@@ -1,0 +1,655 @@
+<title>Helios Engine</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Unbounded:wght@400;600;700&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: a "lab bench" — the live engine stays pinned on the right while the chapters that
+   drive it scroll on the left; full-width sections follow once the bench ends.
+   Dark-first by design: the page frames a rendered image, like a viewport in an editor. */
+:root {
+  --ink: #0c1019;        /* page ground */
+  --panel: #141a28;      /* raised surfaces */
+  --line: #263044;       /* hairlines */
+  --text: #ece6da;       /* warm ivory body text */
+  --muted: #9fa8ba;      /* secondary text */
+  --sun: #f2b04a;        /* Helios: sunlight, the single accent */
+  --sky: #8fb7e6;        /* cool counter-light for data */
+  --good: #7fd1a3;
+  --display: "Unbounded", "Segoe UI", system-ui, sans-serif;
+  --body: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
+  --gutter-l: max(16px, env(safe-area-inset-left, 0px));
+  --gutter-r: max(16px, env(safe-area-inset-right, 0px));
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } * { transition: none !important; animation: none !important; } }
+body { background: var(--ink); color: var(--text); font: 16px/1.6 var(--body); }
+body::before { content: ""; position: fixed; inset: 0 0 auto; height: env(safe-area-inset-top, 0px); z-index: 10; background: var(--ink); }
+a { color: var(--sun); text-underline-offset: 3px; }
+:focus-visible { outline: 2px solid var(--sun); outline-offset: 2px; }
+h1, h2, h3 { font-family: var(--display); font-weight: 600; text-wrap: balance; margin: 0; letter-spacing: -0.01em; }
+p { margin: 0; max-width: 64ch; }
+.mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+.eyebrow { font: 500 12px/1.2 var(--mono); letter-spacing: 0.14em; text-transform: uppercase; color: var(--sun); }
+
+/* Header */
+.top { position: sticky; top: env(safe-area-inset-top, 0px); z-index: 20; background: color-mix(in srgb, var(--ink) 88%, transparent); backdrop-filter: blur(8px); border-bottom: 1px solid var(--line); }
+.top-inner { display: flex; align-items: center; gap: 20px; padding-block: 12px; padding-left: var(--gutter-l); padding-right: var(--gutter-r); }
+.brand { font: 700 15px/1 var(--display); letter-spacing: 0.22em; display: flex; align-items: center; gap: 10px; }
+.brand-sun { width: 14px; height: 14px; border-radius: 50%; background: radial-gradient(circle at 40% 40%, #ffe3a6, var(--sun) 55%, #c9781e); box-shadow: 0 0 14px rgba(242,176,74,0.55); }
+.nav { display: flex; gap: 18px; margin-left: auto; flex-wrap: wrap; }
+.nav a { color: var(--muted); text-decoration: none; font-size: 14px; }
+.nav a:hover { color: var(--text); }
+.lang { display: flex; border: 1px solid var(--line); border-radius: 999px; overflow: hidden; }
+.lang button { background: none; border: 0; color: var(--muted); font: 500 12px/1 var(--mono); padding: 7px 10px; cursor: pointer; }
+.lang button[aria-pressed="true"] { background: var(--sun); color: var(--ink); }
+@media (max-width: 760px) { .nav { display: none; } .lang { margin-left: auto; } }
+
+/* Bench: chapters + pinned viewport */
+.bench { display: grid; grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.25fr); gap: 0; }
+.chapters { min-width: 0; padding-left: var(--gutter-l); padding-right: 28px; }
+.stage { position: sticky; top: calc(env(safe-area-inset-top, 0px) + 57px); height: calc(100vh - 57px - env(safe-area-inset-top, 0px)); padding: 16px var(--gutter-r) 16px 0; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+@media (max-width: 1080px) {
+  .bench { grid-template-columns: minmax(0, 1fr); }
+  .stage { order: -1; top: calc(env(safe-area-inset-top, 0px) + 49px); height: 44vh; padding: 8px var(--gutter-r) 8px var(--gutter-l); z-index: 5; background: var(--ink); }
+  .chapters { padding-right: var(--gutter-r); }
+}
+
+.viewport { position: relative; flex: 1; min-height: 0; border-radius: 10px; overflow: hidden; background: #05070b; border: 1px solid var(--line); }
+#helios-canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; cursor: grab; }
+#helios-canvas:active { cursor: grabbing; }
+.poster { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.veil { position: absolute; inset: 0; display: grid; place-items: center; text-align: center; padding: 24px; background: rgba(5,7,11,0.62); font: 500 14px/1.5 var(--mono); color: var(--text); }
+.veil[hidden] { display: none; }
+.veil .spin { width: 28px; height: 28px; border-radius: 50%; border: 2px solid var(--line); border-top-color: var(--sun); margin: 0 auto 12px; animation: spin 0.9s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.hint { position: absolute; left: 10px; bottom: 10px; font: 12px/1.4 var(--mono); color: var(--muted); background: rgba(5,7,11,0.6); padding: 5px 8px; border-radius: 6px; pointer-events: none; }
+.live-badge { position: absolute; right: 10px; top: 10px; font: 500 11px/1 var(--mono); letter-spacing: 0.12em; color: var(--ink); background: var(--sun); padding: 5px 7px; border-radius: 4px; }
+.live-badge.off { background: var(--line); color: var(--muted); }
+
+/* Telemetry under the viewport */
+.telemetry { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+.stat { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; min-width: 0; }
+.stat b { display: block; font: 500 17px/1.2 var(--mono); font-variant-numeric: tabular-nums; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.stat span { font: 11px/1.3 var(--mono); color: var(--muted); letter-spacing: 0.06em; text-transform: uppercase; }
+.budget { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px 10px; }
+.budget-head { display: flex; justify-content: space-between; font: 11px/1.3 var(--mono); color: var(--muted); letter-spacing: 0.06em; text-transform: uppercase; margin-bottom: 6px; gap: 8px; }
+.bar { position: relative; height: 14px; border-radius: 3px; background: #0a0d14; overflow: hidden; display: flex; }
+.bar i { display: block; height: 100%; transition: width 0.4s ease; }
+.bar .frame-line { position: absolute; top: -2px; bottom: -2px; width: 1px; background: var(--text); opacity: 0.55; }
+.legend { display: flex; flex-wrap: wrap; gap: 4px 12px; margin-top: 7px; font: 11px/1.3 var(--mono); color: var(--muted); }
+.legend span { display: inline-flex; align-items: center; gap: 5px; font-variant-numeric: tabular-nums; }
+.legend em { width: 8px; height: 8px; border-radius: 2px; display: inline-block; font-style: normal; }
+@media (max-width: 1080px) { .telemetry, .budget { display: none; } }
+
+/* Chapters */
+.hero { padding-block: 56px 40px; display: grid; gap: 22px; border-bottom: 1px solid var(--line); }
+.hero h1 { font-size: clamp(34px, 4.6vw, 62px); line-height: 1.04; }
+.hero h1 em { font-style: normal; color: var(--sun); }
+.lede { font-size: 18px; color: var(--text); }
+.facts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
+.fact b { display: block; font: 600 26px/1.1 var(--display); color: var(--text); font-variant-numeric: tabular-nums; }
+.fact span { font-size: 13px; color: var(--muted); }
+@media (max-width: 520px) { .facts { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+
+.chapter { padding-block: 44px; border-bottom: 1px solid var(--line); display: grid; gap: 16px; scroll-margin-top: 70px; }
+.chapter h2 { font-size: clamp(24px, 2.4vw, 32px); }
+.chapter p { color: var(--text); }
+.chapter p.dim { color: var(--muted); font-size: 15px; }
+.controls { display: flex; flex-wrap: wrap; gap: 8px; }
+.btn { appearance: none; border: 1px solid var(--line); background: var(--panel); color: var(--text); font: 500 13px/1 var(--body); padding: 9px 12px; border-radius: 7px; cursor: pointer; display: inline-flex; align-items: center; gap: 8px; }
+.btn:hover { border-color: var(--sun); }
+.btn[aria-pressed="true"] { border-color: var(--sun); background: color-mix(in srgb, var(--sun) 16%, var(--panel)); }
+.btn .state { font: 11px/1 var(--mono); color: var(--muted); }
+.btn[aria-pressed="true"] .state { color: var(--sun); }
+.btn.primary { background: var(--sun); color: var(--ink); border-color: var(--sun); font-weight: 600; }
+.btn:disabled { opacity: 0.45; cursor: default; }
+.slider-row { display: flex; align-items: center; gap: 12px; font: 13px var(--mono); color: var(--muted); flex-wrap: wrap; }
+.slider-row input { flex: 1; min-width: 160px; accent-color: var(--sun); }
+.metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
+.metric { border-left: 2px solid var(--sun); padding: 2px 0 2px 10px; }
+.metric b { display: block; font: 500 18px/1.25 var(--mono); font-variant-numeric: tabular-nums; }
+.metric span { font-size: 13px; color: var(--muted); }
+
+/* Before/after comparison */
+.compare { position: relative; border-radius: 9px; overflow: hidden; border: 1px solid var(--line); aspect-ratio: 16 / 9; max-width: 100%; background: #05070b; user-select: none; touch-action: pan-y; }
+.compare img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.compare .after { clip-path: inset(0 0 0 var(--cut, 50%)); }
+.compare .handle { position: absolute; top: 0; bottom: 0; left: var(--cut, 50%); width: 2px; background: var(--sun); transform: translateX(-1px); }
+.compare .handle::after { content: "⇆"; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); width: 30px; height: 30px; border-radius: 50%; background: var(--sun); color: var(--ink); display: grid; place-items: center; font-size: 14px; }
+.compare .tag { position: absolute; bottom: 8px; font: 500 11px/1 var(--mono); letter-spacing: 0.08em; text-transform: uppercase; background: rgba(5,7,11,0.7); padding: 5px 7px; border-radius: 4px; }
+.compare .tag.l { left: 8px; } .compare .tag.r { right: 8px; color: var(--sun); }
+.compare input { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; cursor: ew-resize; margin: 0; }
+figure { margin: 0; display: grid; gap: 6px; }
+figcaption { font-size: 13px; color: var(--muted); }
+.shots { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; }
+.shots img { width: 100%; aspect-ratio: 16 / 9; object-fit: cover; border-radius: 6px; border: 1px solid var(--line); display: block; }
+
+/* Full-width sections */
+.wide { padding-block: 72px; padding-left: var(--gutter-l); padding-right: var(--gutter-r); border-top: 1px solid var(--line); }
+.wide-inner { max-width: 1180px; margin: 0 auto; display: grid; gap: 26px; }
+.wide h2 { font-size: clamp(26px, 3vw, 40px); }
+.timeline { display: grid; gap: 0; border-left: 1px solid var(--line); margin-left: 6px; }
+.round { position: relative; padding: 0 0 26px 26px; display: grid; gap: 6px; }
+.round::before { content: ""; position: absolute; left: -6px; top: 6px; width: 11px; height: 11px; border-radius: 50%; background: var(--ink); border: 2px solid var(--sun); }
+.round h3 { font-size: 17px; }
+.round p { color: var(--muted); }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip { font: 12px/1 var(--mono); padding: 5px 8px; border: 1px solid var(--line); border-radius: 999px; color: var(--text); background: var(--panel); }
+.stories { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 14px; }
+.story { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 18px; display: grid; gap: 10px; align-content: start; min-width: 0; }
+.story h3 { font-size: 16px; line-height: 1.3; }
+.story p { font-size: 15px; color: var(--muted); }
+.delta { font: 500 15px/1.3 var(--mono); color: var(--good); font-variant-numeric: tabular-nums; }
+.process { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 14px; }
+.process div { border-top: 2px solid var(--sky); padding-top: 10px; display: grid; gap: 6px; }
+.process h3 { font-size: 15px; }
+.process p { font-size: 14px; color: var(--muted); }
+.pipeline-wrap { overflow-x: auto; padding-bottom: 6px; }
+.pipeline { display: flex; gap: 6px; align-items: stretch; min-width: 980px; }
+.stage-box { flex: 1; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px; display: grid; gap: 6px; align-content: start; position: relative; }
+.stage-box h3 { font: 600 13px/1.25 var(--display); }
+.stage-box ul { margin: 0; padding-left: 16px; font-size: 12.5px; color: var(--muted); display: grid; gap: 2px; }
+.stage-box .cat { width: 100%; height: 3px; border-radius: 2px; }
+.limits { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 10px 26px; padding: 0; margin: 0; list-style: none; }
+.limits li { font-size: 15px; color: var(--muted); padding-left: 14px; position: relative; }
+.limits li::before { content: "–"; position: absolute; left: 0; color: var(--sun); }
+.limits b { color: var(--text); font-weight: 500; }
+.videos { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 14px; }
+.videos video { width: 100%; border-radius: 9px; border: 1px solid var(--line); display: block; aspect-ratio: 16/9; background: #05070b; }
+footer { padding-block: 40px 56px; padding-left: var(--gutter-l); padding-right: var(--gutter-r); border-top: 1px solid var(--line); color: var(--muted); font-size: 14px; }
+footer .wide-inner { gap: 10px; }
+</style>
+
+<header class="top">
+  <div class="top-inner">
+    <div class="brand"><span class="brand-sun" aria-hidden="true"></span>HELIOS</div>
+    <nav class="nav" aria-label="Fejezetek">
+      <a href="#geometry" data-en="Geometry">Geometria</a>
+      <a href="#light" data-en="Light">Fény</a>
+      <a href="#world" data-en="World">Világ</a>
+      <a href="#built" data-en="How it was built">Hogyan készült</a>
+    </nav>
+    <div class="lang" role="group" aria-label="Nyelv / Language">
+      <button type="button" id="lang-hu" aria-pressed="true">HU</button>
+      <button type="button" id="lang-en" aria-pressed="false">EN</button>
+    </div>
+  </div>
+</header>
+
+<div class="bench">
+  <main class="chapters">
+    <section class="hero">
+      <div class="eyebrow" data-en="Rust · WebGPU · runs live on this page">Rust · WebGPU · élőben fut ezen az oldalon</div>
+      <h1 data-en="Unreal-class rendering, <em>in the browser</em>">Unreal-szintű grafika <em>a böngészőben</em></h1>
+      <p class="lede" data-en="Helios is a rendering engine written in Rust that recreates the core ideas of Unreal Engine 5 on WebGPU: Nanite-style virtual geometry, Lumen-style global illumination and virtual shadow maps. The image next to this text is not a video: your graphics card renders it right now.">A Helios egy Rustban írt grafikus motor, amely az Unreal Engine 5 alapötleteit valósítja meg WebGPU-n: Nanite-szerű virtuális geometria, Lumen-szerű globális megvilágítás és virtuális árnyéktérképek. A mellette látható kép nem videó: most, élőben a te videokártyád rajzolja ki.</p>
+      <div class="facts">
+        <div class="fact"><b class="mono">307 M</b><span data-en="source triangles in the forest">forrásháromszög az erdőben</span></div>
+        <div class="fact"><b class="mono">16 461</b><span data-en="instances, streamed on demand">példány, igény szerint streamelve</span></div>
+        <div class="fact"><b class="mono">0,03 %</b><span data-en="flickering pixels (was 0.54 %)">villogó pixel (korábban 0,54%)</span></div>
+      </div>
+      <div class="controls" role="group" aria-label="Jelenet">
+        <button class="btn" type="button" data-scene="valley" data-en="Valley">Völgy</button>
+        <button class="btn" type="button" data-scene="cathedral" data-en="Cathedral">Katedrális</button>
+        <button class="btn" type="button" data-scene="forest" data-en="Forest">Erdő</button>
+        <button class="btn" type="button" data-key="KeyY" data-en="Camera tour">Kameratúra</button>
+      </div>
+      <div class="slider-row">
+        <label for="sun" data-en="Time of day">Napszak</label>
+        <input id="sun" type="range" min="-40" max="70" step="1" value="18">
+        <span id="sun-out" class="mono">18°</span>
+      </div>
+      <p class="dim" data-en="Click the image, then fly with WASD and Q/E; drag to look around. Switching scenes rebuilds the world in your browser and takes a few seconds.">Kattints a képre, aztán repülj a WASD és Q/E billentyűkkel; húzással nézhetsz körül. Jelenetváltáskor a böngésződ újraépíti a világot, ez néhány másodpercig tart.</p>
+    </section>
+
+    <section class="chapter" id="geometry">
+      <div class="eyebrow" data-en="01 · Virtual geometry">01 · Virtuális geometria</div>
+      <h2 data-en="Triangles stop being a budget">A háromszögszám többé nem korlát</h2>
+      <p data-en="Every mesh is baked into a hierarchy of 128-triangle clusters with simplified parents, like Nanite. Each frame the GPU picks the cut through that hierarchy whose error stays under one pixel, culls it against last frame's depth, and rasterises tiny triangles in a compute shader instead of the hardware rasteriser.">Előfeldolgozáskor minden háromszögháló 128 háromszögből álló klaszterek hierarchiájává alakul, amelyben minden szülő a gyerekei egyszerűsített változata, ahogy a Nanite-ban. A GPU minden képkockában azt a részletességi szintet választja ki ebből, amelynek hibája egy pixel alatt marad, az előző kép mélysége alapján eldobja a takart klasztereket, a parányi háromszögeket pedig compute shaderben, szoftveresen raszterizálja a hardveres raszterizáló helyett.</p>
+      <div class="controls">
+        <button class="btn" type="button" data-preset="geo-clusters" data-en="Show clusters">Klaszterek</button>
+        <button class="btn" type="button" data-preset="geo-lod" data-en="LOD levels">LOD-szintek</button>
+        <button class="btn" type="button" data-preset="geo-raster" data-en="Hardware vs software raster">HW vagy SW raszterizálás</button>
+        <button class="btn" type="button" data-preset="lit" data-en="Back to the image">Vissza a képhez</button>
+      </div>
+      <div class="metrics">
+        <div class="metric"><b>1 850 000 → 99 000</b><span data-en="clusters drawn in the forest after the fix">kirajzolt klaszter az erdőben a javítás után</span></div>
+        <div class="metric"><b>118 → 48 MiB</b><span data-en="resident geometry, valley (quantised pages)">memóriában tartott geometria, völgy (kvantált lapok)</span></div>
+        <div class="metric"><b>89 → 3,7 MiB</b><span data-en="forest geometry in RAM when streamed from disk">az erdő geometriája a RAM-ban, lemezről streamelve</span></div>
+      </div>
+      <div class="shots">
+        <img src="media/geo_clusters.webp" alt="" loading="lazy" data-alt-hu="Klaszter-nézet az erdőben" data-alt-en="Cluster view in the forest">
+        <img src="media/geo_lod.webp" alt="" loading="lazy" data-alt-hu="LOD-szintek a völgyben" data-alt-en="LOD levels in the valley">
+        <img src="media/geo_raster_path.webp" alt="" loading="lazy" data-alt-hu="Raszterizálás: hardveres és szoftveres" data-alt-en="Raster path: hardware and software">
+      </div>
+    </section>
+
+    <section class="chapter" id="light">
+      <div class="eyebrow" data-en="02 · Global illumination">02 · Globális megvilágítás</div>
+      <h2 data-en="Light that bounces">Visszaverődő fény</h2>
+      <p data-en="Lumen's approach, rebuilt for WebGPU: rays are traced in screen space first, then against per-mesh signed distance fields near the camera and a global distance field further away. Hits are shaded from a surface cache of mesh cards, so sunlight through a window lights the stone on the far side of the nave.">A Lumen megközelítése, WebGPU-ra újraépítve: a sugarak előbb képtérben haladnak, aztán a kamera közelében objektumonkénti, távolabb egy globális távolságmezőben. A találati pontokat egy objektumonkénti kártyákból álló felületi gyorsítótár árnyalja, így az ablakon beeső napfény a hajó túlsó oldalán is megvilágítja a követ.</p>
+      <div class="controls">
+        <button class="btn" type="button" data-preset="cathedral" data-en="Cathedral">Katedrális</button>
+        <button class="btn" type="button" data-toggle="KeyG" data-label="GI" data-en="Global illumination">Globális megvilágítás <span class="state"></span></button>
+        <button class="btn" type="button" data-preset="gi-indirect" data-en="Indirect light only">Csak a közvetett fény</button>
+        <button class="btn" type="button" data-preset="gi-cards" data-en="Surface cache (cards)">Felületi gyorsítótár</button>
+        <button class="btn" type="button" data-preset="lit" data-en="Back to the image">Vissza a képhez</button>
+      </div>
+      <figure>
+        <div class="compare" style="--cut:50%">
+          <img src="media/gi_off.webp" alt="" data-alt-hu="Globális megvilágítás nélkül" data-alt-en="Without global illumination">
+          <img class="after" src="media/gi_on.webp" alt="" data-alt-hu="Globális megvilágítással" data-alt-en="With global illumination">
+          <span class="handle" aria-hidden="true"></span>
+          <span class="tag l" data-en="Direct light only">Csak közvetlen fény</span><span class="tag r" data-en="With GI">GI-vel</span>
+          <input type="range" min="0" max="100" value="50" aria-label="Összehasonlítás">
+        </div>
+        <figcaption data-en="Without GI the shaded side of every pillar is black; with it, the floor and walls pass the sunlight on.">GI nélkül minden pillér árnyékos oldala fekete; vele a padló és a falak továbbadják a napfényt.</figcaption>
+      </figure>
+      <div class="metrics">
+        <div class="metric"><b>0,316 → 0,001 %</b><span data-en="flickering pixels in the cathedral">villogó pixel a katedrálisban</span></div>
+        <div class="metric"><b>9,6 → 3,1</b><span data-en="green light leaking from the grass onto the walls">a fű zöldjének átszivárgása a falakra</span></div>
+      </div>
+    </section>
+
+    <section class="chapter">
+      <div class="eyebrow" data-en="03 · Shadows">03 · Árnyékok</div>
+      <h2 data-en="Shadow maps sixteen thousand texels wide">Tizenhatezer texel széles árnyéktérképek</h2>
+      <p data-en="Virtual shadow maps give the sun a 16k clipmap and every candle and lantern its own cube of pages, but only the pages someone can see are rendered, and they stay cached until something moves. Static geometry and wind-blown foliage are cached in separate layers, so swaying leaves don't redraw the rocks below them.">A virtuális árnyéktérképek a napnak egymásba ágyazott, 16k texel széles szinteket (clipmap), minden gyertyának és lámpásnak pedig saját, lapokra osztott kockatérképet adnak, de csak a látható lapok renderelődnek, és addig a gyorsítótárban maradnak, amíg semmi sem mozdul. A statikus geometria és a szélben hajló növényzet külön rétegben tárolódik, így a ringó levelek nem rajzoltatják újra az alattuk lévő sziklákat.</p>
+      <div class="controls">
+        <button class="btn" type="button" data-preset="night" data-en="Cathedral at night">Katedrális éjjel</button>
+        <button class="btn" type="button" data-toggle="Digit1" data-label="local" data-en="Candle shadow maps">Gyertya-árnyéktérképek <span class="state"></span></button>
+        <button class="btn" type="button" data-preset="shadow-pages" data-en="Shadow pages">Árnyéklapok</button>
+        <button class="btn" type="button" data-preset="lit" data-en="Back to the image">Vissza a képhez</button>
+      </div>
+      <figure>
+        <div class="compare" style="--cut:50%">
+          <img src="media/shadow_local_off.webp" alt="" data-alt-hu="Távolságmezős árnyékok" data-alt-en="Distance-field shadows">
+          <img class="after" src="media/shadow_local_on.webp" alt="" data-alt-hu="Virtuális árnyéktérképek" data-alt-en="Virtual shadow maps">
+          <span class="handle" aria-hidden="true"></span>
+          <span class="tag l" data-en="Distance fields">Távolságmezők</span><span class="tag r" data-en="Shadow maps">Árnyéktérképek</span>
+          <input type="range" min="0" max="100" value="50" aria-label="Összehasonlítás">
+        </div>
+        <figcaption data-en="32 candles and chandeliers, each with its own virtual cube map, share the sun's page pool.">32 gyertya és csillár, mindegyik saját virtuális kockatérképpel, a nappal közös lapkészletből.</figcaption>
+      </figure>
+    </section>
+
+    <section class="chapter" id="world">
+      <div class="eyebrow" data-en="04 · Atmosphere and water">04 · Atmoszféra és víz</div>
+      <h2 data-en="A sky with weather in it">Időjárás az égen</h2>
+      <p data-en="The sky is a physically based atmosphere; clouds are ray-marched through Perlin–Worley noise and cast shadows on the valley; fog is lit by the sun's shadow maps, so light shafts fall between the pillars. Drag the time-of-day slider below the horizon: the moon rises and the stars come out, also in the lake's reflection.">Az égbolt fizikai alapú légkörmodell; a felhőket a Perlin–Worley zajtérfogatban lépésenként haladó sugarak (ray marching) rajzolják ki, és árnyékot vetnek a völgyre; a volumetrikus ködben a nap árnyéktérképe adja az árnyékot, így a pillérek között fénynyalábok hullnak. Húzd a napszakcsúszkát a horizont alá: felkel a hold és kigyúlnak a csillagok, a tó tükrében is.</p>
+      <div class="controls">
+        <button class="btn" type="button" data-preset="valley" data-en="Valley">Völgy</button>
+        <button class="btn" type="button" data-key="KeyC" data-en="Clouds on/off">Felhők be/ki</button>
+        <button class="btn" type="button" data-key="KeyF" data-en="Fog on/off">Köd be/ki</button>
+        <button class="btn" type="button" data-preset="lake" data-en="Above the lake">A tó fölött</button>
+        <button class="btn" type="button" data-preset="underwater" data-en="Under water">Víz alatt</button>
+        <button class="btn" type="button" data-preset="starry" data-en="Starry night">Csillagos éj</button>
+      </div>
+      <figure>
+        <div class="compare" style="--cut:50%">
+          <img src="media/water_off.webp" alt="" data-alt-hu="A tó a víz nélkül" data-alt-en="The lake bed without water">
+          <img class="after" src="media/water_on.webp" alt="" data-alt-hu="A tó vízzel" data-alt-en="The lake with water">
+          <span class="handle" aria-hidden="true"></span>
+          <span class="tag l" data-en="Bed">Meder</span><span class="tag r" data-en="Water">Víz</span>
+          <input type="range" min="0" max="100" value="50" aria-label="Összehasonlítás">
+        </div>
+        <figcaption data-en="Refraction, depth absorption, caustics that move with the waves, and a wet shore.">Fénytörés, mélység szerinti elnyelés, a hullámokkal együtt mozgó kausztika és nedves part.</figcaption>
+      </figure>
+      <div class="shots">
+        <img src="media/water_under_up.webp" alt="" loading="lazy" data-alt-hu="Víz alól felfelé: Snell-ablak" data-alt-en="Looking up from under water: Snell's window">
+        <img src="media/hero_valley_night.webp" alt="" loading="lazy" data-alt-hu="A völgy éjjel" data-alt-en="The valley at night">
+        <img src="media/hero_valley_dawn.webp" alt="" loading="lazy" data-alt-hu="A völgy hajnalban" data-alt-en="The valley at dawn">
+      </div>
+    </section>
+
+    <section class="chapter">
+      <div class="eyebrow" data-en="05 · Foliage">05 · Növényzet</div>
+      <h2 data-en="Sixteen thousand trees in the wind">Tizenhatezer fa a szélben</h2>
+      <p data-en="Trunks bend, branches sway and leaves flutter, with the same displacement in the visible image, the motion vectors and every shadow map. Leaves and fronds are alpha-tested cards; in global illumination they let through as much light as their texture has holes.">A törzsek hajlanak, az ágak ringanak, a levelek rezegnek, ugyanazzal az elmozdulással a látható képen, a mozgásvektorokban és minden árnyéktérképen. A levelek és a páfrányok alfamaszkos síklapok; a globális megvilágításban annyi fényt engednek át, amennyi lyuk van a textúrájukon.</p>
+      <div class="controls">
+        <button class="btn" type="button" data-preset="forest" data-en="Forest">Erdő</button>
+        <button class="btn" type="button" data-toggle="KeyL" data-label="wind" data-en="Wind">Szél <span class="state"></span></button>
+      </div>
+    </section>
+
+    <section class="chapter">
+      <div class="eyebrow" data-en="06 · Materials and glass">06 · Anyagok és üveg</div>
+      <h2 data-en="Textures that stream, glass that layers">Streamelt textúrák, rétegzett üveg</h2>
+      <p data-en="glTF models load with their full material set: texture transforms, second UV sets, ambient occlusion, vertex colours. Image textures stream as 128-pixel tiles, encoded to BC7 and BC5, so the same memory holds 2.6× more detail. Overlapping glass is sorted per pixel by depth peeling.">A glTF-modellek teljes anyagkészletükkel töltődnek be: textúra-transzformáció, második UV, ambient occlusion, csúcsszínek. A képtextúrák 128 pixeles csempékként streamelődnek, BC7 és BC5 formátumba kódolva, így ugyanabba a memóriába 2,6× annyi részlet fér. Az egymást fedő üvegrétegeket pixelenként a depth peeling (rétegenkénti lehántás) rendezi sorba.</p>
+      <div class="controls">
+        <button class="btn" type="button" data-preset="glass" data-en="Crossing glass panes">Keresztező üvegtáblák</button>
+        <button class="btn" type="button" data-toggle="Slash" data-label="layers" data-en="Per-pixel layers">Pixelenkénti rétegek <span class="state"></span></button>
+      </div>
+      <figure>
+        <div class="compare" style="--cut:50%">
+          <img src="media/texture_pool16_raw.webp" alt="" data-alt-hu="16 MiB tömörítetlen csempékkel" data-alt-en="16 MiB of uncompressed tiles">
+          <img class="after" src="media/texture_pool16_bc.webp" alt="" data-alt-hu="16 MiB tömörített csempékkel" data-alt-en="16 MiB of compressed tiles">
+          <span class="handle" aria-hidden="true"></span>
+          <span class="tag l">RGBA8</span><span class="tag r">BC7 / BC5</span>
+          <input type="range" min="0" max="100" value="50" aria-label="Összehasonlítás">
+        </div>
+        <figcaption data-en="Sponza with a 16 MiB texture pool: uncompressed, the curtains fall back to blurry low-resolution layers.">Sponza 16 MiB-os textúrakerettel: tömörítetlenül a függönyök elmosódott, kis felbontású rétegre esnek vissza.</figcaption>
+      </figure>
+    </section>
+
+    <section class="chapter">
+      <div class="eyebrow" data-en="07 · Camera">07 · Kamera</div>
+      <h2 data-en="Fewer pixels, same picture">Kevesebb pixel, ugyanaz a kép</h2>
+      <p data-en="Temporal super resolution renders fewer pixels and rebuilds the full image from jittered history, like UE's TSR. In the browser the engine picks the resolution itself to fit a 14 ms GPU budget; watch the percentage in the panel under the image.">A temporális felskálázás kevesebb pixelt renderel, és a teljes felbontású képet a képkockánként kissé eltolt mintavételű előzménymintákból rakja össze, ahogy az UE TSR-je. A böngészőben a motor maga választja a felbontást, hogy beleférjen a 14 ms-os GPU-keretbe; figyeld a százalékot a kép alatti panelen.</p>
+      <div class="controls">
+        <button class="btn" type="button" data-key="BracketLeft" data-en="Resolution −">Felbontás −</button>
+        <button class="btn" type="button" data-key="BracketRight" data-en="Resolution +">Felbontás +</button>
+        <button class="btn" type="button" data-key="Backslash" data-en="Dynamic resolution on/off">Dinamikus felbontás be/ki</button>
+        <button class="btn" type="button" data-key="KeyB" data-en="Depth of field on/off">Mélységélesség be/ki</button>
+        <button class="btn" type="button" data-toggle="Backquote" data-label="local exposure" data-en="Local exposure">Helyi expozíció <span class="state"></span></button>
+      </div>
+      <p class="dim" data-en="Local exposure exposes bright and dark regions separately, through an edge-aware grid of the image's brightness, like UE5: looking up from under the lake, Snell's window keeps its clouds instead of burning out to white.">A helyi expozíció a világos és a sötét területeket külön exponálja, egy éltartó (bilaterális) fényességrács alapján, ahogy az UE5: a tó alól felnézve a Snell-ablakban megmaradnak a felhők, ahelyett hogy fehérbe égnének.</p>
+      <div class="metrics">
+        <div class="metric"><b>7,57 → 4,11 ms</b><span data-en="cathedral at 2560×1440, 100 % → 50 %">katedrális 2560×1440-en, 100% → 50%</span></div>
+        <div class="metric"><b>0,22 ms</b><span data-en="cost of the upscaling pass">a felskálázó menet költsége</span></div>
+      </div>
+    </section>
+  </main>
+
+  <aside class="stage" aria-label="Élő motor">
+    <div class="viewport" id="viewport">
+      <img class="poster" id="poster" src="media/hero_valley.webp" alt="" data-alt-hu="A völgy" data-alt-en="The valley scene">
+      <canvas id="helios-canvas" tabindex="0" aria-label="Helios élő renderelés"></canvas>
+      <div class="veil" id="veil"><div><div class="spin"></div><span id="status" data-en="Starting the engine…">A motor indul…</span></div></div>
+      <span class="live-badge off" id="badge">LIVE</span>
+      <span class="hint" id="hint" data-en="click · WASD/QE · drag">kattintás · WASD/QE · húzás</span>
+    </div>
+    <div class="telemetry">
+      <div class="stat"><b id="t-gpu">–</b><span data-en="GPU frame">GPU-idő képkockánként</span></div>
+      <div class="stat"><b id="t-res">–</b><span data-en="Resolution">Felbontás</span></div>
+      <div class="stat"><b id="t-tris">–</b><span data-en="Triangles drawn">Kirajzolt háromszög</span></div>
+      <div class="stat"><b id="t-src">–</b><span data-en="Source triangles">Forrásháromszög</span></div>
+    </div>
+    <div class="budget">
+      <div class="budget-head"><span data-en="GPU time per pass (one frame)">GPU-idő menetenként (egy képkocka)</span><span id="t-budget" class="mono">16,7 ms</span></div>
+      <div class="bar" id="bar"></div>
+      <div class="legend" id="legend"></div>
+    </div>
+  </aside>
+</div>
+
+<section class="wide" id="tours">
+  <div class="wide-inner">
+    <div class="eyebrow" data-en="Recorded">Felvételek</div>
+    <h2 data-en="Camera tours">Kameratúrák</h2>
+    <div class="videos">
+      <figure><video src="media/tour_valley.mp4" poster="media/tour_valley.webp" controls muted playsinline preload="none"></video><figcaption data-en="Valley: 199 million source triangles, clouds, lake">Völgy: 199 millió forrásháromszög, felhők, tó</figcaption></figure>
+      <figure><video src="media/tour_cathedral.mp4" poster="media/tour_cathedral.webp" controls muted playsinline preload="none"></video><figcaption data-en="Cathedral: stained glass, light shafts, 33 lights">Katedrális: ólomüveg, fénynyalábok, 33 fény</figcaption></figure>
+      <figure><video src="media/tour_forest.mp4" poster="media/tour_forest.webp" controls muted playsinline preload="none"></video><figcaption data-en="Forest: 16 461 instances, wind">Erdő: 16 461 példány, szél</figcaption></figure>
+    </div>
+  </div>
+</section>
+
+<section class="wide" id="built">
+  <div class="wide-inner">
+    <div class="eyebrow" data-en="How it was built">Hogyan készült</div>
+    <h2 data-en="One lead, a team of agents, and a flicker meter">Egy vezető, egy csapatnyi ügynök és egy villogásmérő</h2>
+    <p data-en="Helios was written by Claude Code in a few days of conversation with its owner. The lead session planned the work, split it into features and handed each to a specialist agent working in its own copy of the repository. Nothing was merged on the agent's word: every merge had to pass the same gates.">A Heliost a Claude Code írta, néhány napnyi beszélgetésben a megrendelőjével. A vezető munkamenet tervezte meg a munkát, funkciókra bontotta, és mindegyiket egy szakosodott ügynök kapta meg, a tároló saját másolatán dolgozva. Semmi sem került be csak az ügynök szavára: minden összefésülésnek ugyanazokon a kapukon kellett átmennie.</p>
+    <div class="process">
+      <div><h3 data-en="Isolated copies">Elszigetelt másolatok</h3><p data-en="Each agent gets a git copy tagged at the current main. Its work comes back as a patch and is merged three-way; when main has moved too far, the agent ports its own work.">Minden ügynök a mostani főág egy git-másolatát kapja. A munkája patchként tér vissza, és háromutas összefésüléssel kerül be; ha a főág közben túl messzire jutott, az ügynök maga ülteti át rá a változtatásait.</p></div>
+      <div><h3 data-en="Tests and two lints">Tesztek és statikus ellenőrzés</h3><p data-en="About 150 unit tests, clippy natively and for wasm32, and a test that checks every shader against Chrome's stricter WGSL compiler, not only naga.">Kb. 150 egységteszt, clippy natívan és wasm32-re, és egy teszt, amely minden shadert a Chrome szigorúbb WGSL-fordítójának szabályai szerint is ellenőriz, nem csak a wgpu saját fordítója (naga) szerint.</p></div>
+      <div><h3 data-en="A number for 'it flickers'">Mérőszám a villogásra</h3><p data-en="A static camera, twelve dumped frames at 2560×1440, and the share of pixels that change by more than 24 levels. Every merge is measured on all three scenes.">Álló kamera, tizenkét mentett képkocka 2560×1440-ben, és azon pixelek aránya, amelyek 24 szintnél többet változnak. Minden összefésülés után mindhárom jelenetben mérve.</p></div>
+      <div><h3 data-en="Look at the pictures">A képek megnézése</h3><p data-en="Numbers miss things. Every change was rendered, cropped and looked at, and checked in headless Chromium on the real GPU, where WebGPU actually runs.">A számok nem látnak mindent. Minden változtatást lerendereltünk és kinagyítva megnéztünk, és headless Chromiumban is ellenőriztük a valódi GPU-n, ahol a WebGPU ténylegesen fut.</p></div>
+    </div>
+    <div class="timeline">
+      <div class="round"><h3 data-en="Round 1 · The roadmap">1. kör · Az ütemterv</h3><p data-en="Virtual geometry with a cluster DAG, two-pass occlusion culling and a software rasteriser; virtual shadow maps; Lumen-style GI; a physically based sky; the valley, cathedral and forest scenes.">Virtuális geometria klaszter-DAG-gal, kétmenetes takarási eldobással és szoftveres raszterizálóval; virtuális árnyéktérképek; Lumen-szerű GI; fizikai alapú égbolt; a völgy, a katedrális és az erdő jelenet.</p></div>
+      <div class="round"><h3 data-en="Round 2 · Hunting flicker">2. kör · Villogásvadászat</h3><p data-en="The forest flickered: 0.54 % of its pixels changed every frame. The cause was foliage clusters of four triangles that overflowed the culling list. Then clouds, volumetric fog, glTF import and real streaming from disk and HTTP.">Az erdő villogott: pixeleinek 0,54%-a változott minden képkockában. A hibát a négyháromszöges lombklaszterek okozták, amelyek túlcsordították a láthatósági listát. Utána felhők, volumetrikus köd, glTF-import és valódi streamelés lemezről és HTTP-n.</p></div>
+      <div class="round"><h3 data-en="Round 3 · Parallel waves">3. kör · Párhuzamos hullámok</h3><p data-en="Up to four agents at once, each wave merged and measured before the next:">Egyszerre legfeljebb négy ügynök, minden hullám összefésülve és lemérve a következő előtt:</p>
+        <div class="chips"><span class="chip" data-en="alpha masks">alfamaszkok</span><span class="chip" data-en="streaming textures">streamelt textúrák</span><span class="chip" data-en="glass &amp; water">üveg és víz</span><span class="chip" data-en="geometry compression">geometriatömörítés</span><span class="chip" data-en="depth of field">mélységélesség</span><span class="chip" data-en="day &amp; night">nappal és éjszaka</span><span class="chip" data-en="wind">szél</span><span class="chip" data-en="Lumen cards">Lumen-kártyák</span><span class="chip" data-en="local-light VSM">pontfény-VSM</span><span class="chip" data-en="TSR">TSR</span><span class="chip" data-en="BC7 / BC5">BC7 / BC5</span><span class="chip" data-en="adaptive probes">adaptív próbák</span><span class="chip" data-en="caustics">kausztika</span><span class="chip" data-en="depth peeling">depth peeling</span><span class="chip" data-en="glTF extensions">glTF-bővítmények</span><span class="chip" data-en="static shadow cache">statikus árnyék-gyorsítótár</span><span class="chip" data-en="local exposure">helyi expozíció</span></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="wide">
+  <div class="wide-inner">
+    <div class="eyebrow" data-en="Debugging stories">Hibakeresési történetek</div>
+    <h2 data-en="Small causes, large symptoms">Kis okok, nagy tünetek</h2>
+    <div class="stories">
+      <article class="story"><h3 data-en="The forest that flickered">Az erdő, amely villogott</h3><p data-en="Leaves are separate quads, so clusters of them held four triangles instead of 128. Millions of clusters overflowed the culling list, and the overflow changed every frame. Filling clusters spatially fixed the flicker and halved the frame time.">A levelek különálló négyszögek, így a klaszterekbe 128 helyett négy háromszög jutott. A klaszterek milliói túlcsordították a láthatósági listát, és a túlcsordulás minden képkockában máshol volt. A klaszterek térbeli feltöltése megszüntette a villogást, és a képkockaidőt is a felére csökkentette.</p><div class="delta" data-en="0.543% → 0.064% · 12.7 → 5.3 ms">0,543% → 0,064% · 12,7 → 5,3 ms</div></article>
+      <article class="story"><h3 data-en="24 bytes against 48">24 bájt a 48 ellen</h3><p data-en="With the wind on, the largest tree shadows vanished. A record was 24 bytes in Rust and 48 in the shader, so the buffer held half of the entries it was sized for, and the rest of the shadow pages never refreshed. A test now pins both layouts together.">Bekapcsolt szélnél eltűntek a legnagyobb fák árnyékai. Egy rekord Rustban 24, a shaderben 48 bájtos volt, így a puffer a tervezett bejegyzések felét tárolta, a többi árnyéklap sosem frissült. Azóta egy teszt ellenőrzi, hogy a két elrendezés egyezik.</p><div class="delta" data-en="19% → 4.7% of pixels differ">19% → 4,7% eltérő pixel</div></article>
+      <article class="story"><h3 data-en="Grass on the cathedral floor">Fű a katedrális padlóján</h3><p data-en="The nave glowed green. The 40 cm floor slab was thinner than one distance-field voxel and vanished, so rays hit the terrain's grass below it. Flood-filled signs, shells around thin parts and heightfields for large slabs put the stone back.">A hajó zöldben derengett. A 40 cm-es padlófödém vékonyabb volt egy távolságmező-voxelnél és eltűnt, így a sugarak az alatta lévő terep füvét találták el. Elárasztásos kitöltéssel számolt előjel, héj a vékony részek köré és magasságmező a nagy födémeknek: visszakerült a kő.</p><div class="delta" data-en="9.6 → 3.1 green excess">9,6 → 3,1 zöld többlet</div></article>
+      <article class="story"><h3 data-en="A band without clouds">Egy sáv felhők nélkül</h3><p data-en="At 67 % resolution, a strip of sky lost its clouds. An integer division gave a block size of 1 instead of 2 whenever the image height was odd, 603 rows for example. One line, rounded up.">67%-os felbontásnál egy égboltsávból eltűntek a felhők. Egy egész osztás 2 helyett 1-es blokkméretet adott, valahányszor a kép magassága páratlan volt, például 603 sor. A javítás egyetlen sor: felfelé kerekítés.</p><div class="delta" data-en="52 → 0 broken blocks">52 → 0 hibás blokk</div></article>
+      <article class="story"><h3 data-en="The star only Chrome rejected">A csillag, amelyet csak a Chrome nem fogadott el</h3><p data-en="The night sky worked natively and broke the whole lighting pass in Chrome: one hash mixed * and ^ without parentheses, which Chrome's WGSL compiler refuses. Since then a test tokenises every shader and fails on any such mix.">Az éjszakai égbolt natívan működött, Chrome-ban viszont az egész megvilágítási menetet elrontotta: egy hash-függvény zárójelek nélkül keverte a * és a ^ műveletet, amit a Chrome WGSL-fordítója elutasít. Azóta egy teszt minden shadert átvizsgál, és hibát jelez minden ilyen keverésnél.</p><div class="delta" data-en="1 test · every shader">1 teszt · minden shader</div></article>
+      <article class="story"><h3 data-en="A glowing box around a candle">Izzó kocka egy gyertya körül</h3><p data-en="The volumetric fog evaluates each light at one point per cell, so a flame a few centimetres away lit the entire 16-pixel block. Averaging the inverse-square falloff over the cell turned the square glow back into a soft halo.">A volumetrikus köd minden fényt cellánként egy pontban értékel ki, így egy néhány centire lévő láng az egész 16 pixeles blokkot bevilágította. A négyzetes csillapítás cellára vett átlaga a szögletes fényt visszaalakította lágy fényudvarrá.</p><div class="delta">1/r² → 1/(r² + R²/3)</div></article>
+    </div>
+  </div>
+</section>
+
+<section class="wide">
+  <div class="wide-inner">
+    <div class="eyebrow" data-en="One frame">Egy képkocka</div>
+    <h2 data-en="What happens in 16 milliseconds">Mi történik 16 milliszekundum alatt</h2>
+    <div class="pipeline-wrap">
+      <div class="pipeline">
+        <div class="stage-box"><span class="cat" style="background:#8fb7e6"></span><h3 data-en="Culling">Láthatóság</h3><ul><li>instance → cluster</li><li>HZB, two passes</li><li>LOD cut &lt; 1 px</li></ul></div>
+        <div class="stage-box"><span class="cat" style="background:#8fb7e6"></span><h3 data-en="Rasterising">Raszterizálás</h3><ul><li>hardware</li><li>compute (tiny tris)</li><li>visibility buffer</li></ul></div>
+        <div class="stage-box"><span class="cat" style="background:#c7a6e8"></span><h3 data-en="Materials">Anyagok</h3><ul><li>classify &amp; resolve</li><li>BC7 tile streaming</li><li>terrain RVT</li></ul></div>
+        <div class="stage-box"><span class="cat" style="background:#e88c6f"></span><h3 data-en="Shadows">Árnyékok</h3><ul><li>mark pages</li><li>static / dynamic cache</li><li>sun + 32 lights</li></ul></div>
+        <div class="stage-box"><span class="cat" style="background:#f2b04a"></span><h3>Lumen</h3><ul><li>cards &amp; voxels</li><li>radiance cache</li><li>screen probes</li><li>reflections</li></ul></div>
+        <div class="stage-box"><span class="cat" style="background:#7fd1a3"></span><h3 data-en="Sky &amp; fog">Ég és köd</h3><ul><li>clouds</li><li>froxel fog</li><li>atmosphere</li></ul></div>
+        <div class="stage-box"><span class="cat" style="background:#ece6da"></span><h3 data-en="Lighting">Megvilágítás</h3><ul><li>deferred</li><li>clustered lights</li><li>glass, water, layers</li></ul></div>
+        <div class="stage-box"><span class="cat" style="background:#9fa8ba"></span><h3 data-en="Image">Kép</h3><ul><li>TSR</li><li>DOF, motion blur</li><li>exposure, bloom</li><li>tonemap</li></ul></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="wide">
+  <div class="wide-inner">
+    <div class="eyebrow" data-en="Honest limits">Őszinte korlátok</div>
+    <h2 data-en="What Unreal still does better">Amit az Unreal még jobban csinál</h2>
+    <ul class="limits">
+      <li data-en="<b>Lumen cards</b> are axis-aligned and carry each material's average colour, not its texture.">A <b>Lumen-kártyák</b> tengelyhez igazítottak, és az anyag átlagszínét hordozzák, nem a textúráját.</li>
+      <li data-en="<b>Shadow pages</b> share a 1024-page pool, a quarter of UE's default.">Az <b>árnyéklapok</b> egy közös, 1024 lapos készletből jönnek, ami az UE alapértékének negyede.</li>
+      <li data-en="<b>Water</b> is a flat sheet with per-pixel waves; under water there are no light shafts.">A <b>víz</b> lapos felület pixelenkénti hullámokkal; víz alatt nincsenek fénynyalábok.</li>
+      <li data-en="<b>Mobile GPUs</b> get uncompressed texture tiles: there is no ASTC or ETC2 encoder yet.">A <b>mobil GPU-k</b> tömörítetlen textúracsempéket kapnak: ASTC- és ETC2-kódoló még nincs.</li>
+      <li data-en="<b>Translucency</b> is exact up to four layers; there is no blending for particle effects.">Az <b>átlátszóság</b> négy rétegig pontos; részecskeeffektusokhoz még nincs átlátszó keverés.</li>
+      <li data-en="<b>Below 50 % resolution</b> thin wires break up under motion."><b>50% alatti felbontásnál</b> a vékony drótok mozgás közben szétesnek.</li>
+    </ul>
+  </div>
+</section>
+
+<footer>
+  <div class="wide-inner">
+    <p data-en="Helios · Rust, wgpu and WGSL · written with Claude Code, November 2026.">Helios · Rust, wgpu és WGSL · Claude Code-dal írva, 2026. november.</p>
+    <p data-en="Sponza and DamagedHelmet from the Khronos glTF Sample Assets (DamagedHelmet: CC BY 4.0, theblueturtle_). The valley, cathedral and forest are procedural.">A Sponza és a DamagedHelmet a Khronos glTF Sample Assets gyűjteményből (DamagedHelmet: CC BY 4.0, theblueturtle_). A völgy, a katedrális és az erdő procedurális.</p>
+  </div>
+</footer>
+
+<script type="module">
+const $ = (s, r = document) => r.querySelector(s);
+const $$ = (s, r = document) => [...r.querySelectorAll(s)];
+
+// ---- Language -------------------------------------------------------------------------------
+let lang = "hu";
+try { lang = localStorage.getItem("helios-lang") || "hu"; } catch (_) {}
+function applyLang(next) {
+  lang = next;
+  document.documentElement.lang = lang;
+  for (const el of $$("[data-en]")) {
+    // Keep live sub-elements (toggle state chips) out of the swapped text.
+    const state = $(".state", el);
+    state?.remove();
+    if (el.dataset.hu === undefined) el.dataset.hu = el.innerHTML.trim();
+    el.innerHTML = lang === "en" ? el.dataset.en : el.dataset.hu;
+    if (state) el.append(" ", state);
+  }
+  for (const img of $$("img[data-alt-hu]")) img.alt = lang === "en" ? img.dataset.altEn : img.dataset.altHu;
+  $("#lang-hu").setAttribute("aria-pressed", String(lang === "hu"));
+  $("#lang-en").setAttribute("aria-pressed", String(lang === "en"));
+  try { localStorage.setItem("helios-lang", lang); } catch (_) {}
+}
+$("#lang-hu").addEventListener("click", () => applyLang("hu"));
+$("#lang-en").addEventListener("click", () => applyLang("en"));
+applyLang(lang);
+const t = (hu, en) => (lang === "en" ? en : hu);
+
+// ---- Before/after sliders -------------------------------------------------------------------
+for (const c of $$(".compare")) {
+  const input = $("input", c);
+  input.addEventListener("input", () => c.style.setProperty("--cut", input.value + "%"));
+}
+
+// ---- Engine ---------------------------------------------------------------------------------
+const veil = $("#veil"), status = $("#status"), badge = $("#badge"), poster = $("#poster");
+let engine = null, busy = false;
+
+function showVeil(text, spin = true) {
+  status.textContent = text;
+  $(".spin", veil).hidden = !spin;
+  veil.hidden = false;
+}
+const nextFrames = () => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+
+async function startEngine() {
+  if (!navigator.gpu) {
+    showVeil(t("Ez a böngésző nem támogatja a WebGPU-t. A képek és videók lent így is megtekinthetők; élőben Chrome, Edge 113+, Safari 26+ vagy Firefox 141+ kell.",
+               "This browser does not support WebGPU. The pictures and videos below still work; to run it live use Chrome, Edge 113+, Safari 26+ or Firefox 141+."), false);
+    return;
+  }
+  globalThis.heliosConfig = { scene: "valley", embedded: true };
+  showVeil(t("A motor indul, a völgy épül a böngésződben…", "Starting the engine and building the valley in your browser…"));
+  try {
+    const m = await import("./pkg/helios_demo.js");
+    await m.default();
+    // The engine starts asynchronously; wait until it reports a scene.
+    for (let i = 0; i < 600 && !m.heliosScene(); i++) await new Promise((r) => setTimeout(r, 100));
+    if (!m.heliosScene()) throw new Error(status.textContent || "timeout");
+    engine = m;
+    poster.hidden = true;
+    veil.hidden = true;
+    badge.classList.remove("off");
+    setSun(Number($("#sun").value));
+    observeVisibility();
+    setInterval(updateTelemetry, 500);
+  } catch (e) {
+    showVeil(t("A motor nem indult el: ", "The engine did not start: ") + (e && e.message ? e.message : e), false);
+  }
+}
+
+function setSun(deg) {
+  $("#sun-out").textContent = deg + "°";
+  engine?.heliosSetSun(200, deg);
+}
+$("#sun").addEventListener("input", (e) => setSun(Number(e.target.value)));
+
+async function loadScene(name) {
+  if (!engine || busy) return false;
+  if (engine.heliosScene() === name) return true;
+  busy = true;
+  const names = { valley: t("A völgy", "valley"), cathedral: t("A katedrális", "cathedral"), forest: t("Az erdő", "forest") };
+  showVeil(t(`${names[name]} épül…`, `Building the ${names[name]}…`));
+  await nextFrames();
+  engine.heliosLoadScene(name);
+  await nextFrames();
+  veil.hidden = true;
+  busy = false;
+  return true;
+}
+
+// Presets: scene, camera (eye/at, heights above ground), sun, debug view.
+const PRESETS = {
+  lit: { view: 0 },
+  valley: { scene: "valley", view: 0, sun: 18 },
+  cathedral: { scene: "cathedral", view: 0, sun: 18 },
+  forest: { scene: "forest", view: 0, sun: 18 },
+  "geo-clusters": { scene: "forest", view: 1 },
+  "geo-lod": { view: 3 },
+  "geo-raster": { view: 9 },
+  "gi-indirect": { scene: "cathedral", view: 7 },
+  "gi-cards": { scene: "cathedral", view: 14 },
+  night: { scene: "cathedral", view: 0, sun: -30 },
+  "shadow-pages": { view: 8 },
+  lake: { scene: "valley", view: 0, sun: 50, eye: [-5, 6, 10], at: [-5, -1, 24] },
+  underwater: { scene: "valley", view: 0, sun: 50, eye: [-5, 0.4, 18], at: [-5, 3, 26] },
+  starry: { scene: "valley", view: 0, sun: -30, eye: [-5, 6, 10], at: [-5, -1, 24] },
+  glass: { scene: "cathedral", view: 0, sun: 18, eye: [14, 1.7, 10.25], at: [-0.6, 3, 10.25] },
+};
+async function applyPreset(name) {
+  const p = PRESETS[name];
+  if (!engine || !p) return;
+  if (p.scene && !(await loadScene(p.scene))) return;
+  if (p.view !== undefined) engine.heliosSetView(p.view);
+  if (p.sun !== undefined) { $("#sun").value = p.sun; setSun(p.sun); }
+  if (p.eye) engine.heliosLookAt(...p.eye, ...p.at);
+}
+
+for (const b of $$("[data-scene]")) b.addEventListener("click", () => loadScene(b.dataset.scene));
+for (const b of $$("[data-preset]")) b.addEventListener("click", () => applyPreset(b.dataset.preset));
+for (const b of $$("[data-key]")) b.addEventListener("click", () => engine?.heliosKey(b.dataset.key));
+for (const b of $$("[data-toggle]")) b.addEventListener("click", () => { engine?.heliosKey(b.dataset.toggle); setTimeout(updateTelemetry, 60); });
+
+// ---- Telemetry ------------------------------------------------------------------------------
+const CATS = [
+  { id: "geo", color: "#8fb7e6", hu: "Geometria", en: "Geometry", match: /cull|raster(?! vsm)|hzb|visible/ },
+  { id: "mat", color: "#c7a6e8", hu: "Anyagok", en: "Materials", match: /material|rvt|svt|texture/ },
+  { id: "vsm", color: "#e88c6f", hu: "Árnyékok", en: "Shadows", match: /vsm|shadow/ },
+  { id: "lumen", color: "#f2b04a", hu: "Lumen", en: "Lumen", match: /lumen|gi temporal/ },
+  { id: "air", color: "#7fd1a3", hu: "Ég és köd", en: "Sky & fog", match: /sky|cloud|fog/ },
+  { id: "light", color: "#ece6da", hu: "Megvilágítás", en: "Lighting", match: /light|translucen/ },
+  { id: "post", color: "#9fa8ba", hu: "Kép", en: "Image", match: /.*/ },
+];
+const fmt = (n, d = 1) => n.toLocaleString(lang === "en" ? "en-US" : "hu-HU", { minimumFractionDigits: d, maximumFractionDigits: d });
+function updateTelemetry() {
+  if (!engine) return;
+  const hud = engine.heliosHud();
+  if (!hud) return;
+  const gpu = /GPU ([\d.]+) ms/.exec(hud);
+  if (gpu) $("#t-gpu").textContent = fmt(Number(gpu[1]), 2) + " ms";
+  const res = /(\d+) % \((\d+)×(\d+)\)/.exec(hud);
+  if (res) $("#t-res").textContent = `${res[1]} % · ${res[2]}×${res[3]}`;
+  const tris = /visible:.*?([\d.]+) M tris/.exec(hud);
+  if (tris) $("#t-tris").textContent = fmt(Number(tris[1]), 2) + " M";
+  const src = /([\d.]+) M source tris/.exec(hud);
+  if (src) $("#t-src").textContent = fmt(Number(src[1]), 0) + " M";
+  // Feature states, e.g. "GI on · shadows on · wind off".
+  const states = {};
+  for (const m of hud.matchAll(/([A-Za-z][A-Za-z ]*?) (on|off)\b/g)) states[m[1].trim().toLowerCase()] = m[2] === "on";
+  const toggles = { KeyG: "gi", KeyL: "wind", Digit1: null, Slash: null };
+  for (const b of $$("[data-toggle]")) {
+    const key = toggles[b.dataset.toggle] ?? b.dataset.label;
+    const on = Object.entries(states).find(([k]) => k.includes(key));
+    if (on) {
+      b.setAttribute("aria-pressed", String(on[1]));
+      $(".state", b).textContent = on[1] ? t("be", "on") : t("ki", "off");
+    }
+  }
+  // Per-pass GPU time, grouped.
+  const line = hud.split("\n").find((l) => l.startsWith("GPU: "));
+  if (!line) return;
+  const sums = Object.fromEntries(CATS.map((c) => [c.id, 0]));
+  for (const part of line.slice(5).split(" · ")) {
+    const m = /^(.+?) ([\d.]+)$/.exec(part.trim());
+    if (!m) continue;
+    const cat = CATS.find((c) => c.match.test(m[1]));
+    sums[cat.id] += Number(m[2]);
+  }
+  const total = Object.values(sums).reduce((a, b) => a + b, 0);
+  const scale = Math.max(16.7, total);
+  $("#bar").innerHTML = CATS.map((c) => `<i style="width:${(sums[c.id] / scale) * 100}%;background:${c.color}" title="${t(c.hu, c.en)}"></i>`).join("")
+    + `<span class="frame-line" style="left:${(16.7 / scale) * 100}%"></span>`;
+  $("#legend").innerHTML = CATS.filter((c) => sums[c.id] > 0.005).map((c) => `<span><em style="background:${c.color}"></em>${t(c.hu, c.en)} ${fmt(sums[c.id], 2)}</span>`).join("");
+  $("#t-budget").textContent = `${fmt(total, 2)} / ${fmt(16.7)} ms`;
+}
+
+// Pause the engine when the stage is off screen or the tab is hidden.
+function observeVisibility() {
+  let onScreen = true;
+  const sync = () => engine?.heliosSetPaused(!onScreen || document.hidden);
+  new IntersectionObserver((entries) => { onScreen = entries[0].isIntersecting; sync(); }).observe($("#viewport"));
+  document.addEventListener("visibilitychange", sync);
+}
+
+$("#helios-canvas").addEventListener("pointerdown", () => $("#helios-canvas").focus());
+startEngine();
+</script>

@@ -1,0 +1,6 @@
+/target
+/web/pkg
+*.png
+!/docs/**/*.png
+/site/dist
+/site/media-src

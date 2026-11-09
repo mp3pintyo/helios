@@ -1,0 +1,35 @@
+[workspace]
+resolver = "2"
+members = ["crates/helios-geometry", "crates/helios-asset", "crates/helios-render", "crates/helios-demo"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+helios-geometry = { path = "crates/helios-geometry" }
+helios-asset = { path = "crates/helios-asset" }
+helios-render = { path = "crates/helios-render" }
+wgpu = "30"
+glam = { version = "0.34", features = ["bytemuck"] }
+bytemuck = { version = "1.25", features = ["derive", "extern_crate_alloc"] }
+log = "0.4"
+winit = "0.30.13"
+pollster = "1"
+env_logger = "0.11"
+png = "0.18"
+wasm-bindgen = "=0.2.130"
+wasm-bindgen-futures = "0.4"
+web-sys = "0.3"
+console_error_panic_hook = "0.1"
+console_log = "1.1"
+web-time = "1.1"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+
+# Geometry baking is heavy; keep it fast even in debug builds.
+[profile.dev.package.helios-geometry]
+opt-level = 3

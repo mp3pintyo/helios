@@ -1,0 +1,10 @@
+[package]
+name = "helios-geometry"
+description = "Offline/runtime virtual geometry builder: clusters, QEM simplification and the LOD DAG."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+glam.workspace = true
+bytemuck.workspace = true

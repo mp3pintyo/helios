@@ -1,0 +1,17 @@
+[package]
+name = "helios-asset"
+description = "glTF 2.0 import (meshes, node instances, PBR materials, decoded images) into a renderer-neutral description."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+helios-geometry.workspace = true
+glam.workspace = true
+log.workspace = true
+# No `import` feature: resources are resolved by the caller (files natively, fetch in the browser),
+# which keeps the crate wasm-friendly and lets us choose the image codecs ourselves.
+gltf = { version = "1.4", default-features = false, features = ["utils", "names", "extensions", "KHR_materials_emissive_strength", "KHR_texture_transform"] }
+# PNG + JPEG only: everything glTF 2.0 core allows, and nothing that bloats the wasm binary.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+base64 = "0.22"
