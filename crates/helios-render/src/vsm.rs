@@ -215,7 +215,9 @@ pub struct VirtualShadowMap {
     /// The software rasteriser specialised for alpha-masked clusters.
     raster_sw_masked: wgpu::ComputePipeline,
     resolve: wgpu::RenderPipeline,
-    raster: wgpu::RenderPipeline,
+    /// Hardware page raster without and with skinning (`SKINNING` in vsm_page.wgsl): scenes
+    /// without skinned instances use the leaner one.
+    raster: [wgpu::RenderPipeline; 2],
     static_layout: wgpu::BindGroupLayout,
     clear_static: wgpu::ComputePipeline,
     capture_static: wgpu::ComputePipeline,
@@ -346,7 +348,7 @@ impl VirtualShadowMap {
         let render = |label: &str,
                       layout: &wgpu::PipelineLayout,
                       module: &wgpu::ShaderModule,
-                      vs: &str,
+                      (vs, constants): (&str, &[(&str, f64)]),
                       fs: &str,
                       depth: wgpu::DepthStencilState,
                       cull: Option<wgpu::Face>| {
@@ -356,7 +358,7 @@ impl VirtualShadowMap {
                 vertex: wgpu::VertexState {
                     module,
                     entry_point: Some(vs),
-                    compilation_options: wgpu::PipelineCompilationOptions { constants: &dirty_start, ..Default::default() },
+                    compilation_options: wgpu::PipelineCompilationOptions { constants, ..Default::default() },
                     buffers: &[],
                 },
                 primitive: wgpu::PrimitiveState { cull_mode: cull, ..Default::default() },
@@ -417,20 +419,22 @@ impl VirtualShadowMap {
                 "vsm resolve",
                 &resolve_pipeline_layout,
                 &draw_module,
-                "vs_clear",
+                ("vs_clear", &dirty_start),
                 "fs_resolve",
                 depth_state(wgpu::CompareFunction::Always, Default::default()),
                 None,
             ),
-            raster: render(
-                "vsm raster",
-                &layout,
-                clipped_module.as_ref().unwrap_or(&draw_module),
-                if clipped { "vs_raster_clipped" } else { "vs_raster" },
-                "fs_raster",
-                depth_state(wgpu::CompareFunction::Greater, bias),
-                Some(wgpu::Face::Back),
-            ),
+            raster: [0.0, 1.0].map(|skinning| {
+                render(
+                    "vsm raster",
+                    &layout,
+                    clipped_module.as_ref().unwrap_or(&draw_module),
+                    (if clipped { "vs_raster_clipped" } else { "vs_raster" }, &[dirty_start[0], ("SKINNING", skinning)]),
+                    "fs_raster",
+                    depth_state(wgpu::CompareFunction::Greater, bias),
+                    Some(wgpu::Face::Back),
+                )
+            }),
             uniform: uniform_buffer(device, "vsm", std::mem::size_of::<VsmUniform>() as u64),
             info,
             // COPY_SRC: the header is read back for statistics.
@@ -780,7 +784,7 @@ impl VirtualShadowMap {
         }
         {
             let mut pass = self.atlas_pass(rec, "vsm raster");
-            pass.set_pipeline(&self.raster);
+            pass.set_pipeline(&self.raster[scene.skins.skinned_instances as usize]);
             pass.set_bind_group(0, &draw_groups[0], &[]);
             pass.draw_indirect(&self.draws, 0);
         }
@@ -791,7 +795,7 @@ impl VirtualShadowMap {
             pass.dispatch_workgroups(self.cache.physical_count, 1, 1);
         }
         let mut pass = self.atlas_pass(rec, "vsm raster");
-        pass.set_pipeline(&self.raster);
+        pass.set_pipeline(&self.raster[scene.skins.skinned_instances as usize]);
         pass.set_bind_group(0, &draw_groups[1], &[]);
         pass.draw_indirect(&self.draws, SPLIT_DRAWS_OFFSET);
     }

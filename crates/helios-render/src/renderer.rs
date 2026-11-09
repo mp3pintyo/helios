@@ -511,7 +511,7 @@ impl Renderer {
         self.scene_changed = versions != self.last_scene_versions;
         self.last_scene_versions = versions;
         self.textures.sync(&self.device, &self.queue, scene);
-        self.material.sync(&self.device, self.scene.uv_extensions);
+        self.material.sync(&self.device, self.scene.uv_extensions, self.scene.skins.skinned_instances);
         self.rvt.sync(&self.device, &self.queue, scene, self.settings.virtual_texturing, frame);
         // Texture feedback is per rendered pixel (internal size); the froxel volume and the
         // screen targets of Lumen, clouds and translucency are sized for the capacity, so a

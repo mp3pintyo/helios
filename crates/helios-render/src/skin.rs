@@ -215,6 +215,8 @@ pub(crate) struct SkinPalettes {
     reach_max: Vec<f32>,
     /// A skin bound to a shadow-casting instance moved this frame.
     pub moving_shadows: bool,
+    /// Some instance is bound to a skin (the G-buffer resolve needs its skinning permutation).
+    pub skinned_instances: bool,
     staging: Vec<Vec4>,
 }
 
@@ -228,6 +230,7 @@ impl SkinPalettes {
             previous: Vec::new(),
             reach_max: Vec::new(),
             moving_shadows: false,
+            skinned_instances: false,
             staging: Vec::new(),
         }
     }
@@ -257,6 +260,7 @@ impl SkinPalettes {
             self.signature = signature;
         }
         self.moving_shadows = false;
+        self.skinned_instances = scene.instances.iter().any(|i| i.skin.is_some());
         if scene.skins.is_empty() {
             return;
         }

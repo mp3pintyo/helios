@@ -18,7 +18,7 @@
 // hardware clusters of alpha-masked materials are flagged CLUSTER_MASKED and their slots also
 // listed after the entries (`masked_capacity` u32s, four per vec4) for the masked draw.
 // Bounding spheres of instances the wind moves are padded by their maximum displacement
-// (wind.wgsl), those of skinned instances grown to hold their current pose (skinning.wgsl), for
+// (wind.wgsl), those of skinned instances grown to hold their current pose (skin_palette.wgsl), for
 // every visibility test (frustum, shadow pages, HZB), not for the LOD cut.
 // Shadow pages refreshed for their dynamic casters only (vsm_common.wgsl) keep static casters
 // out from the instance test on.

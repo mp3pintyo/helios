@@ -39,13 +39,20 @@ README text for the merge: an Architecture bullet (section 2, after *Wind*), a r
   speed, looping, pause, crossfade). The palette is `inverse(mesh node) · joint · inverse bind matrix`, i.e. relative
   to the node that places the mesh, so the rest-pose bounds and LOD stay meaningful while `node · palette` is exactly
   glTF's pose. Debug view **17** colours each joint and blends the colours by weight.
-  Cost (RTX 3090 shared by 7 agents: min / median of 4 interleaved runs, 1600×900, BrainStem — 61 k triangles, 59
-  meshes, 18 joints): animated vs. the same model as a static mesh (`--no-skinning`): main-view raster passes unchanged
-  (raster hw 0.02 / 0.03, sw 0.06–0.07 ms), material resolve 0.47 → 0.49 ms, cull 0.20 → 0.30 ms, shadow page raster
-  (hw + sw) 0.02 → 0.31 ms — re-rendering the moving caster's pages every frame, which a paused model doesn't
-  (0.02 ms); frame totals are within the noise of the shared GPU. Compressed payload: +2.5 bytes per cluster vertex
-  on the Fox, +3.3 on CesiumMan (+19 / +25 %), +0.3 on the mostly rigid BrainStem (+3 %). Scenes without skins: images
-  and GPU times within run-to-run noise of the base build.
+  The G-buffer resolve and the hardware shadow page raster compile the skinning code only into a `SKINNING`
+  permutation used while the scene has skinned instances (like `UV_EXTENSIONS`): unconditionally it took the forest's
+  resolve from 0.39 to 0.74 ms and its page raster 5 % slower, although no pixel there is skinned; the visibility
+  rasterisers, culling and page expansion carry it at no measurable cost.
+  Cost (RTX 3090 shared with other agents; min / median of 5 interleaved runs, 1600×900, BrainStem — 61 k triangles,
+  59 meshes, 18 joints) animated vs. the same model imported as a static mesh (`--no-skinning`): main-view raster
+  unchanged (hw 0.02, sw 0.06–0.07 ms), cull 0.20 → 0.23 ms, material resolve 0.31 → 0.35 ms (the skinning
+  permutation; paused: also 0.35), vsm expand 0.09 → 0.12 ms, shadow page raster (hw + sw + resolve) 0.02 → 0.29 ms —
+  the moving caster's pages re-rendered every frame, which a paused model doesn't (0.02 ms: its pages stay cached);
+  GPU frame 4.16 → 4.41 ms (paused 4.14). Compressed payload: +2.5 bytes per cluster vertex on the Fox, +3.3 on
+  CesiumMan (+19 / +25 %), +0.3 on the mostly rigid BrainStem (+3 %). Scenes without skins (forest medium, 6
+  interleaved runs vs. the base build): every pass within ±0.02 ms (resolve 0.39 → 0.41, page raster 0.88 → 0.87,
+  frame 7.50 → 7.48 ms min); images differ from the base build no more than two runs of the base build differ from
+  each other.
 
 ## glTF paragraph (section "The demo scenes", after the list of supported features)
 

@@ -118,22 +118,19 @@ struct SkinnedVertex {
     position: vec3<f32>,
     previous: vec3<f32>,  // the previous frame's position (motion vectors)
     normal: vec3<f32>,
-    skin: VertexSkin,
-    skinned: bool,
 }
 
 fn skinned_vertex(instance: Instance, c: Cluster, base: u32, index: u32, rest: vec3<f32>, normal: vec3<f32>) -> SkinnedVertex {
-    var v = SkinnedVertex(rest, rest, normal, VertexSkin(vec4<u32>(0u), vec4<f32>(0.0)), false);
+    var v = SkinnedVertex(rest, rest, normal);
     let palette = instance_skin(instance);
     let section = select(INVALID_ID, cluster_skin_section(c, base), palette != 0u);
     if section == INVALID_ID {
         return v;
     }
-    v.skin = vertex_skin(section, index);
-    v.skinned = true;
-    let m = skin_matrix(palette - 1u, v.skin, 0u);
+    let skin = vertex_skin(section, index);
+    let m = skin_matrix(palette - 1u, skin, 0u);
     v.position = skin_point(m, rest);
     v.normal = skin_direction(m, normal);
-    v.previous = skin_point(skin_matrix(palette - 1u, v.skin, SKIN_PREVIOUS), rest);
+    v.previous = skin_point(skin_matrix(palette - 1u, skin, SKIN_PREVIOUS), rest);
     return v;
 }

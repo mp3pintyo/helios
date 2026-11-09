@@ -9,6 +9,9 @@
 //! features — the second UV set, wrap modes other than repeat, occlusion maps in a layer of their
 //! own — compiled on first use, only for scenes whose materials need them
 //! ([`GpuScene::uv_extensions`]): their code and registers would slow down every pixel otherwise.
+//! Likewise, skinning (posing corners, previous positions for motion vectors) is a `SKINNING`
+//! permutation used only while the scene has skinned instances: in the forest it would take the
+//! resolve from 0.39 to 0.74 ms although no pixel is skinned.
 
 use wgpu::BindingResource::{Sampler, TextureView};
 use wgpu::{ShaderStages, TextureFormat};
@@ -37,10 +40,16 @@ pub struct MaterialPass {
     classify_layout: wgpu::BindGroupLayout,
     classify: wgpu::ComputePipeline,
     prepare: wgpu::ComputePipeline,
-    /// Resolve pipelines per shading model: without and (once needed) with `UV_EXTENSIONS`.
-    resolve: [Option<Vec<(u32, wgpu::ComputePipeline)>>; 2],
+    /// Resolve pipelines per shading model and permutation ([`permutation`]), compiled when first
+    /// needed.
+    resolve: [Option<Vec<(u32, wgpu::ComputePipeline)>>; 4],
     /// The permutation in use.
-    uv_extensions: bool,
+    permutation: usize,
+}
+
+/// Index of a resolve permutation: `UV_EXTENSIONS` in bit 0, `SKINNING` in bit 1.
+fn permutation(uv_extensions: bool, skinning: bool) -> usize {
+    uv_extensions as usize | ((skinning as usize) << 1)
 }
 
 impl MaterialPass {
@@ -83,7 +92,7 @@ impl MaterialPass {
                 (BINDING_WATER, bind::uniform()),
             ],
         );
-        let resolve = [Some(resolve_pipelines(device, &module, &layout, false)), None];
+        let resolve = [Some(resolve_pipelines(device, &module, &layout, 0)), None, None, None];
         let classify_module = create_module(device, "classify.wgsl");
         let classify_layout = bind_group_layout(
             device,
@@ -105,16 +114,17 @@ impl MaterialPass {
             resolve,
             layout,
             classify_layout,
-            uv_extensions: false,
+            permutation: 0,
         }
     }
 
-    /// Selects the resolve permutation the scene's materials need, compiling it on first use.
-    pub fn sync(&mut self, device: &wgpu::Device, uv_extensions: bool) {
-        self.uv_extensions = uv_extensions;
-        let slot = &mut self.resolve[uv_extensions as usize];
+    /// Selects the resolve permutation the scene's materials and instances need, compiling it on
+    /// first use.
+    pub fn sync(&mut self, device: &wgpu::Device, uv_extensions: bool, skinning: bool) {
+        self.permutation = permutation(uv_extensions, skinning);
+        let slot = &mut self.resolve[self.permutation];
         if slot.is_none() {
-            *slot = Some(resolve_pipelines(device, &self.module, &self.layout, uv_extensions));
+            *slot = Some(resolve_pipelines(device, &self.module, &self.layout, self.permutation));
         }
     }
 
@@ -190,7 +200,7 @@ impl MaterialPass {
         pass.set_pipeline(&self.prepare);
         pass.dispatch_workgroups(1, 1, 1);
         pass.set_bind_group(0, &group, &[]);
-        for (kind, pipeline) in self.resolve[self.uv_extensions as usize].iter().flatten() {
+        for (kind, pipeline) in self.resolve[self.permutation].iter().flatten() {
             pass.set_pipeline(pipeline);
             pass.dispatch_workgroups_indirect(&targets.material_tiles, (8 + kind * 4) as u64 * 4);
         }
@@ -198,11 +208,12 @@ impl MaterialPass {
 }
 
 /// One resolve pipeline per shading model.
-fn resolve_pipelines(device: &wgpu::Device, module: &wgpu::ShaderModule, layout: &wgpu::BindGroupLayout, uv_extensions: bool) -> Vec<(u32, wgpu::ComputePipeline)> {
+fn resolve_pipelines(device: &wgpu::Device, module: &wgpu::ShaderModule, layout: &wgpu::BindGroupLayout, permutation: usize) -> Vec<(u32, wgpu::ComputePipeline)> {
     KINDS
         .iter()
         .map(|&kind| {
-            let constants = [("MATERIAL_KIND", kind as f64), ("UV_EXTENSIONS", uv_extensions as u32 as f64)];
+            let flag = |bit: usize| ((permutation >> bit) & 1) as f64;
+            let constants = [("MATERIAL_KIND", kind as f64), ("UV_EXTENSIONS", flag(0)), ("SKINNING", flag(1))];
             (kind, compute_pipeline(device, "material resolve", module, "resolve", layout, &constants))
         })
         .collect()
