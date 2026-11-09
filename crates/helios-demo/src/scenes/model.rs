@@ -12,7 +12,8 @@ use glam::{Mat4, Vec3};
 use helios_asset::{AlphaMode, Asset, TextureRef, WrapMode};
 use helios_geometry::{primitives, BuildConfig, Mesh, SdfMode, Vertex, VirtualMesh};
 use helios_render::{
-    Camera, Image, ImageTexture, Material, MaterialKind, Scene, Sun, TextureDesc, TextureHandle, TextureMapping, TexturePattern, UvTransform, Wrap,
+    Camera, Image, ImageTexture, Material, MaterialHandle, MaterialKind, MeshHandle, Scene, Sun, TextureDesc, TextureHandle, TextureMapping, TexturePattern,
+    UvTransform, Wrap,
 };
 use web_time::Instant;
 
@@ -31,6 +32,8 @@ pub struct Model {
     pub name: String,
     /// Put a ground plane under the model.
     pub ground: bool,
+    /// Where it was loaded from (URL or path; scene files refer to it).
+    pub source: String,
     asset: Asset,
     images: Vec<Arc<Image>>,
 }
@@ -41,7 +44,7 @@ impl Model {
             .into_iter()
             .map(|i| Arc::new(Image { width: i.width, height: i.height, pixels: i.pixels }))
             .collect();
-        Self { name: name.into(), ground: true, asset, images }
+        Self { name: name.into(), ground: true, source: String::new(), asset, images }
     }
 }
 
@@ -61,10 +64,36 @@ fn fully_cut_out(material: &helios_asset::Material) -> bool {
 }
 
 pub fn build(model: &Model) -> SceneSetup {
-    let asset = &model.asset;
     let mut scene = Scene::new();
     scene.sun = Sun::from_angles(SUN.0, SUN.1, SUN.2);
+    for part in add_model(&mut scene, model) {
+        let handle = scene.add_instance(part.mesh, part.material, part.transform);
+        scene.set_cast_shadow(handle, part.cast_shadow);
+    }
+    let size = model.asset.bounds().extent();
+    if model.ground {
+        add_ground(&mut scene, size.x.max(size.z));
+    }
+    scene.ground_albedo = Vec3::splat(0.25);
+    scene.clouds = helios_render::CloudLayer::cumulus(0.35);
+    SceneSetup { scene, camera: frame_camera(size), sun: SUN, floor: |_, _| 0.0 }
+}
 
+/// One node instance of a model.
+pub struct ModelPart {
+    pub mesh: MeshHandle,
+    pub material: MaterialHandle,
+    /// Relative to the model's placement: centred on x = z = 0, its bottom at y = 0.
+    pub transform: Mat4,
+    /// Blended surfaces let light through.
+    pub cast_shadow: bool,
+}
+
+/// Bakes the model's meshes and adds them with its materials to `scene`, named `MODEL/MESH`
+/// and `MODEL/MATERIAL`; returns the instances to place (the model scene places them at the
+/// origin, the editor wherever an imported model is dropped).
+pub fn add_model(scene: &mut Scene, model: &Model) -> Vec<ModelPart> {
+    let asset = &model.asset;
     let bounds = asset.bounds();
     let size = bounds.extent();
     let placement = Mat4::from_translation(Vec3::new(-bounds.center().x, -bounds.min.y, -bounds.center().z));
@@ -81,7 +110,12 @@ pub fn build(model: &Model) -> SceneSetup {
         size.z
     );
 
-    let materials = add_materials(&mut scene, model);
+    let materials = add_materials(scene, model);
+    for (i, (&handle, source)) in materials.iter().zip(&asset.materials).enumerate() {
+        let name = if source.name.is_empty() { format!("material {i}") } else { source.name.clone() };
+        let name = (1..).map(|n| if n == 1 { format!("{}/{name}", model.name) } else { format!("{}/{name} #{n}", model.name) }).find(|n| scene.find_material(n).is_none()).unwrap();
+        scene.set_material_name(handle, &name);
+    }
     let skipped: Vec<bool> = asset.materials.iter().map(fully_cut_out).collect();
     let blended = |material: usize| asset.materials[material].alpha_mode == AlphaMode::Blend;
 
@@ -113,20 +147,22 @@ pub fn build(model: &Model) -> SceneSetup {
 
     let mut handles = HashMap::new();
     for (&i, vm) in jobs.iter().zip(baked) {
-        handles.insert(i, scene.add_mesh(vm));
+        let handle = scene.add_mesh(vm);
+        let name = &asset.meshes[i].name;
+        super::name_mesh(scene, handle, &format!("{}/{}", model.name, if name.is_empty() { format!("mesh {i}") } else { name.clone() }));
+        handles.insert(i, handle);
     }
-    for instance in asset.instances.iter().filter(|i| !skipped[i.material]) {
-        let handle = scene.add_instance(handles[&instance.mesh], materials[instance.material], placement * instance.transform);
-        // Blended surfaces let light through.
-        scene.set_cast_shadow(handle, !blended(instance.material));
-    }
-
-    if model.ground {
-        add_ground(&mut scene, size.x.max(size.z));
-    }
-    scene.ground_albedo = Vec3::splat(0.25);
-    scene.clouds = helios_render::CloudLayer::cumulus(0.35);
-    SceneSetup { scene, camera: frame_camera(size), sun: SUN, floor: |_, _| 0.0 }
+    asset
+        .instances
+        .iter()
+        .filter(|i| !skipped[i.material])
+        .map(|instance| ModelPart {
+            mesh: handles[&instance.mesh],
+            material: materials[instance.material],
+            transform: placement * instance.transform,
+            cast_shadow: !blended(instance.material),
+        })
+        .collect()
 }
 
 /// The renderer's texture coordinates for a glTF texture reference.
@@ -249,6 +285,7 @@ fn add_ground(scene: &mut Scene, model_size: f32) {
     let mut plane = primitives::terrain(size, 64, 0.0, 1);
     plane.deform(|p| Vec3::new(p.x, -0.01, p.z));
     let mesh = scene.add_mesh(super::bake_with("ground", &plane, BuildConfig { sdf: SdfMode::Heightfield { resolution: 128 }, ..Default::default() }));
+    super::name_mesh(scene, mesh, "ground");
     let stone = scene.add_texture(TextureDesc::new(TexturePattern::Flagstone, Vec3::new(0.42, 0.4, 0.37), Vec3::new(0.3, 0.29, 0.27)).roughness(0.8, 0.9));
     let material = scene.add_material(Material::textured(MaterialKind::Standard, stone, TextureMapping::WorldTriplanar, 0.25));
     scene.add_instance(mesh, material, Mat4::IDENTITY);

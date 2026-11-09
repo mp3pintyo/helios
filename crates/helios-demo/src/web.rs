@@ -22,14 +22,16 @@ use crate::mesh_store;
 use crate::scenes::model::Model;
 use crate::scenes::{Detail, SceneKind};
 
-struct State {
-    app: DemoApp,
-    input: Input,
+pub(crate) struct State {
+    pub(crate) app: DemoApp,
+    pub(crate) input: Input,
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
     queue: wgpu::Queue,
-    config: wgpu::SurfaceConfiguration,
-    canvas: HtmlCanvasElement,
+    pub(crate) config: wgpu::SurfaceConfiguration,
+    pub(crate) canvas: HtmlCanvasElement,
+    /// Editor mode: the right mouse button is held (the camera flies with WASD/QE).
+    looking: bool,
     hud: Option<HtmlElement>,
     last_time: f64,
     hud_timer: f64,
@@ -43,7 +45,7 @@ thread_local! {
 }
 
 /// Runs `f` on the running engine (`None` until it has started).
-fn with_state<R>(f: impl FnOnce(&mut State) -> R) -> Option<R> {
+pub(crate) fn with_state<R>(f: impl FnOnce(&mut State) -> R) -> Option<R> {
     let state = STATE.with(|s| s.borrow().clone())?;
     let mut st = state.try_borrow_mut().ok()?;
     Some(f(&mut st))
@@ -139,7 +141,7 @@ fn js_error(e: JsValue) -> String {
     e.as_string().unwrap_or_else(|| format!("{e:?}"))
 }
 
-async fn fetch_bytes(url: &str) -> Result<Vec<u8>, String> {
+pub(crate) async fn fetch_bytes(url: &str) -> Result<Vec<u8>, String> {
     let response: web_sys::Response = wasm_bindgen_futures::JsFuture::from(window().fetch_with_str(url))
         .await
         .map_err(js_error)?
@@ -154,7 +156,7 @@ async fn fetch_bytes(url: &str) -> Result<Vec<u8>, String> {
 
 /// Fetches a glTF model (`.glb`, or `.gltf` plus the files it references, resolved relative
 /// to it) from the `?gltf=` parameter.
-async fn load_model(param: &str) -> Result<Model, String> {
+pub(crate) async fn load_model(param: &str) -> Result<Model, String> {
     let decoded = js_sys::decode_uri_component(param).map(String::from).unwrap_or_else(|_| param.to_string());
     let base = window().location().href().map_err(js_error)?;
     let url = web_sys::Url::new_with_base(&decoded, &base).map_err(js_error)?.href();
@@ -169,7 +171,9 @@ async fn load_model(param: &str) -> Result<Model, String> {
     next_tick().await;
     let asset = document.import(&resources).map_err(|e| e.to_string())?;
     let name = decoded.rsplit('/').next().and_then(|f| f.split('.').next()).filter(|n| !n.is_empty()).unwrap_or("model");
-    Ok(Model::new(name, asset))
+    let mut model = Model::new(name, asset);
+    model.source = decoded;
+    Ok(model)
 }
 
 async fn next_tick() {
@@ -226,6 +230,15 @@ async fn run() -> Result<(), String> {
     };
     surface.configure(&ctx.device, &config);
 
+    // `?scene-file=URL`: a saved editor scene; its base scene is built instead of `?scene`.
+    let scene_file = match query_param("scene-file") {
+        Some(url) => {
+            let url = js_sys::decode_uri_component(&url).map(String::from).unwrap_or(url);
+            set_status(&format!("Loading the scene file {url}…"));
+            Some(crate::web_editor::fetch_document(&url).await?)
+        }
+        None => None,
+    };
     let mut app = match query_param("stream") {
         // `?stream=URL_BASE`: the scene of the mesh library at URL_BASE (written by
         // `helios --bake-hvm`), its geometry streamed with HTTP range requests.
@@ -238,14 +251,20 @@ async fn run() -> Result<(), String> {
             DemoApp::from_library(&ctx.device, &ctx.queue, format, (width, height), library, renderer_config())
         }
         None => {
-            let kind = scene_from_url();
-            let model = match query_param("gltf") {
+            let (mut kind, mut detail) = (scene_from_url(), Detail::Medium);
+            let mut gltf = query_param("gltf");
+            match scene_file.as_ref().map(|doc| &doc.base) {
+                Some(crate::editor::doc::BaseScene::Gltf { url, .. }) => (kind, gltf) = (SceneKind::Model, Some(url.clone())),
+                Some(base) => (kind, detail) = crate::app_editor::procedural_base(base).unwrap_or((kind, detail)),
+                None => {}
+            }
+            let model = match gltf {
                 Some(param) if kind == SceneKind::Model => Some(load_model(&param).await?),
                 _ => None,
             };
             set_status(&format!("Building the {} (virtual geometry, distance fields, textures)…", kind.name()));
             next_tick().await;
-            DemoApp::with_config(&ctx.device, &ctx.queue, format, width, height, kind, Detail::Medium, renderer_config(), model)
+            DemoApp::with_config(&ctx.device, &ctx.queue, format, width, height, kind, detail, renderer_config(), model)
         }
     };
     configure_resolution(&mut app);
@@ -268,6 +287,7 @@ async fn run() -> Result<(), String> {
         last_time: window().performance().map(|p| p.now()).unwrap_or(0.0),
         hud_timer: 0.0,
         paused: false,
+        looking: false,
     }));
     STATE.with(|s| *s.borrow_mut() = Some(state.clone()));
     // Keep the context (instance/adapter/queue) alive for the page lifetime.
@@ -275,6 +295,11 @@ async fn run() -> Result<(), String> {
 
     install_input(&state, &canvas)?;
     start_loop(state);
+    if let Some(doc) = scene_file {
+        set_status("Applying the scene file…");
+        crate::web_editor::load_document(doc).await?;
+        set_status("");
+    }
     Ok(())
 }
 
@@ -300,6 +325,14 @@ fn install_input(state: &Rc<RefCell<State>>, canvas: &HtmlCanvasElement) -> Resu
             e.prevent_default();
         }
         let mut st = s.borrow_mut();
+        if st.app.editing {
+            // The editor UI owns the keyboard; while the right button is held, the camera
+            // flies (WASD / QE, Shift) as in UE's viewport.
+            if st.looking {
+                st.input.held.insert(code);
+            }
+            return;
+        }
         if code == "KeyN" && embedded {
             // The page cannot be reloaded with another query: rebuild in place.
             let next = st.app.kind.next(false);
@@ -330,12 +363,29 @@ fn install_input(state: &Rc<RefCell<State>>, canvas: &HtmlCanvasElement) -> Resu
     let target: web_sys::EventTarget = canvas.clone().into();
     let d = dragging.clone();
     let c = canvas.clone();
+    let s = state.clone();
     listen(&target, "pointerdown", move |e: web_sys::PointerEvent| {
+        let mut st = s.borrow_mut();
+        if st.app.editing {
+            // Left clicks select and drag gizmos (the editor UI); the right button looks.
+            if e.button() != 2 {
+                return;
+            }
+            st.looking = true;
+        }
         *d.borrow_mut() = true;
         let _ = c.set_pointer_capture(e.pointer_id());
     })?;
     let d = dragging.clone();
-    listen(&target, "pointerup", move |_: web_sys::PointerEvent| *d.borrow_mut() = false)?;
+    let s = state.clone();
+    listen(&target, "pointerup", move |_: web_sys::PointerEvent| {
+        *d.borrow_mut() = false;
+        let mut st = s.borrow_mut();
+        if std::mem::take(&mut st.looking) {
+            st.input.held.clear();
+        }
+    })?;
+    listen(&target, "contextmenu", move |e: web_sys::Event| e.prevent_default())?;
     let s = state.clone();
     let d = dragging;
     listen(&target, "pointermove", move |e: web_sys::PointerEvent| {
@@ -347,7 +397,13 @@ fn install_input(state: &Rc<RefCell<State>>, canvas: &HtmlCanvasElement) -> Resu
         let s = state.clone();
         listen(&target, "wheel", move |e: web_sys::WheelEvent| {
             e.prevent_default();
-            s.borrow_mut().input.scroll += e.delta_y().signum() as f32;
+            let mut st = s.borrow_mut();
+            if st.app.editing && !st.looking {
+                // The editor's wheel dollies; with the right button held it sets the speed.
+                st.app.dolly(-e.delta_y().signum() as f32);
+                return;
+            }
+            st.input.scroll += e.delta_y().signum() as f32;
         })?;
     }
     Ok(())

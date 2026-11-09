@@ -32,6 +32,13 @@
     } else {
       init().catch((e) => { document.getElementById("status").textContent = "Failed to start: " + e; });
     }
+    // Tab opens the editor around the running scene (editor.html opens it directly).
+    window.addEventListener("keydown", (e) => {
+      if (e.code === "Tab" && !globalThis.heliosEditorMounted) {
+        e.preventDefault();
+        import("./editor/editor.js").then((m) => m.mountEditor());
+      }
+    });
   </script>
 </body>
 </html>

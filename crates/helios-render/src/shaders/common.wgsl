@@ -43,6 +43,7 @@ const FLAG_UNDERWATER: u32 = 64u;
 const INVALID_PAGE: u32 = 0xffffffffu;
 const INSTANCE_CAST_SHADOW: u32 = 1u;
 const INSTANCE_ALPHA_MASKED: u32 = 2u;
+const INSTANCE_HIDDEN: u32 = 8u;        // hidden in an editor: culled for every view
 const INSTANCE_TRANSLUCENT: u32 = 4u;   // drawn by the forward translucency pass only
 
 // Visible cluster entry flags (entry.z).

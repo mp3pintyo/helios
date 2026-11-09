@@ -555,7 +555,7 @@ impl Translucency {
         self.water_bodies = water_bodies(scene);
         let mut appended = false;
         self.candidates.clear();
-        for (index, instance) in scene.instances.iter().enumerate() {
+        for (index, instance) in scene.instances.iter().enumerate().filter(|(_, i)| i.visible) {
             let Some(shading) = scene.materials.get(instance.material.0 as usize).and_then(|m| Shading::of(m.kind)) else { continue };
             let mesh_index = instance.mesh.0 as usize;
             let mesh = &scene.meshes[mesh_index];

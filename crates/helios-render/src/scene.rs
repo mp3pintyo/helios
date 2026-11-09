@@ -454,6 +454,9 @@ pub(crate) struct Instance {
     pub material: MaterialHandle,
     pub transform: Mat4,
     pub cast_shadow: bool,
+    /// Hidden instances (deleted in an editor) stay in the list, so handles never shift, but
+    /// every pass skips them (see `scene_edit.rs`).
+    pub visible: bool,
 }
 
 /// A layer of volumetric cumulus clouds (rendered by `clouds.rs`).
@@ -598,6 +601,8 @@ pub struct Scene {
     pub water: Water,
     /// Air flow that animates materials with a [`Material::wind`] response (calm by default).
     pub wind: Wind,
+    /// Editor metadata: stable mesh and material names (see `scene_edit.rs`).
+    pub(crate) names: crate::scene_edit::SceneNames,
     pub(crate) geometry_version: u64,
     pub(crate) material_version: u64,
     pub(crate) instance_version: u64,
@@ -606,7 +611,7 @@ pub struct Scene {
 
 /// Versions come from one process-wide counter, so two different scenes never share a version
 /// and a renderer that switches scenes always notices the change.
-fn next_version() -> u64 {
+pub(crate) fn next_version() -> u64 {
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
     COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
@@ -711,7 +716,7 @@ impl Scene {
     }
 
     pub fn add_instance(&mut self, mesh: MeshHandle, material: MaterialHandle, transform: Mat4) -> InstanceHandle {
-        self.instances.push(Instance { mesh, material, transform, cast_shadow: true });
+        self.instances.push(Instance { mesh, material, transform, cast_shadow: true, visible: true });
         self.instance_version = next_version();
         InstanceHandle(self.instances.len() as u32 - 1)
     }

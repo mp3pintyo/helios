@@ -263,6 +263,10 @@ impl GpuScene {
 }
 
 fn gpu_instance_flags(scene: &Scene, instance: &Instance, alpha_masked: bool) -> u32 {
+    if !instance.visible {
+        // No shadow flag either: shadow invalidation passes skip it like the culling does.
+        return instance_flags::HIDDEN;
+    }
     let mut flags = if instance.cast_shadow { instance_flags::CAST_SHADOW } else { 0 };
     if alpha_masked {
         flags |= instance_flags::ALPHA_MASKED;

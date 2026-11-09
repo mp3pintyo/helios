@@ -5,6 +5,7 @@ use std::collections::HashSet;
 use glam::{Vec2, Vec3};
 use helios_render::{Camera, DebugView, DynamicResolution, Renderer, RendererConfig, Scene};
 
+use crate::editor::Editor;
 use crate::mesh_store::{Library, MeshStore};
 use crate::scenes::model::Model;
 use crate::scenes::{self, Detail, SceneKind, SceneSetup};
@@ -30,15 +31,15 @@ pub struct DemoApp {
     pub scene: Scene,
     pub camera: Camera,
     pub kind: SceneKind,
-    detail: Detail,
+    pub(crate) detail: Detail,
     /// Imported glTF model, if any (`SceneKind::Model` builds from it).
-    model: Option<Model>,
+    pub(crate) model: Option<Model>,
     initial_camera: Camera,
-    floor: fn(f32, f32) -> f32,
-    sun_intensity: f32,
+    pub(crate) floor: fn(f32, f32) -> f32,
+    pub(crate) sun_intensity: f32,
     speed: f32,
-    sun_azimuth: f32,
-    sun_elevation: f32,
+    pub(crate) sun_azimuth: f32,
+    pub(crate) sun_elevation: f32,
     /// Position in the day cycle (radians) and the azimuth it started from.
     day_phase: f32,
     day_azimuth: f32,
@@ -52,6 +53,9 @@ pub struct DemoApp {
     frame_ms: f32,
     /// GPU time budget dynamic resolution steers to when switched on with the hotkey.
     pub gpu_budget_ms: f32,
+    /// Scene edits over the built scene (see `editor`), and whether its tools are active.
+    pub editor: Editor,
+    pub editing: bool,
 }
 
 /// Screen percentages the `[` / `]` keys step through.
@@ -104,6 +108,7 @@ impl DemoApp {
     }
 
     fn from_setup(renderer: Renderer, setup: SceneSetup, kind: SceneKind, detail: Detail, model: Option<Model>) -> Self {
+        let editor = Editor::new(&setup.scene, crate::app_editor::base_scene(kind, detail, model.as_ref()));
         Self {
             renderer,
             camera: setup.camera,
@@ -125,6 +130,8 @@ impl DemoApp {
             frame_ms: 16.0,
             gpu_budget_ms: 14.0,
             scene: setup.scene,
+            editor,
+            editing: false,
         }
     }
 
@@ -140,6 +147,8 @@ impl DemoApp {
         self.sun_elevation = setup.sun.1;
         self.sun_intensity = setup.sun.2;
         self.tour = None;
+        self.editor = Editor::new(&self.scene, crate::app_editor::base_scene(kind, self.detail, self.model.as_ref()));
+        self.renderer.set_selection(&[]);
         self.renderer.reset_history();
     }
 

@@ -557,7 +557,7 @@ impl Lumen {
         let mut coverage = vec![1.0; scene.instances.len()];
         self.instance_bounds.clear();
         self.in_global_field.clear();
-        for (index, instance) in scene.instances.iter().enumerate() {
+        for (index, instance) in scene.instances.iter().enumerate().filter(|(_, i)| i.visible) {
             let mesh = &scene.meshes[instance.mesh.0 as usize];
             let Some(desc) = mesh_desc[instance.mesh.0 as usize] else { continue };
             coverage[index] = self.mask_coverage.of(scene, instance);

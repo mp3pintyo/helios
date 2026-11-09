@@ -58,7 +58,7 @@ pub(crate) fn water_bodies(scene: &Scene) -> Vec<WaterBody> {
     let bodies: Vec<WaterBody> = scene
         .instances
         .iter()
-        .filter(|i| scene.materials.get(i.material.0 as usize).is_some_and(|m| m.kind == MaterialKind::Water))
+        .filter(|i| i.visible && scene.materials.get(i.material.0 as usize).is_some_and(|m| m.kind == MaterialKind::Water))
         .map(|i| WaterBody::from_bounds(&scene.meshes[i.mesh.0 as usize].aabb, &i.transform))
         .collect();
     if bodies.len() > MAX_WATER_BODIES {

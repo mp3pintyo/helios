@@ -43,11 +43,14 @@ mod near_field;
 mod page_cache;
 pub mod page_source;
 mod passes;
+mod picking;
 mod profiler;
 mod renderer;
 mod resolution;
 mod rvt;
 mod scene;
+mod scene_edit;
+mod selection;
 mod shader;
 mod stats;
 mod streaming;
@@ -65,6 +68,7 @@ pub use camera::Camera;
 pub use context::{GpuContext, ContextError};
 pub use passes::local_exposure::LocalExposure;
 pub use passes::post_fx::DepthOfField;
+pub use picking::PickResult;
 pub use renderer::{DebugView, RenderSettings, Renderer, RendererConfig};
 pub use resolution::{DynamicResolution, MAX_SCREEN_PERCENTAGE, MIN_SCREEN_PERCENTAGE};
 pub use scene::{
@@ -73,6 +77,7 @@ pub use scene::{
     UvTransform, Water, Wrap,
 };
 pub use page_source::{PageLocation, PageRead, PageSource, ReadCompletion};
+pub use scene_edit::transformed_bounds;
 pub use stats::RenderStats;
 pub use streaming::StreamingStats;
 pub use svt::TextureStreamingStats;

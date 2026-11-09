@@ -196,6 +196,9 @@ fn cull_instances(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
     let instance = instances[index];
+    if (instance.flags & INSTANCE_HIDDEN) != 0u {
+        return;
+    }
     if view.kind == VIEW_SHADOW && (instance.flags & INSTANCE_CAST_SHADOW) == 0u {
         return;
     }

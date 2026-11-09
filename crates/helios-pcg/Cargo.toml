@@ -1,0 +1,13 @@
+[package]
+name = "helios-pcg"
+description = "Procedural content generation: a small deterministic point-graph (surface sampling, filters, pruning, transforms, weighted spawning), as UE's PCG framework."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+glam.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

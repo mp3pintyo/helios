@@ -789,11 +789,14 @@ dependencies = [
  "glam",
  "helios-asset",
  "helios-geometry",
+ "helios-pcg",
  "helios-render",
  "js-sys",
  "log",
  "png",
  "pollster",
+ "serde",
+ "serde_json",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
@@ -808,6 +811,15 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "glam",
+]
+
+[[package]]
+name = "helios-pcg"
+version = "0.1.0"
+dependencies = [
+ "glam",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

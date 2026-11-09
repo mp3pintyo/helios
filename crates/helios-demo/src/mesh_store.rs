@@ -146,6 +146,12 @@ pub(crate) fn scoped<R>(store: MeshStore, build: impl FnOnce() -> R) -> (R, Mesh
 
 /// Adds the mesh called `name` to `scene`, from the active store; `bake` bakes it.
 pub(crate) fn add(scene: &mut Scene, name: &str, bake: impl FnOnce() -> VirtualMesh) -> MeshHandle {
+    let handle = add_unnamed(scene, name, bake);
+    crate::scenes::name_mesh(scene, handle, name);
+    handle
+}
+
+fn add_unnamed(scene: &mut Scene, name: &str, bake: impl FnOnce() -> VirtualMesh) -> MeshHandle {
     ACTIVE.with(|active| match &mut *active.borrow_mut() {
         MeshStore::Bake => scene.add_mesh(bake()),
         #[cfg(not(target_arch = "wasm32"))]

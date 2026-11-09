@@ -10,6 +10,7 @@
 //! helios --bake-hvm DIR                    write the scene's baked meshes as .hvm files
 //! helios --stream-from DIR                 build the scene from them, streaming pages from disk
 //!     [--io-latency-ms N]                  (every read takes at least N ms)
+//! helios --scene-file scene.helios.json    a scene saved by the editor (base scene + edits)
 //! ```
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -40,7 +41,9 @@ mod native {
 
     use glam::{Vec2, Vec3};
     use helios_demo::app::{DemoApp, Input, HELP};
+    use helios_demo::editor::doc::BaseScene;
     use helios_demo::mesh_store;
+    use helios_demo::native_editor::NativeEditor;
     use helios_demo::scenes::model::Model;
     use helios_demo::scenes::{Detail, SceneKind};
     use helios_render::page_source::FileSource;
@@ -108,11 +111,15 @@ mod native {
         pub gpu_budget_ms: Option<f32>,
         /// Local exposure settings (`--no-local-exposure`: `None`, global exposure only).
         pub local_exposure: Option<helios_render::LocalExposure>,
+        /// An editor scene file (`.helios.json`): its base scene plus its edits.
+        pub scene_file: Option<String>,
+        /// Instances shown with the editor's selection outline (`--select 3,17`).
+        pub select: Vec<u32>,
     }
 
     impl Options {
         pub fn parse(args: &[String]) -> Self {
-            let mut o = Options { screenshot: None, size: (1600, 900), frames: 90, view: None, detail: Detail::High, scene: SceneKind::Valley, camera: None, eye: None, at: None, occlusion: true, sw_raster: true, rvt: true, svt: true, animate_sun: false, lod: None, fov: None, pool_mb: None, texture_pool_mb: None, texture_compression: true, switch_to: None, dump_dir: None, dump_count: 16, keys: Vec::new(), keys_at: None, hold: Vec::new(), gltf: None, ground: true, bake_hvm: None, stream_from: None, io_latency_ms: 0, sun: None, move_light: false, screen_percentage: None, gpu_budget_ms: None, local_exposure: Some(Default::default()) };
+            let mut o = Options { screenshot: None, size: (1600, 900), frames: 90, view: None, detail: Detail::High, scene: SceneKind::Valley, camera: None, eye: None, at: None, occlusion: true, sw_raster: true, rvt: true, svt: true, animate_sun: false, lod: None, fov: None, pool_mb: None, texture_pool_mb: None, texture_compression: true, switch_to: None, dump_dir: None, dump_count: 16, keys: Vec::new(), keys_at: None, hold: Vec::new(), gltf: None, ground: true, bake_hvm: None, stream_from: None, io_latency_ms: 0, sun: None, move_light: false, screen_percentage: None, gpu_budget_ms: None, local_exposure: Some(Default::default()), scene_file: None, select: Vec::new() };
             let mut scene_given = false;
             let mut it = args.iter().skip(1);
             while let Some(arg) = it.next() {
@@ -171,6 +178,8 @@ mod native {
                     "--screen-percentage" => o.screen_percentage = value().parse().ok(),
                     "--gpu-budget-ms" => o.gpu_budget_ms = value().parse().ok(),
                     "--no-local-exposure" => o.local_exposure = None,
+                    "--scene-file" => o.scene_file = Some(value()),
+                    "--select" => o.select = value().split(',').filter_map(|x| x.parse().ok()).collect(),
                     // Highlight contrast, shadow contrast and optionally the blurred luminance blend.
                     "--local-exposure" => {
                         let v: Vec<f32> = value().split(',').filter_map(|x| x.parse().ok()).collect();
@@ -195,17 +204,7 @@ mod native {
 
         /// Loads `--gltf` (exits with a message if the file cannot be imported).
         fn load_model(&self) -> Option<Model> {
-            let path = self.gltf.as_ref()?;
-            let start = Instant::now();
-            let asset = helios_asset::load_gltf_file(path).unwrap_or_else(|e| {
-                log::error!("cannot load {path}: {e}");
-                std::process::exit(1);
-            });
-            log::info!("imported {path} in {:.2} s", start.elapsed().as_secs_f64());
-            let name = std::path::Path::new(path).file_stem().map_or_else(|| path.clone(), |s| s.to_string_lossy().into_owned());
-            let mut model = Model::new(name, asset);
-            model.ground = self.ground;
-            Some(model)
+            self.gltf.as_ref().map(|path| load_gltf(path, self.ground))
         }
 
         fn renderer_config(&self) -> helios_render::RendererConfig {
@@ -224,6 +223,9 @@ mod native {
         /// `--detail`) plus the file source its pages stream from.
         fn create_app(&self, ctx: &GpuContext, format: wgpu::TextureFormat, size: (u32, u32)) -> (DemoApp, Option<Arc<FileSource>>) {
             let config = self.renderer_config();
+            if let Some(path) = &self.scene_file {
+                return (self.create_from_scene_file(ctx, format, size, path), None);
+            }
             let Some(dir) = &self.stream_from else {
                 let model = self.load_model();
                 return (DemoApp::with_config(&ctx.device, &ctx.queue, format, size.0, size.1, self.scene, self.detail, config, model), None);
@@ -235,6 +237,28 @@ mod native {
                     std::process::exit(1);
                 }
             }
+        }
+
+        /// Builds the scene file's base scene, imports its models and applies its edits.
+        fn create_from_scene_file(&self, ctx: &GpuContext, format: wgpu::TextureFormat, size: (u32, u32), path: &str) -> DemoApp {
+            let doc = helios_demo::native_editor::read_scene_file(path).unwrap_or_else(|e| {
+                log::error!("--scene-file {path}: {e}");
+                std::process::exit(1);
+            });
+            let (kind, detail, model) = match &doc.base {
+                BaseScene::Gltf { url, ground } => (SceneKind::Model, self.detail, Some(load_gltf(url, *ground))),
+                base => {
+                    let (kind, detail) = helios_demo::app_editor::procedural_base(base).unwrap_or((self.scene, self.detail));
+                    (kind, detail, None)
+                }
+            };
+            let mut app = DemoApp::with_config(&ctx.device, &ctx.queue, format, size.0, size.1, kind, detail, self.renderer_config(), model);
+            for import in &doc.imports {
+                app.import_model(&load_gltf(&import.url, false));
+            }
+            app.load_scene_file(doc);
+            log::info!("scene file {path}: {} instances after its edits", app.scene.instance_count());
+            app
         }
 
         fn apply(&self, app: &mut DemoApp) {
@@ -282,6 +306,8 @@ mod native {
             if !self.sw_raster {
                 app.renderer.settings.sw_raster_threshold = 0.0;
             }
+            let selection: Vec<_> = self.select.iter().filter_map(|&i| app.scene.instance_handle(i)).collect();
+            app.renderer.set_selection(&selection);
             // --eye / --at take heights relative to the terrain below them.
             if let Some(eye) = self.eye {
                 app.camera.position = Vec3::new(eye.x, eye.y + app.ground_height(eye.x, eye.z), eye.z);
@@ -291,6 +317,21 @@ mod native {
                 app.camera.look_at(target);
             }
         }
+    }
+
+    /// Imports a glTF file (exits with a message if it cannot be imported).
+    fn load_gltf(path: &str, ground: bool) -> Model {
+        let start = Instant::now();
+        let asset = helios_asset::load_gltf_file(path).unwrap_or_else(|e| {
+            log::error!("cannot load {path}: {e}");
+            std::process::exit(1);
+        });
+        log::info!("imported {path} in {:.2} s", start.elapsed().as_secs_f64());
+        let name = std::path::Path::new(path).file_stem().map_or_else(|| path.to_string(), |s| s.to_string_lossy().into_owned());
+        let mut model = Model::new(name, asset);
+        model.ground = ground;
+        model.source = path.to_string();
+        model
     }
 
     fn parse_vec3(s: &str) -> Option<Vec3> {
@@ -473,6 +514,11 @@ mod native {
         title_timer: f32,
         /// F12 was pressed: save the next presented frame.
         screenshot: bool,
+        /// Editor tools (Tab) and the mouse state they need.
+        editor: NativeEditor,
+        cursor: (f32, f32),
+        press: Option<(f32, f32)>,
+        ctrl: bool,
     }
 
     struct Handler {
@@ -525,6 +571,10 @@ mod native {
                 last_frame: Instant::now(),
                 title_timer: 0.0,
                 screenshot: false,
+                editor: NativeEditor::new(self.options.scene_file.clone()),
+                cursor: (0.0, 0.0),
+                press: None,
+                ctrl: false,
             });
         }
 
@@ -548,7 +598,13 @@ mod native {
                             if name == "F12" {
                                 st.screenshot = true;
                             }
-                            if !event.repeat {
+                            if name == "Tab" && !event.repeat {
+                                log::info!("{}", st.editor.toggle(&mut st.app));
+                            }
+                            let editor_key = if st.app.editing && !event.repeat { st.editor.key(&mut st.app, &name, st.ctrl) } else { None };
+                            if let Some(message) = editor_key {
+                                log::info!("editor: {message}");
+                            } else if !event.repeat {
                                 st.app.key_pressed(&name);
                             }
                             st.input.held.insert(name);
@@ -557,8 +613,18 @@ mod native {
                         }
                     }
                 }
+                WindowEvent::ModifiersChanged(modifiers) => st.ctrl = modifiers.state().control_key(),
+                WindowEvent::CursorMoved { position, .. } => st.cursor = (position.x as f32, position.y as f32),
                 WindowEvent::MouseInput { state, button: MouseButton::Left | MouseButton::Right, .. } => {
                     st.looking = state == ElementState::Pressed;
+                    // Editor tools: a left click that does not drag picks.
+                    if st.app.editing && state == ElementState::Pressed {
+                        st.press = Some(st.cursor);
+                    } else if let Some(start) = st.press.take().filter(|_| st.app.editing) {
+                        if (start.0 - st.cursor.0).hypot(start.1 - st.cursor.1) < 4.0 {
+                            st.editor.click(&mut st.app, st.cursor, (st.config.width, st.config.height));
+                        }
+                    }
                 }
                 WindowEvent::MouseWheel { delta, .. } => {
                     let y = match delta {
@@ -582,6 +648,9 @@ mod native {
                     };
                     let view = texture.texture.create_view(&Default::default());
                     st.app.render(&view, dt);
+                    if let Some(message) = st.editor.poll(&mut st.app) {
+                        log::info!("editor: {message}");
+                    }
                     if std::mem::take(&mut st.screenshot) {
                         save_window_screenshot(&st.ctx, &texture.texture, &st.config);
                     }

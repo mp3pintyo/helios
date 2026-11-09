@@ -106,6 +106,10 @@ fn build_scene(detail: Detail) -> Scene {
         ..Default::default()
     });
 
+    for (material, name) in [(terrain_material, "landscape"), (gold, "gold")] {
+        scene.set_material_name(material, name);
+    }
+
     // ---- Meshes -------------------------------------------------------------------------------
     let mut landscape = primitives::terrain(TERRAIN_SIZE, detail.pick(384, 768), TERRAIN_HEIGHT, TERRAIN_SEED);
     for v in &mut landscape.vertices {
@@ -127,6 +131,7 @@ fn build_scene(detail: Detail) -> Scene {
     sheet.deform(|p| Vec3::new(p.x + LAKE_CENTER.x, WATER_LEVEL, p.z + LAKE_CENTER.y));
     let lake = add_baked_with(&mut scene, "lake", &sheet, BuildConfig { sdf: SdfMode::None, ..Default::default() });
     let water = scene.add_material(Material { kind: MaterialKind::Water, base_color: Vec3::ONE, roughness: 0.03, ..Default::default() });
+    scene.set_material_name(water, "lake water");
 
     // ---- Instances ----------------------------------------------------------------------------
     scene.add_instance(terrain, terrain_material, Mat4::IDENTITY);

@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Helios Editor</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="editor/editor.css" data-helios-editor>
+  <style>
+    :root { color-scheme: dark; }
+    html, body { margin: 0; height: 100%; background: #0e0e10; overflow: hidden; font: 13px/1.45 "Segoe UI", system-ui, sans-serif; color: #e8ecf3; }
+    #helios-canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
+    #status { position: fixed; inset: 0; z-index: 20; display: grid; place-items: center; font-size: 15px; pointer-events: none; text-align: center; padding: 24px; background: rgba(14, 14, 16, 0.6); }
+    #status:empty { display: none; }
+  </style>
+</head>
+<body>
+  <!-- The level editor around the live viewport. Same query parameters as index.html
+       (?scene=, ?gltf=, ?scene-file=, ?sp=, ?budget=); Tab switches to play mode and back. -->
+  <canvas id="helios-canvas" tabindex="0"></canvas>
+  <div id="status">Loading…</div>
+  <script type="module">
+    import init from "./pkg/helios_demo.js";
+    import { mountEditor } from "./editor/editor.js";
+    if (!navigator.gpu) {
+      document.getElementById("status").textContent =
+        "This browser does not expose WebGPU (navigator.gpu). Use Chrome/Edge 113+, Safari 26+ or Firefox 141+.";
+    } else {
+      init().then(() => mountEditor()).catch((e) => { document.getElementById("status").textContent = "Failed to start: " + e; });
+    }
+  </script>
+</body>
+</html>

@@ -97,6 +97,8 @@ pub fn build_with(kind: SceneKind, detail: Detail, model: Option<&model::Model>,
             valley::build(detail)
         }
     });
+    let mut setup = setup;
+    name_materials(&mut setup.scene);
     log::info!(
         "scene '{}': {} instances, {:.1} M source triangles, {} lights, {:.1} MiB geometry in RAM (built in {:.1} s)",
         kind.name(),
@@ -107,6 +109,29 @@ pub fn build_with(kind: SceneKind, detail: Detail, model: Option<&model::Model>,
         start.elapsed().as_secs_f64()
     );
     (setup, store)
+}
+
+/// Names a mesh `name`, or `name #2`, `name #3`… if the name is taken: scene files refer to
+/// meshes by these names (stable as long as the builder adds meshes in the same order).
+pub(crate) fn name_mesh(scene: &mut Scene, mesh: MeshHandle, name: &str) {
+    let unique = (1..).map(|n| if n == 1 { name.to_string() } else { format!("{name} #{n}") }).find(|n| scene.find_mesh(n).is_none()).unwrap();
+    scene.set_mesh_name(mesh, &unique);
+}
+
+/// Names the materials a builder left unnamed after their shading model, numbered per model in
+/// build order (`rock 1`, `rock 2`, `glass 1`…).
+fn name_materials(scene: &mut Scene) {
+    let mut counts: std::collections::HashMap<String, u32> = Default::default();
+    for i in 0..scene.material_count() as u32 {
+        let handle = scene.material_handle(i).expect("index in range");
+        let kind = format!("{:?}", scene.material(handle).kind).to_lowercase();
+        let n = counts.entry(kind.clone()).or_insert(0);
+        *n += 1;
+        if scene.material_name(handle).is_empty() {
+            let name = (*n..).map(|k| format!("{kind} {k}")).find(|candidate| scene.find_material(candidate).is_none()).unwrap();
+            scene.set_material_name(handle, &name);
+        }
+    }
 }
 
 /// Bakes `mesh` and adds it to `scene` (or takes it from the active [`MeshStore`]).

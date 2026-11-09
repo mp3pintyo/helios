@@ -1,0 +1,57 @@
+[
+  {
+    "id": "web-editor",
+    "title": "Unreal-stílusú szerkesztő a böngészőben",
+    "area": "Platform és eszközök",
+    "kind": "feature",
+    "summary": "Sötét, UE5-szerű szintszerkesztő az élő WebGPU-nézetablak körül: eszköztár, tartalomböngésző, World Outliner, Details panel, transzformációs gizmó, kijelölés körvonallal, visszavonás/újra. A demóban Tab-bal nyílik, vagy közvetlenül az editor.html oldalon.",
+    "details": "Build lépés és CDN nélküli ES-modulok (web/editor/*.js) a wasm oldal-API-n (heliosEditor*) keresztül beszélnek a motorral: a jelenetet JSON-ként olvassák, szerkesztési műveleteket küldenek. Minden művelet új SceneDoc dokumentumot hoz létre (egy visszavonási lépés; a csúszkahúzások merge kulccsal egy lépést alkotnak), az Editor::sync csak a különbséget alkalmazza a jelenetre. Példányt sosem törlünk: Scene::set_visible elrejti (INSTANCE_HIDDEN jelző, minden nézet cullingja kihagyja; az áttetszőség, a vízfelületek és a Lumen is), a rejtett slotokat az azonos mesh következő példánya újrahasznosítja, így a kezelők stabilak. Kijelölés: a kattintott kimeneti pixelt egy egyszálú compute pass (pick.wgsl) a visibility bufferből fejti vissza példányra, világpozícióra és normálra, aszinkron visszaolvasással (1–2 képkocka); az áttetsző felületeket CPU-n, befoglaló dobozzal teszteljük. Kijelölési körvonal: teljes képernyős pass a tone mapping után, példányonkénti bitmaszkkal, 8 visibility-mintával pixelenként. A gizmó (mozgatás tengely/sík/képernyősík, forgatás gyűrűk szögkijelzéssel, lokális skálázás) 2D overlay vásznon, a motor nem jitterelt view-projection mátrixából; húzás közben előnézet (heliosEditorPreview), elengedéskor egyetlen transzformációs szerkesztés, Esc megszakít. Overlay: fényikonok (kattinthatók), spot kúp, hatótáv, PCG-dobozok címkével, kijelölt példányok befoglalója. Kamera: jobb gomb + WASD/QE repülés, görgő dolly, F fókusz. Natívan Tab ugyanazt a szerkesztőmagot kapcsolja be panelek nélkül (kattintásos kijelölés, Del, Ctrl+D, F, Ctrl+Z/Y, Ctrl+S).",
+    "metrics": "Körvonal: 0,05 ms 1600×900-on (RTX 3090, megosztott gép, 3 futás); kijelölés nélkül a kép változatlan (max. 5/255 eltérés = időbeli zaj; GPU medián 9,83 → 9,04 ms, zajos). Pick: egyetlen szál, kattintásonként. Az erdő 8 261 példánya virtualizált outliner-sorokkal görgethető. Playwright headless Chromium teszt: kijelölés, gizmós mozgatás (+8 m X), undo/redo, fény hozzáadása és intenzitás állítása, PCG, mentés, újratöltés – 0 konzolhiba a völgyben, a katedrálisban és az erdőben.",
+    "showcase": "editor.html?scene=valley: kattintás a szoborra (narancs körvonal, Details), W/E/R gizmó; katedrális: Tab a demóban, a 33 gyertyafény ikonja, egy fény színének állítása; erdő: egy fenyő tűlevelei kijelölve (körvonal a lombon).",
+    "modules": ["web/editor.html", "web/editor/editor.js", "web/editor/gizmo.js", "web/editor/outliner.js", "web/editor/details.js", "web/editor/content.js", "web/editor/ui.js", "web/editor/math.js", "web/editor/editor.css", "crates/helios-demo/src/editor/mod.rs", "crates/helios-demo/src/editor/ops.rs", "crates/helios-demo/src/editor/describe.rs", "crates/helios-demo/src/editor/content.rs", "crates/helios-demo/src/web_editor.rs", "crates/helios-demo/src/app_editor.rs", "crates/helios-demo/src/native_editor.rs", "crates/helios-render/src/picking.rs", "crates/helios-render/src/selection.rs", "crates/helios-render/src/scene_edit.rs", "crates/helios-render/src/shaders/pick.wgsl", "crates/helios-render/src/shaders/selection.wgsl"]
+  },
+  {
+    "id": "scene-file",
+    "title": "Jelenetfájl (.helios.json)",
+    "area": "Platform és eszközök",
+    "kind": "feature",
+    "summary": "A szerkesztett jelenet mentése és betöltése: alapjelenet (procedurális jelenet + részletesség, vagy glTF URL) és csak a módosítások, a PCG-kötetek generált kimenetével együtt. Böngészőben letöltés / fájlválasztó / ?scene-file=, natívan --scene-file.",
+    "details": "serde dokumentum: alap-példányok felülírásai index szerint (a mesh nevével ellenőrizve, TRS transzformáció, láthatóság, anyag, törölt), hozzáadott példányok mesh- és anyagnév alapján, anyagparaméter-felülírások név szerint, fények, környezet (nap, köd, felhők, szél), renderbeállítások kulcs szerint (adatvezérelt regiszter: editor/settings.rs), importált glTF modellek (név + URL), PCG-kötetek gráffal és generált kimenettel (részek + példányonkénti TRS), így a fájl pontosan a mentett példányokkal töltődik vissza. A mesh-ek stabil nevet kapnak ott, ahol a jelenetek létrehozzák (mesh_store::add; ismétlődés: 'rock #2'; glTF: MODELL/MESH), az anyagok a völgyben és az erdőben explicit nevet, máshol '<árnyalási modell> <n>' nevet. Betöltéskor a fájl alapjelenetét építjük fel (ha eltér), importáljuk a modelleket, majd egy üres dokumentumról ugyanaz a reconcile fut.",
+    "metrics": "Völgy: mentés → ?scene-file= újratöltés → a két PCG-kötet példányszáma (280 és 1 407) és a fények száma egyezik; erdő: 50 és 2 867 példány egyezik. Natív --scene-file ugyanazt a völgyfájlt tölti (2 299 példány a szerkesztések után).",
+    "showcase": "Mentés Ctrl+S-sel, majd editor.html?scene-file=… – a jelenet a mentett nézőpontból, ugyanazokkal a virágokkal és sziklákkal jelenik meg; ugyanez natívan --scene-file kapcsolóval.",
+    "modules": ["crates/helios-demo/src/editor/doc.rs", "crates/helios-demo/src/editor/settings.rs", "crates/helios-demo/src/app_editor.rs", "crates/helios-demo/src/mesh_store.rs", "crates/helios-demo/src/scenes/mod.rs", "crates/helios-demo/src/scenes/model.rs", "crates/helios-demo/src/main.rs", "crates/helios-demo/src/web.rs"]
+  },
+  {
+    "id": "pcg",
+    "title": "PCG – procedurális tartalomgenerálás",
+    "area": "Jelenetek és demó",
+    "kind": "feature",
+    "summary": "Az UE 5.7 PCG keretrendszerének mintájára determinisztikus pontgráf: felületi mintavétel, szűrők, önritkítás, transzformáció-véletlenítés és súlyozott prefab-spawner. A szerkesztőben PCG-kötet helyezhető le előre beállított gráffal, amely élőben újragenerálódik.",
+    "details": "helios-pcg crate: SurfaceSampler (tájkép magasságmezőn világhoz rögzített rácson, cellánként egy jitterelt jelölttel, vagy bármely mesh-példány háromszögein területarányosan), SlopeFilter, HeightFilter, NoiseDensity (világtérbeli fraktál zaj), DensityFilter (sztochasztikus ritkítással), DistanceFilter pontokhoz/spline-okhoz átmenettel, BoundsFilter, SelfPruning (Poisson-lemez, prioritás: sűrűség, majd seed; hash-rács), Difference és Merge (a gráf DAG), Transform (skála, jitter, yaw, dőlés, normálhoz igazítás, eltolás), Spawner (súlyozott, több részes prefabok: törzs + lomb, szár + szirmok). Minden véletlen szám a gráf seedjének, a csomópontnak és a pont saját seedjének hash-e, sosem a feldolgozási sorrendé: a kimenet futásról futásra bitre azonos, és a kötet mozgatásakor a továbbra is lefedett terület pontjai megmaradnak. Előbeállítások: sziklák lejtőkön, virágok réten, erdőszél (a fák a szélvonaltól befelé sűrűsödnek, a szél mentén bokrok és páfrányok, a törzsek körül kitisztítva). A beépített motortartalom (editor/content.rs) első használatkor sül be; a spawnolt példányok a kötet slotjait mesh-enként újrahasznosítják.",
+    "metrics": "Böngészőben (wasm, headless Chromium): virágok 28×28 m-es kötetben 3 170 példány, újragenerálás 15–20 ms; erdőszél (80×50 m) 408 példány, 7–12 ms; sziklák 3–8 ms. 19 egységteszt a crate-ben (determinizmus, ritkítási távolság és sorrendfüggetlenség, szűrők, sűrűség, súlyok, DAG, JSON), plusz a szerkesztő tesztjei (spawn, újragenerálás slot-újrahasznosítással, mentés/visszatöltés azonos transzformációkkal).",
+    "showcase": "Völgy: 'Flowers in meadows' a tó melletti réten (piros, sárga, kék, fehér virágok fűcsomókkal), majd a kocka ikonnal új seed; 'Forest edge' a völgy szélén; a Details panelen egy csomópont paraméterének húzása élőben.",
+    "modules": ["crates/helios-pcg/src/lib.rs", "crates/helios-pcg/src/graph.rs", "crates/helios-pcg/src/surface.rs", "crates/helios-pcg/src/filter.rs", "crates/helios-pcg/src/prune.rs", "crates/helios-pcg/src/transform.rs", "crates/helios-pcg/src/spawn.rs", "crates/helios-pcg/src/noise.rs", "crates/helios-pcg/src/rng.rs", "crates/helios-pcg/src/point.rs", "crates/helios-demo/src/editor/pcg.rs", "crates/helios-demo/src/editor/content.rs"]
+  },
+  {
+    "id": "web-editor-outline-taps",
+    "title": "Kijelölési körvonal: 20 helyett 8 minta",
+    "area": "Platform és eszközök",
+    "kind": "fix",
+    "summary": "Az első körvonal-pass pixelenként 20 visibility-mintát vett, ami 1600×900-on 0,34–0,57 ms volt. Nyolc minta (tengelyek 2 px-en, átlók 1 px-en) ugyanazt a 2 px-es körvonalat adja.",
+    "details": "Minden minta egy visibility-textúraolvasás és két storage-buffer olvasás (látható klaszter → példány → kijelölési bit); a minták számának csökkentése és a korai kilépés a kijelölt pixeleken a költség nagy részét eltüntette.",
+    "metrics": "0,34–0,57 ms → 0,05 ms (1600×900, RTX 3090, megosztott gép, 3 futás).",
+    "showcase": "helios --scene valley --select 3: a szobor narancs körvonala, a HUD-ban 'selection outline 0.05'.",
+    "modules": ["crates/helios-render/src/shaders/selection.wgsl"]
+  },
+  {
+    "id": "web-editor-gizmo-grazing-axis",
+    "title": "Gizmó: kamerára néző tengely húzása",
+    "area": "Platform és eszközök",
+    "kind": "fix",
+    "summary": "Ha a mozgatási tengely majdnem a kamera felé mutatott, a sugár–tengely metszéspont elszaladt: 120 px húzás 136 m-t mozgatott. Ilyenkor a gizmó a tengely képernyőre vetített irányában, pixelarányosan mozgat.",
+    "details": "Ha a tengely képernyőn mért hossza 40 px alá esik, a húzás a vetített tengelyirányra eső egérelmozdulás × (világhossz / max(képernyőhossz, 40)); egyébként marad a pontos sugár–tengely legközelebbi pont.",
+    "metrics": "Erdő, a kamera felé mutató X tengely: 120 px húzás 136 m → 7,2 m (0,5 m-es rácsra illesztve).",
+    "showcase": "Erdőben egy fa kijelölése, majd az X nyíl húzása szemből.",
+    "modules": ["web/editor/gizmo.js"]
+  }
+]

@@ -137,6 +137,8 @@ pub mod instance_flags {
     /// The material is translucent: the main view's culling skips the instance (it is drawn by
     /// the forward translucency pass and must not occlude through the visibility buffer / HZB).
     pub const TRANSLUCENT: u32 = 4;
+    /// Hidden (deleted in an editor): culled for every view.
+    pub const HIDDEN: u32 = 8;
 }
 
 /// Bit flags in [`GpuMaterial::flags`].

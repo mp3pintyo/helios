@@ -31,8 +31,11 @@ use crate::clouds::{CloudInputs, Clouds};
 use crate::fog::{FogInputs, VolumetricFog};
 use crate::lights::{LightCulling, MAX_LIGHTS};
 use crate::lumen::{CardInputs, Lumen};
+use crate::picking::{PickResult, Picker};
 use crate::resolution::{self, DynamicResolution, ResolutionController};
 use crate::rvt::RuntimeVirtualTexture;
+use crate::scene::InstanceHandle;
+use crate::selection::SelectionOutline;
 use crate::textures::TextureLibrary;
 use crate::translucency::Translucency;
 use crate::passes::sky::Sky;
@@ -287,6 +290,9 @@ pub struct Renderer {
     local_exposure: LocalExposurePass,
     bloom: BloomPass,
     tonemap: TonemapPass,
+    /// Editor tools: instance picking and the selection outline (idle unless used).
+    picker: Picker,
+    selection: SelectionOutline,
     stats: StatsReadback,
     profiler: GpuProfiler,
     frame_index: u32,
@@ -364,6 +370,8 @@ impl Renderer {
             local_exposure: LocalExposurePass::new(device),
             bloom: BloomPass::new(device),
             tonemap: TonemapPass::new(device, output_format),
+            picker: Picker::new(device),
+            selection: SelectionOutline::new(device, output_format),
             stats: StatsReadback::new(device, 1 + MAX_LEVELS + 1, crate::vsm::PHYSICAL_PAGES, crate::vsm::DRAW_CAPACITY),
             profiler: GpuProfiler::new(device, queue),
             frame_index: 0,
@@ -487,6 +495,22 @@ impl Renderer {
         }
     }
 
+    /// Asks which instance is under output pixel `pixel` (editor picking). The answer arrives
+    /// asynchronously, a frame or two later, through [`Renderer::take_pick`] with the same `id`.
+    pub fn request_pick(&mut self, id: u32, pixel: (u32, u32)) {
+        self.picker.request(id, pixel);
+    }
+
+    /// The latest finished pick (once).
+    pub fn take_pick(&mut self) -> Option<PickResult> {
+        self.picker.take()
+    }
+
+    /// Instances outlined as the editor's selection (empty: no outline pass).
+    pub fn set_selection(&mut self, selection: &[InstanceHandle]) {
+        self.selection.set(selection);
+    }
+
     /// Forgets temporal history (TSR, GI, exposure), e.g. after a camera cut.
     pub fn reset_history(&mut self) {
         self.history_valid = false;
@@ -578,6 +602,7 @@ impl Renderer {
             self.translucency.water_uniform(),
             &self.samplers,
         );
+        self.picker.record(&mut rec, &self.queue, &self.frame_uniform, &self.targets, &self.main_view.visible_clusters);
         self.rvt.record(&mut rec, &self.textures, &self.samplers.material, self.settings.virtual_texturing);
         if self.settings.shadows {
             self.vsm.record(&mut rec, &self.culling, &self.scene, &self.frame_uniform, &self.targets, &self.lights);
@@ -647,6 +672,7 @@ impl Renderer {
         self.bloom.record(&mut rec, resolved, &self.targets, &self.samplers);
         let bloom = if self.targets.bloom_up.len() > 1 { &self.targets.bloom_up[0] } else { &self.targets.bloom_down[0] };
         self.tonemap.record(&mut rec, &self.frame_uniform, resolved, bloom, &self.exposure.buffer, &self.samplers, output);
+        self.selection.record(&mut rec, &self.queue, &self.frame_uniform, &self.targets, &self.main_view.visible_clusters, output);
 
         let mut states = vec![&self.main_view.state];
         states.extend(self.vsm.level_states());
@@ -657,6 +683,7 @@ impl Renderer {
         let (commands, map_profiler) = rec.finish();
         self.queue.submit([commands]);
         self.profiler.after_submit(map_profiler);
+        self.picker.after_submit();
         if read_stats {
             self.stats.map();
         }

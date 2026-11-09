@@ -124,6 +124,23 @@ fn build_scene(detail: Detail) -> Scene {
         ..Default::default()
     });
     let mushroom_m = scene.add_material(Material::standard(Vec3::new(0.55, 0.08, 0.04), 0.4, 0.0));
+    // Stable names for scene files.
+    for (i, &leaves) in leaves_m.iter().enumerate() {
+        scene.set_material_name(leaves, &format!("leaves {}", i + 1));
+    }
+    for (material, name) in [
+        (terrain_material, "forest floor"),
+        (oak_bark_m, "oak bark"),
+        (pine_bark_m, "pine bark"),
+        (needles_m, "needles"),
+        (grass_m, "grass"),
+        (fern_m, "fern"),
+        (mossy_rock, "mossy rock"),
+        (mossy_log, "mossy log"),
+        (mushroom_m, "mushroom"),
+    ] {
+        scene.set_material_name(material, name);
+    }
 
     // ---- Meshes --------------------------------------------------------------------------------------
     let mut m = Meshes { scene: &mut scene };
