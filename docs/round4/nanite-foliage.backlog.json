@@ -1,0 +1,93 @@
+[
+  {
+    "id": "nanite-foliage",
+    "title": "Nanite Foliage: voxel LOD-ok és assemblyk a növényzetnek",
+    "area": "Virtuális geometria",
+    "kind": "feature",
+    "summary": "Az UE 5.7 kísérleti Nanite Foliage-ének két része Heliosban: a lombozat távoli LOD-jai háromszögek helyett voxelklaszterek lehetnek, amelyek megőrzik a lombkorona fedését és színét, a fák pedig megosztott ágrész-hálókból állhatnak össze (assemblyk). Az erdő mindkettőt használja; az Insert billentyű a voxeleket kapcsolja.",
+    "details": "Két egymásra épülő rész: (1) voxel LOD-ok (nanite-voxels) – a DAG csoportjai, ahol a voxelek hibája kisebb az egyszerűsített háromszögekénél, voxel-alternatívákat kapnak azonos LOD-értékekkel; (2) assemblyk (nanite-assemblies) – részhálók transzformációkkal, amelyeket a GPU minden képkockában a culling előtt bont ki részpéldányokká, távolabb pedig a részek gyökereiből épített alap-háló áll a helyükön. A szél mindkettőn működik: a részek a fájuk origója körül hajlanak, a voxelek a középpontjuk elmozdulásával tolódnak.",
+    "metrics": "Erdő (high, 1600×900, RTX 3090, osztott GPU, 4 futás minimuma): GPU 8,38 → 10,09 ms (voxelek +0,69 ms, assemblyk +1,0 ms); távoli lombkorona albedója a teljes részletességű referenciához: átlagszín-hiba +2,0/+1,3/+1,0 % → −0,2/−0,5/−1,2 %, 16×16-os blokkhiba 1,75 → 1,53/255; geometria 43,3 → 39,6 MiB (RAM és .hvm); villogás (2560×1440, statikus kamera, >24/255 pixelek): szélben 0,077 → 0,083 %, szélcsendben 0,027 → 0,033 %.",
+    "showcase": "Erdő, magas nézőpont a fák fölött: --eye 0,30,0 --at 200,0,-60, előtte/utána csúszka az Insert billentyűvel (voxel LOD-ok ki/be) és a 6-os albedo nézetben; a 22-es nézet a voxelklasztereket, a 23-as az assembly-részeket színezi.",
+    "modules": [
+      "crates/helios-geometry/src/voxel.rs",
+      "crates/helios-geometry/src/assembly.rs",
+      "crates/helios-geometry/src/dag.rs",
+      "crates/helios-render/src/assembly.rs",
+      "crates/helios-render/src/shaders/voxel.wgsl",
+      "crates/helios-render/src/shaders/voxel_raster.wgsl",
+      "crates/helios-render/src/shaders/voxel_resolve.wgsl",
+      "crates/helios-render/src/shaders/vsm_voxel_raster.wgsl",
+      "crates/helios-render/src/shaders/assembly.wgsl",
+      "crates/helios-demo/src/scenes/forest.rs"
+    ]
+  },
+  {
+    "id": "nanite-voxels",
+    "title": "Voxel LOD-ok aggregált geometriához (lombozat, tűlevél, páfrány, fű)",
+    "area": "Virtuális geometria",
+    "kind": "feature",
+    "summary": "A levelekből álló hálók a távolban nem ritkulnak meg: ahol a háromszög-egyszerűsítés már leveleket törölne, a DAG voxelklaszterekre vált, amelyek voxelenként a geometria fedését, irányát és textúra-koordinátáját tárolják. A renderelő sztochasztikus kockákként raszterizálja őket a láthatósági pufferbe és az árnyéklapokra, a TSR átlagolja a ditheringet.",
+    "details": "Építés (BuildConfig::voxels): minden csoport teljes részletességű háromszögeit voxelizáljuk a költségkeret (4 voxel / megtartott háromszög) által engedett legfinomabb rácson; voxelenként tengelyenkénti fedés (darabonként – összefüggő levelenként – a vetített terület maximuma a két oldalról, független darabok szorzódó áteresztése), oktaéderes normál (a levelek főiránya és a lombkorona kifelé mutató iránya keverve) és téglánkénti átlagos UV + szórás. Ahol a voxelhiba kisebb a háromszögekénél, a csoport kimenete voxel-alternatívákat kap azonos LOD-értékekkel, és minden feljebb lévő csoport is voxeles; a két ábrázolás együtt marad a DAG-ban, így a vágás invariánsai mindkét módban érvényesek, és a módok saját lapokat kapnak. Klaszter: ≤128 tégla 4³ voxellel, voxelenként 32 bit; .hvm 4-es verzió (régiek elutasítva). Raszter: compute, klaszterenként egy munkacsoport, a voxelkocka három elülső lapja fed egy pixelt, a nézőirányú fedés valószínűségével (IGN zaj); payload = klaszter-slot + tégla, a resolve a mélységből találja meg a voxelt. Árnyék: ugyanez a lap-texelekben, statikus hash-zajjal és lejtésfüggő torzítással.",
+    "metrics": "Erdő 1600×900: 5,23 M háromszög → 3,97 M háromszög + 4,3 M voxel; voxelek be/ki: GPU 9,40 → 10,09 ms (sw raster + merge 1,47 → 1,99 ms, resolve 0,38 → 0,45 ms, VSM sw raster 0,52 → 0,72 ms). Fedési teszt (levélfelhő): a voxeles vágás 30–2000 m-en tengelyenként 3,4 %-on belül marad a teljes hálóhoz képest (átlósan 9 %), a háromszöges vágás 13 %-ig tér el. Távoli fenyők: a csupasz vörös ágvázak helyett sűrű zöld tűlevél, mint a referencián.",
+    "showcase": "Erdő, --eye 0,30,0 --at 200,0,-60: a távoli fenyők az Insert billentyűvel ki-be kapcsolva (voxelek nélkül vörös ágvázak, voxelekkel sűrű lomb); a 22-es debug nézet színesben mutatja a voxelklasztereket.",
+    "modules": [
+      "crates/helios-geometry/src/voxel.rs",
+      "crates/helios-geometry/src/dag.rs",
+      "crates/helios-render/src/shaders/voxel.wgsl",
+      "crates/helios-render/src/shaders/voxel_raster.wgsl",
+      "crates/helios-render/src/shaders/voxel_resolve.wgsl",
+      "crates/helios-render/src/shaders/vsm_voxel_raster.wgsl",
+      "crates/helios-render/src/shaders/cull.wgsl",
+      "crates/helios-render/src/passes/culling.rs"
+    ]
+  },
+  {
+    "id": "nanite-assemblies",
+    "title": "Assemblyk: fák megosztott ágrészekből, a GPU-n feloldott transzformációkkal",
+    "area": "Virtuális geometria",
+    "kind": "feature",
+    "summary": "Egy háló állhat részekből (tűlevél-ágak, levélcsokrok), amelyeket a GPU minden képkockában a culling előtt bont ki részpéldányokká, így a fenyők néhány megosztott tűlevél-ágat használnak a teljes lomb sütése helyett. Távolabb a részek gyökereiből épített, tovább egyszerűsített (és voxelizált) alap-háló rajzolódik.",
+    "details": "Scene::set_assembly(alap, részek). Az alap a részek gyökérklasztereiből összerakott virtuális háló, hibái a részek legrosszabb gyökérhibájával eltolva, így a LOD-lánc ott folytatódik, ahol a részeké véget ér. A kibontó compute pass assembly-példányonként a fő nézet LOD-szabályával dönt; ha az alap legfinomabb szintje túl durva, részenként egy példányrekordot ír a jelenet példányai mögé (transzformáció = assembly × rész, az assembly határa és növény-origója a szélhez, stabil láthatósági bitek a kétmenetes takaráshoz), és megjelöli az alapot, hogy a culling kihagyja. Minden nézet ugyanazokat a rekordokat cullingolja, így az árnyék mindig a látott ábrázolást követi. 32768 rész-slot; ha a kért részek megközelítik, a CPU visszacsatolás (hiszterézissel) megemeli a kibontás küszöbét, így a legközelebbi fák maradnak részekből.",
+    "metrics": "Fenyők assemblyként: tűlevél-lomb 7,9 MiB → 1,1 MiB, sütés 1,96 → 0,5 s; teljes erdő 43,3 → 39,6 MiB (RAM és .hvm). Költség 1600×900-on: ~26 400 részpéldány, culling 0,48 → 0,91 ms (+ késői 0,06 → 0,12 ms), GPU összesen +0,7 ms. A lombos fáknál (144 háromszöges levélcsokrok) a nyereség kisebb (6,6 → 2,9 MiB) ugyanakkora GPU-költséggel, ezért ott maradt a sütött lomb.",
+    "showcase": "Erdő alapnézet, 23-as debug nézet: a közeli fenyők tűlevél-ágai részenként színesek, a távoliak (alap) világosszürkék.",
+    "modules": [
+      "crates/helios-geometry/src/assembly.rs",
+      "crates/helios-geometry/src/vegetation.rs",
+      "crates/helios-render/src/assembly.rs",
+      "crates/helios-render/src/shaders/assembly.wgsl",
+      "crates/helios-render/src/shaders/wind.wgsl",
+      "crates/helios-render/src/gpu_scene.rs",
+      "crates/helios-render/src/scene.rs"
+    ]
+  },
+  {
+    "id": "sw-raster-dispatch-overshoot",
+    "title": "Javítás: a szoftveres raszterizáló túlfutó munkacsoportjai régi klasztereket rajzoltak",
+    "area": "Virtuális geometria",
+    "kind": "fix",
+    "summary": "65535-nél több szoftveresen raszterizált klaszternél a 2D indirekt dispatch túlfut, és a fölösleges munkacsoportok a látható-klaszter lista végén túli, előző képkockákból maradt bejegyzéseket is kirajzolták. Most minden szoftveres raszterizáló a lista tényleges hosszáig dolgozik.",
+    "details": "A cull_args.wgsl a szoftveres dispatchet (min(n, 65535), ceil(n / 65535)) méretre írja, így a második sor munkacsoportjainak egy része a listán kívül esik. A sw_raster.wgsl és a voxel_raster.wgsl most a vágás állapotából (hardveres / szoftveres darabszám, korai menet) kiszámolja a szoftveres bejegyzések számát, és a túlnyúló indexeknél kilép. Assemblyknél (változó rész-slotok) ez képkockánként más helyre rajzolt ágakat jelentett; a sima erdőben 2560×1440-en determinisztikus, de hibás többletrajzolást.",
+    "metrics": "Erdő 2560×1440, TAA nélkül, statikus kamera: képkockák közti eltérés (>24/255) 2,47 % → 0,012 % (azonos a determinisztikus alapállapottal).",
+    "showcase": "Nem látványelem; a villogásmérés táblázatában szerepelhet.",
+    "modules": [
+      "crates/helios-render/src/shaders/sw_raster.wgsl",
+      "crates/helios-render/src/shaders/voxel_raster.wgsl",
+      "crates/helios-render/src/shaders/common.wgsl"
+    ]
+  },
+  {
+    "id": "debug-view-index",
+    "title": "Javítás: a debug nézetek indexe a DEBUG_* érték, nem a sorrend",
+    "area": "Platform és eszközök",
+    "kind": "fix",
+    "summary": "A --view i kapcsoló és a heliosSetView(i) eddig a nézetlista pozícióját használta, a V billentyű pedig az indexet tömbpozícióként; hézagos indexeknél (22, 23) ez rossz nézetet adott. Most mindhárom a nézet saját indexével dolgozik.",
+    "details": "DebugView::from_index(i) a DEBUG_* értékhez tartozó nézetet adja, a next() a listabeli pozíció szerint lép tovább, így a körök közti agentek által foglalt indexek (16–21) is gond nélkül bekerülhetnek.",
+    "metrics": "--view 22 és --view 23 a voxel- és assembly-nézetet adja.",
+    "showcase": "Nem látványelem.",
+    "modules": [
+      "crates/helios-render/src/renderer.rs",
+      "crates/helios-demo/src/main.rs",
+      "crates/helios-demo/src/web.rs"
+    ]
+  }
+]

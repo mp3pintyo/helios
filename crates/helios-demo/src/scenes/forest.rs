@@ -2,7 +2,9 @@
 //! bushes, ferns and grass over a leaf-litter forest floor, mossy boulders, fallen logs and
 //! mushrooms. Thousands of instances; the canopy shadows come from virtual shadow maps and the
 //! green bounce light under the canopy from Lumen. A gusty breeze sways the trees and ripples
-//! through the grass and ferns.
+//! through the grass and ferns. The foliage has voxel LODs (Nanite Foliage), so distant canopies
+//! keep their density; the conifers are assemblies of shared needle sprays (their foliage bakes
+//! in a quarter of the time and memory of whole-tree meshes).
 
 use glam::{Mat4, Quat, Vec2, Vec3};
 use helios_geometry::modeling::{lathe, merge, tube};
@@ -167,7 +169,7 @@ fn build_scene(detail: Detail) -> Scene {
     let leaves = detail.pick(34, 56);
     let mut species: Vec<Species> = Vec::new();
     for (i, (height, radius, depth)) in [(18.0f32, 0.45f32, detail.pick(3u32, 4)), (14.0, 0.34, detail.pick(3, 4)), (9.0, 0.2, 3)].iter().enumerate() {
-        let tree = vegetation::broadleaf_assembly(&TreeParams {
+        let tree = vegetation::broadleaf_tree(&TreeParams {
             seed: 11 + i as u32 * 7,
             height: *height,
             trunk_radius: *radius,
@@ -180,7 +182,7 @@ fn build_scene(detail: Detail) -> Scene {
         });
         species.push(Species {
             wood: m.add("broadleaf wood", &tree.wood, true),
-            foliage: m.add_assembly("broadleaf foliage", &tree),
+            foliage: m.add_foliage("broadleaf foliage", &tree.foliage, true),
             bark: oak_bark_m,
             leaves: leaves_m[i],
         });

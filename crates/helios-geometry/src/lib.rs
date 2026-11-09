@@ -16,11 +16,13 @@
 //!    dependencies, so the GPU can render whatever subset is resident without cracks.
 //! 6. **Compression** – cluster vertices are quantised to per-mesh grids and bit-packed
 //!    ([`encoding`]), on the GPU as on disk.
-//! 6b. **Voxel LODs** – aggregate geometry (foliage) gets voxel clusters where they beat the
-//!    simplified triangles ([`voxel`]), preserving coverage at a distance.
 //! 7. **Distance fields** – a narrow-band SDF (or heightfield) per mesh for software ray tracing.
 //! 8. **Cards** – orthographic depth/normal captures of a mesh's surfaces ([`cards`]) for a
 //!    card-based surface cache.
+//!
+//! Aggregate geometry (foliage) gets **voxel LODs** where voxels beat its simplified triangles
+//! ([`voxel`]), preserving coverage at a distance, and meshes made of many copies of a few parts
+//! can be **assemblies** ([`assembly`]).
 //!
 //! The output, [`VirtualMesh`], is a set of flat, GPU-ready arrays.
 
