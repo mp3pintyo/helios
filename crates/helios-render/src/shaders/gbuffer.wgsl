@@ -23,6 +23,8 @@
 #include "skinning.wgsl"
 #include "water.wgsl"
 #include "shore.wgsl"
+#include "voxel.wgsl"
+#include "voxel_resolve.wgsl"
 
 override MATERIAL_KIND: u32 = 0u;
 // The scene has skinned instances (passes/material.rs): without them the skinning code is
@@ -268,6 +270,10 @@ fn resolve(
     let entry = visible_clusters[slot];
     let instance = instances[entry.x];
     let cluster = clusters[entry.y];
+    if cluster_is_voxel(cluster) {
+        resolve_voxel(pixel, id);
+        return;
+    }
     let base = cluster_base(cluster);
     let corners = cluster_triangle(cluster, base, triangle);
     let wind_force = wind_strength(instance);
@@ -406,6 +412,9 @@ fn resolve(
         // Movable instances in orange, the rest grey (dynamic_debug.wgsl adds the invalidation).
         case DEBUG_INVALIDATION: { surface.albedo = select(vec3<f32>(0.2 + 0.6 * luminance(surface.albedo)), vec3<f32>(1.0, 0.45, 0.08), (instance.flags & INSTANCE_MOVABLE) != 0u); }
         case DEBUG_SKIN_WEIGHTS: { surface.albedo = skin_weight_color(instance, cluster, base, corners, b.lambda); }
+        // Triangles grey (voxel_resolve.wgsl colours voxel clusters).
+        case DEBUG_VOXELS: { surface.albedo = vec3<f32>(0.3 + 0.1 * hash_color(entry.y).x); }
+        case DEBUG_ASSEMBLY_PARTS: { surface.albedo = assembly_part_color(instance); }
         default: {}
     }
 

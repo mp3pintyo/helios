@@ -5,7 +5,8 @@
 //! * **Virtual geometry** – cluster DAGs from [`helios_geometry`], streamed page by page into a
 //!   GPU pool on demand; GPU-driven instance → page → cluster culling with a per-cluster LOD cut
 //!   and two-pass HZB occlusion; tiny triangles go to a compute **software rasteriser**, the rest
-//!   to one indirect hardware draw, both into a **visibility buffer**.
+//!   to one indirect hardware draw, both into a **visibility buffer**. Foliage gets **voxel LODs**
+//!   and instanced **assemblies** of parts resolved during culling (Nanite Foliage).
 //! * **Materials** – GPU-synthesised texture arrays, **streaming virtual textures** for imported
 //!   images at native resolution, per-shading-model tile classification and resolve, and a
 //!   **runtime virtual texture** for the landscape.
@@ -37,6 +38,7 @@
 //! Entry points: build a [`Scene`], create a [`Renderer`], call [`Renderer::render`].
 
 mod alpha_mask;
+mod assembly;
 mod camera;
 mod cards;
 mod clouds;
@@ -92,7 +94,7 @@ pub use renderer::{DebugView, DynamicStats, RenderSettings, Renderer, RendererCo
 pub use lumen_lite::{GiMethod, LiteFallback};
 pub use resolution::{DynamicResolution, MAX_SCREEN_PERCENTAGE, MIN_SCREEN_PERCENTAGE};
 pub use scene::{
-    CloudLayer, FogVolume, Image, ImageTexture, InstanceHandle, Light, LightHandle, LightKind, Material, MaterialHandle, MaterialKind,
+    AssemblyPart, CloudLayer, FogVolume, Image, ImageTexture, InstanceHandle, Light, LightHandle, LightKind, Material, MaterialHandle, MaterialKind,
     MeshHandle, Mobility, Scene, Sun, TextureDesc, TextureHandle, TextureMapping, TexturePattern, TextureSource,
     UvTransform, Water, Wrap,
 };

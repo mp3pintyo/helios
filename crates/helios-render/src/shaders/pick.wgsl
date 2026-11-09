@@ -18,6 +18,9 @@ struct PickRequest {
 @group(0) @binding(4) var gbuffer_normal: texture_2d<f32>;
 @group(0) @binding(5) var<storage, read> visible_clusters: array<vec4<u32>>;
 @group(0) @binding(6) var<storage, read_write> picked: array<u32, 12>;
+@group(0) @binding(7) var<storage, read> part_owners: array<u32>;
+
+#include "part_owner.wgsl"
 
 @compute @workgroup_size(1)
 fn pick() {
@@ -25,7 +28,8 @@ fn pick() {
     let id = textureLoad(visibility_buffer, pixel, 0).r;
     var instance = INVALID_ID;
     if id != INVALID_ID {
-        instance = visible_clusters[id >> TRIANGLE_BITS].x;
+        // An assembly part picks its assembly's instance.
+        instance = owner_instance(visible_clusters[id >> TRIANGLE_BITS].x);
     }
     let depth = textureLoad(depth_buffer, pixel, 0).r;
     let uv = (vec2<f32>(pixel) + 0.5) * frame.viewport.zw;

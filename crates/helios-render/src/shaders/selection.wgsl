@@ -13,6 +13,9 @@ override OUTPUT_SRGB: bool = true;
 @group(0) @binding(2) var<storage, read> visible_clusters: array<vec4<u32>>;
 // One bit per scene instance.
 @group(0) @binding(3) var<storage, read> selected: array<u32>;
+@group(0) @binding(4) var<storage, read> part_owners: array<u32>;
+
+#include "part_owner.wgsl"
 
 struct VsOut {
     @builtin(position) position: vec4<f32>,
@@ -34,7 +37,8 @@ fn is_selected(output_pixel: vec2<f32>) -> bool {
     if id == INVALID_ID {
         return false;
     }
-    let instance = visible_clusters[id >> TRIANGLE_BITS].x;
+    // Assembly parts are outlined with their assembly.
+    let instance = owner_instance(visible_clusters[id >> TRIANGLE_BITS].x);
     let word = instance >> 5u;
     if word >= arrayLength(&selected) {
         return false;

@@ -1,0 +1,107 @@
+# Nanite Foliage: voxel LODs and assemblies (round 4)
+
+README text for the feature (to merge into the README by the orchestrator).
+
+## Architecture bullet (section 2, after *Wind*)
+
+* **Nanite Foliage** (`helios-geometry/src/voxel.rs`, `assembly.rs`; `helios-render/src/assembly.rs`,
+  `voxel.wgsl`, `voxel_raster.wgsl`, `vsm_voxel_raster.wgsl`, `voxel_resolve.wgsl`, `assembly.wgsl`; UE 5.7's
+  experimental Nanite Foliage). Aggregate geometry — canopies, needles, fronds, grass — cannot be simplified as
+  triangles without deleting pieces: component pruning thins it, and distant forests lose coverage and colour (the
+  conifers turned into reddish skeletons of bare branches). Two parts:
+  **Voxel LODs.** Meshes built with `BuildConfig::voxels` (the forest's foliage, ferns and grass) give every
+  DAG group a voxel candidate: the *full-detail* triangles under the group, voxelised on a grid as fine as its
+  budget allows (`voxels_per_triangle`, 4 per triangle the group keeps). Each voxel stores what the geometry
+  inside it does to light, not its shape: its coverage seen along each axis — each *piece* (a connected leaf,
+  needle or blade) covers its projected share of the face (`max` of the areas facing either way, so a two-sided
+  or folded leaf counts once), independent pieces multiply what they leave open — an octahedral normal blending
+  the leaves' principal orientation with the canopy's outward direction (the coverage gradient over the group),
+  and its brick's mean texture coordinate and spread. Seen from a direction, a voxel's coverage is the leaves'
+  projection over the cube's footprint, in optical depth (`sqrt(Σ(d_i τ_i)²) / Σ|d_i|`, exact for leaves facing
+  an axis and for isotropic tangles; adding the axes linearly counts a leaf seen diagonally up to √3 times).
+  Clusters hold up to 128 bricks of 4³ voxels (occupancy bits, position, first voxel, uv) and one 32-bit word per
+  voxel. Where the voxels' error is below the simplified triangles' (where pruning starts deleting leaves) the
+  group switches to voxels — at the triangles' error, so the LOD switches where it did — and every output cluster
+  gets *voxel alternates* standing for the same source triangles, with the same LOD values; every group above is
+  voxelised too. Both representations stay in the DAG, so `Insert` switches between the voxel cut and the
+  triangle-only cut of the same DAG instantly, and all its invariants (monotonic errors, one side of every group
+  boundary, page dependencies) hold in both; voxel groups' member sets get pages of their own per mode, so a mode
+  never streams the other's data. Voxel clusters are always rasterised in compute: a workgroup per cluster takes
+  its voxels (up to 8192) in turn, projects each cube from its centre (moved by the wind like a vertex there:
+  voxels shift rigidly, they don't flutter) and the instance's half-voxel axes, rejects voxels between pixel
+  centres with a conservative bound, and covers a pixel where one of its three front faces does, at that face's
+  depth, with the probability of the voxel's coverage along the view (stochastic transparency: interleaved
+  gradient noise animated per frame and decorrelated per voxel, averaged by TSR). It shares the software
+  rasteriser's depth / payload passes and target (payload = cluster slot, brick), so the merge with the hardware
+  and software triangle paths is unchanged; the G-buffer resolve finds the voxel from the merged depth (the
+  brick cell under the hit point, with its exact wind offset) and shades it as foliage with its normal (facing
+  the viewer like a two-sided leaf) and the material sampled at the brick's uv with its spread as the footprint
+  (the leaves' average colour). Shadow pages (sun clipmap and local light faces) rasterise voxels the same way
+  in page texels, with the triangles' slope-scaled bias and hashed, static noise per absolute texel (cached and
+  refreshed pages agree). Culling treats voxel clusters like triangle clusters (frustum, HZB, LOD, streaming);
+  `.hvm` is version 4 (voxel payloads, per-level voxel counts; older files are rejected with a request to bake
+  again).
+  **Assemblies** (`Scene::set_assembly`): a mesh can be made of *parts* — meshes placed by transforms in its
+  space — so the forest's conifers share six needle sprays per species (one per branch span, as many copies as
+  branches) instead of each species baking all its needles (`vegetation::conifer_assembly`;
+  `broadleaf_assembly` builds broadleaf trees from leaf sprays the same way). The parts are
+  resolved on the GPU before culling: each instance of an assembly tests its *base* — one ordinary virtual mesh
+  built from the parts at their roots, merged in place and simplified (and voxelised) further, its errors
+  offset by the parts' worst root error so they continue where the parts end — with the main view's LOD rule;
+  where the base's finest level is too coarse, the instance writes one record per part into part slots after the
+  scene's instances (its transform times the part's, the assembly's bounds and plant origin for the wind, and
+  per-(assembly instance, part) visibility bits for two-pass occlusion) and flags its base so culling skips it.
+  Every view culls the same records (the instance dispatch covers only the slots handed out), so shadows always
+  match the view. Up to 32768 part slots: when the parts requested near them, the expansion's LOD threshold is
+  raised just enough (CPU feedback with hysteresis, like the culling budget) so the nearest assemblies keep their
+  parts. Debug views 22 (voxel clusters coloured, triangles grey) and 23 (assembly parts coloured, bases light
+  grey). The wind takes a plant origin from the instance (spare `w` of the normal matrix), so a part sways about
+  its tree's origin exactly as the baked foliage did; voxels move with the displacement of their centre.
+  Measured (forest high, 1600×900, RTX 3090 shared with up to 6 other agents: interleaved runs, minimum of 4,
+  before → after): GPU frame 8.38 → 10.09 ms — voxels on / off (`Insert`) 10.09 / 9.40 ms: software raster +
+  merge 1.47 → 1.99 ms, material resolve 0.38 → 0.45 ms, shadow software raster 0.52 → 0.72 ms; the conifer
+  assemblies (≈ 26 400 part instances) cost the rest, mostly culling (0.48 → 0.91 ms, late pass 0.06 →
+  0.12 ms) and the parts' finer triangles. Default view: 5.23 M triangles → 3.97 M triangles + 4.3 M voxels
+  (shadows 4.46 M → 2.7 M triangles + 2.8 M voxels). Geometry 43.3 → 39.6 MiB in RAM and in `.hvm`; conifer
+  needles 7.9 MiB as baked meshes with voxels → 1.1 MiB as assemblies, baked in 0.5 instead of 2.0 s (whole
+  scene 6.9 → 8.2 s: voxelisation). Broadleaf trees as leaf-spray assemblies would save 6.6 → 2.9 MiB for the
+  same ≈ 0.7 ms of GPU time (their 144-triangle sprays are poor parts), so the forest bakes them whole.
+  Distant canopy (albedo view averaged over 16 frames from 30 m above the forest, `--eye 0,30,0 --at
+  200,0,-60`, the 240 rows of canopy 150–400 m away, vs. a full-detail reference at a 1/8 px LOD threshold):
+  mean colour error +2.0/+1.3/+1.0 % → −0.2/−0.5/−1.2 % (RGB), 16×16-block error 1.75 → 1.53/255, 40×40
+  1.19 → 0.88/255; the distant conifers keep their needles instead of showing bare red branches. Coverage tests
+  on a leaf cloud: within 3.4 % of the full mesh along each axis at 30–2000 m (9 % diagonally at the finest
+  voxels), where the triangle cut is off by up to 13 %. Temporal stability (2560×1440, static camera, % px >
+  24/255): 0.077 → 0.083 % with wind, 0.027 → 0.033 % calm.
+
+## Status vs. Unreal Engine 5 — new item
+
+**Nanite Foliage**: voxels carry per-axis coverage, one normal and their brick's mean texture coordinate — no
+per-voxel colour, so textures varying within a brick, vertex colours and alpha-masked (card) foliage's mask
+coverage are averaged away or ignored; coverage along a diagonal is modelled from the three axes (exact for
+axis-aligned and isotropic leaves). Voxels are rasterised as stochastic cubes (no ray-marched depth buckets or
+front-to-back ordering), rely on TSR to average their dithering, move rigidly with the wind at their centre
+(no flutter, no bone-driven wind), and have no hardware path: in shadow pages refreshed over a static layer
+without a scratch tile, or split pages, they sit out that refresh. Voxels win only where pruning reports a
+larger error than the voxel budget allows (4 voxels per kept triangle: the forest's conifers and ferns from
+mid-distance, the broadleaf canopies near their roots). Assemblies are one level deep (no nested parts), their
+parts take the instance's material (wood and leaves are separate instances), and the base↔parts switch is per
+assembly instance, not per part (UE resolves part instances inside the cluster hierarchy): an expanded tree
+culls every part as an instance (part slot, page batch, cluster workgroups), which costs ≈ 0.4 ms of culling
+for the forest's ≈ 26 k conifer parts, and parts are only as coarse as their own small DAG allows, so the
+expanded range draws more triangles and fewer voxels than one merged mesh would. When more parts are wanted
+than the 32768 slots, the expansion threshold rises, so trees near the edge of the expanded range draw their
+base up to ~1.5 px coarse. Parts are rigid copies (a needle spray follows its branch span, not each branch's
+own curve); part instances' shadow pages are not invalidated by their pages streaming in (the base's are).
+Not done: bone-driven wind (Helios' procedural wind moves the parts as one plant).
+
+## Flags and hotkeys
+
+* `Insert`: voxel LODs on / off (`RenderSettings::voxel_lods`; off = the triangle-only cut of the same DAG).
+* `--view 22` (or `V`): voxel clusters coloured per cluster, triangle clusters grey.
+* `--view 23` (or `V`): assembly part instances coloured per part, assembly bases light grey, the rest dark grey.
+* `BuildConfig::voxels = Some(VoxelConfig { voxels_per_triangle })` for aggregate meshes;
+  `helios_geometry::assembly::build_assembly_base` + `Scene::set_assembly` for assemblies.
+* `--view i` / `heliosSetView(i)` now take the debug view's index (the `DEBUG_*` value), not its position in the
+  cycle (views 16–21 belong to other features).
+* HUD: voxels visible / in shadows and assembly parts drawn.

@@ -6,6 +6,7 @@ use glam::{Affine2, Mat3, Mat4, Vec2, Vec3, Vec4};
 use helios_geometry::{GpuCluster, GpuPage, INVALID_PAGE};
 
 use crate::alpha_mask::{AlphaMasks, MaterialMask};
+use crate::assembly::Assemblies;
 use crate::gpu_types::{instance_flags, material_flags, GpuInstance, GpuMaterial, GpuUvTransform};
 use crate::motion::SceneChanges;
 use crate::scene::{Instance, Material, Mobility, Scene, TextureHandle, TextureSource, UvTransform};
@@ -49,6 +50,8 @@ pub struct GpuScene {
     pub masks: AlphaMasks,
     /// Joint palettes of skinned instances, written every frame.
     pub skins: SkinPalettes,
+    /// Assembly tables and the per-frame expansion into part instances.
+    pub assemblies: Assemblies,
     pub instance_count: u32,
     pub page_count: u32,
     pub meshes: Vec<MeshRange>,
@@ -61,6 +64,8 @@ pub struct GpuScene {
     shadow_moves: Vec<ShadowMove>,
     /// Some shadow-casting instance has a wind response.
     wind_shadows: bool,
+    /// Some mesh has voxel LODs (the voxel rasterisers run).
+    voxels: bool,
     /// Scene versions last uploaded: geometry, materials, instances, textures.
     versions: (u64, u64, u64, u64),
 }
@@ -81,6 +86,7 @@ impl GpuScene {
             wind: crate::util::uniform_buffer(device, "wind", std::mem::size_of::<WindUniform>() as u64),
             masks: AlphaMasks::new(device),
             skins: SkinPalettes::new(device),
+            assemblies: Assemblies::new(device),
             instance_count: 0,
             page_count: 0,
             meshes: Vec::new(),
@@ -89,6 +95,7 @@ impl GpuScene {
             records: Vec::new(),
             shadow_moves: Vec::new(),
             wind_shadows: false,
+            voxels: false,
             versions: (u64::MAX, u64::MAX, u64::MAX, u64::MAX),
         }
     }
@@ -105,6 +112,16 @@ impl GpuScene {
     /// invalidates).
     pub fn wind_moves_shadows(&self) -> bool {
         self.wind_shadows
+    }
+
+    /// Whether some mesh has voxel LODs.
+    pub fn has_voxels(&self) -> bool {
+        self.voxels
+    }
+
+    /// Instances culling visits: the scene's and the assemblies' part slots after them.
+    pub fn cull_instance_count(&self) -> u32 {
+        self.instance_count + self.assemblies.part_capacity()
     }
 
     pub fn write_wind(&self, queue: &wgpu::Queue, wind: &WindUniform) {
@@ -247,6 +264,8 @@ impl GpuScene {
         );
 
         self.page_count = pages.len() as u32;
+        self.voxels = scene.meshes.iter().any(|m| m.has_voxels());
+        self.assemblies.upload_geometry(device, queue, scene, &self.meshes);
         self.clusters = storage_buffer_init(device, queue, "clusters", bytemuck::cast_slice(&clusters));
         self.pages = storage_buffer_init(device, queue, "pages", bytemuck::cast_slice(&pages));
         self.page_table = storage_buffer(device, "page table", pages.len() as u64 * 4, wgpu::BufferUsages::empty());
@@ -282,10 +301,17 @@ impl GpuScene {
         // Inverse transpose, rescaled so that uniform scale leaves normals unit length.
         let normal = linear.inverse().transpose() * max_scale;
         let center = world.transform_point3(mesh.bounds.truncate());
+        // The plant origin of the wind is the instance's own position.
+        let origin = world.w_axis;
+        let mut flags = gpu_instance_flags(scene, instance, self.masks.material(instance.material.0 as usize).is_some())
+            | instance_skin_flags(scene, instance);
+        if self.assemblies.is_assembly(instance.mesh.0) {
+            flags |= instance_flags::ASSEMBLY;
+        }
         GpuInstance {
             world,
             prev_world,
-            normal_matrix: [normal.x_axis.extend(0.0), normal.y_axis.extend(0.0), normal.z_axis.extend(0.0)],
+            normal_matrix: [normal.x_axis.extend(origin.x), normal.y_axis.extend(origin.y), normal.z_axis.extend(origin.z)],
             bounds: center.extend(mesh.bounds.w * max_scale),
             page_offset: mesh.page_offset,
             page_count: mesh.page_count,
@@ -294,8 +320,7 @@ impl GpuScene {
             material: instance.material.0,
             visibility_offset,
             max_scale,
-            flags: gpu_instance_flags(scene, instance, self.masks.material(instance.material.0 as usize).is_some())
-                | instance_skin_flags(scene, instance),
+            flags,
             wind: instance_wind(scene, instance),
         }
     }
@@ -323,9 +348,12 @@ impl GpuScene {
             hi = hi.max(i.bounds.truncate() + i.bounds.w);
         }
         self.bounds = if instances.is_empty() { (glam::Vec3::ZERO, glam::Vec3::ONE) } else { (lo, hi) };
+        let visibility_bits = self.assemblies.upload_instances(device, queue, scene, visibility_bits);
         let bytes: &[u8] = bytemuck::cast_slice(&instances);
-        if self.instances.size() < bytes.len().max(16) as u64 || self.instance_count as usize != count {
-            self.instances = storage_buffer(device, "instances", bytes.len() as u64, wgpu::BufferUsages::empty());
+        // Assemblies' part instances are written after the scene's by the GPU.
+        let size = bytes.len() as u64 + self.assemblies.part_capacity() as u64 * std::mem::size_of::<GpuInstance>() as u64;
+        if self.instances.size() < size.max(16) || self.instance_count as usize != count {
+            self.instances = storage_buffer(device, "instances", size, wgpu::BufferUsages::empty());
         }
         if !bytes.is_empty() {
             queue.write_buffer(&self.instances, 0, bytes);

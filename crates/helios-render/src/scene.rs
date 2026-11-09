@@ -606,9 +606,18 @@ impl Default for Water {
     }
 }
 
+/// A part of an assembly: a mesh placed in the assembly's space (see [`Scene::set_assembly`]).
+#[derive(Clone, Copy, Debug)]
+pub struct AssemblyPart {
+    pub mesh: MeshHandle,
+    pub transform: Mat4,
+}
+
 #[derive(Default)]
 pub struct Scene {
     pub(crate) meshes: Vec<VirtualMesh>,
+    /// Meshes that are assembly bases, with their parts.
+    pub(crate) assemblies: Vec<(MeshHandle, Vec<AssemblyPart>)>,
     /// Where each mesh's non-resident page payloads stream from (`None`: all in memory).
     pub(crate) page_locations: Vec<Option<PageLocation>>,
     pub(crate) materials: Vec<Material>,
@@ -821,6 +830,18 @@ impl Scene {
         &self.meshes[handle.0 as usize]
     }
 
+    /// Makes `base` an assembly (Nanite assemblies; see [`helios_geometry::assembly`]): its
+    /// instances draw `parts` — meshes placed by transforms in `base`'s space, in the instance's
+    /// material — where the base's finest level would be too coarse, and `base` (built with
+    /// [`helios_geometry::assembly::build_assembly_base`] from those parts) beyond. The parts'
+    /// transforms are resolved on the GPU every frame, so an assembly of many shared parts costs
+    /// memory and baking for its distinct parts and its base only.
+    pub fn set_assembly(&mut self, base: MeshHandle, parts: Vec<AssemblyPart>) {
+        self.assemblies.retain(|(mesh, _)| *mesh != base);
+        self.assemblies.push((base, parts));
+        self.geometry_version = next_version();
+    }
+
     /// CPU memory held by the meshes (records, in-memory payloads, distance fields).
     pub fn geometry_cpu_bytes(&self) -> usize {
         self.meshes.iter().map(VirtualMesh::cpu_bytes).sum()
@@ -830,11 +851,13 @@ impl Scene {
         self.instances.len()
     }
 
-    /// Sum of full-detail triangles over all instances (the "virtual" triangle count).
+    /// Sum of full-detail triangles over all instances (the "virtual" triangle count; an
+    /// assembly's are its parts').
     pub fn source_triangle_count(&self) -> u64 {
-        self.instances
-            .iter()
-            .map(|i| self.meshes[i.mesh.0 as usize].triangle_count() as u64)
-            .sum()
+        let triangles = |mesh: MeshHandle| match self.assemblies.iter().find(|(base, _)| *base == mesh) {
+            Some((_, parts)) => parts.iter().map(|p| self.meshes[p.mesh.0 as usize].triangle_count() as u64).sum(),
+            None => self.meshes[mesh.0 as usize].triangle_count() as u64,
+        };
+        self.instances.iter().map(|i| triangles(i.mesh)).sum()
     }
 }

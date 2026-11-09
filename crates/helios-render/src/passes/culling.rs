@@ -87,6 +87,15 @@ impl CullView {
             capacity,
         }
     }
+
+    /// Makes room for at least `batches` page batches (an instance with up to 64 pages takes
+    /// one, so every assembly part does).
+    pub fn reserve_batches(&mut self, device: &wgpu::Device, batches: u32) {
+        if batches > self.capacity.batches {
+            self.capacity.batches = batches;
+            self.work = storage_buffer(device, "culling work", (self.capacity.batches + self.capacity.pages) as u64 * 16, BufferUsages::empty());
+        }
+    }
 }
 
 pub struct Culling {
@@ -111,6 +120,8 @@ pub struct Culling {
     sw_raster: [wgpu::ComputePipeline; 4],
     /// The same for alpha-masked clusters (each specialisation skips the other's clusters).
     sw_raster_masked: [wgpu::ComputePipeline; 4],
+    /// The same for voxel clusters (voxel_raster.wgsl).
+    voxel_raster: [wgpu::ComputePipeline; 4],
     merge: wgpu::ComputePipeline,
     dummy_hzb: wgpu::TextureView,
 }
@@ -171,6 +182,11 @@ impl Culling {
             )
         };
         let sw_pipelines = |masked| [sw_pipeline(0, false, masked), sw_pipeline(1, false, masked), sw_pipeline(0, true, masked), sw_pipeline(1, true, masked)];
+        let voxel_module = create_module(device, "voxel_raster.wgsl");
+        let voxel_pipeline = |pass: u32, late: bool| {
+            let constants = [("PASS", pass as f64), ("LATE", if late { 1.0 } else { 0.0 })];
+            compute_pipeline(device, "voxel raster", &voxel_module, "rasterize", &sw_layout, &constants)
+        };
 
         let dummy_hzb = util::texture(
             device,
@@ -200,6 +216,7 @@ impl Culling {
             raster_masked_late: raster_pipeline(device, &raster_module, &raster_layout, true, true),
             sw_raster: sw_pipelines(false),
             sw_raster_masked: sw_pipelines(true),
+            voxel_raster: [voxel_pipeline(0, false), voxel_pipeline(1, false), voxel_pipeline(0, true), voxel_pipeline(1, true)],
             merge: compute_pipeline(device, "visibility merge", &merge_module, "merge", &merge_layout, &[]),
             dummy_hzb,
             cull_layout,
@@ -268,7 +285,11 @@ impl Culling {
         if mode != CullMode::Late {
             pass.set_bind_group(0, &cull_group, &[]);
             pass.set_pipeline(&self.instances);
-            pass.dispatch_workgroups(util::workgroups(scene.instance_count, 64), 1, 1);
+            match scene.assemblies.cull_dispatch() {
+                // The scene's instances and the assemblies' part slots in use.
+                Some((args, offset)) => pass.dispatch_workgroups_indirect(args, offset),
+                None => pass.dispatch_workgroups(util::workgroups(scene.instance_count, 64), 1, 1),
+            }
 
             pass.set_pipeline(&self.prepare_pages);
             pass.set_bind_group(0, &args_group, &[]);
@@ -371,12 +392,16 @@ impl Culling {
         let base = if late { 2 } else { 0 };
         let args = if late { ARGS_LATE_SW } else { ARGS_EARLY_SW };
         pass.set_bind_group(0, &sw_group, &[]);
-        // The depth pass of all clusters (opaque and alpha-masked), then the payload pass.
+        // The depth pass of all clusters (opaque, alpha-masked and voxels), then the payload pass.
         for stage in [base, base + 1] {
             pass.set_pipeline(&self.sw_raster[stage]);
             pass.dispatch_workgroups_indirect(&view.args, args);
             if scene.masks.any() {
                 pass.set_pipeline(&self.sw_raster_masked[stage]);
+                pass.dispatch_workgroups_indirect(&view.args, args);
+            }
+            if scene.has_voxels() {
+                pass.set_pipeline(&self.voxel_raster[stage]);
                 pass.dispatch_workgroups_indirect(&view.args, args);
             }
         }

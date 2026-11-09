@@ -29,7 +29,7 @@ impl SelectionOutline {
             device,
             "selection outline",
             ShaderStages::FRAGMENT,
-            &[(0, bind::uniform()), (1, bind::texture_uint()), (2, bind::storage(true)), (3, bind::storage(true))],
+            &[(0, bind::uniform()), (1, bind::texture_uint()), (2, bind::storage(true)), (3, bind::storage(true)), (4, bind::storage(true))],
         );
         let pipeline_layout = util::pipeline_layout(device, "selection outline", &[&layout]);
         let constants = [("OUTPUT_SRGB", if output_format.is_srgb() { 1.0 } else { 0.0 })];
@@ -67,7 +67,19 @@ impl SelectionOutline {
         self.changed = Some(bits);
     }
 
-    pub fn record(&mut self, rec: &mut Recorder, queue: &wgpu::Queue, frame: &wgpu::Buffer, targets: &FrameTargets, visible_clusters: &wgpu::Buffer, output: &wgpu::TextureView) {
+    /// `part_owners` maps assembly parts to their assembly's instance (`part_owner.wgsl`), so a
+    /// selected assembly is outlined whether its base or its parts are drawn.
+    #[allow(clippy::too_many_arguments)]
+    pub fn record(
+        &mut self,
+        rec: &mut Recorder,
+        queue: &wgpu::Queue,
+        frame: &wgpu::Buffer,
+        targets: &FrameTargets,
+        visible_clusters: &wgpu::Buffer,
+        part_owners: &wgpu::Buffer,
+        output: &wgpu::TextureView,
+    ) {
         if let Some(bits) = self.changed.take() {
             let bytes: &[u8] = bytemuck::cast_slice(&bits);
             if (self.bits.size() as usize) < bytes.len() {
@@ -90,6 +102,7 @@ impl SelectionOutline {
                 (1, wgpu::BindingResource::TextureView(&targets.visibility)),
                 (2, visible_clusters.as_entire_binding()),
                 (3, self.bits.as_entire_binding()),
+                (4, part_owners.as_entire_binding()),
             ],
         );
         let mut pass = rec.render_pass(

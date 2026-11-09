@@ -27,6 +27,21 @@
 //!
 //! — a cluster whose children are missing simply stays the finest available level, and the
 //! cut is still watertight as long as a page is only resident when its parent pages are.
+//!
+//! ## Voxel LODs
+//!
+//! For aggregate geometry ([`BuildConfig::voxels`]) every group also gets a voxel candidate
+//! ([`crate::voxel`]): the full-detail triangles under it, voxelised as finely as its budget
+//! allows. Where that error is below the simplified triangles' (typically where component
+//! pruning starts deleting leaves), the group switches to voxels — at the triangles' error, or
+//! the voxels' if the budget forces coarser ones — and each output cluster gets *voxel
+//! alternates* standing for the same source triangles, with identical LOD values; every group
+//! above it is then voxelised too. Both representations stay in the DAG: with voxel LODs on, a
+//! triangle cluster that has alternates is replaced by them ([`GpuCluster::in_mode`]); off, the
+//! voxel clusters are ignored and the cut is the triangle DAG's. Either way every group keeps one
+//! error and one sphere, so the selection rule — and its invariants — hold in both modes. Member
+//! sets of voxel groups go to pages of their own per mode, so a mode never streams the other's
+//! data (except at the groups where voxels take over, whose shared members both modes need).
 
 use bytemuck::{Pod, Zeroable};
 use glam::{Vec2, Vec3, Vec4};
@@ -35,6 +50,10 @@ use crate::encoding::{decode_triangle, encode_cluster, ClusterEncoding, Quantiza
 use crate::hash::{FxHashMap, FxHashSet};
 use crate::sdf::{MeshSdf, SdfMode};
 use crate::simplify::{simplify, SimplifyMesh, SimplifyOptions};
+use crate::voxel::{
+    build_voxel_clusters, decode_voxel_cluster, fit_grid, fit_grid_at, Cell, Grid, Pieces, SourceTriangle, Voxel, VoxelCluster, VoxelConfig, VoxelSource,
+    VOXEL_ERROR_PER_SIZE,
+};
 use crate::{build_clusters, canonical_ids, group_clusters, Aabb, ClusterLimits, Mesh, SkinWeights, Sphere};
 
 /// Error value used for "no parent" (DAG roots). Finite to stay well-behaved in shaders.
@@ -61,12 +80,19 @@ pub struct GpuCluster {
     /// Word offset of the cluster's encoded vertices (header first, see [`crate::encoding`])
     /// inside the page payload.
     pub vertex_offset: u32,
-    /// Word offset of the triangle bit stream inside the page payload.
+    /// Word offset of the triangle bit stream inside the page payload (voxel clusters: of their
+    /// voxel attributes).
     pub triangle_offset: u32,
-    /// `vertex_count | triangle_count << 8 | lod_level << 16`.
+    /// `vertex_count | triangle_count << 8 | lod_level << 16` (voxel clusters: no vertices or
+    /// triangles).
     pub counts: u32,
-    pub _pad: u32,
+    /// Voxel clusters ([`crate::voxel`]): `bricks | voxels << 8`. Triangle clusters: 0, or
+    /// [`CLUSTER_VOXEL_ALTERNATE`] if voxel clusters replace them when voxel LODs are on.
+    pub voxel: u32,
 }
+
+/// [`GpuCluster::voxel`] bit of triangle clusters that have voxel alternates.
+pub const CLUSTER_VOXEL_ALTERNATE: u32 = 1 << 31;
 
 impl GpuCluster {
     pub fn vertex_count(&self) -> u32 {
@@ -77,6 +103,27 @@ impl GpuCluster {
     }
     pub fn lod_level(&self) -> u32 {
         self.counts >> 16
+    }
+    pub fn is_voxel(&self) -> bool {
+        self.voxel_bricks() != 0
+    }
+    pub fn voxel_bricks(&self) -> u32 {
+        self.voxel & 0xff
+    }
+    pub fn voxel_count(&self) -> u32 {
+        (self.voxel >> 8) & 0x3fff
+    }
+    /// A triangle cluster that voxel clusters replace when voxel LODs are on.
+    pub fn has_voxel_alternate(&self) -> bool {
+        self.voxel & CLUSTER_VOXEL_ALTERNATE != 0
+    }
+    /// Whether the cluster takes part in the LOD cut with voxel LODs on (`voxels`) or off.
+    pub fn in_mode(&self, voxels: bool) -> bool {
+        if voxels {
+            !self.has_voxel_alternate()
+        } else {
+            !self.is_voxel()
+        }
     }
 }
 
@@ -115,6 +162,9 @@ pub struct BuildConfig {
     /// Position grid step `2^-precision` (mesh units) for the compressed vertex format; `None`
     /// picks it from the triangle size (see [`Quantization::new`]).
     pub position_precision: Option<i32>,
+    /// Aggregate geometry (foliage, grass): offer voxel clusters where they beat the simplified
+    /// triangles (see the module documentation).
+    pub voxels: Option<VoxelConfig>,
 }
 
 impl Default for BuildConfig {
@@ -127,6 +177,7 @@ impl Default for BuildConfig {
             simplify: SimplifyOptions::default(),
             sdf: SdfMode::default(),
             position_precision: None,
+            voxels: None,
         }
     }
 }
@@ -134,8 +185,10 @@ impl Default for BuildConfig {
 /// Per-level summary of a built mesh.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct VirtualMeshStats {
+    /// Clusters of both representations (triangles and voxels).
     pub clusters_per_level: Vec<u32>,
     pub triangles_per_level: Vec<u32>,
+    pub voxels_per_level: Vec<u32>,
 }
 
 impl VirtualMeshStats {
@@ -168,6 +221,18 @@ pub struct VirtualMesh {
     pub sdf: Option<MeshSdf>,
 }
 
+/// Which LOD cuts a cluster takes part in.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum ClusterKind {
+    /// Both (triangles without voxel alternates).
+    #[default]
+    Shared,
+    /// Triangles, replaced by voxel clusters when voxel LODs are on.
+    Alternated,
+    /// Voxels, standing in for an alternated triangle cluster.
+    Voxel,
+}
+
 struct WorkCluster {
     triangles: Vec<[u32; 3]>,
     bounds: Sphere,
@@ -180,6 +245,14 @@ struct WorkCluster {
     source_group: Option<u32>,
     /// Group that consumed it (`None` for roots).
     parent_group: Option<u32>,
+    kind: ClusterKind,
+    /// Voxel meshes only: the full-detail triangles this triangle cluster stands for (taken by
+    /// the group that consumes it).
+    region: Vec<SourceTriangle>,
+    /// Its voxel alternates (indices into the work list).
+    alternates: Vec<usize>,
+    /// The payload of a voxel cluster.
+    voxels: Option<VoxelCluster>,
 }
 
 impl WorkCluster {
@@ -196,8 +269,33 @@ impl WorkCluster {
             level,
             source_group: None,
             parent_group: None,
+            kind: ClusterKind::Shared,
+            region: Vec::new(),
+            alternates: Vec::new(),
+            voxels: None,
         }
     }
+}
+
+/// A group's voxel representation: its grid, the voxelisation of all its source triangles on it
+/// and the resulting error.
+struct VoxelCandidate {
+    grid: Grid,
+    cells: FxHashMap<u64, Cell>,
+    error: f32,
+}
+
+/// Splits a group's source triangles among its output clusters: each goes to the cluster whose
+/// bounding sphere is nearest (aggregate geometry has no connectivity to follow).
+fn partition_region(region: Vec<SourceTriangle>, positions: &[Vec3], outputs: &[Sphere]) -> Vec<Vec<SourceTriangle>> {
+    let mut parts = vec![Vec::new(); outputs.len()];
+    for t in region {
+        let centroid = t.vertices.iter().map(|&v| positions[v as usize]).sum::<Vec3>() / 3.0;
+        let distance = |s: &Sphere| centroid.distance(s.center) - s.radius;
+        let nearest = (0..outputs.len()).min_by(|&a, &b| distance(&outputs[a]).total_cmp(&distance(&outputs[b]))).unwrap_or(0);
+        parts[nearest].push(t);
+    }
+    parts
 }
 
 /// Builds the cluster LOD DAG, streaming pages and (optionally) the distance field of `mesh`.
@@ -215,11 +313,28 @@ pub fn build_virtual_mesh(mesh: &Mesh, config: &BuildConfig) -> VirtualMesh {
     // Vertices of stuck groups (which become roots) must never move again.
     let mut locked_forever = vec![false; positions.len()];
 
-    let mut work: Vec<WorkCluster> = build_clusters(&positions, &canonical, &all_triangles, config.limits)
-        .into_iter()
-        .map(|tris| WorkCluster::new(&positions, tris, 0))
-        .collect();
+    // Voxel meshes: the full-detail geometry every voxel cluster is built from. Skinned meshes
+    // never get voxels: voxels carry no skin weights, so they could not follow the pose.
+    let voxel_lods = config.voxels.filter(|_| mesh.skin.is_empty());
+    let source_attributes = voxel_lods.map(|_| (positions.clone(), normals.clone(), uvs.clone()));
+    let voxel_source = source_attributes.as_ref().map(|(positions, normals, uvs)| VoxelSource { positions, normals, uvs });
+
+    let mut work: Vec<WorkCluster> = {
+        let pieces = voxel_lods.map(|_| Pieces::new(&all_triangles, &canonical));
+        build_clusters(&positions, &canonical, &all_triangles, config.limits)
+            .into_iter()
+            .map(|tris| {
+                let mut cluster = WorkCluster::new(&positions, tris, 0);
+                if let Some(pieces) = &pieces {
+                    cluster.region = cluster.triangles.iter().map(|&t| pieces.source(t)).collect();
+                }
+                cluster
+            })
+            .collect()
+    };
     let mut current: Vec<usize> = (0..work.len()).collect();
+    // Groups whose outputs have voxel alternates.
+    let mut voxel_groups: Vec<bool> = Vec::new();
 
     let mut class_group: FxHashMap<u32, u32> = FxHashMap::default();
     let mut shared: FxHashSet<u32> = FxHashSet::default();
@@ -301,21 +416,69 @@ pub fn build_virtual_mesh(mesh: &Mesh, config: &BuildConfig) -> VirtualMesh {
             let group_id = group_count;
             group_count += 1;
             let children_error = members.iter().map(|&c| work[c].lod_error).fold(0.0f32, f32::max);
-            let group_error = result.error.max(children_error);
+            let region: Vec<SourceTriangle> = members.iter().flat_map(|&c| std::mem::take(&mut work[c].region)).collect();
+            // Voxels compete with the simplified triangles' error at the same budget; once a
+            // member has voxel alternates, the group must offer them too (the voxel cut continues
+            // upwards).
+            let voxels = voxel_lods.zip(voxel_source.as_ref()).and_then(|(voxel_config, source)| {
+                let budget = (voxel_config.voxels_per_triangle * (triangles.len() / 2) as f32) as usize;
+                let forced = members.iter().any(|&c| work[c].kind == ClusterKind::Alternated);
+                let (finest, cells) = fit_grid(source, &region, budget, children_error / VOXEL_ERROR_PER_SIZE)?;
+                if !forced && finest.size * VOXEL_ERROR_PER_SIZE >= result.error {
+                    return None;
+                }
+                // No finer than the triangles' error: the group switches where the triangle cut
+                // would, with no more voxels than the budget (fewer where the voxels could be
+                // finer than that).
+                let size = finest.size.max(result.error / VOXEL_ERROR_PER_SIZE);
+                let (grid, cells) = if size > finest.size { fit_grid_at(source, &region, size) } else { (finest, cells) };
+                Some(VoxelCandidate { grid, cells, error: grid.size * VOXEL_ERROR_PER_SIZE })
+            });
+            let group_error = voxels.as_ref().map_or(result.error, |v| v.error).max(children_error);
             let group_bounds = Sphere::merge_all(members.iter().map(|&c| work[c].lod_bounds));
             for &c in &members {
-                work[c].parent_error = group_error;
-                work[c].parent_lod_bounds = group_bounds;
-                work[c].parent_group = Some(group_id);
+                for i in std::iter::once(c).chain(work[c].alternates.clone()) {
+                    work[i].parent_error = group_error;
+                    work[i].parent_lod_bounds = group_bounds;
+                    work[i].parent_group = Some(group_id);
+                }
             }
+            voxel_groups.push(voxels.is_some());
 
-            for tris in build_clusters(&positions, &canonical, &result.triangles, config.limits) {
+            let outputs = build_clusters(&positions, &canonical, &result.triangles, config.limits);
+            let first_output = work.len();
+            for tris in outputs {
                 let mut cluster = WorkCluster::new(&positions, tris, level);
                 cluster.lod_error = group_error;
                 cluster.lod_bounds = group_bounds;
                 cluster.source_group = Some(group_id);
+                if voxels.is_some() {
+                    cluster.kind = ClusterKind::Alternated;
+                }
                 next.push(work.len());
                 work.push(cluster);
+            }
+            if let Some(source) = &voxel_source {
+                let spheres: Vec<Sphere> = work[first_output..].iter().map(|w| w.bounds).collect();
+                for (o, part) in partition_region(region, &positions, &spheres).into_iter().enumerate() {
+                    let output = first_output + o;
+                    if let Some(candidate) = &voxels {
+                        for payload in build_voxel_clusters(source, &part, candidate.grid, &candidate.cells) {
+                            let index = work.len();
+                            work[output].alternates.push(index);
+                            work.push(WorkCluster {
+                                bounds: payload.bounds,
+                                lod_error: group_error,
+                                lod_bounds: group_bounds,
+                                source_group: Some(group_id),
+                                kind: ClusterKind::Voxel,
+                                voxels: Some(payload),
+                                ..WorkCluster::new(&positions, Vec::new(), level)
+                            });
+                        }
+                    }
+                    work[output].region = part;
+                }
             }
         }
 
@@ -326,7 +489,7 @@ pub fn build_virtual_mesh(mesh: &Mesh, config: &BuildConfig) -> VirtualMesh {
     }
 
     let vertices = Vertices { positions: &positions, normals: &normals, uvs: &uvs, uv1: &uv1, colors: &colors, skin: &skin };
-    let mut vm = pack(&vertices, &work, group_count as usize, config);
+    let mut vm = pack(&vertices, &work, &voxel_groups, config);
     vm.sdf = bake_sdf(&vm, config.sdf);
     vm
 }
@@ -377,7 +540,15 @@ impl Vertices<'_> {
     }
 }
 
-fn pack(vertices: &Vertices, work: &[WorkCluster], group_count: usize, config: &BuildConfig) -> VirtualMesh {
+/// The LOD cuts a page's clusters serve: pages only mix member sets of the same kind.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PageMode {
+    Both = 0,
+    Triangles = 1,
+    Voxels = 2,
+}
+
+fn pack(vertices: &Vertices, work: &[WorkCluster], voxel_groups: &[bool], config: &BuildConfig) -> VirtualMesh {
     let mut out = VirtualMesh {
         bounds: Sphere::from_points(vertices.positions),
         aabb: Aabb::from_points(vertices.positions.iter().copied()),
@@ -385,38 +556,68 @@ fn pack(vertices: &Vertices, work: &[WorkCluster], group_count: usize, config: &
     };
 
     // ---- Page assignment: whole member sets, one LOD level per page ----------------------------
-    let mut members: Vec<Vec<usize>> = vec![Vec::new(); group_count];
+    // A group's members in each mode: shared clusters serve both.
+    let group_count = voxel_groups.len();
+    let mut triangle_members: Vec<Vec<usize>> = vec![Vec::new(); group_count];
+    let mut voxel_members: Vec<Vec<usize>> = vec![Vec::new(); group_count];
+    let mut shared_members = vec![false; group_count];
     let mut roots: Vec<usize> = Vec::new();
     for (i, w) in work.iter().enumerate() {
-        match w.parent_group {
-            Some(g) => members[g as usize].push(i),
-            None => roots.push(i),
+        let Some(g) = w.parent_group else {
+            roots.push(i);
+            continue;
+        };
+        let g = g as usize;
+        match w.kind {
+            ClusterKind::Shared => {
+                triangle_members[g].push(i);
+                shared_members[g] = true;
+            }
+            ClusterKind::Alternated => triangle_members[g].push(i),
+            ClusterKind::Voxel => voxel_members[g].push(i),
         }
     }
     let mut pages: Vec<Vec<usize>> = Vec::new();
     let mut page_is_root: Vec<bool> = Vec::new();
-    let mut page_of_group = vec![INVALID_PAGE; group_count];
-    let mut open: Option<(usize, u32)> = None; // (page, level)
-    for (g, set) in members.iter().enumerate() {
-        if set.is_empty() {
-            continue;
+    // Per group: the page of its members in the triangle and in the voxel cut.
+    let mut page_of_group = vec![[INVALID_PAGE; 2]; group_count];
+    let mut open: [Option<(usize, u32)>; 3] = [None; 3]; // (page, level) per mode
+    for g in 0..group_count {
+        // A voxel group's outputs point at the mode's own member page; any other group's
+        // (shared) outputs at one page holding both.
+        let separate = voxel_groups[g] && !shared_members[g] && !voxel_members[g].is_empty();
+        let sets = if separate {
+            vec![(triangle_members[g].clone(), PageMode::Triangles), (voxel_members[g].clone(), PageMode::Voxels)]
+        } else {
+            vec![([triangle_members[g].as_slice(), &voxel_members[g]].concat(), PageMode::Both)]
+        };
+        for (set, mode) in sets {
+            if set.is_empty() {
+                continue;
+            }
+            let level = work[set[0]].level;
+            let slot = &mut open[mode as usize];
+            if !slot.is_some_and(|(p, l)| l == level && pages[p].len() + set.len() <= config.page_clusters) {
+                pages.push(Vec::new());
+                page_is_root.push(false);
+                *slot = Some((pages.len() - 1, level));
+            }
+            let page = slot.unwrap().0;
+            pages[page].extend_from_slice(&set);
+            match mode {
+                PageMode::Triangles => page_of_group[g][0] = page as u32,
+                PageMode::Voxels => page_of_group[g][1] = page as u32,
+                PageMode::Both => page_of_group[g] = [page as u32; 2],
+            }
         }
-        let level = work[set[0]].level;
-        let fits = open.is_some_and(|(p, l)| l == level && pages[p].len() + set.len() <= config.page_clusters);
-        if !fits {
-            pages.push(Vec::new());
-            page_is_root.push(false);
-            open = Some((pages.len() - 1, level));
-        }
-        let page = open.unwrap().0;
-        pages[page].extend_from_slice(set);
-        page_of_group[g] = page as u32;
     }
     roots.sort_by_key(|&i| work[i].level);
     for chunk in roots.chunks(config.page_clusters.max(1)) {
         pages.push(chunk.to_vec());
         page_is_root.push(true);
     }
+    // The page holding the clusters a cluster was built from, in its own cut.
+    let child_page = |w: &WorkCluster| w.source_group.map_or(INVALID_PAGE, |g| page_of_group[g as usize][(w.kind == ClusterKind::Voxel) as usize]);
 
     // ---- Dependencies: a page needs the pages holding the clusters its groups produced -----------
     let mut page_of_cluster = vec![0u32; work.len()];
@@ -427,11 +628,9 @@ fn pack(vertices: &Vertices, work: &[WorkCluster], group_count: usize, config: &
     }
     let mut parents: Vec<FxHashSet<u32>> = vec![FxHashSet::default(); pages.len()];
     for (c, w) in work.iter().enumerate() {
-        if let Some(g) = w.source_group {
-            let child = page_of_group[g as usize];
-            if child != INVALID_PAGE {
-                parents[child as usize].insert(page_of_cluster[c]);
-            }
+        let child = child_page(w);
+        if child != INVALID_PAGE {
+            parents[child as usize].insert(page_of_cluster[c]);
         }
     }
 
@@ -449,26 +648,33 @@ fn pack(vertices: &Vertices, work: &[WorkCluster], group_count: usize, config: &
         let cluster_offset = out.clusters.len() as u32;
         for &c in set {
             let w = &work[c];
-            local.clear();
-            let local_triangles: Vec<[u32; 3]> = w
-                .triangles
-                .iter()
-                .map(|t| {
-                    t.map(|v| match local.iter().position(|&x| x == v) {
-                        Some(i) => i as u32,
-                        None => {
-                            local.push(v);
-                            local.len() as u32 - 1
-                        }
-                    })
-                })
-                .collect();
-            local_vertices.clear();
-            local_vertices.extend(local.iter().map(|&v| quantized[v as usize]));
             let vertex_offset = (out.page_data.len() - page_start) as u32;
-            let triangle_offset = vertex_offset + encode_cluster(&quantization, &local_vertices, &local_triangles, &mut out.page_data);
+            let (triangle_offset, counts, voxel) = if let Some(voxels) = &w.voxels {
+                out.page_data.extend_from_slice(&voxels.words);
+                let attributes = crate::voxel::VOXEL_HEADER_WORDS + voxels.bricks * crate::voxel::BRICK_WORDS;
+                (vertex_offset + attributes, w.level << 16, voxels.bricks | voxels.voxels << 8)
+            } else {
+                local.clear();
+                let local_triangles: Vec<[u32; 3]> = w
+                    .triangles
+                    .iter()
+                    .map(|t| {
+                        t.map(|v| match local.iter().position(|&x| x == v) {
+                            Some(i) => i as u32,
+                            None => {
+                                local.push(v);
+                                local.len() as u32 - 1
+                            }
+                        })
+                    })
+                    .collect();
+                local_vertices.clear();
+                local_vertices.extend(local.iter().map(|&v| quantized[v as usize]));
+                let triangle_offset = vertex_offset + encode_cluster(&quantization, &local_vertices, &local_triangles, &mut out.page_data);
+                let alternate = if w.kind == ClusterKind::Alternated { CLUSTER_VOXEL_ALTERNATE } else { 0 };
+                (triangle_offset, local.len() as u32 | (w.triangles.len() as u32) << 8 | w.level << 16, alternate)
+            };
 
-            let child_page = w.source_group.map_or(INVALID_PAGE, |g| page_of_group[g as usize]);
             out.clusters.push(GpuCluster {
                 bounds: w.bounds.to_vec4().into(),
                 lod_bounds: w.lod_bounds.to_vec4().into(),
@@ -476,20 +682,22 @@ fn pack(vertices: &Vertices, work: &[WorkCluster], group_count: usize, config: &
                 lod_error: w.lod_error,
                 parent_error: w.parent_error,
                 page: p as u32,
-                child_page,
+                child_page: child_page(w),
                 vertex_offset,
                 triangle_offset,
-                counts: local.len() as u32 | (w.triangles.len() as u32) << 8 | w.level << 16,
-                _pad: 0,
+                counts,
+                voxel,
             });
 
             let level = w.level as usize;
             if out.stats.clusters_per_level.len() <= level {
                 out.stats.clusters_per_level.resize(level + 1, 0);
                 out.stats.triangles_per_level.resize(level + 1, 0);
+                out.stats.voxels_per_level.resize(level + 1, 0);
             }
             out.stats.clusters_per_level[level] += 1;
             out.stats.triangles_per_level[level] += w.triangles.len() as u32;
+            out.stats.voxels_per_level[level] += w.voxels.as_ref().map_or(0, |v| v.voxels);
         }
         let range = set.iter().map(|&c| &work[c]);
         out.pages.push(GpuPage {
@@ -557,24 +765,36 @@ impl LodView {
         error * self.lod_scale / distance
     }
 
-    /// The GPU selection rule for a single cluster, given page residency.
+    /// The GPU selection rule for a single cluster of the triangle cut, given page residency.
     pub fn selects(&self, cluster: &GpuCluster, resident: &dyn Fn(u32) -> bool) -> bool {
+        self.selects_in(cluster, resident, false)
+    }
+
+    /// The GPU selection rule with voxel LODs on (`voxels`) or off.
+    pub fn selects_in(&self, cluster: &GpuCluster, resident: &dyn Fn(u32) -> bool, voxels: bool) -> bool {
         let own_ok = self.projected_error(cluster.lod_error, cluster.lod_bounds) <= self.threshold;
         let children_missing = cluster.child_page == INVALID_PAGE || !resident(cluster.child_page);
-        resident(cluster.page)
+        cluster.in_mode(voxels)
+            && resident(cluster.page)
             && (own_ok || children_missing)
             && self.projected_error(cluster.parent_error, cluster.parent_lod_bounds) > self.threshold
     }
 }
 
-/// Indices of the clusters selected for `view` with every page resident.
+/// Indices of the clusters of the triangle cut for `view` with every page resident.
 pub fn lod_cut(mesh: &VirtualMesh, view: &LodView) -> Vec<u32> {
     lod_cut_resident(mesh, view, &|_| true)
 }
 
-/// Indices of the clusters selected for `view` given page residency.
+/// Indices of the clusters of the triangle cut for `view` given page residency.
 pub fn lod_cut_resident(mesh: &VirtualMesh, view: &LodView, resident: &dyn Fn(u32) -> bool) -> Vec<u32> {
-    (0..mesh.clusters.len() as u32).filter(|&i| view.selects(&mesh.clusters[i as usize], resident)).collect()
+    lod_cut_in(mesh, view, resident, false)
+}
+
+/// Indices of the clusters selected for `view` given page residency, with voxel LODs on
+/// (`voxels`) or off.
+pub fn lod_cut_in(mesh: &VirtualMesh, view: &LodView, resident: &dyn Fn(u32) -> bool, voxels: bool) -> Vec<u32> {
+    (0..mesh.clusters.len() as u32).filter(|&i| view.selects_in(&mesh.clusters[i as usize], resident, voxels)).collect()
 }
 
 impl VirtualMesh {
@@ -648,7 +868,7 @@ impl VirtualMesh {
 
     /// Whether the mesh has skin weights (a skeletal mesh).
     pub fn is_skinned(&self) -> bool {
-        (0..self.clusters.len()).find(|&c| self.has_payload(self.clusters[c].page as usize)).is_some_and(|c| self.cluster_encoding(c).0.attributes.skin)
+        (0..self.clusters.len()).find(|&c| !self.clusters[c].is_voxel() && self.has_payload(self.clusters[c].page as usize)).is_some_and(|c| self.cluster_encoding(c).0.attributes.skin)
     }
 
     /// Triangles of `cluster` as cluster-local vertex indices.
@@ -664,9 +884,24 @@ impl VirtualMesh {
         self.cluster_triangles(cluster).map(|t| t.map(|i| encoding.position(stream, i))).collect()
     }
 
-    /// Version 3: page payloads hold quantised, bit-packed clusters ([`crate::encoding`]).
-    /// Version 2 files (float vertices) must be baked again.
-    const MAGIC: [u8; 4] = *b"HVM3";
+    /// The voxels of a voxel cluster (none for triangle clusters).
+    pub fn cluster_voxels(&self, cluster: usize) -> Vec<Voxel> {
+        let c = &self.clusters[cluster];
+        if !c.is_voxel() {
+            return Vec::new();
+        }
+        decode_voxel_cluster(&self.page_payload(c.page as usize)[c.vertex_offset as usize..])
+    }
+
+    /// Whether the mesh has voxel LODs.
+    pub fn has_voxels(&self) -> bool {
+        self.stats.voxels_per_level.iter().any(|&v| v > 0)
+    }
+
+    /// Version 4: voxel clusters ([`crate::voxel`]) and per-level voxel counts. Version 3 files
+    /// (triangles only, no voxel statistics) and version 2 files (float vertices) must be baked
+    /// again.
+    const MAGIC: [u8; 4] = *b"HVM4";
     /// Bytes at the start of a `.hvm` that determine its header length ([`VirtualMesh::header_len`]).
     pub const PREFIX_BYTES: usize = 28;
     const SDF_HEADER_WORDS: usize = 14;
@@ -683,7 +918,7 @@ impl VirtualMesh {
             + pages * size_of::<GpuPage>()
             + 2 * (pages + 1) * 4
             + dependencies * 4
-            + 2 * levels * 4
+            + 3 * levels * 4
     }
 
     /// Byte length of the serialised header (everything but the page payloads), i.e. the file
@@ -702,8 +937,9 @@ impl VirtualMesh {
     fn check_magic(magic: &[u8]) -> Result<(), String> {
         match magic {
             m if m == Self::MAGIC => Ok(()),
+            b"HVM3" => Err("virtual mesh version 3 (no voxel LODs) is no longer supported: bake it again".into()),
             b"HVM2" => Err("virtual mesh version 2 (uncompressed vertices) is no longer supported: bake it again".into()),
-            _ => Err("not a helios virtual mesh (HVM3)".into()),
+            _ => Err("not a helios virtual mesh (HVM4)".into()),
         }
     }
 
@@ -797,6 +1033,7 @@ impl VirtualMesh {
         out.extend_from_slice(bytemuck::cast_slice(&self.dependencies));
         out.extend_from_slice(bytemuck::cast_slice(&self.stats.clusters_per_level));
         out.extend_from_slice(bytemuck::cast_slice(&self.stats.triangles_per_level));
+        out.extend_from_slice(bytemuck::cast_slice(&self.stats.voxels_per_level));
         out.extend_from_slice(bytemuck::cast_slice(&self.page_data));
         out
     }
@@ -861,7 +1098,11 @@ impl VirtualMesh {
             page_offsets: r.vec(counts[1] + 1)?,
             dependency_offsets: r.vec(counts[1] + 1)?,
             dependencies: r.vec(counts[2])?,
-            stats: VirtualMeshStats { clusters_per_level: r.vec(counts[3])?, triangles_per_level: r.vec(counts[3])? },
+            stats: VirtualMeshStats {
+                clusters_per_level: r.vec(counts[3])?,
+                triangles_per_level: r.vec(counts[3])?,
+                voxels_per_level: r.vec(counts[3])?,
+            },
             page_data: Vec::new(),
             payload_first_page: counts[1] as u32,
         };
@@ -1284,6 +1525,15 @@ mod tests {
         p.distance(a + ab * (vb * denom) + ac * (vc * denom))
     }
 
+    /// Voxels carry no skin weights: a skinned mesh baked with voxel LODs keeps triangles only.
+    #[test]
+    fn skinned_meshes_never_get_voxels() {
+        let config = BuildConfig { sdf: SdfMode::None, voxels: Some(crate::voxel::VoxelConfig::default()), ..Default::default() };
+        let vm = build_virtual_mesh(&skinned_limb(), &config);
+        assert!(vm.is_skinned() && !vm.has_voxels());
+        assert!(vm.clusters.iter().all(|c| c.voxel == 0));
+    }
+
     /// The weight-deviation cost keeps coarse levels from collapsing across the weight seams: a
     /// vertex that follows one joint merging into one that follows another bends the coarse
     /// limb where the source doesn't. Measured as the mean distance of the posed source
@@ -1325,10 +1575,215 @@ mod tests {
     }
 
     #[test]
-    fn version_2_files_are_rejected_with_a_clear_message() {
-        let mut bytes = build_virtual_mesh(&primitives::icosphere(1), &BuildConfig { sdf: SdfMode::None, ..Default::default() }).to_bytes();
-        bytes[..4].copy_from_slice(b"HVM2");
-        assert!(VirtualMesh::from_bytes(&bytes).unwrap_err().contains("bake it again"));
-        assert!(VirtualMesh::header_len(&bytes).unwrap_err().contains("bake it again"));
+    fn version_2_and_3_files_are_rejected_with_a_clear_message() {
+        for magic in [b"HVM2", b"HVM3"] {
+            let mut bytes = build_virtual_mesh(&primitives::icosphere(1), &BuildConfig { sdf: SdfMode::None, ..Default::default() }).to_bytes();
+            bytes[..4].copy_from_slice(magic);
+            assert!(VirtualMesh::from_bytes(&bytes).unwrap_err().contains("bake it again"));
+            assert!(VirtualMesh::header_len(&bytes).unwrap_err().contains("bake it again"));
+        }
+    }
+
+    /// A leaf cloud with a voxel budget generous enough for voxels to win from the first levels.
+    fn build_foliage() -> (Mesh, VirtualMesh) {
+        let mesh = primitives::leaf_cloud(3000, 9);
+        let voxels = Some(VoxelConfig { voxels_per_triangle: 16.0 });
+        let vm = build_virtual_mesh(&mesh, &BuildConfig { sdf: SdfMode::None, voxels, ..Default::default() });
+        (mesh, vm)
+    }
+
+    /// The LOD key of a group's outputs: what both representations of a group share (roots
+    /// have no parent sphere).
+    fn group_key(c: &GpuCluster) -> [u32; 10] {
+        let mut key = [0; 10];
+        key[..4].copy_from_slice(&c.lod_bounds.map(f32::to_bits));
+        if c.parent_error < ROOT_ERROR {
+            key[4..8].copy_from_slice(&c.parent_lod_bounds.map(f32::to_bits));
+        }
+        key[8] = c.lod_error.to_bits();
+        key[9] = c.parent_error.to_bits();
+        key
+    }
+
+    /// Voxel alternates carry their triangles' LOD values: both cuts select the outputs of the
+    /// same groups, errors stay monotonic, and coarse levels really switch to voxels.
+    #[test]
+    fn voxel_cuts_mirror_the_triangle_cut() {
+        let (_, vm) = build_foliage();
+        assert!(vm.has_voxels(), "{:?}", vm.stats);
+        for c in &vm.clusters {
+            assert!(c.parent_error >= c.lod_error);
+            assert!(!(c.is_voxel() && c.has_voxel_alternate()));
+            if c.is_voxel() {
+                assert!(c.triangle_count() == 0 && c.voxel_count() > 0 && c.voxel_bricks() as usize <= crate::voxel::MAX_CLUSTER_BRICKS);
+                assert!(vm.cluster_voxels(vm.clusters.iter().position(|x| x == c).unwrap()).len() == c.voxel_count() as usize);
+            }
+        }
+        let mut voxel_cuts = 0;
+        for distance in [2.0f32, 8.0, 30.0, 60.0, 120.0, 250.0, 500.0, 2000.0] {
+            let view = view(distance);
+            let triangles = lod_cut(&vm, &view);
+            let voxels = lod_cut_in(&vm, &view, &|_| true, true);
+            let keys = |cut: &[u32]| cut.iter().map(|&c| group_key(&vm.clusters[c as usize])).collect::<FxHashSet<_>>();
+            // (A triangle cluster whose share of its group's source triangles came out empty
+            // has no voxels: the group's other alternates cover them.)
+            assert!(keys(&voxels).is_subset(&keys(&triangles)), "both cuts take the same groups at {distance}");
+            assert!(keys(&triangles).len() <= keys(&voxels).len() + keys(&triangles).len() / 8);
+            assert!(triangles.iter().all(|&c| !vm.clusters[c as usize].is_voxel()));
+            voxel_cuts += voxels.iter().any(|&c| vm.clusters[c as usize].is_voxel()) as u32;
+        }
+        assert!(voxel_cuts >= 3, "distant views should draw voxels ({voxel_cuts} of 8)");
+    }
+
+    /// Pages of voxel groups serve one mode: the triangle cut never needs a page holding only
+    /// voxel clusters, and dependencies hold in each cut.
+    #[test]
+    fn voxel_pages_stream_per_mode() {
+        let (_, vm) = build_foliage();
+        let voxel_only = |p: usize| {
+            let page = &vm.pages[p];
+            vm.clusters[page.cluster_offset as usize..(page.cluster_offset + page.cluster_count) as usize].iter().all(GpuCluster::is_voxel)
+        };
+        assert!((0..vm.pages.len()).any(voxel_only));
+        for c in vm.clusters.iter().filter(|c| c.in_mode(false) && c.child_page != INVALID_PAGE) {
+            assert!(!voxel_only(c.child_page as usize));
+        }
+        // Children pages depend on their parents' pages in both cuts.
+        for c in &vm.clusters {
+            if c.child_page != INVALID_PAGE {
+                assert!(vm.page_dependencies(c.child_page as usize).contains(&c.page));
+            }
+        }
+    }
+
+    /// Coverage of a mesh projected along -z onto square pixels of `pixel` world units over
+    /// [-1.2, 1.2]²: 1 - transmittance per pixel.
+    struct Coverage {
+        n: usize,
+        pixel: f32,
+        transmittance: Vec<f32>,
+    }
+
+    impl Coverage {
+        const ORIGIN: f32 = -1.2;
+        const SUB: usize = 4;
+
+        fn new(pixel: f32) -> Self {
+            let n = (2.4 / pixel).ceil() as usize;
+            Self { n, pixel, transmittance: vec![1.0; n * n] }
+        }
+
+        /// Opaque triangles, 4×4 samples per pixel.
+        fn triangles(&mut self, triangles: &[[Vec3; 3]]) {
+            let samples = self.n * Self::SUB;
+            let step = self.pixel / Self::SUB as f32;
+            let mut covered = vec![false; samples * samples];
+            for t in triangles {
+                let p = t.map(|v| (Vec2::new(v.x, v.y) - Self::ORIGIN) / step - 0.5);
+                let lo = p[0].min(p[1]).min(p[2]).ceil().max(Vec2::ZERO);
+                let hi = p[0].max(p[1]).max(p[2]).floor().min(Vec2::splat(samples as f32 - 1.0));
+                let edge = |a: Vec2, b: Vec2, q: Vec2| (b.x - a.x) * (q.y - a.y) - (b.y - a.y) * (q.x - a.x);
+                let area = edge(p[0], p[1], p[2]);
+                if area == 0.0 {
+                    continue;
+                }
+                for y in lo.y as usize..=hi.y.max(lo.y) as usize {
+                    for x in lo.x as usize..=hi.x.max(lo.x) as usize {
+                        let q = Vec2::new(x as f32, y as f32);
+                        let w = [edge(p[1], p[2], q), edge(p[2], p[0], q), edge(p[0], p[1], q)].map(|e| e * area.signum());
+                        if w.iter().all(|&e| e >= 0.0) && x < samples && y < samples {
+                            covered[y * samples + x] = true;
+                        }
+                    }
+                }
+            }
+            for y in 0..self.n {
+                for x in 0..self.n {
+                    let mut hits = 0;
+                    for sy in 0..Self::SUB {
+                        for sx in 0..Self::SUB {
+                            hits += covered[(y * Self::SUB + sy) * samples + x * Self::SUB + sx] as u32;
+                        }
+                    }
+                    self.transmittance[y * self.n + x] *= 1.0 - hits as f32 / (Self::SUB * Self::SUB) as f32;
+                }
+            }
+        }
+
+        /// Voxels seen along z after `rotation` about y: rectangles (the cube's footprint) of
+        /// their coverage along that direction (as the renderer dithers them).
+        fn voxels(&mut self, voxels: &[Voxel], rotation: f32) {
+            let (sin, cos) = rotation.sin_cos();
+            let view = Vec3::new(-sin, 0.0, cos);
+            for v in voxels {
+                let alpha = crate::voxel::directional_coverage(v.coverage, view);
+                let center = Vec2::new(cos * v.center.x + sin * v.center.z, v.center.y);
+                let extent = Vec2::new(v.size * (cos.abs() + sin.abs()), v.size);
+                let lo = (center - extent * 0.5 - Self::ORIGIN) / self.pixel;
+                let hi = lo + extent / self.pixel;
+                for y in lo.y.floor().max(0.0) as usize..(hi.y.ceil() as usize).min(self.n) {
+                    for x in lo.x.floor().max(0.0) as usize..(hi.x.ceil() as usize).min(self.n) {
+                        let overlap = (hi.x.min(x as f32 + 1.0) - lo.x.max(x as f32)).max(0.0) * (hi.y.min(y as f32 + 1.0) - lo.y.max(y as f32)).max(0.0);
+                        self.transmittance[y * self.n + x] *= 1.0 - alpha * overlap;
+                    }
+                }
+            }
+        }
+
+        fn mean(&self) -> f32 {
+            self.transmittance.iter().map(|t| 1.0 - t).sum::<f32>() / self.transmittance.len() as f32
+        }
+    }
+
+    /// Distant foliage keeps its coverage with voxels: projected along each axis, the voxel cut
+    /// covers what the full-detail mesh covers within a few percent at every distance. (The mean
+    /// coverage does not depend on the pixel size, so all images share a fine one.)
+    #[test]
+    fn voxel_cuts_preserve_coverage() {
+        let (mesh, vm) = build_foliage();
+        const PIXEL: f32 = 0.004;
+        let full: Vec<[Vec3; 3]> = mesh.triangles().map(|t| t.map(|v| mesh.vertices[v as usize].position())).collect();
+        // Views along x, y and z, and diagonally between x and z: the coverage image projects
+        // along z after a swizzle and a rotation about y.
+        let quarter = std::f32::consts::FRAC_PI_4;
+        let views: [(fn(Vec3) -> Vec3, f32); 4] = [(|p| p, 0.0), (|p| Vec3::new(p.y, p.z, p.x), 0.0), (|p| Vec3::new(p.z, p.x, p.y), 0.0), (|p| p, quarter)];
+        for (a, &(swizzle, rotation)) in views.iter().enumerate() {
+            let place = |p: Vec3| glam::Quat::from_rotation_y(rotation) * swizzle(p);
+            let mut reference = Coverage::new(PIXEL);
+            reference.triangles(&full.iter().map(|t| t.map(place)).collect::<Vec<_>>());
+            let reference = reference.mean();
+            for distance in [30.0f32, 120.0, 500.0, 2000.0] {
+                let render = |voxels: bool| {
+                    let mut image = Coverage::new(PIXEL);
+                    let cut = lod_cut_in(&vm, &view(distance), &|_| true, voxels);
+                    let triangles: Vec<[Vec3; 3]> = cut.iter().flat_map(|&c| vm.cluster_triangle_positions(c as usize)).map(|t| t.map(place)).collect();
+                    image.triangles(&triangles);
+                    let voxels: Vec<Voxel> = cut.iter().flat_map(|&c| vm.cluster_voxels(c as usize)).map(|v| Voxel { center: swizzle(v.center), coverage: swizzle(v.coverage), ..v }).collect();
+                    image.voxels(&voxels, rotation);
+                    image.mean()
+                };
+                let (with_voxels, triangles_only) = (render(true), render(false));
+                let relative = |c: f32| (c - reference) / reference * 100.0;
+                println!(
+                    "axis {a}, {distance:5} m: full {reference:.3}, voxel cut {with_voxels:.3} ({:+.1} %), triangle cut {triangles_only:.3} ({:+.1} %)",
+                    relative(with_voxels),
+                    relative(triangles_only)
+                );
+                assert!(relative(with_voxels).abs() < 10.0, "voxel cut coverage {with_voxels} vs {reference} at {distance} m along axis {a}");
+            }
+        }
+    }
+
+    /// Voxel alternates leave the triangle DAG's cut watertight (a solid mesh where voxels win
+    /// near the root only).
+    #[test]
+    fn triangle_cut_of_a_voxel_mesh_stays_watertight() {
+        let vm = build_virtual_mesh(&primitives::rock(7, 5), &BuildConfig { sdf: SdfMode::None, voxels: Some(VoxelConfig::default()), ..Default::default() });
+        for distance in [1.5f32, 6.0, 25.0, 100.0, 400.0] {
+            assert_watertight(&vm, &lod_cut(&vm, &view(distance)));
+        }
+        let back = VirtualMesh::from_bytes(&vm.to_bytes()).unwrap();
+        assert_eq!(back.clusters, vm.clusters);
+        assert_eq!(back.stats, vm.stats);
     }
 }

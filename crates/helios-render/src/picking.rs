@@ -70,6 +70,7 @@ impl Picker {
                 (4, bind::texture(false)),
                 (5, bind::storage(true)),
                 (6, bind::storage(false)),
+                (7, bind::storage(true)),
             ],
         );
         Self {
@@ -104,7 +105,16 @@ impl Picker {
     }
 
     /// Records the pick pass if a request waits and no read-back is in flight.
-    pub fn record(&mut self, rec: &mut Recorder, queue: &wgpu::Queue, frame: &wgpu::Buffer, targets: &FrameTargets, visible_clusters: &wgpu::Buffer) {
+    /// `part_owners` maps assembly parts to their assembly's instance (`part_owner.wgsl`).
+    pub fn record(
+        &mut self,
+        rec: &mut Recorder,
+        queue: &wgpu::Queue,
+        frame: &wgpu::Buffer,
+        targets: &FrameTargets,
+        visible_clusters: &wgpu::Buffer,
+        part_owners: &wgpu::Buffer,
+    ) {
         self.poll();
         if self.in_flight.is_some() {
             return;
@@ -126,6 +136,7 @@ impl Picker {
                 (4, wgpu::BindingResource::TextureView(&targets.gbuffer_normal)),
                 (5, visible_clusters.as_entire_binding()),
                 (6, self.output.as_entire_binding()),
+                (7, part_owners.as_entire_binding()),
             ],
         );
         {

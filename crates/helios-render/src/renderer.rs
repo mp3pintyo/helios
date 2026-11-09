@@ -16,7 +16,7 @@ use glam::{Mat4, Vec2, Vec4};
 
 use crate::camera::frustum_planes;
 use crate::gpu_scene::GpuScene;
-use crate::gpu_types::{flags, CullViewUniform, FrameUniform};
+use crate::gpu_types::{flags, view_flags, CullViewUniform, FrameUniform};
 use crate::passes::culling::{CullCapacity, CullMode, CullView, Culling};
 use crate::profiler::{GpuProfiler, Recorder};
 use crate::streaming::StreamingStats;
@@ -99,10 +99,14 @@ pub enum DebugView {
     LumenLiteProbes = 20,
     /// Particle overdraw (red to yellow) and heterogeneous volume march steps (blue to cyan).
     VolumesParticles = 21,
+    /// Voxel clusters in colour (one per cluster), triangle clusters grey.
+    Voxels = 22,
+    /// Assembly part instances in colour (one per part), everything else grey.
+    AssemblyParts = 23,
 }
 
 impl DebugView {
-    pub const ALL: [DebugView; 22] = [
+    pub const ALL: [DebugView; 24] = [
         Self::Lit,
         Self::Clusters,
         Self::Triangles,
@@ -125,6 +129,8 @@ impl DebugView {
         Self::MegaLightsDenoising,
         Self::LumenLiteProbes,
         Self::VolumesParticles,
+        Self::Voxels,
+        Self::AssemblyParts,
     ];
 
     /// The view with index `index` (its `--view` number), if any.
@@ -156,6 +162,8 @@ impl DebugView {
             Self::MegaLightsDenoising => "MegaLights lighting: samples | denoised",
             Self::LumenLiteProbes => "Lumen Lite probes",
             Self::VolumesParticles => "Particle overdraw / volume march steps",
+            Self::Voxels => "Voxel clusters (triangles grey)",
+            Self::AssemblyParts => "Assembly parts",
         }
     }
 
@@ -241,6 +249,9 @@ pub struct RenderSettings {
     pub volumes: bool,
     /// GPU particles ([`crate::Scene::particles`]).
     pub particles: bool,
+    /// Voxel LODs of aggregate meshes (foliage): voxel clusters replace the simplified
+    /// triangles they beat (off: the triangle-only cut of the same DAG).
+    pub voxel_lods: bool,
     /// Internal render resolution in percent of the output (UE's `r.ScreenPercentage`,
     /// 25–100); temporal super resolution reconstructs the output. Ignored while dynamic
     /// resolution is on.
@@ -291,6 +302,7 @@ impl Default for RenderSettings {
             wind: true,
             volumes: true,
             particles: true,
+            voxel_lods: true,
             screen_percentage: 100.0,
             dynamic_resolution: None,
             per_instance_invalidation: true,
@@ -370,6 +382,8 @@ pub struct Renderer {
     previous_view_proj: Option<Mat4>,
     /// Geometry or instances changed structurally this frame (invalidates cached shadow pages).
     scene_changed: bool,
+    /// Voxel LODs as the cached shadow pages were rendered.
+    voxel_lods_cached: bool,
     time: f32,
     /// Multiplier on `lod_threshold` that keeps the main view's visible work inside the GPU
     /// list capacities (see [`Renderer::lod_budget_scale`]).
@@ -453,6 +467,7 @@ impl Renderer {
             history_valid: false,
             previous_view_proj: None,
             scene_changed: true,
+            voxel_lods_cached: true,
             time: 0.0,
             lod_budget_scale: 1.0,
             percentage: 100.0,
@@ -563,6 +578,11 @@ impl Renderer {
         }
     }
 
+    /// Whether some mesh of the scene has voxel LODs ([`RenderSettings::voxel_lods`]).
+    pub fn has_voxels(&self) -> bool {
+        self.scene.has_voxels()
+    }
+
     /// Local lights rendered into virtual shadow maps this frame.
     pub fn shadow_mapped_lights(&self) -> usize {
         self.vsm.local.active_count()
@@ -624,10 +644,16 @@ impl Renderer {
         if sync.geometry_changed {
             self.history_valid = false;
         }
-        // New geometry or instances invalidate every cached shadow page. Moves and streaming
-        // only invalidate the pages under the affected instances (done by the VSM on the GPU);
-        // growing scene bounds change the shadow clipmap's depth range.
-        self.scene_changed = changes.structural || sync.bounds_grew;
+        // Assembly parts each take a page batch in every culling view.
+        let parts = self.scene.assemblies.part_capacity();
+        self.main_view.reserve_batches(&self.device, MAIN_CAPACITY.batches + parts);
+        self.vsm.reserve_batches(&self.device, parts);
+        // New geometry or instances invalidate every cached shadow page, and so does switching
+        // voxel LODs (other casters). Moves and streaming only invalidate the pages under the
+        // affected instances (done by the VSM on the GPU); growing scene bounds change the shadow
+        // clipmap's depth range.
+        self.scene_changed = changes.structural || sync.bounds_grew || self.settings.voxel_lods != self.voxel_lods_cached;
+        self.voxel_lods_cached = self.settings.voxel_lods;
         self.textures.sync(&self.device, &self.queue, scene);
         self.material.sync(&self.device, self.scene.uv_extensions, self.scene.skins.skinned_instances);
         self.rvt.sync(&self.device, &self.queue, scene, self.settings.virtual_texturing, frame);
@@ -670,6 +696,7 @@ impl Renderer {
         self.megalights.update(&self.device, capacity, megalights);
         if self.stats.poll(self.scene.instance_count) {
             self.update_lod_budget();
+            self.scene.assemblies.update_budget(self.stats.latest.assembly_parts_requested);
         }
         // Volumes and particles are drawn over lit radiance and in their own debug view.
         let effects = matches!(self.settings.debug_view, DebugView::Lit | DebugView::VolumesParticles);
@@ -704,7 +731,9 @@ impl Renderer {
         self.effects.record_lights(&mut rec, &self.lights);
         self.lights.record(&mut rec, &self.frame_uniform);
 
-        // Virtual geometry: two-pass occlusion culling into the visibility buffer.
+        // Virtual geometry: assemblies the main view needs as parts get part instances (for
+        // every view), then two-pass occlusion culling into the visibility buffer.
+        self.scene.assemblies.record(&mut rec, &self.main_view, &self.scene.instances);
         let (culling, view, gpu_scene, targets) = (&self.culling, &self.main_view, &self.scene, &self.targets);
         if self.settings.occlusion_culling {
             culling.cull(&mut rec, view, gpu_scene, CullMode::Early, Some(&targets.hzb));
@@ -730,7 +759,7 @@ impl Renderer {
             self.translucency.water_uniform(),
             &self.samplers,
         );
-        self.picker.record(&mut rec, &self.queue, &self.frame_uniform, &self.targets, &self.main_view.visible_clusters);
+        self.picker.record(&mut rec, &self.queue, &self.frame_uniform, &self.targets, &self.main_view.visible_clusters, self.scene.assemblies.owners());
         self.rvt.record(&mut rec, &self.textures, &self.samplers.material, self.settings.virtual_texturing);
         if self.settings.shadows {
             self.vsm.record(&mut rec, &self.culling, &self.scene, &self.frame_uniform, &self.targets, &self.lights);
@@ -829,11 +858,13 @@ impl Renderer {
         self.bloom.record(&mut rec, resolved, &self.targets, &self.samplers);
         let bloom = if self.targets.bloom_up.len() > 1 { &self.targets.bloom_up[0] } else { &self.targets.bloom_down[0] };
         self.tonemap.record(&mut rec, &self.frame_uniform, resolved, bloom, &self.exposure.buffer, &self.samplers, output);
-        self.selection.record(&mut rec, &self.queue, &self.frame_uniform, &self.targets, &self.main_view.visible_clusters, output);
+        let owners = self.scene.assemblies.owners();
+        self.selection.record(&mut rec, &self.queue, &self.frame_uniform, &self.targets, &self.main_view.visible_clusters, owners, output);
 
         let mut states = vec![&self.main_view.state];
         states.extend(self.vsm.level_states());
-        let read_stats = self.stats.record(&mut rec.encoder, &states, [&self.vsm.cache.lists, self.vsm.draws()]);
+        let assembly_parts = self.scene.assemblies.cull_dispatch().map(|(counter, _)| counter);
+        let read_stats = self.stats.record(&mut rec.encoder, &states, [&self.vsm.cache.lists, self.vsm.draws()], assembly_parts);
         let read_feedback = self.scene.record_feedback(&mut rec.encoder, frame);
         let read_texture_feedback = self.svt.record_feedback(&mut rec.encoder, frame);
 
@@ -926,7 +957,7 @@ impl Renderer {
         };
         self.queue.write_buffer(&self.frame_uniform, 0, bytemuck::bytes_of(&frame));
 
-        let instance_count = self.scene.instance_count;
+        let instance_count = self.scene.cull_instance_count();
         let main = CullViewUniform {
             view_proj,
             view,
@@ -951,8 +982,11 @@ impl Renderer {
             batch_capacity: self.main_view.capacity.batches,
             masked_capacity: self.main_view.capacity.masked,
             vsm: Vec4::ZERO,
+            flags: self.cull_flags(),
+            _pad: [0; 3],
         };
         self.queue.write_buffer(&self.main_view.uniform, 0, bytemuck::bytes_of(&main));
+        self.scene.assemblies.write_params(&self.queue);
 
         // Wind: positions at this and the previous frame's time (motion vectors). Its "too small
         // to see" distance is judged in output pixels, like the LOD.
@@ -992,9 +1026,19 @@ impl Renderer {
                 moves: self.scene.shadow_moves(),
                 instances_changed: !self.motion.changes.moved.is_empty(),
                 volume_distance: if self.fog.enabled() { scene.fog.distance } else { 0.0 },
+                cull_flags: self.cull_flags(),
             },
         );
         unjittered
+    }
+
+    /// `CullViewUniform::flags` of every culling view.
+    fn cull_flags(&self) -> u32 {
+        if self.settings.voxel_lods {
+            view_flags::VOXELS
+        } else {
+            0
+        }
     }
 }
 

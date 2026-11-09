@@ -16,6 +16,13 @@ pub struct RenderStats {
     pub sw_triangles: u32,
     /// Hardware clusters drawn by the alpha-masked (alpha-testing) pipeline.
     pub masked_clusters: u32,
+    /// Voxels of the voxel clusters drawn (main view and shadow views).
+    pub voxels: u32,
+    pub shadow_voxels: u32,
+    /// Assembly part instances drawn instead of their assemblies' bases, and those requested
+    /// (beyond the part slots, assemblies keep their bases).
+    pub assembly_parts: u32,
+    pub assembly_parts_requested: u32,
     pub shadow_clusters: u32,
     pub shadow_triangles: u32,
     /// Shadow triangles drawn by the software rasteriser.
@@ -61,12 +68,12 @@ pub struct StatsReadback {
 impl StatsReadback {
     /// `views` cull-state buffers, then the headers (64 bytes each) of the shadow page cache
     /// (page_cache.wgsl) with `shadow_page_capacity` physical pages and of the shadow page draws
-    /// (vsm_expand.wgsl) with room for `shadow_draw_capacity`.
+    /// (vsm_expand.wgsl) with room for `shadow_draw_capacity`, then the assembly part counter.
     pub fn new(device: &wgpu::Device, views: usize, shadow_page_capacity: u32, shadow_draw_capacity: u32) -> Self {
         Self {
             buffer: device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("stats readback"),
-                size: STATE_SIZE * (views as u64 + 2),
+                size: STATE_SIZE * (views as u64 + 3),
                 usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             }),
@@ -79,9 +86,16 @@ impl StatsReadback {
         }
     }
 
-    /// Copies the state buffers (the main view's first) and the shadow headers (page cache
-    /// lists, page draws) if the read-back buffer is free. Returns true if a copy was recorded.
-    pub fn record(&mut self, encoder: &mut wgpu::CommandEncoder, states: &[&wgpu::Buffer], shadow_headers: [&wgpu::Buffer; 2]) -> bool {
+    /// Copies the state buffers (the main view's first), the shadow headers (page cache lists,
+    /// page draws) and the assembly part counter (if the scene has assemblies) if the read-back
+    /// buffer is free. Returns true if a copy was recorded.
+    pub fn record(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        states: &[&wgpu::Buffer],
+        shadow_headers: [&wgpu::Buffer; 2],
+        assembly_parts: Option<&wgpu::Buffer>,
+    ) -> bool {
         if self.status.load(Ordering::Acquire) != IDLE {
             return false;
         }
@@ -91,6 +105,11 @@ impl StatsReadback {
         }
         for (i, header) in shadow_headers.into_iter().enumerate() {
             encoder.copy_buffer_to_buffer(header, 0, &self.buffer, (self.views + i) as u64 * STATE_SIZE, Some(STATE_SIZE));
+        }
+        let parts_offset = (self.views + 2) as u64 * STATE_SIZE;
+        match assembly_parts {
+            Some(counter) => encoder.copy_buffer_to_buffer(counter, 0, &self.buffer, parts_offset, Some(4)),
+            None => encoder.clear_buffer(&self.buffer, parts_offset, Some(4)),
         }
         true
     }
@@ -122,12 +141,14 @@ impl StatsReadback {
                 sw_triangles: view_word(0, 7),
                 overflow: view_word(0, 8),
                 masked_clusters: view_word(0, 9),
+                voxels: view_word(0, 11),
                 ..Default::default()
             };
             for v in 1..self.recorded {
                 stats.shadow_clusters += view_word(v, 2) + view_word(v, 3);
                 stats.shadow_triangles += view_word(v, 6);
                 stats.shadow_sw_triangles += view_word(v, 7);
+                stats.shadow_voxels += view_word(v, 11);
             }
             // Page cache header: [0] entries queued for allocation, [1] free pages before
             // allocating, [2] dirty pages, [4] allocations that found no free page.
@@ -141,6 +162,8 @@ impl StatsReadback {
             stats.shadow_dynamic_pages = view_word(self.views + 1, 13);
             stats.shadow_split_pages = view_word(self.views + 1, 14);
             stats.shadow_draw_capacity = self.shadow_draw_capacity;
+            stats.assembly_parts_requested = view_word(self.views + 2, 0);
+            stats.assembly_parts = stats.assembly_parts_requested.min(crate::assembly::PART_CAPACITY);
             self.latest = stats;
         }
         self.buffer.unmap();

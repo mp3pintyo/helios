@@ -149,15 +149,28 @@ pub(crate) fn add_baked_with(scene: &mut Scene, name: &str, mesh: &Mesh, config:
     mesh_store::add(scene, name, || bake_with(name, mesh, config))
 }
 
+/// Adds the mesh `build` bakes (or the active store's) as `name`.
+pub(crate) fn add_built(scene: &mut Scene, name: &str, build: impl FnOnce() -> VirtualMesh) -> MeshHandle {
+    mesh_store::add(scene, name, || logged(name, build))
+}
+
 fn bake_with(name: &str, mesh: &Mesh, config: BuildConfig) -> VirtualMesh {
+    logged(name, || build_virtual_mesh(mesh, &config))
+}
+
+/// Bakes with `build`, logging the result and the time it took.
+fn logged(name: &str, build: impl FnOnce() -> VirtualMesh) -> VirtualMesh {
     let start = Instant::now();
-    let vm = build_virtual_mesh(mesh, &config);
+    let vm = build();
+    let voxels: u32 = vm.stats.voxels_per_level.iter().sum();
     log::info!(
-        "baked {name}: {} triangles -> {} clusters, {} pages, {} levels ({:.0} ms)",
-        mesh.triangle_count(),
+        "baked {name}: {} triangles -> {} clusters, {} pages, {} levels{}, {:.2} MiB ({:.0} ms)",
+        vm.triangle_count(),
         vm.clusters.len(),
         vm.pages.len(),
         vm.stats.level_count(),
+        if voxels > 0 { format!(", {voxels} voxels") } else { String::new() },
+        vm.cpu_bytes() as f64 / 1048576.0,
         start.elapsed().as_secs_f64() * 1000.0
     );
     vm

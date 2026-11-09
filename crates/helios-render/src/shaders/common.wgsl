@@ -29,6 +29,8 @@ const DEBUG_INVALIDATION: u32 = 16u;
 const DEBUG_SKIN_WEIGHTS: u32 = 17u;
 const DEBUG_MEGALIGHTS_SAMPLES: u32 = 18u;
 const DEBUG_MEGALIGHTS_DENOISING: u32 = 19u;
+const DEBUG_VOXELS: u32 = 22u;
+const DEBUG_ASSEMBLY_PARTS: u32 = 23u;
 
 /// Debug views that show lit (exposed, tonemapped) radiance rather than raw attributes.
 fn is_lit_view(view: u32) -> bool {
@@ -54,12 +56,17 @@ const INSTANCE_ALPHA_MASKED: u32 = 2u;
 const INSTANCE_TRANSLUCENT: u32 = 4u;   // drawn by the forward translucency pass only
 const INSTANCE_HIDDEN: u32 = 8u;        // hidden in an editor: culled for every view
 const INSTANCE_MOVABLE: u32 = 16u;      // Mobility::Movable: a dynamic shadow caster
+const INSTANCE_ASSEMBLY: u32 = 32u;     // an assembly's base (assembly.wgsl)
+const INSTANCE_EXPANDED: u32 = 64u;     // the assembly is drawn as its parts this frame
+const INSTANCE_PART: u32 = 128u;        // an assembly part written by the expansion
 // Bits 12..32: the skin palette index (INSTANCE_SKIN_SHIFT, skin_palette.wgsl).
 
 // Visible cluster entry flags (entry.z).
 const CLUSTER_SOFTWARE: u32 = 1u;
 // A main-view hardware cluster of an alpha-masked material: drawn by the masked pipeline.
 const CLUSTER_MASKED: u32 = 2u;
+// A voxel cluster (always with CLUSTER_SOFTWARE: voxels are rasterised in compute).
+const CLUSTER_VOXEL: u32 = 4u;
 
 struct Cluster {
     bounds: vec4<f32>,
@@ -70,14 +77,27 @@ struct Cluster {
     page: u32,
     child_page: u32,
     vertex_offset: u32,      // compressed cluster: header + vertex bit stream (geometry.wgsl)
-    triangle_offset: u32,    // triangle bit stream
+    triangle_offset: u32,    // triangle bit stream (voxel clusters: voxel attributes)
     counts: u32,        // vertex_count | triangle_count << 8 | lod_level << 16
-    _pad: u32,
+    // Voxel clusters (voxel.wgsl): bricks | voxels << 8. Triangle clusters: 0, or
+    // CLUSTER_VOXEL_ALTERNATE where voxel clusters replace them with voxel LODs on.
+    voxel: u32,
 }
+
+const CLUSTER_VOXEL_ALTERNATE: u32 = 0x80000000u;
 
 fn cluster_vertex_count(c: Cluster) -> u32 { return c.counts & 0xffu; }
 fn cluster_triangle_count(c: Cluster) -> u32 { return (c.counts >> 8u) & 0xffu; }
 fn cluster_lod_level(c: Cluster) -> u32 { return c.counts >> 16u; }
+fn cluster_voxel_bricks(c: Cluster) -> u32 { return c.voxel & 0xffu; }
+fn cluster_voxel_count(c: Cluster) -> u32 { return (c.voxel >> 8u) & 0x3fffu; }
+fn cluster_is_voxel(c: Cluster) -> bool { return cluster_voxel_bricks(c) != 0u; }
+
+// Whether a cluster takes part in the LOD cut with voxel LODs on or off: voxel clusters and the
+// triangle clusters they stand in for are alternatives.
+fn cluster_in_mode(c: Cluster, voxels: bool) -> bool {
+    return select(!cluster_is_voxel(c), (c.voxel & CLUSTER_VOXEL_ALTERNATE) == 0u, voxels);
+}
 
 struct Page {
     bounds: vec4<f32>,
@@ -95,6 +115,8 @@ struct Page {
 struct Instance {
     world: mat4x4<f32>,
     prev_world: mat4x4<f32>,
+    // Columns of the scaled inverse transpose of world; w: the plant origin of the wind
+    // (wind.wgsl), the instance's position or an assembly part's assembly's.
     normal_matrix_0: vec4<f32>,
     normal_matrix_1: vec4<f32>,
     normal_matrix_2: vec4<f32>,
@@ -235,7 +257,14 @@ struct CullView {
     batch_capacity: u32,
     masked_capacity: u32,    // alpha-masked hardware draw list (main view only)
     vsm: vec4<f32>,          // level, page world size, absolute origin page (x, y)
+    flags: u32,              // VIEW_*
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
 }
+
+// CullView.flags: voxel LODs are on (voxel clusters replace their triangle alternates).
+const VIEW_VOXELS: u32 = 1u;
 
 struct Frame {
     view_proj: mat4x4<f32>,
@@ -281,6 +310,13 @@ fn viewport_extent(viewport: vec4<f32>, divisor: u32) -> vec2<u32> {
 fn viewport_uv(uv: vec2<f32>, texels_per_uv: vec2<f32>, dims: vec2<u32>) -> vec2<f32> {
     let texel = clamp(uv * texels_per_uv, vec2<f32>(0.5), max(ceil(texels_per_uv) - 0.5, vec2<f32>(0.5)));
     return texel / vec2<f32>(dims);
+}
+
+// Software-rasterised clusters in a visible cluster list (cull state words: hardware and
+// software counts, the early pass's software count) as cull_args.wgsl clamps them: the early
+// pass's, or all of them for the late pass.
+fn software_cluster_count(late: bool, hardware: u32, software: u32, early_software: u32, capacity: u32) -> u32 {
+    return select(early_software, min(software, capacity - min(hardware, capacity)), late);
 }
 
 fn has_flag(flags: u32, flag: u32) -> bool {

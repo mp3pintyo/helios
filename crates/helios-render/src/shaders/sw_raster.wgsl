@@ -64,6 +64,10 @@ fn rasterize(
     @builtin(local_invocation_index) lid: u32,
 ) {
     let index = wid.x + wid.y * groups.x + select(0u, state[5], LATE);
+    // A 2D dispatch (over 65535 clusters) overshoots: entries past the list are stale.
+    if index >= software_cluster_count(LATE, state[2], state[3], state[5], view.cluster_capacity) {
+        return;
+    }
     let slot = view.cluster_capacity - 1u - index;
     let entry = visible_clusters[slot];
     let cluster = clusters[entry.y];

@@ -43,6 +43,7 @@
 #include "vsm_common.wgsl"
 #include "wind.wgsl"
 #include "skin_palette.wgsl"
+#include "dynamic_caster.wgsl"
 #include "vsm_local_common.wgsl"
 
 // Footprint capacity; set by vsm.rs.

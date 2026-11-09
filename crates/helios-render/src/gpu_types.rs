@@ -8,6 +8,9 @@ use glam::{Mat4, Vec4};
 pub struct GpuInstance {
     pub world: Mat4,
     pub prev_world: Mat4,
+    /// Columns of the inverse transpose of `world`'s linear part (times `max_scale`); their `w`
+    /// hold the plant origin the wind bends about (the instance's position, an assembly part's
+    /// assembly's).
     pub normal_matrix: [Vec4; 3],
     /// World-space bounding sphere.
     pub bounds: Vec4,
@@ -95,6 +98,15 @@ pub struct CullViewUniform {
     pub masked_capacity: u32,
     /// Virtual shadow map views: (level, page world size, absolute origin page x, y).
     pub vsm: Vec4,
+    /// [`view_flags`].
+    pub flags: u32,
+    pub _pad: [u32; 3],
+}
+
+/// Bit flags in [`CullViewUniform::flags`].
+pub mod view_flags {
+    /// Voxel LODs: voxel clusters replace the triangle clusters they stand in for.
+    pub const VOXELS: u32 = 1;
 }
 
 #[repr(C)]
@@ -140,8 +152,12 @@ pub mod instance_flags {
     /// Hidden (deleted in an editor): culled for every view.
     pub const HIDDEN: u32 = 8;
     /// [`crate::Mobility::Movable`]: a dynamic shadow caster, kept out of the shadow pages'
-    /// static layers (`dynamic_caster` in wind.wgsl).
+    /// static layers (`dynamic_caster.wgsl`).
     pub const MOVABLE: u32 = 16;
+    /// An instance of an assembly's base (assembly.rs). The GPU's expansion adds two more each
+    /// frame: 64 on assemblies drawn as their parts, 128 on the part instances it writes
+    /// (`INSTANCE_EXPANDED`, `INSTANCE_PART` in common.wgsl).
+    pub const ASSEMBLY: u32 = 32;
     // Bits 12..32: the skin palette index (`skin::INSTANCE_SKIN_SHIFT`).
 }
 
@@ -178,7 +194,7 @@ pub mod flags {
 const _: () = {
     assert!(std::mem::size_of::<GpuInstance>() == 240);
     assert!(std::mem::size_of::<GpuMaterial>() == 192);
-    assert!(std::mem::size_of::<CullViewUniform>() == 320);
+    assert!(std::mem::size_of::<CullViewUniform>() == 336);
     assert!(std::mem::size_of::<FrameUniform>() == 496);
     assert!(std::mem::size_of::<helios_geometry::GpuCluster>() == 80);
     assert!(std::mem::size_of::<helios_geometry::GpuPage>() == 64);
