@@ -41,6 +41,8 @@ const SOURCES: &[(&str, &str)] = &[
     ("selection.wgsl", include_str!("shaders/selection.wgsl")),
     ("sh.wgsl", include_str!("shaders/sh.wgsl")),
     ("shore.wgsl", include_str!("shaders/shore.wgsl")),
+    ("skin_palette.wgsl", include_str!("shaders/skin_palette.wgsl")),
+    ("skinning.wgsl", include_str!("shaders/skinning.wgsl")),
     ("sky.wgsl", include_str!("shaders/sky.wgsl")),
     ("sw_raster.wgsl", include_str!("shaders/sw_raster.wgsl")),
     ("svt.wgsl", include_str!("shaders/svt.wgsl")),

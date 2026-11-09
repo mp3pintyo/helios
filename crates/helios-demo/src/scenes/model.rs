@@ -3,7 +3,9 @@
 //! Every unique mesh is baked into virtual geometry once (in parallel natively) and placed by
 //! the file's node instances. The model is moved so its bounding box is centred on x = z = 0
 //! with its bottom at y = 0, standing on an optional procedural ground; the camera frames its
-//! bounds.
+//! bounds. Skinned meshes follow joint palettes posed by the file's animations
+//! ([`super::skeletal`]); like UE's skinned meshes they get no distance field (Lumen's screen
+//! traces still see them).
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -17,6 +19,9 @@ use helios_render::{
 };
 use web_time::Instant;
 
+use helios_render::SkinHandle;
+
+use super::skeletal::{posed_bounds, SkeletalAnimation, SkinBindings};
 use super::SceneSetup;
 
 const SUN: (f32, f32, f32) = (0.9, 0.95, 10.0);
@@ -66,17 +71,19 @@ fn fully_cut_out(material: &helios_asset::Material) -> bool {
 pub fn build(model: &Model) -> SceneSetup {
     let mut scene = Scene::new();
     scene.sun = Sun::from_angles(SUN.0, SUN.1, SUN.2);
-    for part in add_model(&mut scene, model) {
+    let added = add_model(&mut scene, model);
+    for part in added.parts {
         let handle = scene.add_instance(part.mesh, part.material, part.transform);
         scene.set_cast_shadow(handle, part.cast_shadow);
+        scene.set_instance_skin(handle, part.skin);
     }
-    let size = model.asset.bounds().extent();
+    let size = added.size;
     if model.ground {
         add_ground(&mut scene, size.x.max(size.z));
     }
     scene.ground_albedo = Vec3::splat(0.25);
     scene.clouds = helios_render::CloudLayer::cumulus(0.35);
-    SceneSetup { scene, camera: frame_camera(size), sun: SUN, floor: |_, _| 0.0 }
+    SceneSetup { scene, camera: frame_camera(size), sun: SUN, floor: |_, _| 0.0, animation: added.animation }
 }
 
 /// One node instance of a model.
@@ -87,14 +94,26 @@ pub struct ModelPart {
     pub transform: Mat4,
     /// Blended surfaces let light through.
     pub cast_shadow: bool,
+    /// The joint palette deforming a skinned mesh.
+    pub skin: Option<SkinHandle>,
+}
+
+/// A model added to a scene: its instances to place and, for skinned models, the animation
+/// posing their joint palettes.
+pub struct AddedModel {
+    pub parts: Vec<ModelPart>,
+    pub animation: Option<SkeletalAnimation>,
+    /// The extent of the model's (posed) bounds.
+    pub size: Vec3,
 }
 
 /// Bakes the model's meshes and adds them with its materials to `scene`, named `MODEL/MESH`
 /// and `MODEL/MATERIAL`; returns the instances to place (the model scene places them at the
-/// origin, the editor wherever an imported model is dropped).
-pub fn add_model(scene: &mut Scene, model: &Model) -> Vec<ModelPart> {
+/// origin, the editor wherever an imported model is dropped) and the model's animation.
+pub fn add_model(scene: &mut Scene, model: &Model) -> AddedModel {
     let asset = &model.asset;
-    let bounds = asset.bounds();
+    let skins = SkinBindings::of(asset);
+    let bounds = posed_bounds(asset, &skins);
     let size = bounds.extent();
     let placement = Mat4::from_translation(Vec3::new(-bounds.center().x, -bounds.min.y, -bounds.center().z));
     log::info!(
@@ -125,6 +144,10 @@ pub fn add_model(scene: &mut Scene, model: &Model) -> Vec<ModelPart> {
     let mut world_scale = vec![0.0f32; asset.meshes.len()];
     let mut double_sided = vec![false; asset.meshes.len()];
     let mut opaque = vec![false; asset.meshes.len()];
+    let mut skinned = vec![false; asset.meshes.len()];
+    for (i, instance) in asset.instances.iter().enumerate() {
+        skinned[instance.mesh] |= skins.instance_skin.contains_key(&i);
+    }
     for instance in asset.instances.iter().filter(|i| !skipped[i.material]) {
         let m = instance.transform;
         let scale = m.x_axis.truncate().length().max(m.y_axis.truncate().length()).max(m.z_axis.truncate().length());
@@ -139,7 +162,7 @@ pub fn add_model(scene: &mut Scene, model: &Model) -> Vec<ModelPart> {
         let mesh = if double_sided[i] { with_back_faces(&source.mesh) } else { source.mesh.clone() };
         let extent = source.mesh.aabb().extent().max_element() * world_scale[i];
         let resolution = ((extent / SDF_VOXEL).ceil() as u32).clamp(SDF_RESOLUTION.0, SDF_RESOLUTION.1);
-        let sdf = if opaque[i] { SdfMode::Volume { resolution } } else { SdfMode::None };
+        let sdf = if opaque[i] && !skinned[i] { SdfMode::Volume { resolution } } else { SdfMode::None };
         super::bake_with(&source.name, &mesh, BuildConfig { sdf, ..Default::default() })
     });
     let voxels: usize = baked.iter().filter_map(|vm: &VirtualMesh| vm.sdf.as_ref()).map(|s| s.voxel_count()).sum();
@@ -152,17 +175,26 @@ pub fn add_model(scene: &mut Scene, model: &Model) -> Vec<ModelPart> {
         super::name_mesh(scene, handle, &format!("{}/{}", model.name, if name.is_empty() { format!("mesh {i}") } else { name.clone() }));
         handles.insert(i, handle);
     }
-    asset
+    let skin_handles: Vec<_> = skins.joint_bounds(asset).into_iter().map(|bounds| scene.add_skin(bounds)).collect();
+    let parts = asset
         .instances
         .iter()
-        .filter(|i| !skipped[i.material])
-        .map(|instance| ModelPart {
+        .enumerate()
+        .filter(|(_, instance)| !skipped[instance.material])
+        .map(|(i, instance)| ModelPart {
             mesh: handles[&instance.mesh],
             material: materials[instance.material],
             transform: placement * instance.transform,
             cast_shadow: !blended(instance.material),
+            skin: skins.instance_skin.get(&i).map(|&skin| skin_handles[skin]),
         })
-        .collect()
+        .collect();
+    let bindings = skins.skins.iter().zip(&skin_handles).map(|(&(skin, bind), &handle)| (handle, skin, bind)).collect();
+    let mut animation = SkeletalAnimation::new(asset, bindings);
+    if let Some(animation) = &mut animation {
+        animation.update(scene, 0.0);
+    }
+    AddedModel { parts, animation, size }
 }
 
 /// The renderer's texture coordinates for a glTF texture reference.
@@ -271,7 +303,7 @@ fn with_back_faces(mesh: &Mesh) -> Mesh {
     let offset = mesh.vertices.len() as u32;
     let mut indices = mesh.indices.clone();
     indices.extend(mesh.triangles().flat_map(|[a, b, c]| [a + offset, c + offset, b + offset]));
-    Mesh::with_attributes(vertices, indices, twice(&mesh.uv1), twice(&mesh.colors))
+    Mesh { skin: twice(&mesh.skin), ..Mesh::with_attributes(vertices, indices, twice(&mesh.uv1), twice(&mesh.colors)) }
 }
 
 /// The optional attribute `values` for the front and the back copy of every vertex.

@@ -19,6 +19,7 @@
 #include "vsm_local_common.wgsl"
 #include "geometry.wgsl"
 #include "wind.wgsl"
+#include "skinning.wgsl"
 #include "vsm_page.wgsl"
 #include "alpha_mask.wgsl"
 
@@ -39,6 +40,7 @@ const DRAW_HEADER: u32 = 4u; // vec4s before the first draw entry
 @group(0) @binding(41) var alpha_masks: texture_2d_array<f32>;
 @group(0) @binding(42) var alpha_mask_sampler: sampler;
 @group(0) @binding(65) var<uniform> wind: Wind;
+@group(0) @binding(66) var skin_palette: texture_2d<f32>;
 @group(0) @binding(60) var<uniform> local_vsm: LocalVsm;
 
 override DIRTY_START: u32 = 0u;

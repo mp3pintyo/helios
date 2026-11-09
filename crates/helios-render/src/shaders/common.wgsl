@@ -25,6 +25,7 @@ const DEBUG_SDF: u32 = 12u;
 const DEBUG_REFLECTIONS: u32 = 13u;
 const DEBUG_SURFACE_CARDS: u32 = 14u;
 const DEBUG_LOCAL_SHADOW_PAGES: u32 = 15u;
+const DEBUG_SKIN_WEIGHTS: u32 = 17u;
 
 /// Debug views that show lit (exposed, tonemapped) radiance rather than raw attributes.
 fn is_lit_view(view: u32) -> bool {

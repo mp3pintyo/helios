@@ -8,6 +8,7 @@ use helios_geometry::{GpuCluster, GpuPage, INVALID_PAGE};
 use crate::alpha_mask::{AlphaMasks, MaterialMask};
 use crate::gpu_types::{instance_flags, material_flags, GpuInstance, GpuMaterial, GpuUvTransform};
 use crate::scene::{Instance, Material, Scene, TextureHandle, TextureSource, UvTransform};
+use crate::skin::{instance_skin_flags, SkinPalettes};
 use crate::streaming::{StreamingStats, Streamer};
 use crate::util::{storage_buffer, storage_buffer_init};
 use crate::wind::WindUniform;
@@ -44,6 +45,8 @@ pub struct GpuScene {
     pub wind: wgpu::Buffer,
     /// Alpha masks of alpha-tested materials, sampled by every rasteriser.
     pub masks: AlphaMasks,
+    /// Joint palettes of skinned instances, written every frame.
+    pub skins: SkinPalettes,
     pub instance_count: u32,
     pub page_count: u32,
     pub meshes: Vec<MeshRange>,
@@ -73,6 +76,7 @@ impl GpuScene {
             uv_extensions: false,
             wind: crate::util::uniform_buffer(device, "wind", std::mem::size_of::<WindUniform>() as u64),
             masks: AlphaMasks::new(device),
+            skins: SkinPalettes::new(device),
             instance_count: 0,
             page_count: 0,
             meshes: Vec::new(),
@@ -122,6 +126,7 @@ impl GpuScene {
             self.upload_instances(device, queue, scene, geometry_changed);
         }
         self.versions = (scene.geometry_version, scene.material_version, scene.instance_version, scene.texture_version);
+        self.skins.sync(device, queue, scene);
 
         self.streamer.update(queue, &self.geometry, &scene.meshes, frame);
         self.streamer.upload_page_table(queue, &self.page_table);
@@ -226,7 +231,8 @@ impl GpuScene {
                     material: instance.material.0,
                     visibility_offset: visibility_bits,
                     max_scale,
-                    flags: gpu_instance_flags(scene, instance, self.masks.material(instance.material.0 as usize).is_some()),
+                    flags: gpu_instance_flags(scene, instance, self.masks.material(instance.material.0 as usize).is_some())
+                        | instance_skin_flags(scene, instance),
                     wind,
                 };
                 visibility_bits += mesh.cluster_count;

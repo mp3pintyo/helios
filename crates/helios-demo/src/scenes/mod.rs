@@ -4,6 +4,7 @@
 pub mod cathedral;
 pub mod forest;
 pub mod model;
+pub mod skeletal;
 pub mod valley;
 
 use helios_geometry::{build_virtual_mesh, BuildConfig, Mesh, VirtualMesh};
@@ -75,6 +76,8 @@ pub struct SceneSetup {
     pub sun: (f32, f32, f32),
     /// Lowest allowed camera height at (x, z).
     pub floor: fn(f32, f32) -> f32,
+    /// Skeletal animation of an imported model's skinned meshes.
+    pub animation: Option<skeletal::SkeletalAnimation>,
 }
 
 /// Builds a scene. `SceneKind::Model` needs `model`; without one it falls back to the valley.

@@ -307,3 +307,100 @@ fn strips_and_fans() {
     assert!(fan_to_list(&[0, 1]).is_empty());
     assert!(strip_to_list(&[0, 1]).is_empty());
 }
+
+/// A two-bone strip in the style of the SimpleSkin sample: four vertices, the lower two bound to
+/// joint 0, the upper two shared by both joints (u8 joints, normalized u8 weights that do not
+/// quite sum to one), inverse bind matrices, and a clip rotating the upper joint 90° about Z.
+fn skinned_document() -> String {
+    let mut bytes = Vec::new();
+    let positions: [[f32; 3]; 4] = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 2.0, 0.0], [1.0, 2.0, 0.0]];
+    positions.iter().flatten().for_each(|v| bytes.extend_from_slice(&v.to_le_bytes())); // 0..48
+    bytes.extend_from_slice(&[0, 1, 2, 0, 1, 2, 2, 0, 0, 0, 1, 0, 1, 0, 1, 0]); // joints 48..64
+    bytes.extend_from_slice(&[255, 0, 0, 0, 255, 0, 0, 0, 100, 100, 50, 0, 120, 100, 30, 0]); // weights 64..80
+    for m in [Mat4::IDENTITY, Mat4::from_translation(Vec3::new(0.0, -1.0, 0.0))] {
+        m.to_cols_array().iter().for_each(|v| bytes.extend_from_slice(&v.to_le_bytes())); // 80..208
+    }
+    [0.0f32, 1.0].iter().for_each(|v| bytes.extend_from_slice(&v.to_le_bytes())); // times 208..216
+    let quarter = glam::Quat::from_rotation_z(std::f32::consts::FRAC_PI_2);
+    [glam::Quat::IDENTITY, quarter].iter().flat_map(|q| q.to_array()).for_each(|v| bytes.extend_from_slice(&v.to_le_bytes())); // 216..248
+    [0u16, 1, 2, 1, 3, 2].iter().for_each(|v| bytes.extend_from_slice(&v.to_le_bytes())); // 248..260
+    let uri = data_uri("application/octet-stream", &bytes);
+    format!(
+        r#"{{
+  "asset": {{ "version": "2.0" }},
+  "buffers": [{{ "uri": "{uri}", "byteLength": {} }}],
+  "bufferViews": [
+    {{ "buffer": 0, "byteOffset": 0, "byteLength": 48 }},
+    {{ "buffer": 0, "byteOffset": 48, "byteLength": 16 }},
+    {{ "buffer": 0, "byteOffset": 64, "byteLength": 16 }},
+    {{ "buffer": 0, "byteOffset": 80, "byteLength": 128 }},
+    {{ "buffer": 0, "byteOffset": 208, "byteLength": 8 }},
+    {{ "buffer": 0, "byteOffset": 216, "byteLength": 32 }},
+    {{ "buffer": 0, "byteOffset": 248, "byteLength": 12 }}
+  ],
+  "accessors": [
+    {{ "bufferView": 0, "componentType": 5126, "count": 4, "type": "VEC3", "min": [0, 0, 0], "max": [1, 2, 0] }},
+    {{ "bufferView": 1, "componentType": 5121, "count": 4, "type": "VEC4" }},
+    {{ "bufferView": 2, "componentType": 5121, "normalized": true, "count": 4, "type": "VEC4" }},
+    {{ "bufferView": 3, "componentType": 5126, "count": 2, "type": "MAT4" }},
+    {{ "bufferView": 4, "componentType": 5126, "count": 2, "type": "SCALAR", "min": [0], "max": [1] }},
+    {{ "bufferView": 5, "componentType": 5126, "count": 2, "type": "VEC4" }},
+    {{ "bufferView": 6, "componentType": 5123, "count": 6, "type": "SCALAR" }}
+  ],
+  "meshes": [{{ "primitives": [{{ "attributes": {{ "POSITION": 0, "JOINTS_0": 1, "WEIGHTS_0": 2 }}, "indices": 6 }}] }}],
+  "skins": [{{ "joints": [1, 2], "inverseBindMatrices": 3, "skeleton": 1 }}],
+  "animations": [{{
+    "name": "bend",
+    "samplers": [{{ "input": 4, "output": 5, "interpolation": "LINEAR" }}],
+    "channels": [{{ "sampler": 0, "target": {{ "node": 2, "path": "rotation" }} }}]
+  }}],
+  "nodes": [
+    {{ "mesh": 0, "skin": 0, "translation": [5, 0, 0] }},
+    {{ "children": [2] }},
+    {{ "translation": [0, 1, 0] }}
+  ],
+  "scenes": [{{ "nodes": [0, 1] }}]
+}}"#,
+        bytes.len()
+    )
+}
+
+#[test]
+fn skins_joint_weights_and_animations() {
+    use helios_geometry::skin::skin_point;
+    use helios_geometry::SkinWeights;
+    let asset = load_gltf(skinned_document().as_bytes()).unwrap();
+    assert_eq!(asset.nodes.len(), 3);
+    assert_eq!(asset.nodes[2].parent, Some(1));
+    let skin = &asset.skins[0];
+    assert_eq!((skin.joints.clone(), skin.skeleton), (vec![1, 2], Some(1)));
+    assert_eq!(skin.inverse_bind_matrices[1], Mat4::from_translation(Vec3::new(0.0, -1.0, 0.0)));
+    let instance = asset.instances[0];
+    assert_eq!((instance.skin, instance.node), (Some(0), 0));
+
+    // Weights are renormalised (100 + 100 + 50 of 255 over joints 0, 0, 1: merged) and
+    // quantised; slots with zero weight are dropped.
+    let mesh = &asset.meshes[instance.mesh].mesh;
+    assert_eq!(mesh.skin.len(), mesh.vertices.len());
+    let skin_at = |p: Vec3| *mesh.vertices.iter().zip(&mesh.skin).find(|(v, _)| v.position() == p).unwrap().1;
+    assert_eq!(skin_at(Vec3::ZERO), SkinWeights::rigid(0));
+    let top = skin_at(Vec3::new(0.0, 2.0, 0.0));
+    assert_eq!((top.joints[..2].to_vec(), top.weights[..2].to_vec()), (vec![0, 1], vec![204, 51]));
+    let shared = skin_at(Vec3::new(1.0, 2.0, 0.0));
+    assert_eq!((shared.influences(), shared.weights.iter().map(|&w| w as u32).sum::<u32>()), (2, 255));
+
+    let clip = &asset.animations[0];
+    assert_eq!((clip.name.as_str(), clip.duration, clip.channels.len()), ("bend", 1.0, 1));
+    // At t = 1 the upper joint has turned 90° about its pivot (0, 1): a vertex fully bound to it
+    // at (1, 2) swings to (-1, 2); vertices of the lower joint stay. The palette is relative to
+    // the mesh node (bind), whose own transform glTF ignores for skinned meshes.
+    let order = crate::animation::hierarchy_order(&asset.nodes);
+    let mut pose = crate::animation::rest_pose(&asset.nodes);
+    clip.apply(1.0, &mut pose);
+    let globals = crate::animation::global_matrices(&asset.nodes, &order, &pose);
+    let palette = skin.joint_matrices(&globals, instance.transform);
+    let swung = instance.transform.transform_point3(skin_point(&SkinWeights::rigid(1), &palette, Vec3::new(1.0, 2.0, 0.0)));
+    assert!((swung - Vec3::new(-1.0, 2.0, 0.0)).length() < 1e-5, "{swung}");
+    let lower = instance.transform.transform_point3(skin_point(&SkinWeights::rigid(0), &palette, Vec3::X));
+    assert!((lower - Vec3::X).length() < 1e-5, "{lower}");
+}

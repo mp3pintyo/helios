@@ -13,6 +13,9 @@
 //!   (point) or perspective (spot) virtual shadow maps for the most important local lights.
 //! * **Wind** – vegetation animated by World Position Offset in every rasteriser, with padded
 //!   culling bounds and per-page shadow invalidation.
+//! * **Skeletal meshes** – virtual geometry deformed by joint palettes (linear blend skinning in
+//!   every rasteriser and the G-buffer resolve), with conservative posed culling bounds and
+//!   dynamic shadow casting ([`Scene::add_skin`]).
 //! * **Global illumination** – Lumen-style software ray tracing: global distance field, voxel
 //!   surface cache, radiance cache, screen-probe final gather and traced reflections.
 //! * **Lights** – clustered point/spot lights with virtual shadow maps (distance-field soft
@@ -52,6 +55,7 @@ mod scene;
 mod scene_edit;
 mod selection;
 mod shader;
+mod skin;
 mod stats;
 mod streaming;
 mod svt;
@@ -78,6 +82,7 @@ pub use scene::{
 };
 pub use page_source::{PageLocation, PageRead, PageSource, ReadCompletion};
 pub use scene_edit::transformed_bounds;
+pub use skin::SkinHandle;
 pub use stats::RenderStats;
 pub use streaming::StreamingStats;
 pub use svt::TextureStreamingStats;

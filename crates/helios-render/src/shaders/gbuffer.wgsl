@@ -6,8 +6,9 @@
 //              over that model's tiles. Each pixel re-fetches its triangle, computes analytic
 //              perspective-correct barycentrics with screen derivatives (Schied & Dachsbacher),
 //              interpolates attributes and evaluates its material exactly once. Corners of
-//              instances in the wind are displaced exactly as the rasterisers displaced them
-//              (wind.wgsl); motion vectors evaluate the previous frame's offset.
+//              instances in the wind are displaced and skinned instances posed exactly as the
+//              rasterisers placed them (wind.wgsl, skinning.wgsl); motion vectors evaluate the
+//              previous frame's offset and palette.
 //
 // tiles buffer: [0, 8) per-model counts, [8, 40) per-model dispatch args (x, y, z, -),
 // [64 + kind * tile_capacity ...) per-model tile lists.
@@ -19,10 +20,14 @@
 #include "rvt.wgsl"
 #include "svt.wgsl"
 #include "wind.wgsl"
+#include "skinning.wgsl"
 #include "water.wgsl"
 #include "shore.wgsl"
 
 override MATERIAL_KIND: u32 = 0u;
+// The scene has skinned instances (passes/material.rs): without them the skinning code is
+// compiled out, so it costs other scenes no registers.
+override SKINNING: bool = true;
 
 const TILE_LISTS: u32 = 64u;
 
@@ -54,6 +59,7 @@ const TILE_LISTS: u32 = 64u;
 @group(0) @binding(49) var svt_feedback: texture_storage_2d<r32uint, write>;
 @group(0) @binding(80) var svt_material: texture_2d<f32>;
 @group(0) @binding(65) var<uniform> wind: Wind;
+@group(0) @binding(66) var skin_palette: texture_2d<f32>;
 @group(0) @binding(90) var<uniform> water: Water;
 
 fn tile_capacity() -> u32 {
@@ -140,6 +146,26 @@ fn evaluate_landscape(m: Material, input: SurfaceInput) -> Surface {
 }
 
 // ---- Resolve ----------------------------------------------------------------------------------------
+
+// Debug view 17: each joint's colour, blended by the corners' weights and the barycentrics (grey:
+// unskinned).
+fn skin_weight_color(instance: Instance, cluster: Cluster, base: u32, corners: vec3<u32>, lambda: vec3<f32>) -> vec3<f32> {
+    if !SKINNING || instance_skin(instance) == 0u {
+        return vec3<f32>(0.5);
+    }
+    let section = cluster_skin_section(cluster, base);
+    if section == INVALID_ID {
+        return vec3<f32>(0.5);
+    }
+    var color = vec3<f32>(0.0);
+    for (var i = 0u; i < 3u; i++) {
+        let s = vertex_skin(section, corners[i]);
+        for (var k = 0u; k < 4u; k++) {
+            color += hash_color(s.joints[k] * 2654435761u) * (s.weights[k] * lambda[i]);
+        }
+    }
+    return color;
+}
 
 struct Barycentrics {
     lambda: vec3<f32>,
@@ -253,12 +279,24 @@ fn resolve(
     var uv1s: array<vec2<f32>, 3>;
     var colors: array<vec4<f32>, 3>;
     var clips: array<vec4<f32>, 3>;
+    // Skinned instances: the corners' previous positions (motion vectors).
+    var previous_worlds: array<vec3<f32>, 3>;
+    let skinned = SKINNING && instance_skin(instance) != 0u;
     let extended = cluster_is_extended(cluster, base);
     for (var i = 0u; i < 3u; i++) {
         let local = corners[i];
+        // Object-space attributes stay those of the rest pose (object triplanar mapping sticks
+        // to the surface); world positions and normals are posed.
         object_positions[i] = vertex_position(cluster, base, local);
-        world_positions[i] = wind_world_position(instance, wind_force, object_positions[i]);
         normals[i] = vertex_normal(cluster, base, local);
+        var posed = object_positions[i];
+        if skinned {
+            let v = skinned_vertex(instance, cluster, base, local, object_positions[i], normals[i]);
+            posed = v.position;
+            normals[i] = v.normal;
+            previous_worlds[i] = wind_previous_world_position(instance, wind_force, v.previous);
+        }
+        world_positions[i] = wind_world_position(instance, wind_force, posed);
         uvs[i] = vertex_uv(cluster, base, local);
         // Optional attributes (imported meshes only).
         uv1s[i] = uvs[i];
@@ -282,6 +320,14 @@ fn resolve(
     b.ddy *= frame.upscale.y;
     var input: SurfaceInput;
     input.object_position = interpolate3(object_positions, b.lambda);
+    // The wind offset varies smoothly: evaluated at the pixel, it matches the interpolated corners
+    // to far below a pixel, which is all motion vectors need. Skinning is affine per triangle: the
+    // corners' previous positions interpolate exactly. (Resolved here, before the material, so
+    // the corner arrays need not live through it.)
+    var previous_world = wind_previous_world_position(instance, wind_force, input.object_position);
+    if skinned {
+        previous_world = interpolate3(previous_worlds, b.lambda);
+    }
     input.world_position = interpolate3(world_positions, b.lambda);
     input.dpdx = interpolate3(world_positions, b.ddx);
     input.dpdy = interpolate3(world_positions, b.ddy);
@@ -357,12 +403,10 @@ fn resolve(
             surface.albedo = path * (0.6 + 0.4 * hash_color(entry.y).x);
         }
         case DEBUG_MATERIALS: { surface.albedo = hash_color(MATERIAL_KIND * 31u + 7u); }
+        case DEBUG_SKIN_WEIGHTS: { surface.albedo = skin_weight_color(instance, cluster, base, corners, b.lambda); }
         default: {}
     }
 
-    // The wind offset varies smoothly: evaluated at the pixel, it matches the interpolated corners
-    // to far below a pixel, which is all motion vectors need.
-    let previous_world = wind_previous_world_position(instance, wind_force, input.object_position);
     let motion = clip_to_uv(frame.unjittered_view_proj * vec4<f32>(input.world_position, 1.0))
         - clip_to_uv(frame.prev_unjittered_view_proj * vec4<f32>(previous_world, 1.0));
 

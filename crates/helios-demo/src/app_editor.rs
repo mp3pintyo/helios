@@ -90,7 +90,9 @@ impl DemoApp {
     /// Adds an imported model's meshes and materials (named `NAME/…`) and makes it a content
     /// item; returns the item id.
     pub fn import_model(&mut self, model: &Model) -> String {
+        // Placed copies are static: the editor's prefabs carry no animation.
         let parts = add_model(&mut self.scene, model)
+            .parts
             .into_iter()
             .map(|p| PrefabPart {
                 mesh: self.scene.mesh_name(p.mesh).to_string(),

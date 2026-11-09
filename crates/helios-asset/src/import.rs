@@ -3,10 +3,11 @@
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 
-use glam::{Mat4, Vec2, Vec3, Vec4};
-use helios_geometry::{Mesh, Vertex};
+use glam::{Mat4, Quat, Vec2, Vec3, Vec4};
+use helios_geometry::{Mesh, SkinWeights, Vertex};
 
 use crate::accessor::read_floats;
+use crate::animation::{AnimationClip, Channel, Interpolation, Node, NodeTransform, Property, Skin};
 use crate::uri::{decode_data_uri, is_data_uri};
 use crate::{AlphaMode, Asset, AssetError, Image, Instance, Material, NamedMesh, TextureRef, TextureTransform, WrapMode};
 
@@ -70,7 +71,101 @@ pub fn import(document: &gltf::Document, blob: Option<Vec<u8>>, resources: &Hash
     }
     let mut asset = instancer.asset;
     asset.materials = instancer.materials;
+    asset.nodes = read_nodes(document);
+    asset.skins = document.skins().map(|s| read_skin(&s, &buffers)).collect();
+    asset.animations = document.animations().filter_map(|a| read_animation(&a, &buffers)).collect();
+    if document.meshes().flat_map(|m| m.primitives()).any(|p| p.morph_targets().next().is_some()) {
+        log::warn!("morph targets are not supported: meshes render in their base shape");
+    }
+    // A skin must cover every joint its meshes reference; otherwise the instance stays rigid.
+    for instance in &mut asset.instances {
+        if let Some(skin) = instance.skin {
+            let mesh = &asset.meshes[instance.mesh].mesh;
+            let joints = asset.skins[skin].joints.len();
+            let max_joint = mesh.skin.iter().flat_map(|s| s.iter()).map(|(j, _)| j as usize).max();
+            if mesh.skin.is_empty() || max_joint.is_some_and(|j| j >= joints) || asset.skins[skin].inverse_bind_matrices.len() != joints {
+                log::warn!("'{}': skin {skin} does not match the mesh's joints; drawn unskinned", asset.meshes[instance.mesh].name);
+                instance.skin = None;
+            }
+        }
+    }
     Ok(asset)
+}
+
+/// Every node with its parent and rest transform (matrices decomposed into TRS).
+fn read_nodes(document: &gltf::Document) -> Vec<Node> {
+    let mut nodes: Vec<Node> = document
+        .nodes()
+        .map(|n| {
+            let (translation, rotation, scale) = n.transform().decomposed();
+            Node {
+                name: n.name().map_or_else(|| format!("node {}", n.index()), str::to_string),
+                parent: None,
+                transform: NodeTransform { translation: Vec3::from(translation), rotation: Quat::from_array(rotation).normalize(), scale: Vec3::from(scale) },
+            }
+        })
+        .collect();
+    for n in document.nodes() {
+        for child in n.children() {
+            nodes[child.index()].parent = Some(n.index());
+        }
+    }
+    nodes
+}
+
+fn read_skin(skin: &gltf::Skin, buffers: &[Cow<[u8]>]) -> Skin {
+    let joints: Vec<usize> = skin.joints().map(|j| j.index()).collect();
+    // Without inverse bind matrices they are identities (glTF 2.0, 5.28).
+    let matrices = skin.inverse_bind_matrices().and_then(|a| read_floats(&a, buffers)).filter(|m| m.len() >= joints.len() * 16);
+    let inverse_bind_matrices = match matrices {
+        Some(m) => m.chunks_exact(16).take(joints.len()).map(Mat4::from_cols_slice).collect(),
+        None => vec![Mat4::IDENTITY; joints.len()],
+    };
+    Skin {
+        name: skin.name().map_or_else(|| format!("skin {}", skin.index()), str::to_string),
+        joints,
+        inverse_bind_matrices,
+        skeleton: skin.skeleton().map(|n| n.index()),
+    }
+}
+
+/// An animation's translation, rotation and scale channels (morph target weights are skipped);
+/// `None` if it has none.
+fn read_animation(animation: &gltf::Animation, buffers: &[Cow<[u8]>]) -> Option<AnimationClip> {
+    use gltf::animation::{Interpolation as Gltf, Property as Path};
+    let name = animation.name().map_or_else(|| format!("animation {}", animation.index()), str::to_string);
+    let mut channels = Vec::new();
+    for channel in animation.channels() {
+        let property = match channel.target().property() {
+            Path::Translation => Property::Translation,
+            Path::Rotation => Property::Rotation,
+            Path::Scale => Property::Scale,
+            Path::MorphTargetWeights => continue,
+        };
+        let sampler = channel.sampler();
+        let interpolation = match sampler.interpolation() {
+            Gltf::Step => Interpolation::Step,
+            Gltf::Linear => Interpolation::Linear,
+            Gltf::CubicSpline => Interpolation::CubicSpline,
+        };
+        let times = read_floats(&sampler.input(), buffers);
+        let output = sampler.output();
+        let components = output.dimensions().multiplicity();
+        let values = read_floats(&output, buffers);
+        let (Some(times), Some(values)) = (times, values) else {
+            log::warn!("{name}: skipping a channel with malformed keys");
+            continue;
+        };
+        let values: Vec<Vec4> = values.chunks_exact(components).map(|v| Vec4::from_array(std::array::from_fn(|i| v.get(i).copied().unwrap_or(0.0)))).collect();
+        let per_key = if interpolation == Interpolation::CubicSpline { 3 } else { 1 };
+        if times.is_empty() || values.len() != times.len() * per_key {
+            log::warn!("{name}: skipping a channel whose key and value counts differ");
+            continue;
+        }
+        channels.push(Channel { node: channel.target().node().index(), property, interpolation, times, values });
+    }
+    let duration = channels.iter().filter_map(|c| c.times.last().copied()).fold(0.0f32, f32::max);
+    (!channels.is_empty()).then_some(AnimationClip { name, channels, duration })
 }
 
 /// Bytes of an external or `data:` URI.
@@ -144,7 +239,8 @@ impl Instancer {
                 let flat = self.first_primitive[mesh.index()] + p;
                 if let Some(index) = self.mesh(flat, &mesh, p, world) {
                     let material = self.material(&primitive);
-                    self.asset.instances.push(Instance { mesh: index, material, transform: world });
+                    let skin = node.skin().map(|s| s.index());
+                    self.asset.instances.push(Instance { mesh: index, material, transform: world, node: node.index(), skin });
                 }
             }
         }
@@ -233,22 +329,38 @@ fn read_primitive(primitive: &gltf::Primitive, buffers: &[Cow<[u8]>]) -> Option<
     let uvs = uv_set(0).unwrap_or_else(|| vec![Vec2::ZERO; positions.len()]);
     let uv1 = uv_set(1).unwrap_or_default();
     let colors: Vec<Vec4> = attribute::<4>(primitive, Semantic::Colors(0), buffers, count).map_or_else(Vec::new, |c| c.into_iter().map(Vec4::from).collect());
+    let skin = read_skin_weights(primitive, buffers, count);
     let mut mesh = match attribute::<3>(primitive, Semantic::Normals, buffers, count) {
         Some(normals) => {
             let vertices =
                 positions.iter().zip(normals).zip(&uvs).map(|((&p, n), &uv)| Vertex::new(p, Vec3::from(n).normalize_or(Vec3::Y), uv)).collect();
-            Mesh::with_attributes(vertices, indices, uv1, colors)
+            Mesh { skin, ..Mesh::with_attributes(vertices, indices, uv1, colors) }
         }
-        None => flat_shaded(&positions, &uvs, &uv1, &colors, &indices),
+        None => flat_shaded(&positions, &uvs, &uv1, &colors, &skin, &indices),
     };
     // Exporters often split vertices needlessly; welding lets the simplifier see the topology.
     mesh.weld();
     Some(mesh)
 }
 
+/// Joint influences (`JOINTS_0` and `WEIGHTS_0`, both required; unsigned bytes or shorts, and
+/// float or normalized weights), renormalised and quantised; empty without them.
+fn read_skin_weights(primitive: &gltf::Primitive, buffers: &[Cow<[u8]>], count: Option<usize>) -> Vec<SkinWeights> {
+    use gltf::Semantic;
+    if primitive.get(&Semantic::Joints(1)).is_some() {
+        log::warn!("only the first joint set (4 influences per vertex) is used");
+    }
+    let (Some(joints), Some(weights)) =
+        (attribute::<4>(primitive, Semantic::Joints(0), buffers, count), attribute::<4>(primitive, Semantic::Weights(0), buffers, count))
+    else {
+        return Vec::new();
+    };
+    joints.iter().zip(&weights).map(|(j, w)| SkinWeights::new(j.map(|j| j.clamp(0.0, u16::MAX as f32) as u16), *w)).collect()
+}
+
 /// glTF requires flat normals for primitives without them: one wedge per triangle corner.
-/// `uv1` and `colors` are empty or one per position.
-fn flat_shaded(positions: &[Vec3], uvs: &[Vec2], uv1: &[Vec2], colors: &[Vec4], indices: &[u32]) -> Mesh {
+/// `uv1`, `colors` and `skin` are empty or one per position.
+fn flat_shaded(positions: &[Vec3], uvs: &[Vec2], uv1: &[Vec2], colors: &[Vec4], skin: &[SkinWeights], indices: &[u32]) -> Mesh {
     let mut vertices = Vec::with_capacity(indices.len());
     for t in indices.chunks_exact(3) {
         let [a, b, c] = [t[0], t[1], t[2]].map(|i| i as usize);
@@ -257,7 +369,8 @@ fn flat_shaded(positions: &[Vec3], uvs: &[Vec2], uv1: &[Vec2], colors: &[Vec4], 
     }
     let corners = |values: &[Vec2]| if values.is_empty() { Vec::new() } else { indices.iter().map(|&i| values[i as usize]).collect() };
     let colors = if colors.is_empty() { Vec::new() } else { indices.iter().map(|&i| colors[i as usize]).collect() };
-    Mesh::with_attributes(vertices, (0..indices.len() as u32).collect(), corners(uv1), colors)
+    let skin = if skin.is_empty() { Vec::new() } else { indices.iter().map(|&i| skin[i as usize]).collect() };
+    Mesh { skin, ..Mesh::with_attributes(vertices, (0..indices.len() as u32).collect(), corners(uv1), colors) }
 }
 
 /// Triangle strip → list, alternating the winding of odd triangles back to the first's.

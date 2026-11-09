@@ -9,6 +9,11 @@
 //! * **instances** — `(mesh, material, world transform)` for every primitive reached through
 //!   the node hierarchy. Transforms are *not* baked into vertices, so a mesh that the file
 //!   instances many times is baked into virtual geometry once,
+//! * **skeletal animation** — the node hierarchy, skins (joints and inverse bind matrices),
+//!   per-vertex joint influences (`JOINTS_0` / `WEIGHTS_0`, any component type, renormalised and
+//!   quantised to [`helios_geometry::SkinWeights`]) and animation clips (translation, rotation
+//!   and scale channels with step, linear and cubic-spline keys), played by an
+//!   [`AnimationPlayer`] ([`animation`]). Morph targets are not imported,
 //! * **materials** — the metallic-roughness PBR model (factors; texture references with their
 //!   UV set, `KHR_texture_transform` and sampler wrap modes; normal scale, occlusion strength,
 //!   emission with `KHR_materials_emissive_strength`, alpha mode),
@@ -22,6 +27,7 @@
 //! [`load_gltf_file`] (native only) resolves external files relative to the document.
 
 mod accessor;
+pub mod animation;
 mod import;
 mod uri;
 
@@ -30,6 +36,8 @@ use std::fmt;
 
 use glam::{Affine2, Mat4, Vec2, Vec3, Vec4};
 use helios_geometry::{Aabb, Mesh};
+
+pub use animation::{AnimationClip, AnimationPlayer, Channel, Interpolation, Node, NodeTransform, Property, Skin};
 
 /// Decoded 8-bit RGBA image, rows from top to bottom (glTF's UV origin is the top-left
 /// corner, so UVs index it directly).
@@ -185,6 +193,11 @@ pub struct Instance {
     pub material: usize,
     /// Object to world, the product of the node hierarchy's transforms.
     pub transform: Mat4,
+    /// The node that places the mesh (index into [`Asset::nodes`]).
+    pub node: usize,
+    /// The skin that deforms it (index into [`Asset::skins`]), if any. glTF poses skinned
+    /// vertices with the skin's joints alone; see [`Skin::joint_matrices`].
+    pub skin: Option<usize>,
 }
 
 /// An imported scene.
@@ -194,6 +207,10 @@ pub struct Asset {
     pub materials: Vec<Material>,
     pub images: Vec<Image>,
     pub instances: Vec<Instance>,
+    /// Every node of the document, with its rest transform.
+    pub nodes: Vec<Node>,
+    pub skins: Vec<Skin>,
+    pub animations: Vec<AnimationClip>,
 }
 
 impl Asset {

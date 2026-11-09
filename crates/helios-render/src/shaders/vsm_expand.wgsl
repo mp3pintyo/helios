@@ -24,6 +24,7 @@
 #include "vsm_common.wgsl"
 #include "vsm_local_common.wgsl"
 #include "wind.wgsl"
+#include "skin_palette.wgsl"
 
 const DRAW_HEADER: u32 = 16u; // words before the first draw entry
 const MAX_DISPATCH: u32 = 65535u;
@@ -41,6 +42,7 @@ const MAX_DISPATCH: u32 = 65535u;
 @group(0) @binding(8) var<storage, read> info: array<i32>;
 @group(0) @binding(60) var<uniform> local_vsm: LocalVsm;
 @group(0) @binding(65) var<uniform> wind: Wind;
+@group(0) @binding(66) var skin_palette: texture_2d<f32>;
 
 const MAX_PAGES_PER_CLUSTER: i32 = 256;
 
@@ -101,10 +103,11 @@ fn expand(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups
     let item = visible_clusters[select(view.cluster_capacity - 1u - (index - hw), index, index < hw)];
     let software = item.z != 0u;
     let instance = instances[item.x];
-    // Padded like in culling: the cluster reaches every page its wind-displaced triangles touch.
+    // Padded like in culling: the cluster reaches every page its wind-displaced or posed
+    // triangles touch.
     let strength = wind_strength(instance);
-    let dynamic = dynamic_caster(strength);
-    let sphere = wind_padded(instance, strength, transform_sphere(instance.world, clusters[item.y].bounds, instance.max_scale));
+    let dynamic = dynamic_caster(strength) || skin_dynamic(instance);
+    let sphere = skin_padded(instance, wind_padded(instance, strength, transform_sphere(instance.world, clusters[item.y].bounds, instance.max_scale)));
     let level = u32(view.vsm.x);
     let page_world = vsm.level_info[level].x;
     let ls = (vsm.light_view * vec4<f32>(sphere.xyz, 1.0)).xyz;
@@ -159,10 +162,11 @@ fn expand_local(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_work
     }
     let item = visible_clusters[select(view.cluster_capacity - 1u - (index - hw), index, index < hw)];
     let instance = instances[item.x];
-    // Padded like in culling: the cluster reaches every page its wind-displaced triangles touch.
+    // Padded like in culling: the cluster reaches every page its wind-displaced or posed
+    // triangles touch.
     let strength = wind_strength(instance);
-    let dynamic = dynamic_caster(strength);
-    let sphere = wind_padded(instance, strength, transform_sphere(instance.world, clusters[item.y].bounds, instance.max_scale));
+    let dynamic = dynamic_caster(strength) || skin_dynamic(instance);
+    let sphere = skin_padded(instance, wind_padded(instance, strength, transform_sphere(instance.world, clusters[item.y].bounds, instance.max_scale)));
     var visited = 0;
     for (var slot = 0u; slot < LOCAL_SLOTS; slot++) {
         // Static casters: the box of the light's pages rendered in full.

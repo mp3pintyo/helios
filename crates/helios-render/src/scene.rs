@@ -7,6 +7,7 @@ use glam::{Affine2, Mat4, Vec2, Vec3};
 use helios_geometry::VirtualMesh;
 
 use crate::page_source::{PageLocation, PageSource};
+use crate::skin::{Skin, SkinHandle};
 use crate::wind::{Wind, WindResponse};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -457,6 +458,8 @@ pub(crate) struct Instance {
     /// Hidden instances (deleted in an editor) stay in the list, so handles never shift, but
     /// every pass skips them (see `scene_edit.rs`).
     pub visible: bool,
+    /// The joint palette deforming a skinned mesh ([`Scene::set_instance_skin`]).
+    pub skin: Option<SkinHandle>,
 }
 
 /// A layer of volumetric cumulus clouds (rendered by `clouds.rs`).
@@ -590,6 +593,8 @@ pub struct Scene {
     pub(crate) textures: Vec<TextureSource>,
     pub(crate) lights: Vec<Light>,
     pub(crate) instances: Vec<Instance>,
+    /// Joint palettes of skinned instances (`skin.rs`).
+    pub(crate) skins: Vec<Skin>,
     pub sun: Sun,
     /// Average albedo of the ground, used for atmospheric multiple scattering and sky bounce.
     pub ground_albedo: Vec3,
@@ -716,7 +721,7 @@ impl Scene {
     }
 
     pub fn add_instance(&mut self, mesh: MeshHandle, material: MaterialHandle, transform: Mat4) -> InstanceHandle {
-        self.instances.push(Instance { mesh, material, transform, cast_shadow: true, visible: true });
+        self.instances.push(Instance { mesh, material, transform, cast_shadow: true, visible: true, skin: None });
         self.instance_version = next_version();
         InstanceHandle(self.instances.len() as u32 - 1)
     }
