@@ -31,6 +31,7 @@ use crate::clouds::{CloudInputs, Clouds};
 use crate::fog::{FogInputs, VolumetricFog};
 use crate::lights::{LightCulling, MAX_LIGHTS};
 use crate::lumen::{CardInputs, Lumen};
+use crate::lumen_lite::{GiMethod, LiteFallback, LiteInputs, LumenLite};
 use crate::resolution::{self, DynamicResolution, ResolutionController};
 use crate::rvt::RuntimeVirtualTexture;
 use crate::textures::TextureLibrary;
@@ -76,10 +77,13 @@ pub enum DebugView {
     /// Virtual shadow map pages of the local light that contributes most at each pixel: mip
     /// and page grid, shaded by its shadow.
     LocalShadowPages = 15,
+    /// Lumen Lite's irradiance probes (spheres shaded with their irradiance; sleeping: blue,
+    /// buried in geometry: red) over the irradiance they give each pixel. Runs Lumen Lite.
+    LumenLiteProbes = 20,
 }
 
 impl DebugView {
-    pub const ALL: [DebugView; 16] = [
+    pub const ALL: [DebugView; 17] = [
         Self::Lit,
         Self::Clusters,
         Self::Triangles,
@@ -96,6 +100,7 @@ impl DebugView {
         Self::Reflections,
         Self::SurfaceCards,
         Self::LocalShadowPages,
+        Self::LumenLiteProbes,
     ];
 
     pub fn name(self) -> &'static str {
@@ -116,11 +121,18 @@ impl DebugView {
             Self::Reflections => "Reflections",
             Self::SurfaceCards => "Lumen surface cache (cards)",
             Self::LocalShadowPages => "Local light shadow pages (mips)",
+            Self::LumenLiteProbes => "Lumen Lite probes",
         }
     }
 
     pub fn next(self) -> Self {
-        Self::ALL[(self as usize + 1) % Self::ALL.len()]
+        let position = Self::ALL.iter().position(|&v| v == self).unwrap_or(0);
+        Self::ALL[(position + 1) % Self::ALL.len()]
+    }
+
+    /// The view with index `index` (its `--view` number; the indices have gaps).
+    pub fn from_index(index: usize) -> Option<Self> {
+        Self::ALL.into_iter().find(|&v| v as usize == index)
     }
 }
 
@@ -138,6 +150,10 @@ pub struct RenderSettings {
     /// when off, get distance-field shadows).
     pub local_light_shadow_maps: bool,
     pub global_illumination: bool,
+    /// Final gather of the diffuse GI: Lumen's screen probes or Lumen Lite's irradiance field.
+    pub gi_method: GiMethod,
+    /// Switch to Lumen Lite when dynamic resolution stays at its minimum (see [`LiteFallback`]).
+    pub gi_lite_fallback: bool,
     /// Temporal accumulation: sub-pixel jitter and the TSR history (off: TSR only upscales
     /// the current frame spatially).
     pub taa: bool,
@@ -205,6 +221,8 @@ impl Default for RenderSettings {
             shadows: true,
             local_light_shadow_maps: true,
             global_illumination: true,
+            gi_method: GiMethod::ScreenProbes,
+            gi_lite_fallback: false,
             taa: true,
             auto_exposure: true,
             exposure_compensation: 0.0,
@@ -274,6 +292,9 @@ pub struct Renderer {
     rvt: RuntimeVirtualTexture,
     svt: StreamingVirtualTexture,
     lumen: Lumen,
+    /// Created on first use (its probe atlases and buffers take 43 MiB).
+    lumen_lite: Option<LumenLite>,
+    lite_fallback: LiteFallback,
     lights: LightCulling,
     clouds: Clouds,
     fog: VolumetricFog,
@@ -339,6 +360,8 @@ impl Renderer {
             rvt: RuntimeVirtualTexture::new(device, queue),
             svt: StreamingVirtualTexture::new(device, config.texture_pool_bytes, TileFormat::select(device.features(), config.texture_compression)),
             lumen: Lumen::new(device),
+            lumen_lite: None,
+            lite_fallback: LiteFallback::default(),
             lights: LightCulling::new(device),
             clouds: Clouds::new(device),
             fog: VolumetricFog::new(device),
@@ -432,6 +455,16 @@ impl Renderer {
             }
         };
         self.targets.set_internal_size(resolution::internal_size(output, self.percentage));
+        let s = &mut self.settings;
+        if s.gi_lite_fallback && s.gi_method != GiMethod::LumenLite && self.lite_fallback.observe(self.percentage, s.dynamic_resolution.as_ref()) {
+            log::info!("dynamic resolution stays at its minimum: switching the GI to Lumen Lite");
+            s.gi_method = GiMethod::LumenLite;
+        }
+    }
+
+    /// The final gather this frame: the probe view runs Lumen Lite whatever the method.
+    fn uses_lumen_lite(&self) -> bool {
+        self.settings.global_illumination && (self.settings.gi_method == GiMethod::LumenLite || self.settings.debug_view == DebugView::LumenLiteProbes)
     }
 
     /// GPU statistics from a recent frame.
@@ -514,6 +547,10 @@ impl Renderer {
         let capacity = self.targets.capacity;
         self.svt.sync(&self.device, &self.queue, scene, self.settings.texture_streaming, frame, size);
         self.lumen.update(&self.device, &self.queue, scene, camera.position, frame, &self.targets);
+        if self.uses_lumen_lite() {
+            let lite = self.lumen_lite.get_or_insert_with(|| LumenLite::new(&self.device));
+            lite.update(&self.queue, scene, camera.position, frame);
+        }
         let view_proj = camera.projection(self.targets.output.0 as f32 / self.targets.output.1 as f32) * camera.view_matrix();
         let lights = scene.lights();
         self.vsm.assign_local_lights(&LocalFrame {
@@ -547,6 +584,7 @@ impl Renderer {
         let layers = self.settings.translucency_layers;
         self.translucency.update(&self.device, &self.queue, scene, camera.position, &unjittered_view_proj, capacity, translucency, layers);
 
+        let lumen_lite = self.lumen_lite.as_ref().filter(|_| self.uses_lumen_lite());
         let device = self.device.clone();
         let mut rec = Recorder::new(&device, &mut self.profiler, "frame");
         self.sky.record(&mut rec, &self.frame_uniform, &self.samplers.linear, scene.ground_albedo);
@@ -583,6 +621,7 @@ impl Renderer {
             self.vsm.record(&mut rec, &self.culling, &self.scene, &self.frame_uniform, &self.targets, &self.lights);
         }
         self.lumen.record_distance_field(&mut rec, &self.textures, &self.scene.materials, &self.samplers);
+        let lite_inputs = LiteInputs { frame: &self.frame_uniform, targets: &self.targets, sky: &self.sky, samplers: &self.samplers, exposure: &self.exposure.buffer };
         if self.settings.global_illumination {
             let previous_radiance = &self.targets.history[1 - current];
             self.lumen.record(
@@ -596,7 +635,11 @@ impl Renderer {
                 &self.lights,
                 &self.exposure.buffer,
                 &CardInputs { vsm: &self.vsm, textures: &self.textures, materials: &self.scene.materials },
+                lumen_lite.is_none(),
             );
+            if let Some(lite) = lumen_lite {
+                lite.record(&mut rec, &lite_inputs, &self.lumen);
+            }
             self.gi.record(&mut rec, &self.frame_uniform, &self.targets, &self.samplers, current);
         }
         if self.clouds.enabled() {
@@ -633,6 +676,9 @@ impl Renderer {
         self.lighting.record(&mut rec, &lighting);
         if self.settings.debug_view == DebugView::SurfaceCards {
             self.lumen.record_debug(&mut rec, &self.frame_uniform, &self.targets, &self.samplers);
+        }
+        if let Some(lite) = lumen_lite.filter(|_| self.settings.debug_view == DebugView::LumenLiteProbes) {
+            lite.record_debug(&mut rec, &lite_inputs, &self.targets.gi_history[current]);
         }
         self.translucency.record(&mut rec, &lighting, &self.scene, &self.textures);
 

@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 
 use glam::{Vec2, Vec3};
-use helios_render::{Camera, DebugView, DynamicResolution, Renderer, RendererConfig, Scene};
+use helios_render::{Camera, DebugView, DynamicResolution, GiMethod, Renderer, RendererConfig, Scene};
 
 use crate::mesh_store::{Library, MeshStore};
 use crate::scenes::model::Model;
@@ -58,7 +58,7 @@ pub struct DemoApp {
 const SCREEN_PERCENTAGES: [f32; 4] = [50.0, 67.0, 75.0, 100.0];
 
 pub const HELP: &str = "WASD/QE fly · drag to look · wheel speed · Shift fast\n\
-N next scene · V debug view · G GI · H shadows · 1 local light shadow maps · [ ] screen percentage (50/67/75/100 %) · \\ dynamic resolution · T TAA · O occlusion · K software raster · I texture streaming · F fog · C clouds · U translucency · / translucency layers · L wind · M motion blur · B depth of field · ` local exposure · Z/X zoom · , . LOD error · ←→↑↓ sun · P animate sun · J day/night cycle · Y camera tour · R reset";
+N next scene · V debug view · G GI · ; GI method (Lumen / Lumen Lite) · H shadows · 1 local light shadow maps · [ ] screen percentage (50/67/75/100 %) · \\ dynamic resolution · T TAA · O occlusion · K software raster · I texture streaming · F fog · C clouds · U translucency · / translucency layers · L wind · M motion blur · B depth of field · ` local exposure · Z/X zoom · , . LOD error · ←→↑↓ sun · P animate sun · J day/night cycle · Y camera tour · R reset";
 
 impl DemoApp {
     pub fn new(
@@ -151,6 +151,27 @@ impl DemoApp {
         }
     }
 
+    /// Picks the GI's final gather from a `--gi` / `?gi=` value: `lumen` (screen probes) or
+    /// `lite` (Lumen Lite); otherwise (`auto`, absent) Lumen Lite on integrated and software
+    /// adapters, and a switch to it should dynamic resolution stay at its minimum.
+    pub fn choose_gi(&mut self, value: Option<&str>, adapter: &wgpu::AdapterInfo) {
+        let s = &mut self.renderer.settings;
+        match value.and_then(GiMethod::parse) {
+            Some(method) => {
+                s.gi_method = method;
+                s.gi_lite_fallback = false;
+            }
+            None => {
+                if let Some(other) = value.filter(|v| *v != "auto") {
+                    log::warn!("unknown GI method {other:?} (lumen, lite or auto)");
+                }
+                s.gi_method = GiMethod::for_adapter(adapter);
+                s.gi_lite_fallback = true;
+            }
+        }
+        log::info!("GI final gather: {}{}", s.gi_method.name(), if s.gi_lite_fallback { " (Lumen Lite when the GPU falls behind)" } else { "" });
+    }
+
     /// Places the sun (radians); `update` applies it, including the night-time exposure.
     pub fn set_sun(&mut self, azimuth: f32, elevation: f32) {
         self.sun_azimuth = azimuth;
@@ -171,6 +192,12 @@ impl DemoApp {
         match code {
             "KeyV" => s.debug_view = s.debug_view.next(),
             "KeyG" => s.global_illumination = !s.global_illumination,
+            // Lumen's screen probes <-> Lumen Lite's irradiance field (a manual choice ends the
+            // automatic one).
+            "Semicolon" => {
+                s.gi_method = s.gi_method.toggled();
+                s.gi_lite_fallback = false;
+            }
             "KeyH" => s.shadows = !s.shadows,
             "KeyT" => s.taa = !s.taa,
             "KeyO" => s.occlusion_culling = !s.occlusion_culling,
@@ -356,7 +383,7 @@ impl DemoApp {
             stream.in_flight,
             self.scene.instance_count(),
             self.scene.source_triangle_count() as f64 / 1e6,
-            on(s.global_illumination),
+            if s.global_illumination { s.gi_method.name() } else { "off" },
             on(s.shadows),
             on(s.taa),
             on(s.aerial_perspective),

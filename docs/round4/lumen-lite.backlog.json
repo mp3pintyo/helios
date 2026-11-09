@@ -1,0 +1,79 @@
+[
+  {
+    "id": "lumen-lite",
+    "title": "Lumen Lite: besugárzási mező (irradiance field) végső gyűjtés gyenge GPU-khoz",
+    "area": "Lumen / GI",
+    "kind": "feature",
+    "summary": "Az UE 5.8 Lumen Lite (r.Lumen.FinalGatherMethod 0) megfelelője: a képernyőpróbák helyett a diffúz GI egy kamera körüli, világtérbeli próbarácsból (DDGI-szerű besugárzási mezőből) jön. A végső gyűjtés költsége felbontásfüggetlen, és nagyjából harmadára-felére csökken. A ; billentyű, a --gi kapcsoló és a ?gi= URL-paraméter vált a két módszer között.",
+    "details": "4 kamera körüli clipmap-szint, szintenként 16³ próba (1, 2, 4, 8 m távolság, ±8…±64 m), egész cellánként, hiszterézissel görgetve; toroidális címzés (világkoordináta mod 16), így mozgáskor csak a belépő szelet új. Próbánként oktaéderes besugárzás-térkép (6×6 texel: koszinusszal súlyozott átlagos radiancia + égbolt-láthatóság) és távolságmomentum-térkép (14×14: átlag és négyzetes átlag próbatávolságban) Csebisev-láthatósághoz, egytexeles oktaéderes szegéllyel az atlaszban (bilineáris mintavétel; rgba16f atlaszok 40 MiB + 3 MiB puffer, első használatkor foglalva). Frissítés: képkockánként 512 próba, GPU-n választva (pontszám-hisztogram → küszöb → lista, indirekt dispatch), próbánként 128 sugár a Lumen saját nyomkövetésén át (közeli mező mesh SDF-ek, globális távolságmező, mesh card és voxel felületi gyorsítótár, radiance cache, égbolt) – a közös WGSL-függvény (trace_world_radiance, lumen_trace.wgsl) a képernyőpróbákkal közös. Hiszterézis 0,85 (nagy változásnál felezve, új próbánál 0). Árnyalás félfelbontásban: a normál mentén 0,15 és a szem felé 0,3 próbatávolsággal eltolt pont körüli 8 próba, trilineáris × sima hátlap × Csebisev (köbre emelve, 0,2 alatt elnyomva) súllyal; a szint ablakának utolsó 2 cellájában átúsztatás a durvább szintre, az utolsó szinten túl a radiance cache. Az eredmény a gi_raw-ba kerül ugyanabban a formátumban, így a GI-zajszűrés, az égbolt-láthatóság (spekuláris takarás), az anyag-AO és a megvilágítási pass változatlan. Tükröződések: a durvák (érdesség ~0,5 fölött) a besugárzási mezőből jönnek (a megvilágítási pass a gyűjtött besugárzást használja), a fényesek megtartják a Lumen pixelenkénti GGX-sugarát, mert egy 6×6-os próba nem mutat tükörképet.",
+    "metrics": "Végső gyűjtés (1600×900, RTX 3090 hat másik ágenssel megosztva, váltakozó futások minimuma): katedrális 0,93 → 0,36 ms, erdő 0,92 → 0,37 ms, Sponza (átrium) 1,07 → 0,39 ms, völgy 0,77 → 0,40 ms. A teljes GI (kártyák + felületi/radiance cache + gyűjtés + tükröződések + GI temporális): katedrális 2,72 (3. kör) → 1,62 (Lumen) → 1,04 ms (Lumen Lite), erdő 2,48 → 1,29 → 0,74 ms, völgy 2,61 → 1,20 → 0,81 ms, Sponza 2,91 → 1,71 → 0,95 ms (a Lumenhez képest 1,5–1,8×, a 3. körhöz képest 2,5–3,4× olcsóbb). A Sponza átriumában az indirekt fény 9 %-kal, a katedrálisban 7 %-kal sötétebb. Kép: a lit képkocka PSNR-je a Lumenhez képest katedrális 36,5 dB, völgy 33,8 dB, erdő 43,4 dB; nincs fényszivárgás a napsütötte külső melletti 1,2 m-es oldalhajó-falakon. Statikus kamera, >24/255-nél többet változó pixelek: katedrális 0,002 % (azonos), völgy 0,042 % (Lumen 0,053 %), erdő 0,056 % (Lumen 0,060 %).",
+    "showcase": "Katedrális, kezdő nézet: a ; billentyűvel váltogatva Lumen ↔ Lumen Lite (a HUD 'GI Lumen' / 'GI Lumen Lite' és a GPU-sorban a 'lumen final gather' helyett 'lumen lite probes' + 'lumen lite gather'). Előtte/utána csúszka: --view 7 (indirekt fény) Lumen vs Lumen Lite. URL: ?scene=cathedral&gi=lite.",
+    "modules": ["crates/helios-render/src/lumen_lite.rs", "crates/helios-render/src/shaders/lumen_lite.wgsl", "crates/helios-render/src/shaders/lumen_trace.wgsl", "crates/helios-render/src/shaders/lumen_gather.wgsl", "crates/helios-render/src/lumen.rs", "crates/helios-render/src/renderer.rs"]
+  },
+  {
+    "id": "lumen-lite-budget",
+    "title": "Lumen Lite: próbafrissítési keret és prioritás a GPU-n",
+    "area": "Lumen / GI",
+    "kind": "feature",
+    "summary": "Képkockánként pontosan 512 próba frissül, CPU-visszaolvasás nélkül, a GPU-n kiválasztva. Előbb az újonnan belépő próbák (a finomabb szintek elöl), utána kor szerint, a képernyőn látható próbák négyszer olyan gyakran.",
+    "details": "A schedule pass minden próbaslotot pontoz: új próba → a legfelső vödrök (63 − szint); egyébként kor × 4 (képernyőn) × 1/8 (alvó) × 1/64 (eltemetett), negyed-oktávos log2 vödrökbe, atomikus 64-es hisztogramba. A select_probes (egy munkacsoport) felülről lefelé összegezve megkeresi a keretet kitöltő küszöbvödröt és annak kvótáját, megírja az indirekt dispatch méretét és nullázza a hisztogramot; a list_probes a küszöb fölötti (és a kvótán belüli küszöb-) próbákat a listához fűzi és megjelöli a frissítés idejét. A sugárkövetés, a vetítés és az atlaszírás ugyanazzal az indirekt mérettel fut.",
+    "metrics": "Ütemezés + nyomkövetés + vetítés + atlaszírás együtt 0,28–0,35 ms (512 próba × 128 sugár = 65 536 sugár; a képernyőpróbák 1600×900-on ~365 000+ sugarat követnek).",
+    "showcase": "--view 20 a katedrálisban, a kamerát mozgatva: a belépő szelet próbái egy képkockán belül megkapják a fényüket (bíbor = még nem követett próba, gyakorlatilag nem látszik).",
+    "modules": ["crates/helios-render/src/shaders/lumen_lite.wgsl", "crates/helios-render/src/lumen_lite.rs"]
+  },
+  {
+    "id": "lumen-lite-classification",
+    "title": "Lumen Lite: próbaáthelyezés, eltemetett és alvó próbák",
+    "area": "Lumen / GI",
+    "kind": "feature",
+    "summary": "A követés előtt a globális távolságmező minden próbát osztályoz: a felülethez túl közelit kitolja, a geometriába zártat letiltja, és elaltatja azt, amely körül nincs felület. A falakba és a terep alá eső próbák így nem szivárogtatnak fényt, és nem pazarolják a keretet.",
+    "details": "A próba szintjéhez illő SDF-szint (voxel = ¼ próbatávolság, sáv = 1 próbatávolság): ha a távolság < 0,1 próbatávolság, három gradiens-lépés a 0,15-ös távolságra, legfeljebb 0,45 próbatávolságnyi eltolással; ha így sem jut ki (< 0,05), 'eltemetett' (nem interpolált, 1/64 prioritás, a csempéje a következő első frissítéskor nulláról indul). Ha a durvább SDF-szint szerint 1,8 próbatávolságon belül nincs felület (a cella átlója 1,73), 'alvó': egy pixel sem interpolálja, ezért nyolcszor ritkábban frissül, de nem tiltott, mert az alfa-maszkolt lombozat nincs a globális mezőben.",
+    "metrics": "Katedrális kezdő nézet: a falakban és a padló alatt lévő próbák pirosak (eltemetett) a --view 20-ban, a hajó közepén, a padok felett 1,8 m-nél magasabban kékek (alvó).",
+    "showcase": "--view 20 (Lumen Lite próbák): gömbök a besugárzásukkal árnyalva, kék = alvó, piros = eltemetett.",
+    "modules": ["crates/helios-render/src/shaders/lumen_lite.wgsl"]
+  },
+  {
+    "id": "lumen-lite-auto",
+    "title": "Lumen Lite automatikus választása gyenge adaptereken",
+    "area": "Platform és eszközök",
+    "kind": "feature",
+    "summary": "Integrált és szoftveres adapteren a Lumen Lite az alapértelmezett, és ha a dinamikus felbontás 180 képkockán át a minimumán ragad, a renderer magától átvált rá. A böngészőben ?gi=lumen|lite, natívan --gi lumen|lite|auto, a ; billentyű kézzel vált.",
+    "details": "GiMethod::for_adapter (IntegratedGpu / Cpu → LumenLite) a DemoApp::choose_gi-ben; a böngésző nem árulja el az adapter típusát (a wgpu WebGPU-háttere DeviceType::Other-t ad), ott a RenderSettings::gi_lite_fallback dönt: a LiteFallback számolja az egymást követő képkockákat, amelyekben a dinamikus felbontás a min_percentage-en van. A kézi választás (; vagy explicit paraméter) kikapcsolja az automatikát. A HUD a GI sorban a módszert mutatja.",
+    "metrics": "Asztali GPU-n (RTX 3090) a kezdő módszer a Lumen marad, a képek a 3. körével zajon belül azonosak (katedrális 61,0 dB, völgy 64,8 dB; az alapverzió önmagával 61,2 dB).",
+    "showcase": "Böngésző: ?scene=cathedral&gi=lite, majd a ; billentyű – a HUD 'GI Lumen Lite' ↔ 'GI Lumen'.",
+    "modules": ["crates/helios-render/src/lumen_lite.rs", "crates/helios-render/src/renderer.rs", "crates/helios-demo/src/app.rs", "crates/helios-demo/src/main.rs", "crates/helios-demo/src/web.rs"]
+  },
+  {
+    "id": "lumen-lite-debug-view",
+    "title": "20-as debug nézet: Lumen Lite próbák",
+    "area": "Lumen / GI",
+    "kind": "tool",
+    "summary": "A próbák gömbökként jelennek meg a saját besugárzásukkal árnyalva, a pixelenkénti besugárzás fölött. Az alvó próbák kékes, az eltemetettek piros, a még nem követettek bíbor színűek.",
+    "details": "debug_field: pixelenként a nézősugár 3D DDA-val lépked a próbák körüli cellákon szintenként, ahol nincs finomabb szint; gömb-sugár metszés a (relokált) próbapozíción, sugár = 0,08 próbatávolság; a kamerához 2 próbatávolságnál közelebbi próbák kimaradnak. A nézet a Lumen Lite-ot futtatja akkor is, ha a GI-módszer a képernyőpróbás Lumen.",
+    "metrics": "Költség ~0,3 ms (1600×900), csak ebben a nézetben.",
+    "showcase": "Katedrális, --view 20 vagy heliosSetView(20).",
+    "modules": ["crates/helios-render/src/shaders/lumen_lite.wgsl", "crates/helios-render/src/renderer.rs"]
+  },
+  {
+    "id": "radiance-cache-workgroups",
+    "title": "Radiance cache frissítés: munkacsoport próbánként",
+    "area": "Lumen / GI",
+    "kind": "fix",
+    "summary": "A radiance cache próbafrissítése szálanként egy próbát követett a 32 sugarával egymás után, így néhány ezer hosszú, soros szál mellett a GPU nagy része tétlen volt. Most egy munkacsoport jut egy próbára, szálanként egy sugárral, és az SH-t megosztott memóriában összegzi; ez mindkét végső gyűjtésnek jó.",
+    "details": "lumen_light.wgsl update_probes: @workgroup_size(32), workgroup_id = frissített próba, a 4 SH-együttható (L0, L1x/y/z) fa-redukcióval; a lumen.rs a frissített próbák számával indít dispatch-ot.",
+    "metrics": "Katedrális: maga a radiance cache 1,37 → 0,53 ms (egyszeri mérés), a teljes 'lumen surface + radiance cache' pass 1,48 → 0,35 ms (váltakozó futások minimuma), erdő 1,42 → 0,24 ms, Sponza 1,49 → 0,22 ms, völgy 1,43 → 0,22 ms; a kép a zajon belül változatlan (60,7 dB az alapverzióhoz, amely önmagával 61,2 dB).",
+    "showcase": "HUD GPU-sor: 'lumen surface + radiance cache' a 3. körhöz képest.",
+    "modules": ["crates/helios-render/src/shaders/lumen_light.wgsl", "crates/helios-render/src/lumen.rs"]
+  },
+  {
+    "id": "debug-view-by-number",
+    "title": "Debug nézetek sorszám szerint (--view, heliosSetView, V)",
+    "area": "Platform és eszközök",
+    "kind": "fix",
+    "summary": "A --view és a heliosSetView eddig a DebugView::ALL tömb pozíciója szerint választott, a V pedig az enum értékéből lépett tovább, így hézagos sorszámoknál (pl. 20) rossz nézetre ugrott. Most mindhárom a nézet saját sorszámát használja.",
+    "details": "DebugView::from_index(i) a sorszám szerint keres; a next() az ALL-beli pozícióból lép tovább.",
+    "metrics": "--view 20 a 20-as nézetet adja akkor is, ha a 16–19 sorszámok foglaltak vagy hiányoznak.",
+    "showcase": "-",
+    "modules": ["crates/helios-render/src/renderer.rs", "crates/helios-demo/src/main.rs", "crates/helios-demo/src/web.rs"]
+  }
+]

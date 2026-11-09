@@ -5,7 +5,7 @@
 //! helios --screenshot out.png              render offscreen and save
 //!     [--size 1600x900] [--frames 90] [--view 1] [--detail medium|high]
 //!     [--camera x,y,z,yaw,pitch] [--screen-percentage N] [--gpu-budget-ms N]
-//!     [--no-local-exposure | --local-exposure HIGHLIGHT,SHADOW[,BLEND]]
+//!     [--no-local-exposure | --local-exposure HIGHLIGHT,SHADOW[,BLEND]] [--gi lumen|lite|auto]
 //! helios --gltf model.glb|model.gltf       a scene built from a glTF 2.0 file [--no-ground]
 //! helios --bake-hvm DIR                    write the scene's baked meshes as .hvm files
 //! helios --stream-from DIR                 build the scene from them, streaming pages from disk
@@ -108,11 +108,13 @@ mod native {
         pub gpu_budget_ms: Option<f32>,
         /// Local exposure settings (`--no-local-exposure`: `None`, global exposure only).
         pub local_exposure: Option<helios_render::LocalExposure>,
+        /// GI final gather: `lumen`, `lite` or `auto` (see `DemoApp::choose_gi`).
+        pub gi: Option<String>,
     }
 
     impl Options {
         pub fn parse(args: &[String]) -> Self {
-            let mut o = Options { screenshot: None, size: (1600, 900), frames: 90, view: None, detail: Detail::High, scene: SceneKind::Valley, camera: None, eye: None, at: None, occlusion: true, sw_raster: true, rvt: true, svt: true, animate_sun: false, lod: None, fov: None, pool_mb: None, texture_pool_mb: None, texture_compression: true, switch_to: None, dump_dir: None, dump_count: 16, keys: Vec::new(), keys_at: None, hold: Vec::new(), gltf: None, ground: true, bake_hvm: None, stream_from: None, io_latency_ms: 0, sun: None, move_light: false, screen_percentage: None, gpu_budget_ms: None, local_exposure: Some(Default::default()) };
+            let mut o = Options { screenshot: None, size: (1600, 900), frames: 90, view: None, detail: Detail::High, scene: SceneKind::Valley, camera: None, eye: None, at: None, occlusion: true, sw_raster: true, rvt: true, svt: true, animate_sun: false, lod: None, fov: None, pool_mb: None, texture_pool_mb: None, texture_compression: true, switch_to: None, dump_dir: None, dump_count: 16, keys: Vec::new(), keys_at: None, hold: Vec::new(), gltf: None, ground: true, bake_hvm: None, stream_from: None, io_latency_ms: 0, sun: None, move_light: false, screen_percentage: None, gpu_budget_ms: None, local_exposure: Some(Default::default()), gi: None };
             let mut scene_given = false;
             let mut it = args.iter().skip(1);
             while let Some(arg) = it.next() {
@@ -171,6 +173,7 @@ mod native {
                     "--screen-percentage" => o.screen_percentage = value().parse().ok(),
                     "--gpu-budget-ms" => o.gpu_budget_ms = value().parse().ok(),
                     "--no-local-exposure" => o.local_exposure = None,
+                    "--gi" => o.gi = Some(value()),
                     // Highlight contrast, shadow contrast and optionally the blurred luminance blend.
                     "--local-exposure" => {
                         let v: Vec<f32> = value().split(',').filter_map(|x| x.parse().ok()).collect();
@@ -239,7 +242,10 @@ mod native {
 
         fn apply(&self, app: &mut DemoApp) {
             if let Some(index) = self.view {
-                app.renderer.settings.debug_view = DebugView::ALL[index.min(DebugView::ALL.len() - 1)];
+                app.renderer.settings.debug_view = DebugView::from_index(index).unwrap_or_else(|| {
+                    log::warn!("no debug view {index}");
+                    DebugView::Lit
+                });
             }
             if let Some([x, y, z, yaw, pitch]) = self.camera {
                 app.camera.position = Vec3::new(x, y, z);
@@ -319,6 +325,7 @@ mod native {
         let view = target.create_view(&Default::default());
 
         let (mut app, io) = options.create_app(&ctx, format, (width, height));
+        app.choose_gi(options.gi.as_deref(), &ctx.adapter.get_info());
         options.apply(&mut app);
         let mut cpu_ms = Vec::with_capacity(options.frames as usize);
         let mut start = Instant::now();
@@ -513,6 +520,7 @@ mod native {
             surface.configure(&ctx.device, &config);
 
             let (mut app, _) = self.options.create_app(&ctx, format, (config.width, config.height));
+            app.choose_gi(self.options.gi.as_deref(), &ctx.adapter.get_info());
             self.options.apply(&mut app);
             self.state = Some(State {
                 window,

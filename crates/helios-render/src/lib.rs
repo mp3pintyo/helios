@@ -14,7 +14,8 @@
 //! * **Wind** – vegetation animated by World Position Offset in every rasteriser, with padded
 //!   culling bounds and per-page shadow invalidation.
 //! * **Global illumination** – Lumen-style software ray tracing: global distance field, voxel
-//!   surface cache, radiance cache, screen-probe final gather and traced reflections.
+//!   surface cache, radiance cache, screen-probe final gather (or Lumen Lite's world-space
+//!   irradiance field on weak GPUs) and traced reflections.
 //! * **Lights** – clustered point/spot lights with virtual shadow maps (distance-field soft
 //!   shadows beyond the shadow-map budget); Hillaire sky.
 //! * **Clouds** – ray-marched volumetric cumulus with multiple scattering and ground shadows.
@@ -39,6 +40,7 @@ mod gpu_scene;
 mod gpu_types;
 mod lights;
 mod lumen;
+mod lumen_lite;
 mod near_field;
 mod page_cache;
 pub mod page_source;
@@ -66,6 +68,7 @@ pub use context::{GpuContext, ContextError};
 pub use passes::local_exposure::LocalExposure;
 pub use passes::post_fx::DepthOfField;
 pub use renderer::{DebugView, RenderSettings, Renderer, RendererConfig};
+pub use lumen_lite::{GiMethod, LiteFallback};
 pub use resolution::{DynamicResolution, MAX_SCREEN_PERCENTAGE, MIN_SCREEN_PERCENTAGE};
 pub use scene::{
     CloudLayer, FogVolume, Image, ImageTexture, InstanceHandle, Light, LightHandle, LightKind, Material, MaterialHandle, MaterialKind,

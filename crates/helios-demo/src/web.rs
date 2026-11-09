@@ -249,6 +249,9 @@ async fn run() -> Result<(), String> {
         }
     };
     configure_resolution(&mut app);
+    // `?gi=lumen|lite` (page config `gi`); by default Lumen Lite once dynamic resolution can't
+    // keep the budget even at its minimum.
+    app.choose_gi(option_string("gi", "gi").as_deref(), &ctx.adapter.get_info());
     set_status("");
 
     let hud = document.get_element_by_id("hud").and_then(|e| e.dyn_into::<HtmlElement>().ok());
@@ -462,7 +465,6 @@ pub fn helios_scene() -> String {
 #[wasm_bindgen(js_name = heliosSetView)]
 pub fn helios_set_view(index: u32) {
     with_state(|st| {
-        let views = helios_render::DebugView::ALL;
-        st.app.renderer.settings.debug_view = views[(index as usize).min(views.len() - 1)];
+        st.app.renderer.settings.debug_view = helios_render::DebugView::from_index(index as usize).unwrap_or_default();
     });
 }
