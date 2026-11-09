@@ -54,7 +54,9 @@ cargo run -p helios-demo --release -- --scene-file my.helios.json   # natively (
   (valley vs. the branch base: max pixel difference 5/255 = temporal noise, GPU 9.83 → 9.04 ms median of 3,
   min 5.02 → 5.18 ms, noise). Gizmo drags and every edit currently bump the instance version, which re-uploads the
   instance buffer, Lumen's distance-field instances and invalidates cached shadow pages — the `dynamic-world`
-  branch's per-instance invalidation makes them cheap; the editor only calls `Scene::set_transform`.
+  branch's per-instance invalidation makes them cheap; the editor only calls `Scene::set_transform`. Measured
+  in the browser (headless Chromium, 67 %, an instance previewed every frame): valley 16.7 → 16.8 ms median frame
+  (still 60 fps), forest 16.7 → 33.4 ms (8 261 instances re-uploaded per frame).
 * **Scene files** (`.helios.json`, `editor/doc.rs`, serde). A base scene — a procedural scene and detail
   (both change the instance list) or a glTF URL — plus only the edits: base-instance overrides keyed by index with
   the mesh name for validation (transform as TRS, visibility, material, deleted), added instances by mesh and
