@@ -80,7 +80,33 @@ line, a "Status vs. Unreal Engine 5" item, the hotkey and the debug view.
 
 ## Measured cost
 
-RESULTS
+RTX 3090 shared with up to 6 other agents' builds and renders: interleaved on/off runs (`'` off = `--keys Quote`),
+medium detail, 240 frames; medians of 3 runs at 1600×900, 2 at 2560×1440 (minimums within 0.1 ms of them unless
+noted). Effect passes = every pass the feature adds.
+
+| View | 1600×900: GPU off → on | effect passes | 2560×1440: GPU off → on | effect passes |
+|---|---|---|---|---|
+| Forest campfire close-up (`--eye 4.3,1.3,0.6 --at 7,1.0,-1`) | 9.19 → 9.65 ms | 0.58 ms | 16.4 → 17.2 ms (min) | 1.19 ms |
+| Cathedral censer (`--eye 66.2,1.8,0.4 --at 68.4,2.4,1.9`) | 6.26 → 6.46 ms | 0.38 ms | 10.88 → 11.18 ms (min) | 0.59 ms |
+| Cathedral initial view (24 000 motes, incense far) | 6.36 → 6.81 ms (min) | 0.37 ms (min) | 11.56 → 11.89 ms (min) | 0.45 ms (min) |
+| Valley initial view (lake mist, 100×10×91 cells) | 5.19 → 5.86 ms | 0.53 ms | 8.75 → 9.72 ms | 1.24 ms |
+
+Per pass (1600×900 / 2560×1440): campfire simulation 40×80×40 with 16 SOR sweeps 0.10–0.11 ms, incense 32×112×32
+0.08 ms (both resolution-independent); lighting caches 0.02–0.03 ms; march + temporal resolve: campfire close-up
+0.36 / 0.94 ms, censer 0.15 / 0.29 ms, valley mist 0.45 / 1.07 ms (it covers a third of the screen); particle
+simulation + lighting 0.02 ms (1 280 fire particles) – 0.09 ms (24 000 motes); OIT draw 0.02–0.04 ms; nearest
+translucent depth 0.01 ms; composites 0.04 / 0.10 ms. Debug view 21 shows where the march spends its steps: empty-space
+skipping leaves the clear air of a box at a quarter of the steps. GPU memory while on screen: 72 bytes per internal
+pixel (104 MiB at 1600×900) plus the grids (campfire: seven 1 MiB rgba16f fields, 1 MiB of pressure and divergence, a 0.1 MiB cache;
+the incense about the same).
+
+Temporal stability (static camera, 24 frames after 216, share of pixels changing by more than 24/255 per frame):
+forest initial view 0.074 % → 0.117 % overall — inside the campfire's rectangle 0.11 → 0.42 % (the flames and
+sparks move), outside it 0.070 → 0.083 %; cathedral 0.002 → 0.005 %; censer close-up 0.001 → 0.002 %; valley
+0.066 → 0.014 % (run-to-run noise). Bit-exactness with the feature off: valley before vs. after with `'` off differs
+by at most 5/255 in 6.3 % of pixels — the same as two runs of the old build (5/255, 5.4 %); the cathedral (which
+gained a censer mesh) by ≤ 22/255 in 0.001 % of pixels. Browser (Chrome headless, WebGPU): no WGSL or validation
+errors; forest, cathedral, valley and debug view 21 render as natively.
 
 ## Status vs. Unreal Engine 5 — new item
 
