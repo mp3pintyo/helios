@@ -1,12 +1,15 @@
-// Material classification: bins 8x8 screen tiles by the shading models they contain.
-// tiles buffer: [0, 8) per-model counts, [8, 40) per-model dispatch args, [64 + kind * capacity)
-// per-model tile lists (tile = x | y << 16).
+// Material classification: bins 8x8 screen tiles by the resolve pipelines their pixels need -
+// the shading models (slots 0-7, 7: sky) and the extended pipelines of Substrate-slab and
+// material-graph materials (slots 8-15, see passes/material.rs).
+// tiles buffer: [0, 16) per-slot counts, [16, 80) per-slot dispatch args, [80 + slot * capacity)
+// per-slot tile lists (tile = x | y << 16).
 
 #include "common.wgsl"
 
 const MATERIAL_SKY: u32 = 7u;
-const MATERIAL_KINDS: u32 = 8u;
-const TILE_LISTS: u32 = 64u;
+const RESOLVE_SLOTS: u32 = 16u;
+const TILE_ARGS: u32 = 16u;
+const TILE_LISTS: u32 = 80u;
 
 @group(0) @binding(0) var<uniform> frame: Frame;
 @group(0) @binding(1) var<uniform> materials: array<Material, MAX_MATERIALS>;
@@ -20,48 +23,47 @@ fn tile_capacity() -> u32 {
     return ((size.x + 7u) / 8u) * ((size.y + 7u) / 8u);
 }
 
-fn pixel_kind(pixel: vec2<u32>) -> u32 {
+fn pixel_slot(pixel: vec2<u32>) -> u32 {
     let id = textureLoad(visibility_buffer, pixel, 0).r;
     if id == INVALID_ID {
         return MATERIAL_SKY;
     }
     let entry = visible_clusters[id >> TRIANGLE_BITS];
-    return min(materials[instances[entry.x].material].kind, MATERIAL_KINDS - 1u);
+    return min(materials[instances[entry.x].material].resolve, RESOLVE_SLOTS - 1u);
 }
 
 // ---- Classification -------------------------------------------------------------------------------
 
-var<workgroup> tile_kinds: atomic<u32>;
+var<workgroup> tile_slots: atomic<u32>;
 
 @compute @workgroup_size(8, 8)
 fn classify(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>) {
     if all(lid.xy == vec2<u32>(0u)) {
-        atomicStore(&tile_kinds, 0u);
+        atomicStore(&tile_slots, 0u);
     }
     workgroupBarrier();
     let size = vec2<u32>(frame.viewport.xy);
     let pixel = wid.xy * 8u + lid.xy;
     if all(pixel < size) {
-        atomicOr(&tile_kinds, 1u << pixel_kind(pixel));
+        atomicOr(&tile_slots, 1u << pixel_slot(pixel));
     }
     workgroupBarrier();
     if all(lid.xy == vec2<u32>(0u)) {
-        var kinds = atomicLoad(&tile_kinds);
+        var slots = atomicLoad(&tile_slots);
         let tile = wid.x | (wid.y << 16u);
-        while kinds != 0u {
-            let kind = firstTrailingBit(kinds);
-            kinds &= kinds - 1u;
-            let slot = atomicAdd(&tiles[kind], 1u);
-            atomicStore(&tiles[TILE_LISTS + kind * tile_capacity() + slot], tile);
+        while slots != 0u {
+            let slot = firstTrailingBit(slots);
+            slots &= slots - 1u;
+            let index = atomicAdd(&tiles[slot], 1u);
+            atomicStore(&tiles[TILE_LISTS + slot * tile_capacity() + index], tile);
         }
     }
 }
 
-@compute @workgroup_size(8)
-fn prepare_tiles(@builtin(local_invocation_index) kind: u32) {
-    let count = atomicLoad(&tiles[kind]);
-    atomicStore(&tiles[8u + kind * 4u], min(count, 65535u));
-    atomicStore(&tiles[9u + kind * 4u], (count + 65534u) / 65535u);
-    atomicStore(&tiles[10u + kind * 4u], 1u);
+@compute @workgroup_size(16)
+fn prepare_tiles(@builtin(local_invocation_index) slot: u32) {
+    let count = atomicLoad(&tiles[slot]);
+    atomicStore(&tiles[TILE_ARGS + slot * 4u], min(count, 65535u));
+    atomicStore(&tiles[TILE_ARGS + 1u + slot * 4u], (count + 65534u) / 65535u);
+    atomicStore(&tiles[TILE_ARGS + 2u + slot * 4u], 1u);
 }
-

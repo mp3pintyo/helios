@@ -122,7 +122,19 @@ pub fn compute_pipeline(
     layout: &wgpu::BindGroupLayout,
     constants: &[(&str, f64)],
 ) -> wgpu::ComputePipeline {
-    let layout = pipeline_layout(device, label, &[layout]);
+    compute_pipeline_with(device, label, module, entry_point, &[layout], constants)
+}
+
+/// A compute pipeline over several bind groups (group `i` = `layouts[i]`).
+pub fn compute_pipeline_with(
+    device: &wgpu::Device,
+    label: &str,
+    module: &wgpu::ShaderModule,
+    entry_point: &str,
+    layouts: &[&wgpu::BindGroupLayout],
+    constants: &[(&str, f64)],
+) -> wgpu::ComputePipeline {
+    let layout = pipeline_layout(device, label, layouts);
     device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
         label: Some(label),
         layout: Some(&layout),

@@ -44,6 +44,8 @@ pub struct GpuScene {
     /// Some material samples a texture with the second UV set, a wrap mode other than repeat or
     /// an occlusion layer of its own: the G-buffer resolve needs its `UV_EXTENSIONS` permutation.
     pub uv_extensions: bool,
+    /// Counts uploads of `materials` (extended materials patch their resolve slots after each).
+    pub material_uploads: u64,
     /// [`WindUniform`], written every frame ([`GpuScene::write_wind`]).
     pub wind: wgpu::Buffer,
     /// Alpha masks of alpha-tested materials, sampled by every rasteriser.
@@ -83,6 +85,7 @@ impl GpuScene {
             instances: empty("instances"),
             materials: crate::util::uniform_buffer(device, "materials", (MAX_MATERIALS * std::mem::size_of::<GpuMaterial>()) as u64),
             uv_extensions: false,
+            material_uploads: 0,
             wind: crate::util::uniform_buffer(device, "wind", std::mem::size_of::<WindUniform>() as u64),
             masks: AlphaMasks::new(device),
             skins: SkinPalettes::new(device),
@@ -284,6 +287,7 @@ impl GpuScene {
         self.uv_extensions = materials.iter().any(needs_uv_extensions);
         materials.resize(MAX_MATERIALS, bytemuck::Zeroable::zeroed());
         queue.write_buffer(&self.materials, 0, bytemuck::cast_slice(&materials));
+        self.material_uploads += 1;
     }
 
     /// How far (object space) the skin of `instance` may have moved any vertex from its rest pose
@@ -456,7 +460,10 @@ fn gpu_material(scene: &Scene, m: &Material, mask: Option<MaterialMask>) -> GpuM
         uv: [tiled(&m.uv), tiled(&m.emissive_uv), tiled(&m.occlusion_uv)],
         occlusion_texture: occlusion.map_or(u32::MAX, |t| t.0),
         occlusion_strength: m.occlusion_strength.clamp(0.0, 1.0),
-        _pad: [0; 2],
+        // Extended materials are patched in by `substrate_gpu.rs`. Translucent kinds never reach
+        // the visibility buffer; the clamp keeps them off the extended slots.
+        resolve: (m.kind as u32).min(crate::passes::material::SKY_SLOT),
+        _pad: 0,
     }
 }
 

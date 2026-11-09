@@ -111,13 +111,13 @@ fn resolve_voxel(pixel: vec2<u32>, id: u32) {
     input.bitangent = frame_basis[1];
 
     let m = materials[instance.material];
+    // As the triangle resolve: the pipeline's shading model, or a slab / graph material's
+    // extended evaluation (which also writes its slab texel).
     var surface: Surface;
-    switch MATERIAL_KIND {
-        case MATERIAL_ROCK: { surface = evaluate_rock(m, input); }
-        case MATERIAL_TERRAIN: { surface = evaluate_terrain(m, input); }
-        case MATERIAL_METAL: { surface = evaluate_metal(m, input); }
-        case MATERIAL_FOLIAGE: { surface = evaluate_foliage(m, input); }
-        default: { surface = evaluate_standard(m, input); }
+    if EXTENDED_RESOLVE {
+        surface = resolve_extended(pixel, m, input, instance.material, vec4<f32>(1.0));
+    } else {
+        surface = evaluate_kind(m, input);
     }
     switch frame.debug_view {
         case DEBUG_CLUSTERS, DEBUG_VOXELS: { surface.albedo = hash_color(entry.y * 7919u + entry.x * 104729u); }
@@ -126,7 +126,7 @@ fn resolve_voxel(pixel: vec2<u32>, id: u32) {
         case DEBUG_INSTANCES: { surface.albedo = hash_color(entry.x); }
         // Voxels in yellow (red: software triangles, green: hardware, blue: alpha-masked).
         case DEBUG_RASTER_PATH: { surface.albedo = vec3<f32>(0.95, 0.8, 0.15) * (0.6 + 0.4 * hash_color(entry.y).x); }
-        case DEBUG_MATERIALS: { surface.albedo = hash_color(MATERIAL_KIND * 31u + 7u); }
+        case DEBUG_MATERIALS: { surface.albedo = hash_color(RESOLVE_SLOT * 31u + 7u); }
         case DEBUG_ASSEMBLY_PARTS: { surface.albedo = assembly_part_color(instance); }
         default: {}
     }

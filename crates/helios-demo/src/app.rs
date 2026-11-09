@@ -67,7 +67,7 @@ pub struct DemoApp {
 const SCREEN_PERCENTAGES: [f32; 4] = [50.0, 67.0, 75.0, 100.0];
 
 pub const HELP: &str = "WASD/QE fly · drag to look · wheel speed · Shift fast\n\
-N next scene · 0 demo motion · V debug view · Insert voxel LODs · G GI · ; GI method (Lumen / Lumen Lite) · H shadows · 1 local light shadow maps · [ ] screen percentage (50/67/75/100 %) · \\ dynamic resolution · T TAA · O occlusion · K software raster · I texture streaming · - animation clip / pause · F fog · C clouds · U translucency · / translucency layers · ' volumes + particles · L wind · M motion blur · B depth of field · ` local exposure · = MegaLights · Z/X zoom · , . LOD error · ←→↑↓ sun · P animate sun · J day/night cycle · Y camera tour · R reset · Tab editor tools (native)";
+N next scene · 0 demo motion · V debug view · Insert voxel LODs · G GI · ; GI method (Lumen / Lumen Lite) · H shadows · 1 local light shadow maps · [ ] screen percentage (50/67/75/100 %) · \\ dynamic resolution · T TAA · O occlusion · K software raster · I texture streaming · - animation clip / pause · F fog · C clouds · U translucency · / translucency layers · ' volumes + particles · L wind · M motion blur · B depth of field · ` local exposure · = MegaLights · Z/X zoom · , . LOD error · PageUp Substrate materials · ←→↑↓ sun · P animate sun · J day/night cycle · Y camera tour · R reset · Tab editor tools (native)";
 
 impl DemoApp {
     pub fn new(
@@ -285,6 +285,8 @@ impl DemoApp {
             "Digit0" => self.motion.enabled = !self.motion.enabled,
             // MegaLights (stochastic shadowed lighting from every local light) vs the classic loop.
             "Equal" => s.mega_lights = !s.mega_lights,
+            // Substrate slabs on / off (extended materials A/B against their plain base).
+            "PageUp" => s.substrate = !s.substrate,
             code if code.starts_with("Digit") => {
                 if let Some(index) = code[5..].parse::<usize>().ok().and_then(|d| d.checked_sub(1)) {
                     if let Some(&view) = DebugView::ALL.get(index) {
@@ -404,7 +406,7 @@ impl DemoApp {
             "{} · {:.1} ms ({:.0} fps){gpu} · {resolution} · {} · LOD error {} px{budget}\n\
              visible: {} clusters ({} software, {} alpha-masked), {:.2} M tris (early pass {}) · shadows: {:.2} M tris ({:.2} M software)\n\
              streaming: {}/{} pages, {:.0}/{:.0} MiB resident, {} pending, {} in flight · scene: {} instances, {:.0} M source tris\n\
-             GI {} · shadows {} · TAA {} · fog {} · SW raster {} · wind {} · local exposure {} · MegaLights {} ({} lights) · volumes + particles {}",
+             GI {} · shadows {} · TAA {} · fog {} · SW raster {} · wind {} · local exposure {} · MegaLights {} ({} lights) · volumes + particles {} · Substrate {}",
             self.scene_name(),
             self.frame_ms,
             1000.0 / self.frame_ms.max(0.01),
@@ -435,6 +437,7 @@ impl DemoApp {
             on(s.mega_lights),
             self.scene.lights().len(),
             on(s.volumes || s.particles),
+            on(s.substrate),
         );
         text.push_str(&format!(
             "\nshadow pages: {}/{} in use, {} rendered ({} dynamic casters only, {} split; {}/{} draws), {} unallocated · local lights with shadow maps: {}",

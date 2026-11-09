@@ -224,3 +224,59 @@ body.ed-active #hud, body.ed-active #help, body.ed-active .title { display: none
 
 #ed-play-hint { position: fixed; right: 14px; bottom: 12px; z-index: 5; display: none; padding: 6px 10px; border-radius: 6px; background: rgba(8, 10, 14, 0.7); color: #e8ecf3; font: 12px var(--ed-font); pointer-events: none; }
 #ed-play-hint.on { display: block; }
+
+
+/* ---- Material graph editor (graph.js) ---------------------------------------------------------- */
+.mg-panel {
+  position: absolute; left: 0; right: 0; bottom: 0; height: 46%; z-index: 4;
+  display: flex; flex-direction: column;
+  background: rgba(19, 19, 21, 0.97); border-top: 2px solid var(--ed-line-2);
+}
+.mg-panel.hidden { display: none; }
+.mg-head { display: flex; align-items: center; gap: 8px; height: 32px; padding: 0 8px; background: var(--ed-panel); border-bottom: 1px solid var(--ed-line); flex: none; }
+.mg-title { font-weight: 600; color: var(--ed-text-strong); margin-right: 6px; }
+.mg-status { color: var(--ed-green); font-size: 11px; }
+.mg-status.error { color: var(--ed-red); }
+.mg-close .ed-icon { transform: rotate(45deg); }
+.mg-body { position: relative; flex: 1; min-height: 0; }
+.mg-canvas {
+  position: absolute; inset: 0; overflow: hidden; outline: none; cursor: default;
+  background-color: #151517;
+  background-image: linear-gradient(rgba(255, 255, 255, 0.035) 1px, transparent 1px), linear-gradient(90deg, rgba(255, 255, 255, 0.035) 1px, transparent 1px);
+}
+.mg-world { position: absolute; left: 0; top: 0; transform-origin: 0 0; }
+.mg-links { position: absolute; left: 0; top: 0; width: 1px; height: 1px; overflow: visible; pointer-events: none; }
+.mg-links path { fill: none; stroke: #9fb2c8; stroke-width: 2; opacity: 0.85; }
+.mg-links path.temp { stroke: var(--ed-orange); stroke-dasharray: 6 4; }
+.mg-node {
+  position: absolute; background: #222226; border: 1px solid #0a0a0b; border-radius: 6px;
+  box-shadow: 0 3px 10px rgba(0, 0, 0, 0.45); font-size: 11px; color: var(--ed-text);
+}
+.mg-node.selected { border-color: var(--ed-orange); box-shadow: 0 0 0 1px var(--ed-orange), 0 3px 10px rgba(0, 0, 0, 0.45); }
+.mg-node.error { border-color: var(--ed-red); box-shadow: 0 0 0 1px var(--ed-red), 0 3px 10px rgba(0, 0, 0, 0.45); }
+.mg-node-head { display: flex; justify-content: space-between; gap: 6px; padding: 4px 8px; border-radius: 5px 5px 0 0; color: #fff; font-weight: 600; cursor: grab; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mg-node-id { opacity: 0.55; font-weight: 400; }
+.mg-props { padding: 4px 8px 2px; border-bottom: 1px solid #18181b; display: grid; gap: 3px; }
+.mg-prop { display: flex; align-items: center; gap: 4px; }
+.mg-prop-label { width: 52px; color: var(--ed-dim); flex: none; }
+.mg-prop .ed-color-hex { display: none; }
+.mg-row { display: flex; justify-content: space-between; align-items: center; min-height: 20px; padding: 1px 0; }
+.mg-in, .mg-out { display: flex; align-items: center; gap: 5px; }
+.mg-out { margin-left: auto; }
+.mg-pin { width: 10px; height: 10px; border-radius: 50%; border: 2px solid #9fb2c8; background: #151517; cursor: crosshair; flex: none; }
+.mg-pin.in { margin-left: -6px; }
+.mg-pin.out { margin-right: -6px; }
+.mg-pin.linked { background: #9fb2c8; }
+.mg-pin:hover { border-color: var(--ed-orange); }
+.mg-pin-label { color: var(--ed-text); }
+.mg-value, .mg-text { width: 46px; height: 16px; padding: 0 4px; font: 11px var(--ed-font); color: var(--ed-text-strong); background: var(--ed-input); border: 1px solid var(--ed-line-2); border-radius: 3px; }
+.mg-text { width: 96px; }
+.mg-palette { position: absolute; z-index: 5; width: 210px; max-height: 300px; display: flex; flex-direction: column; background: var(--ed-panel-2); border: 1px solid var(--ed-line-2); border-radius: 6px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.6); }
+.mg-palette.hidden { display: none; }
+.mg-search { margin: 6px; padding: 4px 6px; font: 12px var(--ed-font); color: var(--ed-text-strong); background: var(--ed-input); border: 1px solid var(--ed-line-2); border-radius: 4px; }
+.mg-palette-list { overflow: auto; padding-bottom: 6px; }
+.mg-palette-cat { padding: 4px 10px 2px; color: var(--ed-dim); font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; }
+.mg-palette-item { padding: 3px 16px; cursor: pointer; }
+.mg-palette-item:hover { background: var(--ed-select); color: #fff; }
+.mg-errors { position: absolute; right: 8px; bottom: 8px; max-width: 45%; display: grid; gap: 4px; pointer-events: auto; }
+.mg-error { padding: 4px 8px; background: rgba(90, 20, 18, 0.92); border: 1px solid var(--ed-red); border-radius: 4px; color: #ffd9d6; cursor: pointer; font-size: 11px; }

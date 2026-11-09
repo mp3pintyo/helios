@@ -16,7 +16,9 @@
 //!   [`AnimationPlayer`] ([`animation`]). Morph targets are not imported,
 //! * **materials** — the metallic-roughness PBR model (factors; texture references with their
 //!   UV set, `KHR_texture_transform` and sampler wrap modes; normal scale, occlusion strength,
-//!   emission with `KHR_materials_emissive_strength`, alpha mode),
+//!   emission with `KHR_materials_emissive_strength`, alpha mode) and the PBR extensions
+//!   `KHR_materials_clearcoat`, `_sheen`, `_ior`, `_specular`, `_transmission`, `_volume`,
+//!   `_unlit` and `_anisotropy` ([`MaterialExtensions`]),
 //! * **images** — decoded RGBA8 (PNG and JPEG, the formats glTF core allows).
 //!
 //! Loading has two phases so it works the same natively and in the browser, where external
@@ -29,6 +31,7 @@
 mod accessor;
 pub mod animation;
 mod import;
+mod material_extensions;
 mod uri;
 
 use std::collections::HashMap;
@@ -153,6 +156,80 @@ pub struct Material {
     pub emissive_texture: Option<TextureRef>,
     pub alpha_mode: AlphaMode,
     pub double_sided: bool,
+    /// The PBR extensions beyond metallic-roughness (`KHR_materials_*`).
+    pub extensions: MaterialExtensions,
+}
+
+/// `KHR_materials_clearcoat`, `_sheen`, `_ior`, `_specular`, `_transmission`, `_volume`,
+/// `_unlit` and `_anisotropy`: factors and textures as the extensions define them (defaults:
+/// absent extensions).
+#[derive(Clone, Debug, PartialEq)]
+pub struct MaterialExtensions {
+    pub clearcoat: f32,
+    /// Clear coat in R.
+    pub clearcoat_texture: Option<TextureRef>,
+    pub clearcoat_roughness: f32,
+    /// Clear-coat roughness in G.
+    pub clearcoat_roughness_texture: Option<TextureRef>,
+    pub clearcoat_normal_texture: Option<TextureRef>,
+    pub clearcoat_normal_scale: f32,
+    /// Linear sheen colour (black: no sheen).
+    pub sheen_color: Vec3,
+    /// sRGB sheen colour.
+    pub sheen_color_texture: Option<TextureRef>,
+    pub sheen_roughness: f32,
+    /// Sheen roughness in A.
+    pub sheen_roughness_texture: Option<TextureRef>,
+    pub ior: f32,
+    pub specular: f32,
+    /// Specular in A.
+    pub specular_texture: Option<TextureRef>,
+    /// Linear F0 colour.
+    pub specular_color: Vec3,
+    /// sRGB F0 colour.
+    pub specular_color_texture: Option<TextureRef>,
+    /// Share of light transmitted through the surface (thin-walled without a volume).
+    pub transmission: f32,
+    pub transmission_texture: Option<TextureRef>,
+    /// `KHR_materials_volume`: thickness and Beer–Lambert attenuation of the medium behind
+    /// a transmitting surface (`attenuation_distance` infinite: none).
+    pub thickness: f32,
+    pub attenuation_distance: f32,
+    pub attenuation_color: Vec3,
+    pub unlit: bool,
+    /// `KHR_materials_anisotropy`: strength (0–1) and rotation (radians from the tangent).
+    pub anisotropy: f32,
+    pub anisotropy_rotation: f32,
+}
+
+impl Default for MaterialExtensions {
+    fn default() -> Self {
+        Self {
+            clearcoat: 0.0,
+            clearcoat_texture: None,
+            clearcoat_roughness: 0.0,
+            clearcoat_roughness_texture: None,
+            clearcoat_normal_texture: None,
+            clearcoat_normal_scale: 1.0,
+            sheen_color: Vec3::ZERO,
+            sheen_color_texture: None,
+            sheen_roughness: 0.0,
+            sheen_roughness_texture: None,
+            ior: 1.5,
+            specular: 1.0,
+            specular_texture: None,
+            specular_color: Vec3::ONE,
+            specular_color_texture: None,
+            transmission: 0.0,
+            transmission_texture: None,
+            thickness: 0.0,
+            attenuation_distance: f32::INFINITY,
+            attenuation_color: Vec3::ONE,
+            unlit: false,
+            anisotropy: 0.0,
+            anisotropy_rotation: 0.0,
+        }
+    }
 }
 
 impl Default for Material {
@@ -173,6 +250,7 @@ impl Default for Material {
             emissive_texture: None,
             alpha_mode: AlphaMode::Opaque,
             double_sided: false,
+            extensions: MaterialExtensions::default(),
         }
     }
 }

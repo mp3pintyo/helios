@@ -38,6 +38,8 @@ const SOURCES: &[(&str, &str)] = &[
     ("lumen_trace.wgsl", include_str!("shaders/lumen_trace.wgsl")),
     ("lumen_types.wgsl", include_str!("shaders/lumen_types.wgsl")),
     ("material.wgsl", include_str!("shaders/material.wgsl")),
+    ("material_graph.wgsl", include_str!("shaders/material_graph.wgsl")),
+    ("material_graph_off.wgsl", include_str!("shaders/material_graph_off.wgsl")),
     ("media_common.wgsl", include_str!("shaders/media_common.wgsl")),
     ("megalights_common.wgsl", include_str!("shaders/megalights_common.wgsl")),
     ("megalights_denoise.wgsl", include_str!("shaders/megalights_denoise.wgsl")),
@@ -52,6 +54,8 @@ const SOURCES: &[(&str, &str)] = &[
     ("pick.wgsl", include_str!("shaders/pick.wgsl")),
     ("post_fx.wgsl", include_str!("shaders/post_fx.wgsl")),
     ("raster.wgsl", include_str!("shaders/raster.wgsl")),
+    ("resolve_extended.wgsl", include_str!("shaders/resolve_extended.wgsl")),
+    ("resolve_extended_off.wgsl", include_str!("shaders/resolve_extended_off.wgsl")),
     ("rvt.wgsl", include_str!("shaders/rvt.wgsl")),
     ("rvt_render.wgsl", include_str!("shaders/rvt_render.wgsl")),
     ("selection.wgsl", include_str!("shaders/selection.wgsl")),
@@ -60,6 +64,12 @@ const SOURCES: &[(&str, &str)] = &[
     ("skin_palette.wgsl", include_str!("shaders/skin_palette.wgsl")),
     ("skinning.wgsl", include_str!("shaders/skinning.wgsl")),
     ("sky.wgsl", include_str!("shaders/sky.wgsl")),
+    ("substrate.wgsl", include_str!("shaders/substrate.wgsl")),
+    ("substrate_read.wgsl", include_str!("shaders/substrate_read.wgsl")),
+    ("substrate_read_off.wgsl", include_str!("shaders/substrate_read_off.wgsl")),
+    ("subsurface.wgsl", include_str!("shaders/subsurface.wgsl")),
+    ("subsurface_store.wgsl", include_str!("shaders/subsurface_store.wgsl")),
+    ("subsurface_store_off.wgsl", include_str!("shaders/subsurface_store_off.wgsl")),
     ("sw_raster.wgsl", include_str!("shaders/sw_raster.wgsl")),
     ("svt.wgsl", include_str!("shaders/svt.wgsl")),
     ("svt_off.wgsl", include_str!("shaders/svt_off.wgsl")),
@@ -91,7 +101,7 @@ const SOURCES: &[(&str, &str)] = &[
     ("wind.wgsl", include_str!("shaders/wind.wgsl")),
 ];
 
-fn source(name: &str) -> &'static str {
+pub fn source(name: &str) -> &'static str {
     SOURCES
         .iter()
         .find(|(n, _)| *n == name)
@@ -101,16 +111,24 @@ fn source(name: &str) -> &'static str {
 
 /// Resolves includes (each file is included at most once) and returns the final WGSL.
 pub fn compose(name: &str) -> String {
-    fn expand(name: &str, included: &mut Vec<String>, out: &mut String) {
+    compose_variant(name, &[])
+}
+
+/// As [`compose`], with the included files of `replacements` (file name → WGSL, whose own
+/// includes are resolved too) substituted. Variants swap a default `*_off.wgsl` file for the
+/// code of an optional feature, or for generated code (material graphs).
+pub fn compose_variant(name: &str, replacements: &[(&str, &str)]) -> String {
+    fn expand(name: &str, replacements: &[(&str, &str)], included: &mut Vec<String>, out: &mut String) {
         if included.iter().any(|n| n == name) {
             return;
         }
         included.push(name.to_owned());
-        for line in source(name).lines() {
+        let text = replacements.iter().find(|(n, _)| *n == name).map_or_else(|| source(name), |(_, s)| *s);
+        for line in text.lines() {
             let trimmed = line.trim();
             if let Some(rest) = trimmed.strip_prefix("#include") {
                 let target = rest.trim().trim_matches('"');
-                expand(target, included, out);
+                expand(target, replacements, included, out);
             } else {
                 out.push_str(line);
                 out.push('\n');
@@ -118,15 +136,33 @@ pub fn compose(name: &str) -> String {
         }
     }
     let mut out = String::new();
-    expand(name, &mut Vec::new(), &mut out);
+    expand(name, replacements, &mut Vec::new(), &mut out);
     out
 }
 
 pub fn create_module(device: &wgpu::Device, name: &str) -> wgpu::ShaderModule {
-    device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some(name),
-        source: wgpu::ShaderSource::Wgsl(compose(name).into()),
-    })
+    create_module_from(device, name, compose(name))
+}
+
+pub fn create_module_from(device: &wgpu::Device, label: &str, wgsl: String) -> wgpu::ShaderModule {
+    device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some(label), source: wgpu::ShaderSource::Wgsl(wgsl.into()) })
+}
+
+/// Replacements giving the deferred lighting and MegaLights' shading Substrate slabs (see
+/// substrate_read.wgsl, subsurface_store.wgsl).
+pub fn substrate_lighting() -> [(&'static str, &'static str); 2] {
+    [("substrate_read_off.wgsl", source("substrate_read.wgsl")), ("subsurface_store_off.wgsl", source("subsurface_store.wgsl"))]
+}
+
+/// The extended G-buffer resolve (resolve_extended.wgsl) with a material graph's code (`None`:
+/// slab materials without a graph).
+pub fn extended_resolve(graph: Option<&str>) -> String {
+    let graph = graph.map(|code| format!("const HAS_GRAPH: bool = true;\n{code}"));
+    let mut replacements = vec![("resolve_extended_off.wgsl", source("resolve_extended.wgsl"))];
+    if let Some(code) = &graph {
+        replacements.push(("material_graph_off.wgsl", code.as_str()));
+    }
+    compose_variant("gbuffer.wgsl", &replacements)
 }
 
 #[cfg(test)]
@@ -154,6 +190,68 @@ mod tests {
             let mut validator = naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all());
             if let Err(e) = validator.validate(&module) {
                 failures.push(format!("{name}: {}", e.emit_to_string(&source)));
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    fn validate(label: &str, source: &str) -> Result<(), String> {
+        let module = naga::front::wgsl::parse_str(source).map_err(|e| format!("{label}: {}", e.emit_to_string(source)))?;
+        let mut validator = naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all());
+        validator.validate(&module).map_err(|e| format!("{label}: {}", e.emit_to_string(source)))?;
+        let problems: Vec<String> = source.lines().filter_map(unparenthesised_bitwise).collect();
+        if problems.is_empty() {
+            Ok(())
+        } else {
+            Err(format!("{label}: {}", problems.join("; ")))
+        }
+    }
+
+    /// The Substrate variants of the lighting passes and the extended resolve.
+    #[test]
+    fn substrate_variants_validate() {
+        let mut failures = Vec::new();
+        for name in ["lighting.wgsl", "megalights_shade.wgsl"] {
+            failures.extend(validate(name, &compose_variant(name, &substrate_lighting())).err());
+        }
+        failures.extend(validate("extended resolve", &extended_resolve(None)).err());
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    /// Every preset graph and every node type compiles into a valid resolve pipeline. Each node
+    /// type is tested on a texture coordinate path, so its derivative code is generated too.
+    #[test]
+    fn material_graph_code_validates() {
+        use helios_material::{compile, presets, GraphBuilder, Op};
+        let mut graphs: Vec<_> = presets::PRESETS.iter().map(|(id, _)| presets::preset(id).unwrap()).collect();
+        for op in Op::palette().into_iter().filter(|op| *op != Op::Output) {
+            let output_pin = helios_material::spec(&op).outputs[0];
+            let mut g = GraphBuilder::new(op.type_name());
+            let node = g.node(op, [0.0, 0.0]);
+            let length = g.node(Op::Length, [0.0, 0.0]);
+            let scale = g.node(Op::Multiply, [0.0, 0.0]);
+            let uv = g.node(Op::TexCoord { set: 1, tiling: [2.0, 2.0] }, [0.0, 0.0]);
+            let shifted = g.node(Op::Add, [0.0, 0.0]);
+            let sample = g.node(Op::TextureSample { parameter: "Albedo".into() }, [0.0, 0.0]);
+            let output = g.node(Op::Output, [0.0, 0.0]);
+            g.link(node, output_pin, length, "In")
+                .link(length, "Out", scale, "A")
+                .value(scale, "B", 0.01)
+                .link(uv, "Out", shifted, "A")
+                .link(scale, "Out", shifted, "B")
+                .link(shifted, "Out", sample, "UV")
+                .link(sample, "RGB", output, "BaseColor")
+                .link(length, "Out", output, "Roughness")
+                .link(sample, "Normal", output, "Normal")
+                .link(scale, "Out", output, "Clearcoat")
+                .link(sample, "R", output, "Subsurface");
+            graphs.push(g.build());
+        }
+        let mut failures = Vec::new();
+        for graph in &graphs {
+            match compile(graph) {
+                Ok(compiled) => failures.extend(validate(&graph.name, &extended_resolve(Some(&compiled.wgsl))).err()),
+                Err(errors) => failures.push(format!("{}: {errors:?}", graph.name)),
             }
         }
         assert!(failures.is_empty(), "{}", failures.join("\n"));

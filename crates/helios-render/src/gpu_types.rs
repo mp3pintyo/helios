@@ -58,7 +58,9 @@ pub struct GpuMaterial {
     /// Ambient occlusion layer (its albedo alpha), or `u32::MAX`.
     pub occlusion_texture: u32,
     pub occlusion_strength: f32,
-    pub _pad: [u32; 2],
+    /// Resolve pipeline slot: the shading model, or an extended pipeline (`passes/material.rs`).
+    pub resolve: u32,
+    pub _pad: u32,
 }
 
 /// A [`crate::UvTransform`]: `uv' = (dot(u, (uv, 1)), dot(v, (uv, 1)))` of the mesh UV set

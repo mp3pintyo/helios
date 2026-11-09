@@ -80,6 +80,14 @@ fn ml_lighting(s: MlSurface, light: GpuLight) -> MlLighting {
     var c: MlLighting;
     let ls = sample_light(light, s.world);
     c.radiance = ls.radiance;
+    if s.substrate {
+        // Slabs: every lobe of brdf.wgsl, thin transmission folded into the diffuse share
+        // (MegaLights keeps diffuse light whole; subsurface pixels are not diffused here).
+        let l = evaluate_slab(s.slab, ls.l);
+        c.diffuse = (l.diffuse + s.slab.transmission_color * l.back) * ls.radiance;
+        c.specular = l.specular * ls.radiance;
+        return c;
+    }
     let nl = saturate(dot(s.n, ls.l));
     if nl + s.wrap <= 0.0 {
         c.diffuse = vec3<f32>(0.0);

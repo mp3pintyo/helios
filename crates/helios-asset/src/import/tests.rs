@@ -184,6 +184,36 @@ fn external_resources() {
 }
 
 #[test]
+fn reads_pbr_extensions() {
+    let extensions = r#""extensions": {
+        "KHR_materials_emissive_strength": { "emissiveStrength": 2 },
+        "KHR_materials_clearcoat": { "clearcoatFactor": 1, "clearcoatRoughnessFactor": 0.2,
+            "clearcoatNormalTexture": { "index": 0, "scale": 0.5, "texCoord": 1 } },
+        "KHR_materials_sheen": { "sheenColorFactor": [0.5, 0.25, 0], "sheenRoughnessFactor": 0.4, "sheenRoughnessTexture": { "index": 0 } },
+        "KHR_materials_ior": { "ior": 1.33 },
+        "KHR_materials_specular": { "specularFactor": 0.5, "specularColorFactor": [1, 0.5, 0.25] },
+        "KHR_materials_transmission": { "transmissionFactor": 0.75 },
+        "KHR_materials_volume": { "thicknessFactor": 0.1, "attenuationDistance": 2, "attenuationColor": [1, 0.5, 0.5] },
+        "KHR_materials_unlit": {},
+        "KHR_materials_anisotropy": { "anisotropyStrength": 0.6, "anisotropyRotation": 1.5 } }"#;
+    let json = embedded()
+        .replace(r#""extensions": { "KHR_materials_emissive_strength": { "emissiveStrength": 2 } }"#, extensions)
+        .replace(r#""extensionsUsed""#, r#""extensionsRequired": ["KHR_materials_clearcoat", "KHR_materials_unlit"], "extensionsUsed""#);
+    let asset = load_gltf(json.as_bytes()).unwrap();
+    let e = &asset.materials[0].extensions;
+    assert_eq!((e.clearcoat, e.clearcoat_roughness, e.clearcoat_normal_scale), (1.0, 0.2, 0.5));
+    assert_eq!(e.clearcoat_normal_texture.map(|t| (t.image, t.tex_coord)), Some((0, 1)));
+    assert_eq!((e.sheen_color, e.sheen_roughness), (Vec3::new(0.5, 0.25, 0.0), 0.4));
+    assert!(e.sheen_roughness_texture.is_some() && e.sheen_color_texture.is_none());
+    assert_eq!((e.ior, e.specular, e.specular_color), (1.33, 0.5, Vec3::new(1.0, 0.5, 0.25)));
+    assert_eq!((e.transmission, e.thickness, e.attenuation_distance), (0.75, 0.1, 2.0));
+    assert_eq!((e.unlit, e.anisotropy, e.anisotropy_rotation), (true, 0.6, 1.5));
+    // Without the extensions: the defaults.
+    let plain = load_gltf(embedded().as_bytes()).unwrap();
+    assert_eq!(plain.materials[0].extensions, crate::MaterialExtensions::default());
+}
+
+#[test]
 fn rejects_unsupported_required_extensions() {
     let json = embedded().replace(r#""extensionsUsed""#, r#""extensionsRequired": ["KHR_draco_mesh_compression"], "extensionsUsed""#);
     let result = GltfDocument::parse(json.as_bytes());

@@ -12,6 +12,7 @@ use std::collections::BTreeMap;
 
 use glam::{Mat4, Quat, Vec3};
 use helios_pcg::{Graph, Volume};
+use helios_render::material_graph::MaterialGraph;
 use serde::{Deserialize, Serialize};
 
 pub const FORMAT: &str = "helios-scene";
@@ -121,6 +122,52 @@ pub struct MaterialParams {
     pub normal_strength: Option<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub uv_scale: Option<f32>,
+    /// The material graph by name (`""`: none).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graph: Option<String>,
+    /// Graph parameter values of this material (a material instance), by parameter name.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub parameters: BTreeMap<String, ParameterDef>,
+    /// Substrate slab overrides.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slab: Option<SlabDef>,
+}
+
+/// A graph parameter's value (texture parameters are not stored: textures have no names).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ParameterDef {
+    Scalar(f32),
+    Vector([f32; 4]),
+}
+
+/// Substrate slab overrides (absent fields keep the base value; see `helios_render::Slab`).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct SlabDef {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ior: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub specular: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clearcoat: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clearcoat_roughness: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sheen_color: Option<[f32; 3]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sheen_roughness: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subsurface: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subsurface_color: Option<[f32; 3]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subsurface_radius: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transmission: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anisotropy: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unlit: Option<bool>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -249,6 +296,10 @@ pub struct SceneDoc {
     pub added: Vec<AddedInstance>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub materials: BTreeMap<String, MaterialParams>,
+    /// Material graphs created or edited in the editor, by name (they replace a base scene's
+    /// graph of the same name).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub graphs: BTreeMap<String, MaterialGraph>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub lights: BTreeMap<u32, LightDef>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -280,6 +331,7 @@ impl SceneDoc {
             instances: BTreeMap::new(),
             added: Vec::new(),
             materials: BTreeMap::new(),
+            graphs: BTreeMap::new(),
             lights: BTreeMap::new(),
             added_lights: Vec::new(),
             environment: None,
@@ -329,6 +381,11 @@ mod tests {
             cast_shadow: true,
         });
         doc.materials.insert("gold".into(), MaterialParams { roughness: Some(0.6), ..Default::default() });
+        let mut lava = MaterialParams { graph: Some("Lava".into()), slab: Some(SlabDef { clearcoat: Some(1.0), ..Default::default() }), ..Default::default() };
+        lava.parameters.insert("Glow Intensity".into(), ParameterDef::Scalar(20.0));
+        lava.parameters.insert("Glow Color".into(), ParameterDef::Vector([1.0, 0.5, 0.0, 1.0]));
+        doc.materials.insert("lava".into(), lava);
+        doc.graphs.insert("Lava".into(), helios_render::material_graph::presets::lava());
         doc.render.insert("global_illumination".into(), serde_json::Value::Bool(false));
         let json = doc.to_json();
         assert!(json.contains("\"12\"") && !json.contains("cast_shadow"));

@@ -1,11 +1,12 @@
 // Details panel: the properties of the primary selection — an instance (transform, material
-// and its parameters, rendering), a light, a PCG volume (volume, surface, seed and the graph's
-// nodes), the environment (sun, fog, clouds, wind), the render settings (built from the
-// engine's schema) or a material.
+// and its parameters, graph parameters and Substrate slab, rendering), a light, a PCG volume
+// (volume, surface, seed and the graph's nodes), the environment (sun, fog, clouds, wind), the
+// render settings (built from the engine's schema) or a material.
 
 import { h, icon, section, row, numberField, vectorField, slider, checkbox, select, colorField, button } from "./ui.js";
 import { quatFromEuler, quatToEuler } from "./math.js";
 import { splitRef } from "./editor.js";
+import { materialParams } from "./graph.js";
 
 export function createDetails(ed) {
   const title = h("span", { class: "ed-panel-title" }, "Details");
@@ -98,7 +99,8 @@ export function createDetails(ed) {
     if (!m) {
       return [section("Material", [h("div", { class: "ed-note" }, `${name} is created the first time something uses it.`)])];
     }
-    const params = { base_color: m.base_color, roughness: m.roughness, metallic: m.metallic, emissive: m.emissive, opacity: m.opacity };
+    // An edit replaces the material's whole entry: send every field (graph, parameters and slab too).
+    const params = materialParams(m);
     const key = `mat-${name}-${Math.random()}`;
     const send = (done) => ed.apply({ op: "material", name, params }, { merge: key, quiet: !done });
     const rows = [
@@ -112,7 +114,52 @@ export function createDetails(ed) {
     }
     if (!nested) header("material", name, `Material · ${m.kind}`);
     const title = nested ? `Material · ${name}` : "Parameters";
-    return [section(title, [h("div", { class: "ed-note" }, `${m.kind} shading model · shared by every instance using it`), ...rows])];
+    const sections = [section(title, [h("div", { class: "ed-note" }, `${m.kind} shading model · shared by every instance using it`), ...rows])];
+    if (!["glass", "water", "translucent"].includes(m.kind)) sections.push(graphSection(m, params, send), slabSection(m, params, send));
+    return sections;
+  }
+
+  // The material graph and this material's values of its parameters (a material instance).
+  function graphSection(m, params, send) {
+    const names = (ed.state.graphs || []).map((g) => g.name);
+    const rows = [row("Graph", select([["", "None (shading model)"], ...names.map((n) => [n, n])], m.graph || "", (g) => ((params.graph = g), send(true))),
+      button("", () => ed.graphEditor.open(m.graph || names[0]), { iconName: "material", title: "Open the material graph editor" }))];
+    const graph = (ed.state.graphs || []).find((g) => g.name === m.graph);
+    if (graph?.errors?.length) rows.push(h("div", { class: "ed-error" }, `${graph.errors.length} compile error(s): the material renders without its graph`));
+    for (const p of m.parameters || []) {
+      if (p.kind === "scalar") {
+        const [min, max] = p.range[0] < p.range[1] ? p.range : [0, 1];
+        const set = (v, done) => ((params.parameters[p.name] = v), send(done));
+        rows.push(row(p.name, slider(p.value, { min, max, step: (max - min) / 200, precision: 3, onInput: (v) => set(v, false), onCommit: (v) => set(v, true) })));
+      } else if (p.kind === "vector") {
+        const set = (c, done) => ((params.parameters[p.name] = [...c, p.value[3] ?? 1]), send(done));
+        rows.push(row(p.name, colorField(p.value.slice(0, 3), (c) => set(c, false), (c) => set(c, true))));
+      } else rows.push(row(p.name, h("span", { class: "ed-value-text" }, p.value)));
+    }
+    return section("Material graph", rows, { open: !!m.graph });
+  }
+
+  // Substrate slab: clear coat, sheen, subsurface, transmission, anisotropy, IOR and specular.
+  function slabSection(m, params, send) {
+    const slab = params.slab;
+    const field = (label, prop, opts) => row(label, slider(slab[prop], { ...opts, onInput: (v) => ((slab[prop] = v), send(false)), onCommit: (v) => ((slab[prop] = v), send(true)) }));
+    const color = (label, prop) => row(label, colorField(slab[prop], (c) => ((slab[prop] = c), send(false)), (c) => ((slab[prop] = c), send(true))));
+    const on = Object.entries(slab).some(([k, v]) => (k === "clearcoat" || k === "subsurface" || k === "transmission") && v > 0) || slab.sheen_color.some((c) => c > 0) || slab.anisotropy !== 0 || slab.unlit;
+    return section("Substrate slab", [
+      h("div", { class: "ed-note" }, "PageUp toggles slabs; debug view 24 shows their features"),
+      field("Clear coat", "clearcoat", { min: 0, max: 1, step: 0.01 }),
+      field("Coat roughness", "clearcoat_roughness", { min: 0, max: 1, step: 0.01 }),
+      color("Sheen colour", "sheen_color"),
+      field("Sheen roughness", "sheen_roughness", { min: 0, max: 1, step: 0.01 }),
+      field("Subsurface", "subsurface", { min: 0, max: 1, step: 0.01 }),
+      color("Scatter colour", "subsurface_color"),
+      field("Scatter radius (m)", "subsurface_radius", { min: 0, max: 0.1, step: 0.001, precision: 3 }),
+      field("Transmission", "transmission", { min: 0, max: 1, step: 0.01 }),
+      field("Anisotropy", "anisotropy", { min: -1, max: 1, step: 0.01 }),
+      field("IOR", "ior", { min: 1, max: 3, step: 0.01 }),
+      field("Specular", "specular", { min: 0, max: 1, step: 0.01 }),
+      row("Unlit", checkbox(slab.unlit, (v) => ((slab.unlit = v), send(true)))),
+    ], { open: on });
   }
 
   // ---- Lights ------------------------------------------------------------------------------

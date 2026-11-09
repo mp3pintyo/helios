@@ -39,6 +39,8 @@ pub enum EditOp {
     /// Places a content item (engine prefab, imported model, `mesh:NAME`) at a transform.
     Place { item: String, transform: Trs },
     Material { name: String, params: MaterialParams },
+    /// Creates or replaces a material graph (by name).
+    Graph { name: String, graph: helios_render::material_graph::MaterialGraph },
     Light { light: u32, def: LightDef },
     AddLight { def: LightDef },
     Environment { env: Environment },
@@ -144,6 +146,12 @@ impl Editor {
             }
             EditOp::Material { name, params } => {
                 next.materials.insert(name, params);
+            }
+            EditOp::Graph { name, graph } => {
+                if name.trim().is_empty() {
+                    return Err("a material graph needs a name".into());
+                }
+                next.graphs.insert(name, graph);
             }
             EditOp::Light { light, def } => self.edit_light(&mut next, world, light, |d| *d = def.clone(), false)?,
             EditOp::AddLight { def } => {

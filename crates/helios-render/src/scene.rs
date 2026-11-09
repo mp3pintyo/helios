@@ -307,6 +307,13 @@ pub struct Material {
     pub alpha_cutoff: Option<f32>,
     /// How surfaces move in [`Scene::wind`] (World Position Offset); static by default.
     pub wind: WindResponse,
+    /// The Substrate slab: clear coat, sheen, subsurface, transmission, IOR / specular colour,
+    /// anisotropy, unlit (opaque models; none by default).
+    pub slab: crate::substrate::Slab,
+    /// A material graph that evaluates the surface instead of the shading model's code (opaque
+    /// models); its parameters are overridden per material with
+    /// [`Scene::set_material_parameter`].
+    pub graph: Option<crate::material_graphs::MaterialGraphHandle>,
 }
 
 impl Default for Material {
@@ -334,6 +341,8 @@ impl Default for Material {
             layers: [None; 4],
             alpha_cutoff: None,
             wind: WindResponse::NONE,
+            slab: Default::default(),
+            graph: None,
         }
     }
 }
@@ -643,6 +652,8 @@ pub struct Scene {
     pub volumes: Vec<crate::volumes::VolumeEmitter>,
     /// GPU particle emitters (`particles.rs`).
     pub particles: Vec<crate::particles::ParticleEmitter>,
+    /// Material graphs and material instances' parameters (`material_graphs.rs`).
+    pub(crate) graphs: crate::material_graphs::GraphStore,
     pub(crate) geometry_version: u64,
     pub(crate) material_version: u64,
     /// Structural instance changes (instances added, shadow casting toggled): every consumer

@@ -7,6 +7,7 @@ license.workspace = true
 
 [dependencies]
 helios-geometry.workspace = true
+helios-material.workspace = true
 wgpu.workspace = true
 glam.workspace = true
 bytemuck.workspace = true

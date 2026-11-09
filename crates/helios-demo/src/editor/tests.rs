@@ -54,6 +54,41 @@ fn handle(f: &Fixture, i: u32) -> helios_render::InstanceHandle {
 }
 
 #[test]
+fn graphs_materials_and_instance_parameters() {
+    use helios_render::material_graph::presets;
+    let mut f = Fixture::new();
+    let mut editor = f.editor();
+    let stone = f.scene.find_material("stone").unwrap();
+    op(&mut editor, &mut f, json!({ "op": "graph", "name": "Lava", "graph": presets::lava() }));
+    let lava = f.scene.find_material_graph("Lava").expect("the graph is added to the scene");
+    op(&mut editor, &mut f, json!({ "op": "material", "name": "stone", "params": {
+        "graph": "Lava", "parameters": { "Glow Intensity": 30.0 }, "slab": { "clearcoat": 1.0 } } }));
+    let m = *f.scene.material(stone);
+    assert_eq!(m.graph, Some(lava));
+    assert_eq!(m.slab.clearcoat, 1.0);
+    assert_eq!(f.scene.material_parameter(stone, "Glow Intensity"), Some(helios_render::ParameterValue::Scalar(30.0)));
+    // Editing the graph replaces it in place: the material keeps it.
+    let mut edited = presets::lava();
+    edited.nodes.retain(|n| n.op != helios_render::material_graph::Op::Noise { scale: 0.9, octaves: 5 });
+    op(&mut editor, &mut f, json!({ "op": "graph", "name": "Lava", "graph": edited }));
+    assert!(!f.scene.material_graph_errors(lava).is_empty(), "the noise's links now dangle");
+    assert_eq!(f.scene.material(stone).graph, Some(lava));
+    // Undo twice: the graph compiles again, then the material is plain again.
+    assert!(editor.undo(&mut f.world()));
+    assert!(f.scene.material_graph_errors(lava).is_empty());
+    assert!(editor.undo(&mut f.world()));
+    assert_eq!(f.scene.material(stone).graph, None);
+    assert_eq!(f.scene.material_parameter(stone, "Glow Intensity"), None);
+    assert_eq!(f.scene.material(stone).slab.clearcoat, 0.0);
+    // Scene files keep graphs and material instances.
+    assert!(editor.redo(&mut f.world()));
+    let saved = editor.save(CameraDef { position: [0.0; 3], yaw_deg: 0.0, pitch_deg: 0.0, fov_deg: 60.0 });
+    let loaded = SceneDoc::parse(&saved.to_json()).unwrap();
+    assert_eq!(loaded.graphs["Lava"], presets::lava());
+    assert_eq!(loaded.materials["stone"].graph.as_deref(), Some("Lava"));
+}
+
+#[test]
 fn transforms_undo_and_redo() {
     let mut f = Fixture::new();
     let mut editor = f.editor();
