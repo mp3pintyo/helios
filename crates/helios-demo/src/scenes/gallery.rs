@@ -128,7 +128,7 @@ fn build_scene(detail: Detail) -> Scene {
     g.scene.add_instance(candle, wax, Mat4::from_translation(top + Vec3::new(-0.25, 0.0, 0.0)));
     let marble_slab = g.material(
         "marble",
-        Material { slab: Slab::subsurface(0.6, Vec3::new(1.0, 0.92, 0.85), 0.01), ..Material::textured(MaterialKind::Standard, marble, TextureMapping::ObjectTriplanar, 1.5) },
+        Material { slab: Slab::subsurface(0.7, Vec3::new(1.0, 0.92, 0.85), 0.012), ..Material::standard(Vec3::new(0.86, 0.85, 0.82), 0.22, 0.0) },
     );
     g.sphere(marble_slab, top + Vec3::new(0.32, 0.3, 0.1), Vec3::new(0.24, 0.3, 0.24));
     let flame = g.material("flame", Material { emissive: 40.0, ..Material::standard(Vec3::new(1.0, 0.62, 0.25), 0.5, 0.0) });

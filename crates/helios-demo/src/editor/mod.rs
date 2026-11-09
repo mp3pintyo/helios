@@ -16,6 +16,7 @@
 pub mod content;
 pub mod describe;
 pub mod doc;
+pub mod materials;
 pub mod ops;
 pub mod pcg;
 pub mod settings;
@@ -27,6 +28,7 @@ use helios_render::{InstanceHandle, Light, LightKind, Material, MaterialHandle, 
 
 use self::content::{Content, PrefabPart};
 use self::doc::*;
+pub use self::materials::with_params;
 
 /// What edits act on: the scene, the render settings and the demo's sun.
 pub struct World<'a> {
@@ -76,6 +78,9 @@ pub struct Editor {
     base_lights: Vec<Light>,
     /// Values before the first override, captured lazily (materials by name, settings by key).
     base_materials: HashMap<String, Material>,
+    /// The base scene's graphs and material parameter values the document overrides.
+    base_graphs: HashMap<String, helios_render::material_graph::MaterialGraph>,
+    base_parameters: HashMap<String, Vec<(String, helios_render::ParameterValue)>>,
     base_settings: HashMap<String, serde_json::Value>,
     base_environment: Option<Environment>,
     owners: Vec<Owner>,
@@ -119,6 +124,8 @@ impl Editor {
             base_instances,
             base_lights: scene.lights().to_vec(),
             base_materials: HashMap::new(),
+            base_graphs: HashMap::new(),
+            base_parameters: HashMap::new(),
             base_settings: HashMap::new(),
             base_environment: None,
             owners,
@@ -270,6 +277,7 @@ impl Editor {
     /// Applies every difference between the document and what the scene reflects.
     pub fn sync(&mut self, world: &mut World) {
         self.warnings.clear();
+        self.sync_graphs(world);
         self.sync_materials(world);
         self.sync_base_instances(world);
         self.sync_added(world);
@@ -309,7 +317,7 @@ impl Editor {
             let Some(handle) = self.material_handle(world.scene, &name) else { continue };
             let base = *self.base_materials.entry(name.clone()).or_insert_with(|| *world.scene.material(handle));
             let params = self.doc.materials.get(&name).cloned().unwrap_or_default();
-            world.scene.set_material(handle, with_params(base, &params));
+            self.apply_material(world.scene, &name, handle, base, &params);
         }
     }
 
@@ -608,21 +616,6 @@ impl Editor {
             .filter(|n| !n.is_empty())
             .unwrap_or_else(|| "engine/default".into());
         Some(vec![PrefabPart::new(scene.mesh_name(mesh), &material)])
-    }
-}
-
-/// A material with parameter overrides.
-pub fn with_params(base: Material, p: &MaterialParams) -> Material {
-    Material {
-        base_color: p.base_color.map_or(base.base_color, Vec3::from),
-        roughness: p.roughness.unwrap_or(base.roughness),
-        metallic: p.metallic.unwrap_or(base.metallic),
-        opacity: p.opacity.unwrap_or(base.opacity),
-        emissive: p.emissive.unwrap_or(base.emissive),
-        emissive_color: p.emissive_color.map_or(base.emissive_color, Vec3::from),
-        normal_strength: p.normal_strength.unwrap_or(base.normal_strength),
-        uv_scale: p.uv_scale.unwrap_or(base.uv_scale),
-        ..base
     }
 }
 

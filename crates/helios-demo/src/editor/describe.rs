@@ -5,7 +5,7 @@ use serde_json::{json, Value};
 
 use super::content::{self, MATERIALS};
 use super::doc::Trs;
-use super::{light_def, pcg, settings, Editor, Owner, World};
+use super::{light_def, materials, pcg, settings, Editor, Owner, World};
 
 fn kind_name(kind: MaterialKind) -> &'static str {
     match kind {
@@ -38,6 +38,7 @@ pub fn state(editor: &Editor, world: &World) -> Value {
         .map(|h| {
             let m = scene.material(h);
             let name = scene.material_name(h);
+            let (graph, parameters) = materials::graph_value(scene, h);
             json!({
                 "name": name,
                 "kind": kind_name(m.kind),
@@ -48,6 +49,9 @@ pub fn state(editor: &Editor, world: &World) -> Value {
                 "emissive": m.emissive,
                 "emissive_color": m.emissive_color.to_array(),
                 "edited": editor.doc.materials.contains_key(name),
+                "graph": graph,
+                "parameters": parameters,
+                "slab": materials::slab_value(m),
             })
         })
         .collect();
@@ -106,6 +110,7 @@ pub fn state(editor: &Editor, world: &World) -> Value {
         "base_instances": editor.base_instance_count(),
         "meshes": meshes,
         "materials": materials,
+        "graphs": materials::graphs_value(scene),
         "instances": { "mesh": mesh, "material": material, "visible": visible, "owner": owner, "owner_id": owner_id },
         "lights": lights,
         "pcg": volumes,

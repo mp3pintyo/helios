@@ -447,7 +447,10 @@ fn shade(@builtin(global_invocation_id) gid: vec3<u32>) {
             let nl = saturate(dot(n, ls.l));
             let wrap = select(0.0, 0.35, surface_flags == 1u); // foliage transmits
             // Slabs: wrapped subsurface diffuse and thin transmission reach behind the terminator.
-            let reach = select(nl + wrap, max(dot(n, ls.l) + sh.wrap, sh.transmission), substrate);
+            var reach = nl + wrap;
+            if substrate {
+                reach = max(dot(n, ls.l) + sh.wrap, sh.transmission);
+            }
             if reach <= 0.0 {
                 continue;
             }

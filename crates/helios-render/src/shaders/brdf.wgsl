@@ -166,7 +166,8 @@ fn shade_slab(s: Slab, c: MaterialSlab, n: vec3<f32>, roughness: f32, albedo: ve
     sh.f0 = mix(s.f0, albedo, metallic);
     sh.f90 = mix(c.f90, 1.0, metallic);
     if has_feature(s, SLAB_ANISOTROPY) && !has_feature(s, SLAB_CLEARCOAT) {
-        let t = normalize(s.tangent - sh.n * dot(sh.n, s.tangent) + vec3<f32>(1e-6, 0.0, 0.0));
+        let along = s.tangent - sh.n * dot(sh.n, s.tangent);
+        let t = select(basis(sh.n)[0], normalize(along), dot(along, along) > 1e-8);
         sh.anisotropy = s.anisotropy;
         sh.t = t;
         sh.b = cross(sh.n, t);

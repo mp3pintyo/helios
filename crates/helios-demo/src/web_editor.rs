@@ -49,6 +49,16 @@ pub fn helios_editor_state() -> String {
     with_state(|st| st.app.edit(|editor, world| describe::state(editor, world).to_string())).unwrap_or_default()
 }
 
+/// The material graph editor's palette: every node type (pins, defaults, properties) and the
+/// preset graphs (id, label, graph).
+#[wasm_bindgen(js_name = heliosMaterialNodes)]
+pub fn helios_material_nodes() -> String {
+    use helios_render::material_graph::{catalog, presets};
+    let presets: Vec<serde_json::Value> =
+        presets::PRESETS.iter().map(|(id, label)| serde_json::json!({ "id": id, "label": label, "graph": presets::preset(id) })).collect();
+    serde_json::json!({ "nodes": catalog(), "presets": presets }).to_string()
+}
+
 /// Increments whenever an edit changed the scene (cheap: poll it to refresh panels).
 #[wasm_bindgen(js_name = heliosEditorRevision)]
 pub fn helios_editor_revision() -> f64 {

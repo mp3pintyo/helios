@@ -99,7 +99,7 @@ fn renderer_config() -> helios_render::RendererConfig {
     helios_render::RendererConfig { texture_compression: query_param("texture-compression").as_deref() != Some("0"), ..Default::default() }
 }
 
-/// Scene selected with `?scene=valley|cathedral|forest|model`; `?gltf=URL` alone selects the model.
+/// Scene selected with `?scene=valley|cathedral|forest|gallery|model`; `?gltf=URL` alone selects the model.
 fn scene_from_url() -> SceneKind {
     match option_string("scene", "scene").and_then(|v| SceneKind::parse(&v)) {
         Some(kind) => kind,

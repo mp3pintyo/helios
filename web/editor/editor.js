@@ -14,6 +14,7 @@ import { Gizmo } from "./gizmo.js";
 import { createOutliner } from "./outliner.js";
 import { createDetails } from "./details.js";
 import { createContentBrowser } from "./content.js";
+import { createGraphEditor } from "./graph.js";
 
 export const DEFAULT_LIGHT = { shape: "point", position: [0, 0, 0], direction: [0, -1, 0], color: [1, 0.82, 0.62], intensity: 5, range: 12, source_radius: 0.05, cast_shadows: true, inner_deg: 25, outer_deg: 35, enabled: true };
 
@@ -72,6 +73,7 @@ class Editor {
     this.outliner.update();
     if (!keepDetails) this.details.render();
     this.content.update();
+    this.graphEditor.update();
     this.toolbarState();
     engine.heliosEditorSetSelection(new Uint32Array(this.selectedIds("i")));
     for (const w of this.state.warnings || []) this.status(w, "warn");
@@ -464,7 +466,7 @@ class Editor {
     this.undoButton = button("", () => this.undo(), { iconName: "undo", title: "Undo (Ctrl+Z)" });
     this.redoButton = button("", () => this.redo(), { iconName: "redo", title: "Redo (Ctrl+Y)" });
     this.sceneLabel = h("span", { class: "ed-scene-label" });
-    const scenes = select([["", "Switch scene…"], ["valley", "Valley"], ["cathedral", "Cathedral"], ["forest", "Forest"]], "", async (v) => {
+    const scenes = select([["", "Switch scene…"], ["valley", "Valley"], ["cathedral", "Cathedral"], ["forest", "Forest"], ["gallery", "Material gallery"]], "", async (v) => {
       if (v && confirm(`Load the ${v} scene? Unsaved edits are lost.`)) await this.newScene(v);
     });
     return h(
@@ -478,6 +480,7 @@ class Editor {
       h("div", { class: "ed-group" }, this.undoButton, this.redoButton),
       h("div", { class: "ed-group" }, Object.values(this.modeButtons), this.spaceButton),
       h("div", { class: "ed-group" }, gridGroup, angleGroup, scaleGroup),
+      h("div", { class: "ed-group" }, button("Material Graph", () => (this.graphEditor.visible ? this.graphEditor.close() : this.graphEditor.open()), { iconName: "material", title: "Material graph editor" })),
       h("div", { class: "ed-spacer" }),
       h("div", { class: "ed-group" }, this.sceneLabel, scenes),
       button("Play", () => toggleEditor(), { iconName: "play", cls: "ed-play", title: "Leave the editor (Tab)" }),
@@ -503,6 +506,8 @@ class Editor {
     this.outliner = createOutliner(this);
     this.details = createDetails(this);
     this.content = createContentBrowser(this);
+    this.graphEditor = createGraphEditor(this);
+    this.viewport.append(this.graphEditor.element);
     this.root = h("div", { class: "ed-root" },
       this.buildToolbar(),
       h("aside", { class: "ed-left" }, this.content.element),
