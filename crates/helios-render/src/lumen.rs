@@ -129,18 +129,18 @@ pub struct CardInputs<'a> {
 }
 
 /// Per-entry-point pipeline with its own (exact) bind group layout.
-struct Stage {
+pub(crate) struct Stage {
     layout: wgpu::BindGroupLayout,
-    pipeline: wgpu::ComputePipeline,
+    pub pipeline: wgpu::ComputePipeline,
 }
 
 impl Stage {
-    fn new(device: &wgpu::Device, module: &wgpu::ShaderModule, entry: &str, bindings: &[(u32, BindingType)]) -> Self {
+    pub fn new(device: &wgpu::Device, module: &wgpu::ShaderModule, entry: &str, bindings: &[(u32, BindingType)]) -> Self {
         let layout = bind_group_layout(device, entry, ShaderStages::COMPUTE, bindings);
         Self { pipeline: compute_pipeline(device, entry, module, entry, &layout, &[]), layout }
     }
 
-    fn group(&self, device: &wgpu::Device, entries: &[(u32, wgpu::BindingResource)]) -> wgpu::BindGroup {
+    pub fn group(&self, device: &wgpu::Device, entries: &[(u32, wgpu::BindingResource)]) -> wgpu::BindGroup {
         bind_group(device, "lumen", &self.layout, entries)
     }
 }
@@ -663,7 +663,7 @@ impl Lumen {
     }
 
     /// Records surface cache (cards and voxels) and radiance cache updates, the screen-probe
-    /// gather (into `targets.gi_raw`) and reflections.
+    /// gather (into `targets.gi_raw`; skipped when Lumen Lite gathers instead) and reflections.
     #[allow(clippy::too_many_arguments)]
     pub fn record(
         &mut self,
@@ -677,6 +677,7 @@ impl Lumen {
         lights: &crate::lights::LightCulling,
         exposure: &wgpu::Buffer,
         surfaces: &CardInputs,
+        screen_probes: bool,
     ) {
         let device = rec.device;
         let Some(gather) = &self.gather else { return };
@@ -760,8 +761,8 @@ impl Lumen {
                 pass.dispatch_workgroups(LIGHT_RES / 4, LIGHT_RES / 4, LIGHT_RES * SDF_LEVELS as u32 / 4);
                 pass.set_pipeline(&self.update_probes.pipeline);
                 pass.set_bind_group(0, &probes, &[]);
-                let count = PROBE_RES * PROBE_RES * PROBE_RES * 2 / PROBE_UPDATE_FRACTION;
-                pass.dispatch_workgroups(workgroups(count, 64), 1, 1);
+                // One workgroup (a thread per ray) per refreshed probe.
+                pass.dispatch_workgroups(PROBE_RES * PROBE_RES * PROBE_RES * 2 / PROBE_UPDATE_FRACTION, 1, 1);
             }
         }
         let lighting = &self.voxel_lighting[write];
@@ -846,32 +847,33 @@ impl Lumen {
             ],
         );
         let half = (targets.width.div_ceil(2), targets.height.div_ceil(2));
-        let mut pass = rec.compute_pass("lumen final gather");
-        pass.set_pipeline(&self.place_probes.pipeline);
-        pass.set_bind_group(0, &place, &[]);
-        pass.dispatch_workgroups(workgroups(grid.0, 8), workgroups(grid.1, 8), 1);
-        // Adaptive probes where the uniform ones miss a surface; the probe passes then run over
-        // the uniform grid plus the tile rows the adaptive probes filled (indirect).
-        // The cells of the internal resolution (the buffers are sized for the capacity).
-        let cells = (targets.width.div_ceil(ADAPTIVE_CELL), targets.height.div_ceil(ADAPTIVE_CELL));
-        for (stage, group) in [(&self.request_adaptive, &request_adaptive), (&self.place_adaptive, &place_adaptive)] {
-            pass.set_pipeline(&stage.pipeline);
-            pass.set_bind_group(0, group, &[]);
-            pass.dispatch_workgroups(workgroups(cells.0, 8), workgroups(cells.1, 8), 1);
+        if screen_probes {
+            let mut pass = rec.compute_pass("lumen final gather");
+            pass.set_pipeline(&self.place_probes.pipeline);
+            pass.set_bind_group(0, &place, &[]);
+            pass.dispatch_workgroups(workgroups(grid.0, 8), workgroups(grid.1, 8), 1);
+            // Adaptive probes where the uniform ones miss a surface; the probe passes then run over
+            // the uniform grid plus the tile rows the adaptive probes filled (indirect).
+            // The cells of the internal resolution (the buffers are sized for the capacity).
+            let cells = (targets.width.div_ceil(ADAPTIVE_CELL), targets.height.div_ceil(ADAPTIVE_CELL));
+            for (stage, group) in [(&self.request_adaptive, &request_adaptive), (&self.place_adaptive, &place_adaptive)] {
+                pass.set_pipeline(&stage.pipeline);
+                pass.set_bind_group(0, group, &[]);
+                pass.dispatch_workgroups(workgroups(cells.0, 8), workgroups(cells.1, 8), 1);
+            }
+            pass.set_pipeline(&self.finish_adaptive.pipeline);
+            pass.set_bind_group(0, &finish_adaptive, &[]);
+            pass.dispatch_workgroups(1, 1, 1);
+            pass.set_pipeline(&self.trace_probes.pipeline);
+            pass.set_bind_group(0, &trace, &[]);
+            pass.dispatch_workgroups_indirect(&gather.adaptive, 0);
+            pass.set_pipeline(&self.probe_sh.pipeline);
+            pass.set_bind_group(0, &sh, &[]);
+            pass.dispatch_workgroups_indirect(&gather.adaptive, 0);
+            pass.set_pipeline(&self.integrate.pipeline);
+            pass.set_bind_group(0, &integrate, &[]);
+            pass.dispatch_workgroups(workgroups(half.0, 8), workgroups(half.1, 8), 1);
         }
-        pass.set_pipeline(&self.finish_adaptive.pipeline);
-        pass.set_bind_group(0, &finish_adaptive, &[]);
-        pass.dispatch_workgroups(1, 1, 1);
-        pass.set_pipeline(&self.trace_probes.pipeline);
-        pass.set_bind_group(0, &trace, &[]);
-        pass.dispatch_workgroups_indirect(&gather.adaptive, 0);
-        pass.set_pipeline(&self.probe_sh.pipeline);
-        pass.set_bind_group(0, &sh, &[]);
-        pass.dispatch_workgroups_indirect(&gather.adaptive, 0);
-        pass.set_pipeline(&self.integrate.pipeline);
-        pass.set_bind_group(0, &integrate, &[]);
-        pass.dispatch_workgroups(workgroups(half.0, 8), workgroups(half.1, 8), 1);
-        drop(pass);
         let mut pass = rec.compute_pass("lumen reflections");
         pass.set_pipeline(&self.reflect_trace.pipeline);
         pass.set_bind_group(0, &reflect, &[]);
@@ -926,6 +928,37 @@ impl Lumen {
     pub fn near_field(&self) -> (&wgpu::Buffer, &wgpu::TextureView) {
         (&self.near_field.data, &self.near_field.atlas)
     }
+
+    /// What `trace_world_radiance` (lumen_trace.wgsl) reads, for Lumen Lite's probe traces.
+    pub(crate) fn trace_resources(&self) -> TraceResources<'_> {
+        TraceResources {
+            uniform: &self.uniform,
+            global_sdf: &self.global_sdf,
+            voxel_lighting: self.debug_views().1,
+            radiance_probes: &self.radiance_probes,
+            near_field: (&self.near_field.data, &self.near_field.atlas),
+            card_data: &self.cards.data,
+            card_pages: &self.cards.pages,
+            card_capture: &self.cards.capture,
+            card_lighting: &self.cards.lighting,
+            instance_ids: &self.instance_ids,
+        }
+    }
+}
+
+/// Lumen's tracing resources: the uniform, the global distance field, this frame's voxel
+/// lighting, the radiance cache, the near field and the mesh cards.
+pub(crate) struct TraceResources<'a> {
+    pub uniform: &'a wgpu::Buffer,
+    pub global_sdf: &'a wgpu::TextureView,
+    pub voxel_lighting: &'a wgpu::TextureView,
+    pub radiance_probes: &'a wgpu::Buffer,
+    pub near_field: (&'a wgpu::Buffer, &'a wgpu::TextureView),
+    pub card_data: &'a wgpu::Buffer,
+    pub card_pages: &'a wgpu::Buffer,
+    pub card_capture: &'a wgpu::TextureView,
+    pub card_lighting: &'a wgpu::TextureView,
+    pub instance_ids: &'a wgpu::TextureView,
 }
 
 /// Coverage of alpha-masked (mesh, material) pairs: the fraction of the surface that passes the

@@ -27,6 +27,7 @@
 #include "lumen_common.wgsl"
 #include "lumen_mesh_sdf.wgsl"
 #include "lumen_cards.wgsl"
+#include "lumen_trace.wgsl"
 
 const PROBE_TILE: u32 = 16u;
 const PROBE_TEXELS: u32 = 8u;
@@ -100,11 +101,6 @@ fn linear_depth_at(pixel: vec2<u32>) -> f32 {
     return frame.camera_position.w / max(textureLoad(depth_texture, pixel, 0).r, 1e-9);
 }
 
-fn sky_radiance(dir: vec3<f32>) -> vec3<f32> {
-    let sun = normalize(frame.sun_direction.xyz);
-    return sample_sky_view(sky_view_lut, lumen_sampler, frame.camera_position.xyz, dir, sun) * frame.sun_illuminance.rgb * lumen.sky_intensity;
-}
-
 // ---- Shared tracing --------------------------------------------------------------------------------
 
 struct ScreenHit {
@@ -147,61 +143,21 @@ fn trace_screen(origin: vec3<f32>, dir: vec3<f32>, max_distance: f32, steps: u32
     return hit;
 }
 
-struct Radiance {
-    color: vec3<f32>,
-    sky: f32,
-}
-
-// Screen trace, then mesh SDFs (near field), then the global distance field, then sky.
+// Screen trace, then the world (lumen_trace.wgsl): near field, global distance field, sky.
 fn trace_radiance(origin: vec3<f32>, dir: vec3<f32>, screen_distance: f32, jitter: f32) -> Radiance {
-    var r: Radiance;
-    r.sky = 0.0;
     let s = trace_screen(origin, dir, screen_distance, 12u, jitter);
     if s.found {
+        var r: Radiance;
         let motion = textureLoad(gbuffer_motion, vec2<u32>(s.uv * frame.viewport.xy), 0).xy;
         r.color = textureSampleLevel(previous_radiance, lumen_sampler, s.uv - motion, 0.0).rgb;
+        r.sky = 0.0;
+        r.t = s.t;
         return r;
     }
-    if lumen.sdf_enabled != 0u {
-        // Without a near field, start beyond the origin surface's own distance band (Lumen
-        // continues the ray where the screen trace left off).
-        let level = min(sdf_finest_level(origin), lumen.level_count - 1u);
-        var t_min = max(screen_distance * 0.35, lumen.sdf_levels[level].w * 2.5);
-        if mesh_sdf_covers(origin) {
-            // The near field resolves what the screen trace cannot see (occluded or off-screen
-            // geometry) down to the mesh SDFs' detail, right from the origin.
-            let near = trace_mesh_sdfs(origin, dir, 0.0, lumen.mesh_sdf_trace.x);
-            if near.hit {
-                let p = origin + dir * near.t;
-                r.color = card_surface_radiance(near_field_radiance(p, near.normal), near.instance, p, near.normal, 0.02);
-                return r;
-            }
-            t_min = lumen.mesh_sdf_trace.x;
-        }
-        let hit = trace_sdf(origin, dir, t_min, lumen.max_trace_distance);
-        if hit.hit {
-            // Sample the surface cache on the near side of the hit: lighting voxels are larger
-            // than thin walls, so this keeps the far (e.g. sunlit exterior) side from leaking in.
-            let lighting_voxel = lumen.sdf_levels[hit.level].w * SDF_RES / LIGHT_RES;
-            let voxels = voxel_radiance(hit.position - dir * lighting_voxel * 0.6, hit.level);
-            // The surface's cards, if any.
-            var n = sdf_normal(hit.position, hit.level);
-            n = select(n, -n, dot(n, dir) > 0.0);
-            r.color = card_field_radiance(voxels, hit.position, n, hit.level, lumen.sdf_levels[hit.level].w * 0.5);
-            return r;
-        }
-        if sdf_finest_level(origin + dir * lumen.max_trace_distance) < lumen.level_count {
-            // Ray ended inside the clipmap without hitting anything nearby: far-field estimate
-            // from the radiance cache.
-            let far = origin + dir * lumen.max_trace_distance;
-            r.color = mix(sky_radiance(dir), radiance_cache_irradiance(far, -dir, sky_radiance(dir)) / PI, 0.5);
-            r.sky = 0.5;
-            return r;
-        }
-    }
-    r.color = sky_radiance(dir);
-    r.sky = 1.0;
-    return r;
+    // Without a near field, start beyond the origin surface's own distance band (Lumen
+    // continues the ray where the screen trace left off).
+    let level = min(sdf_finest_level(origin), lumen.level_count - 1u);
+    return trace_world_radiance(origin, dir, max(screen_distance * 0.35, lumen.sdf_levels[level].w * 2.5));
 }
 
 // ---- Screen probes ---------------------------------------------------------------------------------

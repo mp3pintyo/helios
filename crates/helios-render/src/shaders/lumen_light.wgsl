@@ -140,11 +140,16 @@ fn fibonacci_direction(i: u32, n: u32, rotation: f32) -> vec3<f32> {
 
 const PROBE_RAYS: u32 = 32u;
 
-@compute @workgroup_size(64)
-fn update_probes(@builtin(global_invocation_id) gid: vec3<u32>) {
+// Per ray: L0, L1x, L1y, L1z radiance, summed over the workgroup.
+var<workgroup> probe_sh: array<array<vec3<f32>, 4>, PROBE_RAYS>;
+
+// One workgroup per refreshed probe, one thread per ray: a thread per probe tracing all its
+// rays in turn left most of the GPU idle (a few thousand long, serial threads).
+@compute @workgroup_size(32)
+fn update_probes(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) i: u32) {
     let total = PROBE_RES * PROBE_RES * PROBE_RES * PROBE_LEVELS;
     let fraction = lumen.probe_update_fraction;
-    let probe = gid.x * fraction + (lumen.frame % fraction);
+    let probe = wid.x * fraction + (lumen.frame % fraction);
     if probe >= total {
         return;
     }
@@ -161,26 +166,33 @@ fn update_probes(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     let rotation = f32(pcg_hash(lumen.frame * 7919u + probe) & 0xffffu) / 65536.0 * 6.2831853;
-    var l0 = vec3<f32>(0.0);
-    var l1x = vec3<f32>(0.0);
-    var l1y = vec3<f32>(0.0);
-    var l1z = vec3<f32>(0.0);
-    for (var i = 0u; i < PROBE_RAYS; i++) {
-        let dir = fibonacci_direction(i, PROBE_RAYS, rotation);
-        let hit = trace_sdf(position, dir, l.w * 0.1, lumen.max_trace_distance);
-        var radiance = sky_radiance(dir);
-        if hit.hit {
-            let lighting_voxel = lumen.sdf_levels[hit.level].w * SDF_RES / LIGHT_RES;
-            radiance = voxel_radiance(hit.position - dir * lighting_voxel * 0.6, hit.level);
-            var n = sdf_normal(hit.position, hit.level);
-            n = select(n, -n, dot(n, dir) > 0.0);
-            radiance = card_field_radiance(radiance, hit.position, n, hit.level, lumen.sdf_levels[hit.level].w * 0.5);
-        }
-        l0 += radiance * 0.282095;
-        l1x += radiance * 0.488603 * dir.x;
-        l1y += radiance * 0.488603 * dir.y;
-        l1z += radiance * 0.488603 * dir.z;
+    let dir = fibonacci_direction(i, PROBE_RAYS, rotation);
+    let hit = trace_sdf(position, dir, l.w * 0.1, lumen.max_trace_distance);
+    var radiance = sky_radiance(dir);
+    if hit.hit {
+        let lighting_voxel = lumen.sdf_levels[hit.level].w * SDF_RES / LIGHT_RES;
+        radiance = voxel_radiance(hit.position - dir * lighting_voxel * 0.6, hit.level);
+        var n = sdf_normal(hit.position, hit.level);
+        n = select(n, -n, dot(n, dir) > 0.0);
+        radiance = card_field_radiance(radiance, hit.position, n, hit.level, lumen.sdf_levels[hit.level].w * 0.5);
     }
+    probe_sh[i] = array<vec3<f32>, 4>(radiance * 0.282095, radiance * (0.488603 * dir.x), radiance * (0.488603 * dir.y), radiance * (0.488603 * dir.z));
+    workgroupBarrier();
+    for (var stride = PROBE_RAYS / 2u; stride > 0u; stride >>= 1u) {
+        if i < stride {
+            for (var k = 0u; k < 4u; k++) {
+                probe_sh[i][k] += probe_sh[i + stride][k];
+            }
+        }
+        workgroupBarrier();
+    }
+    if i != 0u {
+        return;
+    }
+    let l0 = probe_sh[0][0];
+    let l1x = probe_sh[0][1];
+    let l1y = probe_sh[0][2];
+    let l1z = probe_sh[0][3];
     let norm = 4.0 * PI / f32(PROBE_RAYS);
     let base = probe * 4u;
     let previous_valid = radiance_probes[base].w > 0.5;
