@@ -44,7 +44,24 @@ README text for the round-4 feature `dynamic-world` (branch of agent dynamic-wor
   chandeliers swing on their chains (pendulums with a 7 s period, 1–3° amplitude, each with its own phase and plane;
   their candle lights move along), the valley's gold sculpture turns once in 45 s and a log raft drifts, bobs and rolls
   on the lake; `0` pauses and resumes it.
-  MEASUREMENTS
+  Cost (high detail, 1600×900, RTX 3090 shared with up to six other agents: minima of 3 interleaved runs; per-pass
+  minima where whole-frame totals were swamped by the other agents). Cathedral, sun shadows only (local lights' shadow
+  maps off): GPU frame 5.88 ms at rest; moving 1 / 3 / 11 chandeliers (3 / 9 / 33 instances) 6.04 / 6.05 / 6.04 ms
+  with 7 / 32 / 57 sun pages re-drawing only their dynamic casters, versus 7.87 / 7.63 / 8.03 ms with the old full
+  invalidation (all 123 cached pages rendered in full, page raster 0.83–0.92 ms instead of 0.01–0.02 ms, and all 4
+  distance-field levels recomposed every frame, 0.93–0.98 ms, instead of ~24 bricks). With the chandeliers' candle
+  lights' shadow maps on, the lights moving with them dominate: 1 / 3 / 11 chandeliers render 96 / 314 / 520 pages
+  (88 / 288 / 440 dynamic-only), page raster 0.28 / 1.11 / 3.62 ms, versus 609 full pages and 8.6 / 7.9 / 13.5 ms
+  with full invalidation (138 k instead of 391 k (cluster, page) draws for all eleven); one uncontended pair: GPU
+  frame 14.7 ms moving vs 25.8 ms full invalidation. Valley (sculpture + raft): 5.00 ms at rest, 5.66 ms with both
+  moving (25 dynamic-only pages) vs 6.44 ms full; the sculpture alone 5.28 vs 7.89 ms. Distance-field bricks: without the
+  quarter-voxel threshold the chandeliers recomposed ~390 bricks a frame (0.42 ms), with it 24–120 (≤ 0.07 ms).
+  CPU: the moves cost a scan of the instances in frames where something moved plus a few record writes (full
+  invalidation also re-uploads the near field and mesh cards, which reset their allocations, every frame). Temporal
+  stability (valley, static camera, 16 frames, pixels changing by more than 24/255 outside the movers and their
+  shadow pages): 0.049 % moving vs 0.042 % paused (noise: water waves). Scenes without moving instances render as
+  before (forest and paused cathedral differ from the previous build only by run-to-run noise: max 9–10/255 either
+  way, no pixel over 8/255).
 
 ## "Status vs. Unreal Engine 5" — replace the dynamic-world parts
 
@@ -76,6 +93,8 @@ README text for the round-4 feature `dynamic-world` (branch of agent dynamic-wor
 * Debug view 16: *Invalidation* (`--view 16`, `V` cycle).
 * `--full-invalidation`: every move invalidates everything (the behaviour before per-instance invalidation).
 * `--movers N`: keep only the first N moving prop groups moving (cathedral: chandeliers; valley: sculpture, raft).
+* `--static-motion`: the props move as `Mobility::Static` instances (the one-off edit path: pages under them are
+  rendered in full).
 * Library: `Mobility`, `Scene::set_mobility`, `Scene::mobility`, `Renderer::dynamic_stats` (`DynamicStats`),
   `RenderSettings::per_instance_invalidation`.
 * Help line: `0 demo motion`.
