@@ -4,6 +4,12 @@
 //   compose     : per voxel, min over the brick's instances of their mesh SDF (sampled in
 //                 object space), plus the albedo of the closest surface for the voxel surface
 //                 cache and that instance's index for the mesh-card surface cache.
+//
+// Incremental updates (lumen_dynamic.rs) recompose only the bricks listed in `brick_list`, under
+// instances that moved:
+//   cull_listed    : per listed brick, its instances into the brick table of its list slot
+//   compose_listed : one workgroup per listed brick, recomposing its voxels; stamps the brick
+//                    for the invalidation debug view
 
 #include "common.wgsl"
 #include "lumen_types.wgsl"
@@ -30,7 +36,7 @@ struct ComposeParams {
     level: u32,
     candidate_count: u32,
     level_count: u32,
-    _pad: u32,
+    brick_count: u32,       // listed bricks (incremental updates)
 }
 
 const BRICK: u32 = 8u;
@@ -50,14 +56,18 @@ const BRICK_WORDS: u32 = 64u; // count + 63 instance indices
 // Closest instance per voxel, 16 bits each, two voxels along x per texel (sdf_instance_at in
 // lumen_cards.wgsl).
 @group(0) @binding(70) var out_instances: texture_storage_3d<r32uint, write>;
+// Incremental updates: the level's bricks to recompose, and per level and brick a stamp set when
+// it was recomposed this frame (cleared by lumen_dynamic.rs).
+@group(0) @binding(10) var<storage, read> brick_list: array<u32>;
+@group(0) @binding(11) var<storage, read_write> brick_stamps: array<u32>;
 
-@compute @workgroup_size(64)
-fn cull_bricks(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let b = gid.x;
-    if b >= BRICKS_PER_SIDE * BRICKS_PER_SIDE * BRICKS_PER_SIDE {
-        return;
-    }
-    let coords = vec3<u32>(b % BRICKS_PER_SIDE, (b / BRICKS_PER_SIDE) % BRICKS_PER_SIDE, b / (BRICKS_PER_SIDE * BRICKS_PER_SIDE));
+fn brick_coords(b: u32) -> vec3<u32> {
+    return vec3<u32>(b % BRICKS_PER_SIDE, (b / BRICKS_PER_SIDE) % BRICKS_PER_SIDE, b / (BRICKS_PER_SIDE * BRICKS_PER_SIDE));
+}
+
+// Lists the candidates touching brick `b` in brick table `table`.
+fn cull_brick(b: u32, table: u32) {
+    let coords = brick_coords(b);
     let voxel = params.origin.w;
     let band = voxel * SDF_BAND_VOXELS;
     let lo = params.origin.xyz + vec3<f32>(coords * BRICK) * voxel - band;
@@ -67,12 +77,26 @@ fn cull_bricks(@builtin(global_invocation_id) gid: vec3<u32>) {
         let inst = sdf_instances[candidates[i]];
         if all(inst.world_max.xyz >= lo) && all(inst.world_min.xyz <= hi) {
             if count < BRICK_WORDS - 1u {
-                bricks[b * BRICK_WORDS + 1u + count] = candidates[i];
+                bricks[table * BRICK_WORDS + 1u + count] = candidates[i];
                 count++;
             }
         }
     }
-    bricks[b * BRICK_WORDS] = count;
+    bricks[table * BRICK_WORDS] = count;
+}
+
+@compute @workgroup_size(64)
+fn cull_bricks(@builtin(global_invocation_id) gid: vec3<u32>) {
+    if gid.x < BRICKS_PER_SIDE * BRICKS_PER_SIDE * BRICKS_PER_SIDE {
+        cull_brick(gid.x, gid.x);
+    }
+}
+
+@compute @workgroup_size(64)
+fn cull_listed(@builtin(global_invocation_id) gid: vec3<u32>) {
+    if gid.x < params.brick_count {
+        cull_brick(brick_list[gid.x], gid.x);
+    }
 }
 
 fn sdf_byte(index: u32) -> f32 {
@@ -125,15 +149,14 @@ fn mesh_distance(desc: MeshSdfDesc, q: vec3<f32>) -> f32 {
     return max(mix(x0, x1, f.z) * band, outside);
 }
 
-// Composes voxel `gid`; returns the index of the closest instance with mesh cards (0xffff if
-// none or too large). Others - heightfield terrain, which is solid far below its surface and
-// often coincides with floors - would hide the cards of the surfaces they touch.
-fn compose_voxel(gid: vec3<u32>) -> u32 {
+// Composes voxel `gid` from the instances in brick table `b`; returns the index of the closest
+// instance with mesh cards (0xffff if none or too large). Others - heightfield terrain, which is
+// solid far below its surface and often coincides with floors - would hide the cards of the
+// surfaces they touch.
+fn compose_voxel(gid: vec3<u32>, b: u32) -> u32 {
     let voxel = params.origin.w;
     let band = voxel * SDF_BAND_VOXELS;
     let p = params.origin.xyz + (vec3<f32>(gid) + 0.5) * voxel;
-    let brick = gid / BRICK;
-    let b = brick.x + BRICKS_PER_SIDE * (brick.y + BRICKS_PER_SIDE * brick.z);
     let count = bricks[b * BRICK_WORDS];
     var best = band;
     var best_material = 0xffffffffu;
@@ -162,14 +185,36 @@ fn compose_voxel(gid: vec3<u32>) -> u32 {
     return best_instance;
 }
 
-// One thread per pair of voxels along x (they share an instance-index texel).
+// Composes the pair of voxels along x at `pair` (they share an instance-index texel) from brick
+// table `b`.
+fn compose_pair(pair: vec3<u32>, b: u32) {
+    let even = compose_voxel(vec3<u32>(pair.x * 2u, pair.yz), b);
+    let odd = compose_voxel(vec3<u32>(pair.x * 2u + 1u, pair.yz), b);
+    textureStore(out_instances, vec3<u32>(pair.xy, pair.z + params.level * u32(SDF_RES)), vec4<u32>(even | (odd << 16u), 0u, 0u, 0u));
+}
+
+// One thread per pair of voxels along x.
 @compute @workgroup_size(4, 4, 4)
 fn compose(@builtin(global_invocation_id) gid: vec3<u32>) {
     let res = u32(SDF_RES);
     if gid.x >= res / 2u || gid.y >= res || gid.z >= res {
         return;
     }
-    let even = compose_voxel(vec3<u32>(gid.x * 2u, gid.yz));
-    let odd = compose_voxel(vec3<u32>(gid.x * 2u + 1u, gid.yz));
-    textureStore(out_instances, vec3<u32>(gid.xy, gid.z + params.level * res), vec4<u32>(even | (odd << 16u), 0u, 0u, 0u));
+    let brick = vec3<u32>(gid.x * 2u, gid.y, gid.z) / BRICK;
+    compose_pair(gid, brick.x + BRICKS_PER_SIDE * (brick.y + BRICKS_PER_SIDE * brick.z));
+}
+
+// One workgroup per listed brick, one thread per pair of its voxels.
+@compute @workgroup_size(4, 8, 8)
+fn compose_listed(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>) {
+    let slot = wid.x;
+    if slot >= params.brick_count {
+        return;
+    }
+    let b = brick_list[slot];
+    let pair = brick_coords(b) * vec3<u32>(BRICK / 2u, BRICK, BRICK) + lid;
+    compose_pair(pair, slot);
+    if all(lid == vec3<u32>(0u)) {
+        brick_stamps[params.level * BRICKS_PER_SIDE * BRICKS_PER_SIDE * BRICKS_PER_SIDE + b] = 1u;
+    }
 }

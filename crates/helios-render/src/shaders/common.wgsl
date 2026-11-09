@@ -25,6 +25,7 @@ const DEBUG_SDF: u32 = 12u;
 const DEBUG_REFLECTIONS: u32 = 13u;
 const DEBUG_SURFACE_CARDS: u32 = 14u;
 const DEBUG_LOCAL_SHADOW_PAGES: u32 = 15u;
+const DEBUG_INVALIDATION: u32 = 16u;
 
 /// Debug views that show lit (exposed, tonemapped) radiance rather than raw attributes.
 fn is_lit_view(view: u32) -> bool {
@@ -44,6 +45,7 @@ const INVALID_PAGE: u32 = 0xffffffffu;
 const INSTANCE_CAST_SHADOW: u32 = 1u;
 const INSTANCE_ALPHA_MASKED: u32 = 2u;
 const INSTANCE_TRANSLUCENT: u32 = 4u;   // drawn by the forward translucency pass only
+const INSTANCE_MOVABLE: u32 = 8u;       // Mobility::Movable: a dynamic shadow caster
 
 // Visible cluster entry flags (entry.z).
 const CLUSTER_SOFTWARE: u32 = 1u;

@@ -51,6 +51,7 @@ use wgpu::{BindingType, ShaderStages};
 
 use crate::camera::frustum_planes;
 use crate::gpu_scene::GpuScene;
+use crate::motion::SceneChanges;
 use crate::passes::shading::LightingInputs;
 use crate::profiler::Recorder;
 use crate::scene::{MaterialKind, Scene};
@@ -191,6 +192,31 @@ struct Candidate {
     aabb: Aabb,
     /// The instance covers any pixel at most once.
     single_layer: bool,
+}
+
+impl Candidate {
+    /// Scene instance `index` with its decoded mesh and shading model, placed where it is now.
+    fn of(scene: &Scene, index: usize, shading: Shading, decoded: DecodedMesh) -> Self {
+        let instance = &scene.instances[index];
+        let mesh = &scene.meshes[instance.mesh.0 as usize];
+        let world = instance.transform;
+        let linear = glam::Mat3::from_mat4(world);
+        let scale = linear.x_axis.length().max(linear.y_axis.length()).max(linear.z_axis.length());
+        Self {
+            instance: index as u32,
+            shading,
+            range: decoded.range,
+            center: world.transform_point3(mesh.bounds.center),
+            radius: mesh.bounds.radius * scale,
+            aabb: Aabb::from_points(corners(&mesh.aabb).map(|p| world.transform_point3(p))),
+            // Water is drawn two-sided: a closed convex body would show twice.
+            single_layer: match decoded.shape {
+                Shape::Flat => true,
+                Shape::Convex => shading != Shading::Water,
+                Shape::Concave => false,
+            },
+        }
+    }
 }
 
 /// Indices into `candidates` of those intersecting the frustum, farthest first (painter's
@@ -411,6 +437,8 @@ pub struct Translucency {
     cpu_vertices: Vec<TranslucentVertex>,
     cpu_indices: Vec<u32>,
     candidates: Vec<Candidate>,
+    /// Per scene instance: its candidate (`u32::MAX`: none).
+    candidate_of: Vec<u32>,
     /// This frame's draws (indices into `candidates`), back to front.
     draws: Vec<usize>,
     /// Layers peeled this frame (0: one pass in per-instance order).
@@ -463,6 +491,7 @@ impl Translucency {
             cpu_vertices: Vec::new(),
             cpu_indices: Vec::new(),
             candidates: Vec::new(),
+            candidate_of: Vec::new(),
             draws: Vec::new(),
             peel_count: 0,
             refracting: false,
@@ -485,16 +514,17 @@ impl Translucency {
         &self.water
     }
 
-    /// Mirrors the scene's translucent instances and water bodies, culls and sorts them for this
-    /// frame's view, decides how many layers to peel (none with `layers` false) and sizes the
-    /// scene-colour copy and the layers. With `enabled` false nothing is drawn (the water uniform
-    /// is still written: lake beds need it).
+    /// Mirrors the scene's translucent instances and water bodies (moved ones in place), culls
+    /// and sorts them for this frame's view, decides how many layers to peel (none with `layers`
+    /// false) and sizes the scene-colour copy and the layers. With `enabled` false nothing is
+    /// drawn (the water uniform is still written: lake beds need it).
     #[allow(clippy::too_many_arguments)]
     pub fn update(
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         scene: &Scene,
+        changes: &SceneChanges,
         eye: Vec3,
         view_proj: &Mat4,
         size: (u32, u32),
@@ -502,9 +532,11 @@ impl Translucency {
         layers: bool,
     ) {
         let versions = (scene.geometry_version, scene.material_version, scene.instance_version);
-        if versions != self.versions {
+        if versions != self.versions || changes.structural {
             self.sync(device, scene, versions.0 != self.versions.0);
             self.versions = versions;
+        } else {
+            self.move_instances(scene, changes);
         }
         self.draws = if enabled { sort_back_to_front(&self.candidates, eye, &frustum_planes(view_proj)) } else { Vec::new() };
         self.camera_body = if enabled { self.water_bodies.iter().position(|b| b.contains(eye)) } else { None };
@@ -544,6 +576,22 @@ impl Translucency {
         }
     }
 
+    /// Re-places the candidates of moved instances (and the water bodies if one moved).
+    fn move_instances(&mut self, scene: &Scene, changes: &SceneChanges) {
+        let mut water_moved = false;
+        for m in changes.motions(scene) {
+            let Some(&c) = self.candidate_of.get(m.index as usize).filter(|&&c| c != u32::MAX) else { continue };
+            let c = &mut self.candidates[c as usize];
+            let mesh = scene.instances[m.index as usize].mesh.0 as usize;
+            let decoded = self.decoded[mesh].expect("candidates have decoded meshes");
+            *c = Candidate::of(scene, m.index as usize, c.shading, decoded);
+            water_moved |= c.shading == Shading::Water;
+        }
+        if water_moved {
+            self.water_bodies = water_bodies(scene);
+        }
+    }
+
     /// Rebuilds the candidate list; decodes meshes that translucent instances newly use.
     fn sync(&mut self, device: &wgpu::Device, scene: &Scene, geometry_changed: bool) {
         if geometry_changed {
@@ -555,6 +603,7 @@ impl Translucency {
         self.water_bodies = water_bodies(scene);
         let mut appended = false;
         self.candidates.clear();
+        self.candidate_of = vec![u32::MAX; scene.instances.len()];
         for (index, instance) in scene.instances.iter().enumerate() {
             let Some(shading) = scene.materials.get(instance.material.0 as usize).and_then(|m| Shading::of(m.kind)) else { continue };
             let mesh_index = instance.mesh.0 as usize;
@@ -579,23 +628,8 @@ impl Translucency {
             if decoded.range.index_count == 0 {
                 continue;
             }
-            let world = instance.transform;
-            let linear = glam::Mat3::from_mat4(world);
-            let scale = linear.x_axis.length().max(linear.y_axis.length()).max(linear.z_axis.length());
-            self.candidates.push(Candidate {
-                instance: index as u32,
-                shading,
-                range: decoded.range,
-                center: world.transform_point3(mesh.bounds.center),
-                radius: mesh.bounds.radius * scale,
-                aabb: Aabb::from_points(corners(&mesh.aabb).map(|p| world.transform_point3(p))),
-                // Water is drawn two-sided: a closed convex body would show twice.
-                single_layer: match decoded.shape {
-                    Shape::Flat => true,
-                    Shape::Convex => shading != Shading::Water,
-                    Shape::Concave => false,
-                },
-            });
+            self.candidate_of[index] = self.candidates.len() as u32;
+            self.candidates.push(Candidate::of(scene, index, shading, decoded));
         }
         if appended {
             use wgpu::util::DeviceExt;

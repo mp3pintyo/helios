@@ -126,7 +126,7 @@ pub fn build(model: &Model) -> SceneSetup {
     }
     scene.ground_albedo = Vec3::splat(0.25);
     scene.clouds = helios_render::CloudLayer::cumulus(0.35);
-    SceneSetup { scene, camera: frame_camera(size), sun: SUN, floor: |_, _| 0.0 }
+    SceneSetup { scene, camera: frame_camera(size), sun: SUN, floor: |_, _| 0.0, motion: Default::default() }
 }
 
 /// The renderer's texture coordinates for a glTF texture reference.

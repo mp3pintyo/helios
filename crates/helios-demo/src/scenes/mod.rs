@@ -75,6 +75,8 @@ pub struct SceneSetup {
     pub sun: (f32, f32, f32),
     /// Lowest allowed camera height at (x, z).
     pub floor: fn(f32, f32) -> f32,
+    /// Props that move every frame.
+    pub motion: crate::motion::DemoMotion,
 }
 
 /// Builds a scene. `SceneKind::Model` needs `model`; without one it falls back to the valley.

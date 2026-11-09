@@ -1,0 +1,57 @@
+[
+  {
+    "id": "dynamic-world",
+    "title": "Dinamikus világ: példányonkénti invalidálás (UE Movable mobilitás)",
+    "area": "Virtuális geometria",
+    "kind": "feature",
+    "summary": "Bármely példány minden képkockában mozoghat anélkül, hogy a körülötte lévő világot érvénytelenítené: a Scene::set_transform már nem a teljes jelenet verzióját lépteti, hanem a példányt bélyegzi meg, és minden alrendszer csak a mozgott példányokat frissíti. Új Mobility (Static / Movable) beállítás, mint az Unreal komponens-mobilitása; a temporális előzmények (TSR, GI) mozgáskor megmaradnak.",
+    "details": "A MotionTracker (motion.rs) képkockánként a példányverziókból állítja össze a mozgott példányok listáját az előző képkockai transzformációval (példányokat csak olyan képkockában vizsgál, amelyben valami mozgott). GPU-jelenet: csak a mozgott rekordok íródnak újra (egy write_buffer összefüggő futásonként; korábban minden mozgáskor az összes példány), prev_world = előző képkockai transzformáció, így a mozgásvektorok (TSR, mozgási elmosás) követik a merev mozgást; a megálló példány még egyszer íródik, hogy elveszítse a mozgását. Strukturális változás (új példány, árnyékvetés kapcsolása, új geometria) továbbra is mindent újraépít egyszer. Ha egy mozgás a jelenet befoglalóját (az árnyék-clipmap mélységtartományát) növeli, az az egyetlen eset, amely minden árnyéklapot érvénytelenít. Áttetszőség: a mozgott példányok jelöltjei (és mozgó vízfelület esetén a víztestek) helyben frissülnek, nincs listaújraépítés. RenderSettings::per_instance_invalidation = false (--full-invalidation) visszaadja a régi viselkedést összehasonlításhoz.",
+    "metrics": "METRICS_MAIN",
+    "showcase": "Katedrális, alapnézet: a 11 csillár lengése (0 billentyű: szünet / folytatás), a HUD 'moving (0)' sora mutatja a mozgott példányokat, árnyékvetőket és újraszámolt SDF-téglákat. Előtte/utána: --full-invalidation (régi viselkedés) vs. alapértelmezés GPU-ideje.",
+    "modules": ["crates/helios-render/src/motion.rs", "crates/helios-render/src/scene.rs", "crates/helios-render/src/gpu_scene.rs", "crates/helios-render/src/renderer.rs", "crates/helios-render/src/translucency.rs"]
+  },
+  {
+    "id": "dynamic-world-vsm",
+    "title": "Virtuális árnyéktérképek mozgó példányokhoz: dinamikus vetők, fény-térbeli téglalap-lábnyom",
+    "area": "Árnyékok",
+    "kind": "feature",
+    "summary": "A Movable példányok dinamikus árnyékvetők (mint a szélben mozgó növényzet): kimaradnak a lapok statikus rétegéből, így mozgásuk csak a dinamikus vetőket rajzoltatja újra a gyorsítótárazott statikus réteg fölé. Csak a régi és új helyzet alatti lapok frissülnek, a nap clipmapjében és a helyi fények lapjain egyaránt.",
+    "details": "A dynamic_caster (wind.wgsl) a szélerősség mellett a példány MOVABLE jelzőjét is figyeli; a culling, a lapkibontás és az invalidálás ugyanezt a döntést használja. A CPU a mozgások lábnyomát (vsm_motion.rs) közvetlenül az invalidálási listába írja, mielőtt a GPU hozzáfűzi a streaming és a szél lábnyomait: a nap számára a példány orientált befoglaló dobozának fény-térbeli téglalapja mindkét helyzetben (kis mozgásnál egy söpört lábnyom, ugrásnál pózonként egy), ami egy 12 m-es láncon függő csillárnál a befoglaló kör területének harmada; a helyi fények lapjaihoz a befoglaló gömbök. Movable vető alatt a lap csak a dinamikus vetőit rajzolja újra a statikus rétege fölé; elmozdított Static példány alatt a lap felszabadul és teljesen újrarajzolódik (egyszeri szerkesztés). Nyugalomban egy Movable példány semmibe sem kerül.",
+    "metrics": "METRICS_VSM",
+    "showcase": "Katedrális, 16-os debug nézet (Invalidation): a csillárok narancssárgák, a képkockában újrarajzolt naplapok pirosan sraffozottak — a csillárok fény-térbeli 'árnyékfolyosója'. A 0 billentyűvel megállítva a sraffozás eltűnik.",
+    "modules": ["crates/helios-render/src/vsm_motion.rs", "crates/helios-render/src/vsm.rs", "crates/helios-render/src/shaders/vsm_invalidate.wgsl", "crates/helios-render/src/shaders/wind.wgsl", "crates/helios-render/src/shaders/cull.wgsl", "crates/helios-render/src/shaders/vsm_expand.wgsl"]
+  },
+  {
+    "id": "dynamic-world-lumen",
+    "title": "Lumen mozgó példányokhoz: inkrementális globális távolságmező-téglák, közeli mező, kártyák",
+    "area": "Lumen / GI",
+    "kind": "feature",
+    "summary": "Mozgáskor a Lumen nem építi újra a jelenetét: a globális távolságmezőben csak a példány régi és új doboza alatti 8³-as téglák számolódnak újra, képkockánkénti kerettel. A Movable példányok bent maradnak a mezőben, mint az UE5-ben, a mesh-kártyák a példánnyal együtt mozognak.",
+    "details": "lumen_dynamic.rs: a példány SDF-rekordja (inverz transzformáció, világdoboz) helyben íródik újra; egy clipmap-szint akkor számolja újra a példány alatti téglákat (távolság, albedó, voxelenkénti legközelebbi kártya-példány), ha a példány valamely pontja a szint voxelméretének negyedével elmozdult onnan, ahol a szint utoljára komponálta — a 0,25 m-es szint néhány képkockánként követi a lengő csillárt, a 2 m-es ritkán. Két új átmenet (cull_listed, compose_listed a lumen_sdf.wgsl-ben, téglánként egy munkacsoport), legfeljebb 1024 tégla képkockánként (a többi sorban áll, a legfinomabb szint először); az újraépülő szint eldobja a sorát. Közeli mező: a rekord újraíródik, a 2 m-es cellás culling-rács csak cellahatár átlépésekor épül újra. Kártyák: a transzformáció a kártyarekordokban frissül (nincs újrafelvétel), a lapok elsőként világítódnak újra a kártyavilágítási keret felén belül. A voxel-felületgyorsítótár és a radiance cache folyamatosan frissül a módosult mezőből.",
+    "metrics": "METRICS_LUMEN",
+    "showcase": "Völgy: a forgó arany szobor és a tavon sodródó tutaj; 16-os debug nézetben a cián téglák mutatják az újraszámolt mezőt. Előtte/utána: --full-invalidation mellett mind a 4 szint minden képkockában újraépül (lumen sdf átmenet).",
+    "modules": ["crates/helios-render/src/lumen_dynamic.rs", "crates/helios-render/src/lumen.rs", "crates/helios-render/src/shaders/lumen_sdf.wgsl", "crates/helios-render/src/near_field.rs", "crates/helios-render/src/cards.rs"]
+  },
+  {
+    "id": "dynamic-world-demo",
+    "title": "Mozgó demó: lengő csillárok, forgó szobor, sodródó tutaj",
+    "area": "Jelenetek és demó",
+    "kind": "feature",
+    "summary": "A katedrális 11 csillára lassan leng a láncán (a gyertyafényekkel együtt), a völgy arany szobra 45 s alatt fordul körbe, és egy rönktutaj sodródik, ring és billeg a tavon. A 0 billentyű minden jelenetben szünetelteti és folytatja a mozgást.",
+    "details": "crates/helios-demo/src/motion.rs: Motion (inga a felfüggesztési pont körül, a 12 m-es lánchoz tartozó ~7 s-os periódussal és 1–3°-os amplitúdóval, csilláronként saját fázissal és síkkal; forgás függőleges tengely körül; úszás: lassú hurok, ringás, billegés) és DemoMotion (csoportonként példányok és fények, Movable mobilitással). A HUD 'moving (0)' sora mutatja a mozgott példányokat, árnyékvetőket, újraszámolt téglákat és újraépült szinteket. --movers N csak az első N csoportot mozgatja (méréshez).",
+    "metrics": "Katedrális: 33 mozgó példány (11 csillár × gyűrű, gyertyák, lángok) + 11 mozgó fény; völgy: 2 mozgó példány.",
+    "showcase": "Katedrális alapnézet: lengő csillárok és mozgó gyertyafény; völgy alapnézet: forgó szobor, tutaj a tó jobb alsó részén. 0 billentyű: szünet / folytatás.",
+    "modules": ["crates/helios-demo/src/motion.rs", "crates/helios-demo/src/scenes/cathedral.rs", "crates/helios-demo/src/scenes/valley.rs", "crates/helios-demo/src/app.rs", "crates/helios-demo/src/main.rs"]
+  },
+  {
+    "id": "dynamic-world-debug-view",
+    "title": "Invalidálási debug nézet (16) és mérőkapcsolók",
+    "area": "Platform és eszközök",
+    "kind": "tool",
+    "summary": "A 16-os debug nézet megmutatja, mit érvénytelenítettek a mozgások az adott képkockában: a Movable példányok narancssárgák, a frissen renderelt nap-árnyéklapok pirosan sraffozottak, az újraszámolt távolságmező-téglák ciánok a körvonalukkal. A --full-invalidation és --movers kapcsolók A/B mérést tesznek lehetővé.",
+    "details": "dynamic_debug.rs / dynamic_debug.wgsl: a világítási átmenet után saját compute átmenet írja felül a megvilágított pixeleket (napfény VSM-árnyékkal a G-bufferből); egy lap akkor piros, ha a bejegyzése az aktuális képkockában renderelődött (entries.w == frame), egy tégla akkor cián, ha a compose_listed az adott képkockában bélyegezte (szintenként és téglánként egy szó, amelyet a következő képkocka töröl). A narancssárga színezést a G-buffer feloldás adja a példány MOVABLE jelzője alapján.",
+    "metrics": "A nézet költsége ~0,2 ms 1600×900-on (csak a 16-os nézetben fut).",
+    "showcase": "Katedrális és völgy, --view 16 (vagy V-vel léptetve); 0 billentyűvel megállítva a piros és cián jelölések eltűnnek.",
+    "modules": ["crates/helios-render/src/dynamic_debug.rs", "crates/helios-render/src/shaders/dynamic_debug.wgsl", "crates/helios-render/src/shaders/gbuffer.wgsl"]
+  }
+]

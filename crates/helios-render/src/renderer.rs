@@ -31,6 +31,7 @@ use crate::clouds::{CloudInputs, Clouds};
 use crate::fog::{FogInputs, VolumetricFog};
 use crate::lights::{LightCulling, MAX_LIGHTS};
 use crate::lumen::{CardInputs, Lumen};
+use crate::motion::MotionTracker;
 use crate::resolution::{self, DynamicResolution, ResolutionController};
 use crate::rvt::RuntimeVirtualTexture;
 use crate::textures::TextureLibrary;
@@ -76,10 +77,13 @@ pub enum DebugView {
     /// Virtual shadow map pages of the local light that contributes most at each pixel: mip
     /// and page grid, shaded by its shadow.
     LocalShadowPages = 15,
+    /// What moving instances invalidated this frame: movable instances tinted, shadow pages
+    /// re-rendered and distance-field bricks recomposed (see `dynamic_debug.rs`).
+    Invalidation = 16,
 }
 
 impl DebugView {
-    pub const ALL: [DebugView; 16] = [
+    pub const ALL: [DebugView; 17] = [
         Self::Lit,
         Self::Clusters,
         Self::Triangles,
@@ -96,6 +100,7 @@ impl DebugView {
         Self::Reflections,
         Self::SurfaceCards,
         Self::LocalShadowPages,
+        Self::Invalidation,
     ];
 
     pub fn name(self) -> &'static str {
@@ -116,6 +121,7 @@ impl DebugView {
             Self::Reflections => "Reflections",
             Self::SurfaceCards => "Lumen surface cache (cards)",
             Self::LocalShadowPages => "Local light shadow pages (mips)",
+            Self::Invalidation => "Invalidation (movable, re-rendered shadow pages, recomposed SDF bricks)",
         }
     }
 
@@ -193,6 +199,11 @@ pub struct RenderSettings {
     pub screen_percentage: f32,
     /// Choose the screen percentage each frame to stay within a GPU time budget.
     pub dynamic_resolution: Option<DynamicResolution>,
+    /// Apply instance moves incrementally: only the moved instances' GPU records, the shadow
+    /// pages and distance-field bricks under their old and new bounds, their cards (see
+    /// `motion.rs`). Off: every move rebuilds the instance data and invalidates every cached
+    /// shadow page, as structural changes do (for comparisons).
+    pub per_instance_invalidation: bool,
 }
 
 impl Default for RenderSettings {
@@ -229,6 +240,7 @@ impl Default for RenderSettings {
             wind: true,
             screen_percentage: 100.0,
             dynamic_resolution: None,
+            per_instance_invalidation: true,
         }
     }
 }
@@ -289,12 +301,14 @@ pub struct Renderer {
     tonemap: TonemapPass,
     stats: StatsReadback,
     profiler: GpuProfiler,
+    /// This frame's instance moves.
+    motion: MotionTracker,
+    invalidation_debug: crate::dynamic_debug::InvalidationDebug,
     frame_index: u32,
     history_valid: bool,
     previous_view_proj: Option<Mat4>,
-    /// Geometry or instances changed this frame (invalidates cached shadow pages).
+    /// Geometry or instances changed structurally this frame (invalidates cached shadow pages).
     scene_changed: bool,
-    last_scene_versions: (u64, u64),
     time: f32,
     /// Multiplier on `lod_threshold` that keeps the main view's visible work inside the GPU
     /// list capacities (see [`Renderer::lod_budget_scale`]).
@@ -366,11 +380,12 @@ impl Renderer {
             tonemap: TonemapPass::new(device, output_format),
             stats: StatsReadback::new(device, 1 + MAX_LEVELS + 1, crate::vsm::PHYSICAL_PAGES, crate::vsm::DRAW_CAPACITY),
             profiler: GpuProfiler::new(device, queue),
+            motion: MotionTracker::default(),
+            invalidation_debug: crate::dynamic_debug::InvalidationDebug::new(device),
             frame_index: 0,
             history_valid: false,
             previous_view_proj: None,
             scene_changed: true,
-            last_scene_versions: (u64::MAX, u64::MAX),
             time: 0.0,
             lod_budget_scale: 1.0,
             percentage: 100.0,
@@ -458,6 +473,19 @@ impl Renderer {
         self.profiler.supported().then(|| self.profiler.total_ms())
     }
 
+    /// Moving instances in the latest frame: instances moved, distance-field bricks recomposed
+    /// and still queued.
+    pub fn dynamic_stats(&self) -> DynamicStats {
+        let field = self.lumen.dynamic_stats();
+        DynamicStats {
+            moved: self.motion.changes.moved.len() as u32,
+            shadow_moves: self.scene.shadow_moves().len() as u32,
+            bricks: field.bricks,
+            queued_bricks: field.queued,
+            sdf_levels: field.levels,
+        }
+    }
+
     /// Local lights rendered into virtual shadow maps this frame.
     pub fn shadow_mapped_lights(&self) -> usize {
         self.vsm.local.active_count()
@@ -496,14 +524,17 @@ impl Renderer {
     pub fn render(&mut self, scene: &Scene, camera: &Camera, output: &wgpu::TextureView, delta_time: f32) {
         self.update_resolution();
         let frame = self.frame_index + 1;
-        let versions = (scene.geometry_version, scene.instance_version);
-        if self.scene.sync(&self.device, &self.queue, scene, frame) {
+        self.motion.incremental = self.settings.per_instance_invalidation;
+        self.motion.update(scene);
+        let changes = &self.motion.changes;
+        let sync = self.scene.sync(&self.device, &self.queue, scene, changes, self.motion.previous(), frame);
+        if sync.geometry_changed {
             self.history_valid = false;
         }
-        // New geometry or instances invalidate every cached shadow page. Streaming changes only
-        // invalidate the pages under the affected instances (done by the VSM on the GPU).
-        self.scene_changed = versions != self.last_scene_versions;
-        self.last_scene_versions = versions;
+        // New geometry or instances invalidate every cached shadow page. Moves and streaming
+        // only invalidate the pages under the affected instances (done by the VSM on the GPU);
+        // growing scene bounds change the shadow clipmap's depth range.
+        self.scene_changed = changes.structural || sync.bounds_grew;
         self.textures.sync(&self.device, &self.queue, scene);
         self.material.sync(&self.device, self.scene.uv_extensions);
         self.rvt.sync(&self.device, &self.queue, scene, self.settings.virtual_texturing, frame);
@@ -513,7 +544,7 @@ impl Renderer {
         let size = (self.targets.width, self.targets.height);
         let capacity = self.targets.capacity;
         self.svt.sync(&self.device, &self.queue, scene, self.settings.texture_streaming, frame, size);
-        self.lumen.update(&self.device, &self.queue, scene, camera.position, frame, &self.targets);
+        self.lumen.update(&self.device, &self.queue, scene, &self.motion.changes, camera.position, frame, &self.targets);
         let view_proj = camera.projection(self.targets.output.0 as f32 / self.targets.output.1 as f32) * camera.view_matrix();
         let lights = scene.lights();
         self.vsm.assign_local_lights(&LocalFrame {
@@ -545,7 +576,8 @@ impl Renderer {
         // Translucent surfaces are drawn over lit radiance only, not over debug views.
         let translucency = self.settings.translucency && self.settings.debug_view == DebugView::Lit;
         let layers = self.settings.translucency_layers;
-        self.translucency.update(&self.device, &self.queue, scene, camera.position, &unjittered_view_proj, capacity, translucency, layers);
+        let changes = &self.motion.changes;
+        self.translucency.update(&self.device, &self.queue, scene, changes, camera.position, &unjittered_view_proj, capacity, translucency, layers);
 
         let device = self.device.clone();
         let mut rec = Recorder::new(&device, &mut self.profiler, "frame");
@@ -633,6 +665,9 @@ impl Renderer {
         self.lighting.record(&mut rec, &lighting);
         if self.settings.debug_view == DebugView::SurfaceCards {
             self.lumen.record_debug(&mut rec, &self.frame_uniform, &self.targets, &self.samplers);
+        }
+        if self.settings.debug_view == DebugView::Invalidation {
+            self.invalidation_debug.record(&mut rec, &self.frame_uniform, &self.targets, &self.vsm, &self.lumen, &self.samplers);
         }
         self.translucency.record(&mut rec, &lighting, &self.scene, &self.textures);
 
@@ -802,11 +837,28 @@ impl Renderer {
                 scene_changed: self.scene_changed,
                 geometry_streamed: self.scene.streaming_stats().changed(),
                 wind: wind_moves_shadows,
+                moves: self.scene.shadow_moves(),
+                instances_changed: !self.motion.changes.moved.is_empty(),
                 volume_distance: if self.fog.enabled() { scene.fog.distance } else { 0.0 },
             },
         );
         unjittered
     }
+}
+
+/// Moving instances in a frame ([`Renderer::dynamic_stats`]).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct DynamicStats {
+    /// Instances moved (or given another mobility).
+    pub moved: u32,
+    /// Shadow casters among them whose bounds moved (their shadow pages are invalidated).
+    pub shadow_moves: u32,
+    /// Global distance field bricks recomposed, and still queued for the next frames.
+    pub bricks: u32,
+    pub queued_bricks: u32,
+    /// Global distance field clipmap levels rebuilt in full (camera movement, structural
+    /// changes; with [`RenderSettings::per_instance_invalidation`] off, every move).
+    pub sdf_levels: u32,
 }
 
 /// A viewport uniform (width, height, 1 / width, 1 / height).

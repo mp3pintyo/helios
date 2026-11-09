@@ -18,6 +18,7 @@ use helios_render::{
 };
 
 use super::{add_baked, add_baked_with, Detail, SceneSetup};
+use crate::motion::{DemoMotion, Motion};
 
 const BAY: f32 = 7.0;
 const BAYS: usize = 11;
@@ -708,7 +709,7 @@ impl Builder<'_> {
     }
 }
 
-fn build_scene(detail: Detail) -> Scene {
+fn build_scene(detail: Detail) -> (Scene, DemoMotion) {
     let mut scene = Scene::new();
     scene.sun = Sun::from_angles(SUN.0, SUN.1, SUN.2);
     scene.ground_albedo = Vec3::new(0.2, 0.2, 0.16);
@@ -886,13 +887,23 @@ fn build_scene(detail: Detail) -> Scene {
     let ring = b.mesh("chandelier", &ring);
     let ring_wax = b.mesh("chandelier candles", &ring_wax);
     let ring_flames = b.mesh("chandelier flames", &ring_flames);
+    // The chandeliers swing gently on their 12 m chains (movable, light and all), each with its
+    // own phase and a slightly different plane.
+    let mut motion = DemoMotion::default();
     for i in 0..BAYS {
         let t = at(i as f32 * BAY + half, 0.0) * Mat4::from_translation(Vec3::Y * 7.5);
-        b.place(ring, m.iron, t);
-        b.place(ring_wax, m.wax, t);
-        let h = b.scene.add_instance(ring_flames, m.flame, t);
-        b.scene.set_cast_shadow(h, false);
-        b.scene.add_light(Light { source_radius: 1.4, ..Light::point(t.transform_point3(Vec3::Y * 0.35), warm, 3.0, 16.0) });
+        let parts = [b.scene.add_instance(ring, m.iron, t), b.scene.add_instance(ring_wax, m.wax, t), b.scene.add_instance(ring_flames, m.flame, t)];
+        b.scene.set_cast_shadow(parts[2], false);
+        let light = b.scene.add_light(Light { source_radius: 1.4, ..Light::point(t.transform_point3(Vec3::Y * 0.35), warm, 3.0, 16.0) });
+        let k = i as f32;
+        let swing = Motion::Pendulum {
+            pivot: t.transform_point3(Vec3::Y * 12.0),
+            axis: Vec3::new((k * 0.9).sin() * 0.4, 0.0, 1.0),
+            amplitude: 0.035 + 0.015 * (k * 1.7).cos(),
+            length: 12.0,
+            phase: k * 2.4,
+        };
+        motion.add(b.scene, swing, &parts, &[light]);
     }
     for p in lights {
         b.scene.add_light(Light { source_radius: 0.15, ..Light::point(p, warm, 0.6, 9.0) });
@@ -932,7 +943,7 @@ fn build_scene(detail: Detail) -> Scene {
         let clear = b.scene.add_material(Material { kind: MaterialKind::Glass, base_color: tint, roughness: 0.05, ..Default::default() });
         b.glass(small, clear, at(6.0, aisle + 0.9) * across * Mat4::from_rotation_y(angle));
     }
-    scene
+    (scene, motion)
 }
 
 fn initial_camera() -> Camera {
@@ -942,7 +953,8 @@ fn initial_camera() -> Camera {
 }
 
 pub fn build(detail: Detail) -> SceneSetup {
-    SceneSetup { scene: build_scene(detail), camera: initial_camera(), sun: SUN, floor: floor_height }
+    let (scene, motion) = build_scene(detail);
+    SceneSetup { scene, camera: initial_camera(), sun: SUN, floor: floor_height, motion }
 }
 
 #[cfg(test)]

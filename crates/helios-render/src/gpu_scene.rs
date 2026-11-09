@@ -7,9 +7,11 @@ use helios_geometry::{GpuCluster, GpuPage, INVALID_PAGE};
 
 use crate::alpha_mask::{AlphaMasks, MaterialMask};
 use crate::gpu_types::{instance_flags, material_flags, GpuInstance, GpuMaterial, GpuUvTransform};
-use crate::scene::{Instance, Material, Scene, TextureHandle, TextureSource, UvTransform};
+use crate::motion::SceneChanges;
+use crate::scene::{Instance, Material, Mobility, Scene, TextureHandle, TextureSource, UvTransform};
 use crate::streaming::{StreamingStats, Streamer};
 use crate::util::{storage_buffer, storage_buffer_init};
+use crate::vsm_motion::ShadowMove;
 use crate::wind::WindUniform;
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -50,8 +52,10 @@ pub struct GpuScene {
     /// World bounds of all instances.
     bounds: (glam::Vec3, glam::Vec3),
     streamer: Streamer,
-    previous_world: Vec<Mat4>,
-    instances_moving: bool,
+    /// CPU copy of the instance records: moves rewrite single records.
+    records: Vec<GpuInstance>,
+    /// Shadow casters moved by the last [`GpuScene::sync`].
+    shadow_moves: Vec<ShadowMove>,
     /// Some shadow-casting instance has a wind response.
     wind_shadows: bool,
     /// Scene versions last uploaded: geometry, materials, instances, textures.
@@ -78,8 +82,8 @@ impl GpuScene {
             meshes: Vec::new(),
             bounds: (glam::Vec3::ZERO, glam::Vec3::ZERO),
             streamer: Streamer::new(pool_words),
-            previous_world: Vec::new(),
-            instances_moving: false,
+            records: Vec::new(),
+            shadow_moves: Vec::new(),
             wind_shadows: false,
             versions: (u64::MAX, u64::MAX, u64::MAX, u64::MAX),
         }
@@ -103,9 +107,23 @@ impl GpuScene {
         queue.write_buffer(&self.wind, 0, bytemuck::bytes_of(wind));
     }
 
-    /// Uploads whatever changed since the previous call and streams pages. Returns true if
-    /// geometry was rebuilt.
-    pub fn sync(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, scene: &Scene, frame: u32) -> bool {
+    /// Shadow casters moved by the last [`GpuScene::sync`], with their old and new bounds.
+    pub(crate) fn shadow_moves(&self) -> &[ShadowMove] {
+        &self.shadow_moves
+    }
+
+    /// Uploads whatever changed since the previous call and streams pages. Moved instances
+    /// (`changes`, with every instance's previous-frame transform in `previous`) rewrite only
+    /// their own records.
+    pub(crate) fn sync(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        scene: &Scene,
+        changes: &SceneChanges,
+        previous: &[Mat4],
+        frame: u32,
+    ) -> SyncResult {
         let geometry_changed = self.versions.0 != scene.geometry_version;
         if geometry_changed {
             self.upload_geometry(device, queue, scene);
@@ -118,14 +136,68 @@ impl GpuScene {
             self.upload_materials(queue, scene);
         }
         let instances_changed = self.versions.2 != scene.instance_version;
-        if materials_changed || instances_changed || self.instances_moving {
-            self.upload_instances(device, queue, scene, geometry_changed);
+        self.shadow_moves.clear();
+        let mut bounds_grew = false;
+        if materials_changed || instances_changed || changes.structural {
+            // Last frame's transforms: `previous` already holds this frame's for the moved.
+            let mut prev_world = previous.to_vec();
+            for m in &changes.moved {
+                prev_world[m.index as usize] = m.previous;
+            }
+            let old = std::mem::take(&mut self.records);
+            self.upload_instances(device, queue, scene, &prev_world, geometry_changed);
+            // Moves still count when materials changed in the same frame (without a structural
+            // change, cached shadows are only invalidated under them).
+            if old.len() == self.records.len() {
+                for m in &changes.moved {
+                    let i = m.index as usize;
+                    self.shadow_moves.extend(shadow_move(scene, i, &old[i], &self.records[i]));
+                }
+            }
+        } else {
+            bounds_grew = self.update_instances(queue, scene, changes);
         }
         self.versions = (scene.geometry_version, scene.material_version, scene.instance_version, scene.texture_version);
 
         self.streamer.update(queue, &self.geometry, &scene.meshes, frame);
         self.streamer.upload_page_table(queue, &self.page_table);
-        geometry_changed
+        SyncResult { geometry_changed, bounds_grew }
+    }
+
+    /// Rewrites the records of the instances that moved (previous transform: last frame's) or
+    /// came to rest (previous transform: the current one). Returns true if the scene bounds grew.
+    fn update_instances(&mut self, queue: &wgpu::Queue, scene: &Scene, changes: &SceneChanges) -> bool {
+        let rest = changes.settled.iter().map(|&i| (i, scene.instances[i as usize].transform));
+        let mut updates: Vec<(u32, Mat4)> = changes.moved.iter().map(|m| (m.index, m.previous)).chain(rest).collect();
+        updates.sort_unstable_by_key(|u| u.0);
+        let (mut lo, mut hi) = self.bounds;
+        for &(index, prev_world) in &updates {
+            let i = index as usize;
+            let instance = &scene.instances[i];
+            let record = self.record(scene, instance, prev_world, self.records[i].visibility_offset);
+            self.shadow_moves.extend(shadow_move(scene, i, &self.records[i], &record));
+            lo = lo.min(record.bounds.truncate() - record.bounds.w);
+            hi = hi.max(record.bounds.truncate() + record.bounds.w);
+            self.records[i] = record;
+        }
+        // One write per run of consecutive records.
+        let mut k = 0;
+        while k < updates.len() {
+            let first = updates[k].0 as usize;
+            let mut end = first + 1;
+            while k + 1 < updates.len() && updates[k + 1].0 as usize == end {
+                k += 1;
+                end += 1;
+            }
+            let offset = (first * std::mem::size_of::<GpuInstance>()) as u64;
+            queue.write_buffer(&self.instances, offset, bytemuck::cast_slice(&self.records[first..end]));
+            k += 1;
+        }
+        // The shadow clipmap's depth range spans the scene bounds: they only grow between
+        // structural changes, and growing invalidates the cached shadow pages.
+        let grew = (lo, hi) != self.bounds;
+        self.bounds = (lo, hi);
+        grew
     }
 
     /// Records the feedback read-back (call at the end of the frame's command encoding).
@@ -189,47 +261,45 @@ impl GpuScene {
         queue.write_buffer(&self.materials, 0, bytemuck::cast_slice(&materials));
     }
 
-    fn upload_instances(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, scene: &Scene, layout_changed: bool) {
-        let count = scene.instances.len();
-        if self.previous_world.len() != count {
-            self.previous_world = scene.instances.iter().map(|i| i.transform).collect();
+    /// The GPU record of `instance` (moved from `prev_world` since the previous frame).
+    fn record(&self, scene: &Scene, instance: &Instance, prev_world: Mat4, visibility_offset: u32) -> GpuInstance {
+        let mesh = self.meshes[instance.mesh.0 as usize];
+        let world = instance.transform;
+        let linear = Mat3::from_mat4(world);
+        let max_scale = linear.x_axis.length().max(linear.y_axis.length()).max(linear.z_axis.length());
+        // Inverse transpose, rescaled so that uniform scale leaves normals unit length.
+        let normal = linear.inverse().transpose() * max_scale;
+        let center = world.transform_point3(mesh.bounds.truncate());
+        GpuInstance {
+            world,
+            prev_world,
+            normal_matrix: [normal.x_axis.extend(0.0), normal.y_axis.extend(0.0), normal.z_axis.extend(0.0)],
+            bounds: center.extend(mesh.bounds.w * max_scale),
+            page_offset: mesh.page_offset,
+            page_count: mesh.page_count,
+            cluster_offset: mesh.cluster_offset,
+            cluster_count: mesh.cluster_count,
+            material: instance.material.0,
+            visibility_offset,
+            max_scale,
+            flags: gpu_instance_flags(scene, instance, self.masks.material(instance.material.0 as usize).is_some()),
+            wind: instance_wind(scene, instance),
         }
+    }
 
+    fn upload_instances(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, scene: &Scene, prev_world: &[Mat4], layout_changed: bool) {
+        let count = scene.instances.len();
         // Visibility bits start after the page feedback words.
         let mut visibility_bits = self.page_count * 32;
-        let mut moving = false;
         let mut wind_shadows = false;
         let instances: Vec<GpuInstance> = scene
             .instances
             .iter()
-            .zip(&self.previous_world)
+            .zip(prev_world)
             .map(|(instance, &prev_world)| {
-                let mesh = self.meshes[instance.mesh.0 as usize];
-                let world = instance.transform;
-                moving |= world != prev_world;
-                let linear = Mat3::from_mat4(world);
-                let max_scale = linear.x_axis.length().max(linear.y_axis.length()).max(linear.z_axis.length());
-                // Inverse transpose, rescaled so that uniform scale leaves normals unit length.
-                let normal = linear.inverse().transpose() * max_scale;
-                let center = world.transform_point3(mesh.bounds.truncate());
-                let wind = instance_wind(scene, instance);
-                wind_shadows |= instance.cast_shadow && wind != Vec4::ZERO;
-                let gpu = GpuInstance {
-                    world,
-                    prev_world,
-                    normal_matrix: [normal.x_axis.extend(0.0), normal.y_axis.extend(0.0), normal.z_axis.extend(0.0)],
-                    bounds: center.extend(mesh.bounds.w * max_scale),
-                    page_offset: mesh.page_offset,
-                    page_count: mesh.page_count,
-                    cluster_offset: mesh.cluster_offset,
-                    cluster_count: mesh.cluster_count,
-                    material: instance.material.0,
-                    visibility_offset: visibility_bits,
-                    max_scale,
-                    flags: gpu_instance_flags(scene, instance, self.masks.material(instance.material.0 as usize).is_some()),
-                    wind,
-                };
-                visibility_bits += mesh.cluster_count;
+                let gpu = self.record(scene, instance, prev_world, visibility_bits);
+                wind_shadows |= instance.cast_shadow && gpu.wind != Vec4::ZERO;
+                visibility_bits += gpu.cluster_count;
                 gpu
             })
             .collect();
@@ -254,16 +324,37 @@ impl GpuScene {
         }
 
         self.instance_count = count as u32;
-        self.instances_moving = moving;
         self.wind_shadows = wind_shadows;
-        for (prev, instance) in self.previous_world.iter_mut().zip(&scene.instances) {
-            *prev = instance.transform;
-        }
+        self.records = instances;
     }
+}
+
+/// What [`GpuScene::sync`] changed.
+pub(crate) struct SyncResult {
+    /// Geometry was rebuilt.
+    pub geometry_changed: bool,
+    /// A moved instance extended the scene bounds.
+    pub bounds_grew: bool,
+}
+
+/// The shadow move of instance `index` from record `old` to `new`, if it casts shadows and moved.
+fn shadow_move(scene: &Scene, index: usize, old: &GpuInstance, new: &GpuInstance) -> Option<ShadowMove> {
+    let instance = &scene.instances[index];
+    (instance.cast_shadow && old.world != new.world).then(|| ShadowMove {
+        aabb: scene.meshes[instance.mesh.0 as usize].aabb,
+        old_world: old.world,
+        new_world: new.world,
+        old: old.bounds,
+        new: new.bounds,
+        movable: instance.mobility == Mobility::Movable,
+    })
 }
 
 fn gpu_instance_flags(scene: &Scene, instance: &Instance, alpha_masked: bool) -> u32 {
     let mut flags = if instance.cast_shadow { instance_flags::CAST_SHADOW } else { 0 };
+    if instance.mobility == Mobility::Movable {
+        flags |= instance_flags::MOVABLE;
+    }
     if alpha_masked {
         flags |= instance_flags::ALPHA_MASKED;
     }

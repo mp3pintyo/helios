@@ -448,12 +448,34 @@ impl Light {
     }
 }
 
+/// Whether an instance may move, as UE's component mobility.
+///
+/// Every instance can be moved with [`Scene::set_transform`]; the renderer always updates only
+/// what the move touched (the instance's GPU record, the shadow pages and distance-field bricks
+/// under its old and new bounds, its mesh cards). Mobility decides *how* the cached shadows treat
+/// it: a [`Mobility::Static`] instance is baked into the static layer of the shadow pages it
+/// covers, so moving it re-renders those pages in full (a one-off edit); a [`Mobility::Movable`]
+/// instance is a *dynamic caster* that stays out of the static layers, so its moves only redraw
+/// the dynamic casters of the pages under it, over their cached static layer.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Mobility {
+    /// Placed once (it may still be moved occasionally, e.g. by an editor).
+    #[default]
+    Static,
+    /// Moves often (animated props, physics, vehicles).
+    Movable,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Instance {
     pub mesh: MeshHandle,
     pub material: MaterialHandle,
     pub transform: Mat4,
     pub cast_shadow: bool,
+    pub mobility: Mobility,
+    /// Scene version of the last change of `transform` or `mobility` (see
+    /// [`Scene::changed_instances`]).
+    pub version: u64,
 }
 
 /// A layer of volumetric cumulus clouds (rendered by `clouds.rs`).
@@ -600,8 +622,12 @@ pub struct Scene {
     pub wind: Wind,
     pub(crate) geometry_version: u64,
     pub(crate) material_version: u64,
+    /// Structural instance changes (instances added, shadow casting toggled): every consumer
+    /// rebuilds its instance data. Moves don't change it ([`Scene::set_transform`]).
     pub(crate) instance_version: u64,
     pub(crate) texture_version: u64,
+    /// The latest [`Instance::version`]: some instance moved or changed mobility after it.
+    pub(crate) transform_version: u64,
 }
 
 /// Versions come from one process-wide counter, so two different scenes never share a version
@@ -620,6 +646,7 @@ impl Scene {
             material_version: version,
             instance_version: version,
             texture_version: version,
+            transform_version: version,
             ..Default::default()
         }
     }
@@ -710,8 +737,12 @@ impl Scene {
         self.material_version = next_version();
     }
 
+    /// Adds a [`Mobility::Static`] instance. Adding instances is a structural change: the
+    /// renderer rebuilds its instance data (GPU records, distance-field clipmaps, mesh cards,
+    /// cached shadow pages) once, unlike moves.
     pub fn add_instance(&mut self, mesh: MeshHandle, material: MaterialHandle, transform: Mat4) -> InstanceHandle {
-        self.instances.push(Instance { mesh, material, transform, cast_shadow: true });
+        // Not a move: a new instance is part of the structural change.
+        self.instances.push(Instance { mesh, material, transform, cast_shadow: true, mobility: Mobility::Static, version: 0 });
         self.instance_version = next_version();
         InstanceHandle(self.instances.len() as u32 - 1)
     }
@@ -723,13 +754,44 @@ impl Scene {
         self.instance_version = next_version();
     }
 
+    /// Moves an instance. Only what the move touches is updated (see [`Mobility`]); temporal
+    /// history is kept and motion vectors follow the instance.
     pub fn set_transform(&mut self, handle: InstanceHandle, transform: Mat4) {
-        self.instances[handle.0 as usize].transform = transform;
-        self.instance_version = next_version();
+        let instance = &mut self.instances[handle.0 as usize];
+        if instance.transform != transform {
+            instance.transform = transform;
+            self.touch(handle);
+        }
     }
 
     pub fn transform(&self, handle: InstanceHandle) -> Mat4 {
         self.instances[handle.0 as usize].transform
+    }
+
+    /// Declares whether an instance moves often (see [`Mobility`]).
+    pub fn set_mobility(&mut self, handle: InstanceHandle, mobility: Mobility) {
+        let instance = &mut self.instances[handle.0 as usize];
+        if instance.mobility != mobility {
+            instance.mobility = mobility;
+            self.touch(handle);
+        }
+    }
+
+    pub fn mobility(&self, handle: InstanceHandle) -> Mobility {
+        self.instances[handle.0 as usize].mobility
+    }
+
+    fn touch(&mut self, handle: InstanceHandle) {
+        let version = next_version();
+        self.instances[handle.0 as usize].version = version;
+        self.transform_version = version;
+    }
+
+    /// Indices of the instances moved (or given another mobility) after scene version `since`,
+    /// in index order (nothing is scanned unless some instance changed since).
+    pub(crate) fn changed_instances(&self, since: u64) -> impl Iterator<Item = usize> + '_ {
+        let any = self.transform_version > since;
+        self.instances.iter().enumerate().filter(move |(_, i)| any && i.version > since).map(|(index, _)| index)
     }
 
     pub fn mesh(&self, handle: MeshHandle) -> &VirtualMesh {

@@ -6,6 +6,7 @@ use glam::{Vec2, Vec3};
 use helios_render::{Camera, DebugView, DynamicResolution, Renderer, RendererConfig, Scene};
 
 use crate::mesh_store::{Library, MeshStore};
+use crate::motion::DemoMotion;
 use crate::scenes::model::Model;
 use crate::scenes::{self, Detail, SceneKind, SceneSetup};
 
@@ -35,6 +36,8 @@ pub struct DemoApp {
     model: Option<Model>,
     initial_camera: Camera,
     floor: fn(f32, f32) -> f32,
+    /// The scene's moving props (`Digit0` pauses them).
+    pub motion: DemoMotion,
     sun_intensity: f32,
     speed: f32,
     sun_azimuth: f32,
@@ -58,7 +61,7 @@ pub struct DemoApp {
 const SCREEN_PERCENTAGES: [f32; 4] = [50.0, 67.0, 75.0, 100.0];
 
 pub const HELP: &str = "WASD/QE fly · drag to look · wheel speed · Shift fast\n\
-N next scene · V debug view · G GI · H shadows · 1 local light shadow maps · [ ] screen percentage (50/67/75/100 %) · \\ dynamic resolution · T TAA · O occlusion · K software raster · I texture streaming · F fog · C clouds · U translucency · / translucency layers · L wind · M motion blur · B depth of field · ` local exposure · Z/X zoom · , . LOD error · ←→↑↓ sun · P animate sun · J day/night cycle · Y camera tour · R reset";
+N next scene · 0 demo motion · V debug view · G GI · H shadows · 1 local light shadow maps · [ ] screen percentage (50/67/75/100 %) · \\ dynamic resolution · T TAA · O occlusion · K software raster · I texture streaming · F fog · C clouds · U translucency · / translucency layers · L wind · M motion blur · B depth of field · ` local exposure · Z/X zoom · , . LOD error · ←→↑↓ sun · P animate sun · J day/night cycle · Y camera tour · R reset";
 
 impl DemoApp {
     pub fn new(
@@ -112,6 +115,7 @@ impl DemoApp {
             detail,
             model,
             floor: setup.floor,
+            motion: setup.motion,
             sun_intensity: setup.sun.2,
             speed: 8.0,
             sun_azimuth: setup.sun.0,
@@ -136,6 +140,10 @@ impl DemoApp {
         self.camera = setup.camera;
         self.initial_camera = setup.camera;
         self.floor = setup.floor;
+        // A new scene's props start moving or paused as the previous ones were.
+        let enabled = self.motion.enabled;
+        self.motion = setup.motion;
+        self.motion.enabled = enabled;
         self.sun_azimuth = setup.sun.0;
         self.sun_elevation = setup.sun.1;
         self.sun_intensity = setup.sun.2;
@@ -220,6 +228,8 @@ impl DemoApp {
             // All letters are taken: 1 toggles the local lights' virtual shadow maps (off: their
             // distance-field shadows); 2–9 pick debug views.
             "Digit1" => s.local_light_shadow_maps = !s.local_light_shadow_maps,
+            // 0 pauses and resumes the scene's moving props.
+            "Digit0" => self.motion.enabled = !self.motion.enabled,
             code if code.starts_with("Digit") => {
                 if let Some(index) = code[5..].parse::<usize>().ok().and_then(|d| d.checked_sub(1)) {
                     if let Some(&view) = DebugView::ALL.get(index) {
@@ -293,6 +303,7 @@ impl DemoApp {
         }
         self.sun_elevation = self.sun_elevation.clamp(-1.2, 1.5);
         self.scene.set_time_of_day(self.sun_azimuth, self.sun_elevation, self.sun_intensity);
+        self.motion.update(&mut self.scene, dt);
         // Night stays dark: exposure adapts, but not all the way to daylight brightness.
         self.renderer.settings.exposure_compensation = self.day_exposure - 1.6 * Scene::night_factor(self.sun_elevation);
     }
@@ -376,6 +387,19 @@ impl DemoApp {
             st.shadow_page_overflow,
             self.renderer.shadow_mapped_lights(),
         ));
+        if self.motion.instance_count() > 0 {
+            let d = self.renderer.dynamic_stats();
+            text.push_str(&format!(
+                "\nmoving (0): {} props {} · {} instances moved, {} shadow casters · distance field: {} bricks recomposed, {} queued, {} levels rebuilt",
+                self.motion.instance_count(),
+                if self.motion.enabled { "moving" } else { "paused" },
+                d.moved,
+                d.shadow_moves,
+                d.bricks,
+                d.queued_bricks,
+                d.sdf_levels,
+            ));
+        }
         let tex = self.renderer.texture_streaming_stats();
         if tex.layers > 0 {
             text.push_str(&format!(

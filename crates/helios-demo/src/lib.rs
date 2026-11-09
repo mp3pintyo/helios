@@ -2,6 +2,7 @@
 
 pub mod app;
 pub mod mesh_store;
+pub mod motion;
 pub mod scenes;
 pub mod tour;
 

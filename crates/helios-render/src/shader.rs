@@ -10,6 +10,7 @@ const SOURCES: &[(&str, &str)] = &[
     ("common.wgsl", include_str!("shaders/common.wgsl")),
     ("cull.wgsl", include_str!("shaders/cull.wgsl")),
     ("cull_args.wgsl", include_str!("shaders/cull_args.wgsl")),
+    ("dynamic_debug.wgsl", include_str!("shaders/dynamic_debug.wgsl")),
     ("exposure.wgsl", include_str!("shaders/exposure.wgsl")),
     ("fog.wgsl", include_str!("shaders/fog.wgsl")),
     ("fog_common.wgsl", include_str!("shaders/fog_common.wgsl")),

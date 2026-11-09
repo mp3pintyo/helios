@@ -95,10 +95,11 @@ fn pack_atlas(sizes: &[[u32; 3]], side: u32) -> AtlasLayout {
     AtlasLayout { offsets, size }
 }
 
-/// One near-field instance: mesh index, transform, surface-cache index and coverage (the solid
-/// fraction of its surface: 1 unless alpha-masked).
+/// One near-field instance: scene instance and mesh index, transform, surface-cache index and
+/// coverage (the solid fraction of its surface: 1 unless alpha-masked).
 #[derive(Clone, Copy, Debug)]
 struct NearInstance {
+    index: usize,
     mesh: usize,
     world: Mat4,
     card: u32,
@@ -174,6 +175,10 @@ struct NearFieldData {
     words: Vec<u32>,
     atlas: AtlasLayout,
     atlas_voxels: Vec<u8>,
+    /// Per record: its instance, where its field lives (atlas offset, heightfield word) and its
+    /// bounds.
+    instances: Vec<NearInstance>,
+    placements: Vec<([u32; 3], u32)>,
     bounds: Vec<(Vec3, Vec3)>,
 }
 
@@ -220,13 +225,24 @@ fn build_data(meshes: &[Option<&MeshSdf>], instances: &[NearInstance]) -> NearFi
     words.resize(words.len().next_multiple_of(4), 0);
 
     let mut bounds = Vec::with_capacity(instances.len());
+    let mut placements = Vec::with_capacity(instances.len());
     for (i, instance) in instances.iter().enumerate() {
         let m = instance.mesh;
         let (record, b) = instance_record(meshes[m].unwrap(), instance, atlas_slot[m], heightfield_word[m]);
         words[i * RECORD_WORDS..(i + 1) * RECORD_WORDS].copy_from_slice(&record);
         bounds.push(b);
+        placements.push((atlas_slot[m], heightfield_word[m]));
     }
-    NearFieldData { words, atlas, atlas_voxels, bounds }
+    NearFieldData { words, atlas, atlas_voxels, instances, placements, bounds }
+}
+
+/// The grid cells (inclusive range, clamped to the grid) whose lists include an instance with
+/// world bounds `(lo, hi)` (see `build_grid`).
+fn cell_range((lo, hi): (Vec3, Vec3), origin: IVec3) -> (IVec3, IVec3) {
+    let base = origin.as_vec3() * CELL_SIZE;
+    let a = ((lo - CELL_REACH - base) / CELL_SIZE).floor().as_ivec3().max(IVec3::ZERO);
+    let b = ((hi + CELL_REACH - base) / CELL_SIZE).floor().as_ivec3().min(GRID_DIMS - 1);
+    (a, b)
 }
 
 /// Grid origin (in cells) for a camera position, snapped so the grid moves every GRID_SNAP cells.
@@ -243,9 +259,8 @@ fn build_grid(bounds: &[(Vec3, Vec3)], origin: IVec3) -> Vec<u32> {
     let cell_count = (dims.x * dims.y * dims.z) as usize;
     let base = origin.as_vec3() * CELL_SIZE;
     let mut lists: Vec<Vec<u32>> = vec![Vec::new(); cell_count];
-    for (i, (lo, hi)) in bounds.iter().enumerate() {
-        let a = ((*lo - CELL_REACH - base) / CELL_SIZE).floor().as_ivec3().max(IVec3::ZERO);
-        let b = ((*hi + CELL_REACH - base) / CELL_SIZE).floor().as_ivec3().min(dims - 1);
+    for (i, &bounds) in bounds.iter().enumerate() {
+        let (a, b) = cell_range(bounds, origin);
         for z in a.z..=b.z {
             for y in a.y..=b.y {
                 for x in a.x..=b.x {
@@ -283,7 +298,11 @@ pub struct NearField {
     pub atlas: wgpu::TextureView,
     /// The scene part of `data` (records + heights).
     scene_words: Vec<u32>,
+    instances: Vec<NearInstance>,
+    placements: Vec<([u32; 3], u32)>,
     bounds: Vec<(Vec3, Vec3)>,
+    /// Per scene instance: its record (`u32::MAX`: none).
+    record_of: Vec<u32>,
     /// u32 words `data` holds.
     capacity: usize,
     grid: Option<IVec3>,
@@ -308,7 +327,10 @@ impl NearField {
             data: storage_buffer(device, "mesh sdf data", 16, wgpu::BufferUsages::empty()),
             atlas: atlas_texture(device, [1, 1, 1]).create_view(&Default::default()),
             scene_words: Vec::new(),
+            instances: Vec::new(),
+            placements: Vec::new(),
             bounds: Vec::new(),
+            record_of: Vec::new(),
             capacity: 4,
             grid: None,
         }
@@ -325,8 +347,9 @@ impl NearField {
             .instances
             .iter()
             .zip(card_instances.iter().zip(coverage))
-            .filter(|(i, (&card, _))| i.cast_shadow && card != u32::MAX)
-            .map(|(i, (&card, &coverage))| NearInstance { mesh: i.mesh.0 as usize, world: i.transform, card, coverage })
+            .enumerate()
+            .filter(|(_, (i, (&card, _)))| i.cast_shadow && card != u32::MAX)
+            .map(|(index, (i, (&card, &coverage)))| NearInstance { index, mesh: i.mesh.0 as usize, world: i.transform, card, coverage })
             .collect();
         let data = build_data(&meshes, &instances);
         let size = data.atlas.size;
@@ -345,10 +368,41 @@ impl NearField {
             data.atlas.size[1],
             data.atlas.size[2]
         );
+        self.record_of = vec![u32::MAX; scene.instances.len()];
+        for (r, instance) in data.instances.iter().enumerate() {
+            self.record_of[instance.index] = r as u32;
+        }
         self.scene_words = data.words;
+        self.instances = data.instances;
+        self.placements = data.placements;
         self.bounds = data.bounds;
         self.capacity = 0;
         self.grid = None;
+    }
+
+    /// Re-places the records of moved scene instances `moved` (their atlas slots stay); the
+    /// culling grid is rebuilt only if one crossed into other cells.
+    pub fn move_instances(&mut self, queue: &wgpu::Queue, scene: &Scene, moved: impl Iterator<Item = usize>) {
+        for i in moved {
+            let Some(&r) = self.record_of.get(i).filter(|&&r| r != u32::MAX) else { continue };
+            let r = r as usize;
+            let instance = &mut self.instances[r];
+            instance.world = scene.instances[i].transform;
+            let Some(sdf) = scene.meshes[instance.mesh].sdf.as_ref() else { continue };
+            let (atlas_offset, heightfield_word) = self.placements[r];
+            let (record, bounds) = instance_record(sdf, instance, atlas_offset, heightfield_word);
+            let range = r * RECORD_WORDS..(r + 1) * RECORD_WORDS;
+            self.scene_words[range.clone()].copy_from_slice(&record);
+            if self.capacity > 0 {
+                queue.write_buffer(&self.data, range.start as u64 * 4, bytemuck::cast_slice(&record));
+            }
+            if let Some(origin) = self.grid {
+                if cell_range(bounds, origin) != cell_range(self.bounds[r], origin) {
+                    self.grid = None;
+                }
+            }
+            self.bounds[r] = bounds;
+        }
     }
 
     /// Moves the culling grid with the camera (rebuilding its lists when it moved) and returns
@@ -438,7 +492,7 @@ mod tests {
         let meshes = [Some(&cylinder), None, Some(&sphere)];
         // Non-uniformly scaled, rotated and translated sphere; the mesh without SDF is skipped.
         let world = Mat4::from_translation(Vec3::new(10.0, 2.0, -3.0)) * Mat4::from_rotation_y(0.7) * Mat4::from_scale(Vec3::new(2.0, 1.0, 1.0));
-        let instance = |mesh, world, card, coverage| NearInstance { mesh, world, card, coverage };
+        let instance = |mesh, world, card, coverage| NearInstance { index: mesh, mesh, world, card, coverage };
         let data = build_data(&meshes, &[instance(0, Mat4::IDENTITY, 7, 1.0), instance(1, Mat4::IDENTITY, 8, 1.0), instance(2, world, 9, 0.25)]);
         assert_eq!(data.bounds.len(), 2);
         assert_eq!((data.words[28], data.words[RECORD_WORDS + 28]), (7, 9), "surface-cache instances");

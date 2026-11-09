@@ -137,6 +137,9 @@ pub mod instance_flags {
     /// The material is translucent: the main view's culling skips the instance (it is drawn by
     /// the forward translucency pass and must not occlude through the visibility buffer / HZB).
     pub const TRANSLUCENT: u32 = 4;
+    /// [`crate::Mobility::Movable`]: a dynamic shadow caster, kept out of the shadow pages'
+    /// static layers (`dynamic_caster` in wind.wgsl).
+    pub const MOVABLE: u32 = 8;
 }
 
 /// Bit flags in [`GpuMaterial::flags`].

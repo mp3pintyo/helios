@@ -47,11 +47,12 @@ fn wind_strength(instance: Instance) -> f32 {
     return strength * fade * fade * (3.0 - 2.0 * fade);
 }
 
-// Whether an instance with wind strength `strength` (wind_strength) is a dynamic shadow caster
-// this frame: cached shadow pages keep it out of their static layer and re-render it whenever it
-// moved (vsm_invalidate.wgsl). Culling, page expansion and invalidation must agree on it.
-fn dynamic_caster(strength: f32) -> bool {
-    return strength > 0.0;
+// Whether `instance`, with wind strength `strength` (wind_strength), is a dynamic shadow caster
+// this frame: one the wind moves, or a Mobility::Movable one. Cached shadow pages keep it out of
+// their static layer and re-render it whenever it moved (vsm_invalidate.wgsl). Culling, page
+// expansion and invalidation must agree on it.
+fn dynamic_caster(instance: Instance, strength: f32) -> bool {
+    return strength > 0.0 || (instance.flags & INSTANCE_MOVABLE) != 0u;
 }
 
 // Gust envelope in [0, 1] at a plant's origin.
