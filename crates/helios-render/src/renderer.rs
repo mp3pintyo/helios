@@ -31,6 +31,7 @@ use crate::clouds::{CloudInputs, Clouds};
 use crate::fog::{FogInputs, VolumetricFog};
 use crate::lights::{LightCulling, MAX_LIGHTS};
 use crate::lumen::{CardInputs, Lumen};
+use crate::megalights::{MegaLights, MegaLightsInputs};
 use crate::resolution::{self, DynamicResolution, ResolutionController};
 use crate::rvt::RuntimeVirtualTexture;
 use crate::textures::TextureLibrary;
@@ -76,10 +77,15 @@ pub enum DebugView {
     /// Virtual shadow map pages of the local light that contributes most at each pixel: mip
     /// and page grid, shaded by its shadow.
     LocalShadowPages = 15,
+    /// MegaLights: the light of each sample (one colour per light, dark where the shadow ray
+    /// was blocked), averaged over frames by TSR.
+    MegaLightsSamples = 18,
+    /// MegaLights' local lighting: this frame's samples (left) and denoised (right).
+    MegaLightsDenoising = 19,
 }
 
 impl DebugView {
-    pub const ALL: [DebugView; 16] = [
+    pub const ALL: [DebugView; 18] = [
         Self::Lit,
         Self::Clusters,
         Self::Triangles,
@@ -96,7 +102,14 @@ impl DebugView {
         Self::Reflections,
         Self::SurfaceCards,
         Self::LocalShadowPages,
+        Self::MegaLightsSamples,
+        Self::MegaLightsDenoising,
     ];
+
+    /// The view with index `index` (its `--view` number), if any.
+    pub fn from_index(index: usize) -> Option<Self> {
+        Self::ALL.into_iter().find(|&v| v as usize == index)
+    }
 
     pub fn name(self) -> &'static str {
         match self {
@@ -116,11 +129,14 @@ impl DebugView {
             Self::Reflections => "Reflections",
             Self::SurfaceCards => "Lumen surface cache (cards)",
             Self::LocalShadowPages => "Local light shadow pages (mips)",
+            Self::MegaLightsSamples => "MegaLights samples (light per sample, dark = blocked)",
+            Self::MegaLightsDenoising => "MegaLights lighting: samples | denoised",
         }
     }
 
     pub fn next(self) -> Self {
-        Self::ALL[(self as usize + 1) % Self::ALL.len()]
+        let position = Self::ALL.iter().position(|&v| v == self).unwrap_or(0);
+        Self::ALL[(position + 1) % Self::ALL.len()]
     }
 }
 
@@ -137,6 +153,11 @@ pub struct RenderSettings {
     /// Virtual shadow maps for the most important shadow-casting local lights (others, or all
     /// when off, get distance-field shadows).
     pub local_light_shadow_maps: bool,
+    /// MegaLights: stochastic, denoised direct lighting in which every local light casts soft
+    /// shadows, at a cost that barely grows with the light count (`megalights.rs`). Off: the
+    /// clustered light loop (shadow maps for the 32 most important lights, distance-field shadows
+    /// for four more per pixel).
+    pub mega_lights: bool,
     pub global_illumination: bool,
     /// Temporal accumulation: sub-pixel jitter and the TSR history (off: TSR only upscales
     /// the current frame spatially).
@@ -204,6 +225,7 @@ impl Default for RenderSettings {
             occlusion_culling: true,
             shadows: true,
             local_light_shadow_maps: true,
+            mega_lights: false,
             global_illumination: true,
             taa: true,
             auto_exposure: true,
@@ -280,6 +302,7 @@ pub struct Renderer {
     black: wgpu::TextureView,
     gi: GiPass,
     lighting: LightingPass,
+    megalights: MegaLights,
     translucency: Translucency,
     tsr: TsrPass,
     post_fx: PostFxPass,
@@ -357,6 +380,7 @@ impl Renderer {
             .create_view(&Default::default()),
             gi: GiPass::new(device),
             lighting: LightingPass::new(device),
+            megalights: MegaLights::new(device, queue),
             translucency: Translucency::new(device),
             tsr: TsrPass::new(device),
             post_fx: PostFxPass::new(device),
@@ -535,6 +559,10 @@ impl Renderer {
         self.tsr.update(&self.queue, self.targets.output);
         self.hzb.update(&self.queue, &self.targets);
         self.fog.update(&self.device, &self.queue, &scene.fog, self.settings.volumetric_fog, self.time + delta_time, capacity);
+        // MegaLights' debug views sample even while the classic loop shades.
+        let megalights_debug = matches!(self.settings.debug_view, DebugView::MegaLightsSamples | DebugView::MegaLightsDenoising);
+        let megalights = (self.settings.mega_lights || megalights_debug) && self.lights.count > 0;
+        self.megalights.update(&self.device, capacity, megalights);
         if self.stats.poll(self.scene.instance_count) {
             self.update_lod_budget();
         }
@@ -616,6 +644,17 @@ impl Renderer {
             self.fog.record(&mut rec, &inputs, current);
         }
         let reflection = if self.settings.global_illumination { self.lumen.reflection(current).unwrap_or(&self.black) } else { &self.black };
+        let megalights_inputs = MegaLightsInputs {
+            frame: &self.frame_uniform,
+            targets: &self.targets,
+            lights: &self.lights,
+            vsm: &self.vsm,
+            lumen: &self.lumen,
+            samplers: &self.samplers,
+        };
+        if megalights {
+            self.megalights.record(&mut rec, &megalights_inputs, current);
+        }
         let lighting = LightingInputs {
             frame: &self.frame_uniform,
             targets: &self.targets,
@@ -629,8 +668,13 @@ impl Renderer {
             clouds: &self.clouds,
             cloud_texture: self.clouds.output(current),
             fog: &self.fog,
+            megalights: self.megalights.output(current).filter(|_| self.settings.mega_lights),
+            black: &self.black,
         };
         self.lighting.record(&mut rec, &lighting);
+        if megalights && megalights_debug {
+            self.megalights.record_debug(&mut rec, &megalights_inputs, current);
+        }
         if self.settings.debug_view == DebugView::SurfaceCards {
             self.lumen.record_debug(&mut rec, &self.frame_uniform, &self.targets, &self.samplers);
         }
@@ -708,6 +752,7 @@ impl Renderer {
             // Last frame's: the uniforms are written before translucency finds the camera's water
             // body this frame (exposure adapts over several frames anyway).
             (self.translucency.camera_in_water(), flags::UNDERWATER),
+            (s.mega_lights && self.lights.count > 0, flags::MEGALIGHTS),
         ] {
             if enabled {
                 frame_flags |= flag;

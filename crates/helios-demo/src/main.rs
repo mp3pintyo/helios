@@ -108,11 +108,13 @@ mod native {
         pub gpu_budget_ms: Option<f32>,
         /// Local exposure settings (`--no-local-exposure`: `None`, global exposure only).
         pub local_exposure: Option<helios_render::LocalExposure>,
+        /// MegaLights instead of the clustered light loop.
+        pub megalights: bool,
     }
 
     impl Options {
         pub fn parse(args: &[String]) -> Self {
-            let mut o = Options { screenshot: None, size: (1600, 900), frames: 90, view: None, detail: Detail::High, scene: SceneKind::Valley, camera: None, eye: None, at: None, occlusion: true, sw_raster: true, rvt: true, svt: true, animate_sun: false, lod: None, fov: None, pool_mb: None, texture_pool_mb: None, texture_compression: true, switch_to: None, dump_dir: None, dump_count: 16, keys: Vec::new(), keys_at: None, hold: Vec::new(), gltf: None, ground: true, bake_hvm: None, stream_from: None, io_latency_ms: 0, sun: None, move_light: false, screen_percentage: None, gpu_budget_ms: None, local_exposure: Some(Default::default()) };
+            let mut o = Options { screenshot: None, size: (1600, 900), frames: 90, view: None, detail: Detail::High, scene: SceneKind::Valley, camera: None, eye: None, at: None, occlusion: true, sw_raster: true, rvt: true, svt: true, animate_sun: false, lod: None, fov: None, pool_mb: None, texture_pool_mb: None, texture_compression: true, switch_to: None, dump_dir: None, dump_count: 16, keys: Vec::new(), keys_at: None, hold: Vec::new(), gltf: None, ground: true, bake_hvm: None, stream_from: None, io_latency_ms: 0, sun: None, move_light: false, screen_percentage: None, gpu_budget_ms: None, local_exposure: Some(Default::default()), megalights: false };
             let mut scene_given = false;
             let mut it = args.iter().skip(1);
             while let Some(arg) = it.next() {
@@ -171,6 +173,8 @@ mod native {
                     "--screen-percentage" => o.screen_percentage = value().parse().ok(),
                     "--gpu-budget-ms" => o.gpu_budget_ms = value().parse().ok(),
                     "--no-local-exposure" => o.local_exposure = None,
+                    "--megalights" => o.megalights = true,
+                    "--lights" => helios_demo::scenes::candles::set_candle_lights(value().parse().unwrap_or(0)),
                     // Highlight contrast, shadow contrast and optionally the blurred luminance blend.
                     "--local-exposure" => {
                         let v: Vec<f32> = value().split(',').filter_map(|x| x.parse().ok()).collect();
@@ -239,7 +243,7 @@ mod native {
 
         fn apply(&self, app: &mut DemoApp) {
             if let Some(index) = self.view {
-                app.renderer.settings.debug_view = DebugView::ALL[index.min(DebugView::ALL.len() - 1)];
+                app.renderer.settings.debug_view = DebugView::from_index(index).unwrap_or(DebugView::Lit);
             }
             if let Some([x, y, z, yaw, pitch]) = self.camera {
                 app.camera.position = Vec3::new(x, y, z);
@@ -262,6 +266,7 @@ mod native {
                 app.renderer.settings.screen_percentage = percentage;
             }
             app.renderer.settings.local_exposure = self.local_exposure;
+            app.renderer.settings.mega_lights |= self.megalights;
             if let Some(budget) = self.gpu_budget_ms {
                 app.gpu_budget_ms = budget;
                 let mut dynamic = helios_render::DynamicResolution::with_budget(budget);

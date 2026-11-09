@@ -39,6 +39,7 @@ mod gpu_scene;
 mod gpu_types;
 mod lights;
 mod lumen;
+mod megalights;
 mod near_field;
 mod page_cache;
 pub mod page_source;

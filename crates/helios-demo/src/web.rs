@@ -1,7 +1,7 @@
 //! Browser platform layer: canvas surface, DOM input and a requestAnimationFrame loop.
 //!
 //! A page can embed the engine instead of using `index.html`'s full-window demo: it sets
-//! `globalThis.heliosConfig = { scene, screenPercentage, gpuBudgetMs, embedded }` before
+//! `globalThis.heliosConfig = { scene, screenPercentage, gpuBudgetMs, embedded, lights, megaLights }` before
 //! loading the module (query parameters still work and take part as fallbacks), and drives the
 //! running engine through the exported `helios*` functions (scene, camera, sun, hotkeys, HUD).
 //! `embedded: true` keeps keyboard input on the focused canvas and leaves the mouse wheel to
@@ -226,6 +226,10 @@ async fn run() -> Result<(), String> {
     };
     surface.configure(&ctx.device, &config);
 
+    // `?lights=N`: the cathedral lit by N individual candles (see scenes/candles.rs).
+    if let Some(count) = option_string("lights", "lights").and_then(|v| v.parse().ok()) {
+        crate::scenes::candles::set_candle_lights(count);
+    }
     let mut app = match query_param("stream") {
         // `?stream=URL_BASE`: the scene of the mesh library at URL_BASE (written by
         // `helios --bake-hvm`), its geometry streamed with HTTP range requests.
@@ -249,6 +253,8 @@ async fn run() -> Result<(), String> {
         }
     };
     configure_resolution(&mut app);
+    // `?megalights=1`: MegaLights instead of the clustered light loop (key `=` toggles).
+    app.renderer.settings.mega_lights = matches!(option_string("megaLights", "megalights").as_deref(), Some("1" | "true"));
     set_status("");
 
     let hud = document.get_element_by_id("hud").and_then(|e| e.dyn_into::<HtmlElement>().ok());
@@ -462,7 +468,6 @@ pub fn helios_scene() -> String {
 #[wasm_bindgen(js_name = heliosSetView)]
 pub fn helios_set_view(index: u32) {
     with_state(|st| {
-        let views = helios_render::DebugView::ALL;
-        st.app.renderer.settings.debug_view = views[(index as usize).min(views.len() - 1)];
+        st.app.renderer.settings.debug_view = helios_render::DebugView::from_index(index as usize).unwrap_or_default();
     });
 }

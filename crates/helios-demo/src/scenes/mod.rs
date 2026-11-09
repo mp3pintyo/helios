@@ -1,6 +1,7 @@
 //! Demo scenes. Each scene is built procedurally (geometry, textures, materials, lights) or
 //! from an imported glTF model, and baked into virtual meshes at startup.
 
+pub mod candles;
 pub mod cathedral;
 pub mod forest;
 pub mod model;

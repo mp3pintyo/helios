@@ -163,6 +163,8 @@ pub mod flags {
     pub const HISTORY_VALID: u32 = 32;
     /// The camera is inside a water body (exposure metering keeps Snell's window).
     pub const UNDERWATER: u32 = 64;
+    /// Local lights come from MegaLights (`megalights.rs`), not the clustered light loop.
+    pub const MEGALIGHTS: u32 = 128;
 }
 
 const _: () = {

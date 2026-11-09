@@ -42,6 +42,7 @@
 #include "lumen_common.wgsl"
 #include "lumen_mesh_sdf.wgsl"
 #include "lights.wgsl"
+#include "brdf.wgsl"
 #include "clouds_common.wgsl"
 #include "fog_common.wgsl"
 #include "stars.wgsl"
@@ -170,33 +171,6 @@ fn vs_main(v: VertexInput, @builtin(instance_index) instance_index: u32) -> Vert
 }
 
 // ---- Shared lighting -----------------------------------------------------------------------------
-
-fn d_ggx(n_dot_h: f32, a: f32) -> f32 {
-    let a2 = a * a;
-    let d = n_dot_h * n_dot_h * (a2 - 1.0) + 1.0;
-    return a2 / (PI * d * d);
-}
-
-fn v_smith_ggx_correlated(n_dot_v: f32, n_dot_l: f32, a: f32) -> f32 {
-    let a2 = a * a;
-    let gv = n_dot_l * sqrt(n_dot_v * n_dot_v * (1.0 - a2) + a2);
-    let gl = n_dot_v * sqrt(n_dot_l * n_dot_l * (1.0 - a2) + a2);
-    return 0.5 / max(gv + gl, 1e-5);
-}
-
-fn f_schlick(f0: vec3<f32>, v_dot_h: f32) -> vec3<f32> {
-    return f0 + (vec3<f32>(1.0) - f0) * pow(1.0 - v_dot_h, 5.0);
-}
-
-// Karis' analytic approximation of the split-sum environment BRDF.
-fn env_brdf(f0: vec3<f32>, roughness: f32, n_dot_v: f32) -> vec3<f32> {
-    let c0 = vec4<f32>(-1.0, -0.0275, -0.572, 0.022);
-    let c1 = vec4<f32>(1.0, 0.0425, 1.04, -0.04);
-    let r = roughness * c0 + c1;
-    let a004 = min(r.x * r.x, exp2(-9.28 * n_dot_v)) * r.x + r.y;
-    let ab = vec2<f32>(-1.04, 1.04) * a004 + r.zw;
-    return f0 * ab.x + ab.y;
-}
 
 fn clip_to_uv(clip: vec4<f32>) -> vec2<f32> {
     let ndc = clip.xy / clip.w;

@@ -17,6 +17,7 @@ use helios_render::{
     TexturePattern,
 };
 
+use super::candles::{self, Fixture};
 use super::{add_baked, add_baked_with, Detail, SceneSetup};
 
 const BAY: f32 = 7.0;
@@ -574,8 +575,8 @@ fn candelabrum(detail: Detail) -> (Mesh, Mesh, Mesh, [Vec3; 3]) {
     (merge(&[stand, arms]), merge(&waxes), merge(&flames), lights)
 }
 
-/// Iron ring chandelier with 8 candles, hanging from a chain.
-fn chandelier(detail: Detail) -> (Mesh, Mesh, Mesh) {
+/// Iron ring chandelier with 8 candles, hanging from a chain (and the centres of their flames).
+fn chandelier(detail: Detail) -> (Mesh, Mesh, Mesh, Vec<Vec3>) {
     let r = 1.4;
     let ring_path: Vec<Vec3> = (0..=64).map(|i| {
         let a = i as f32 / 64.0 * std::f32::consts::TAU;
@@ -589,14 +590,16 @@ fn chandelier(detail: Detail) -> (Mesh, Mesh, Mesh) {
     iron.push(tube(&[Vec3::new(0.0, 2.2, 0.0), Vec3::new(0.0, 12.0, 0.0)], &[0.025, 0.025], 6, true));
     let mut waxes = Vec::new();
     let mut flames = Vec::new();
+    let mut centres = Vec::new();
     for i in 0..8 {
         let a = (i as f32 + 0.5) / 8.0 * std::f32::consts::TAU;
         let p = Vec3::new(a.cos() * r, 0.03, a.sin() * r);
         let (w, f) = candle(0.25);
         waxes.push(w.transformed(Mat4::from_translation(p)));
         flames.push(f.transformed(Mat4::from_translation(p)));
+        centres.push(p + Vec3::Y * 0.3);
     }
-    (merge(&iron), merge(&waxes), merge(&flames))
+    (merge(&iron), merge(&waxes), merge(&flames), centres)
 }
 
 fn altar(detail: Detail) -> (Mesh, Mesh, Mesh) {
@@ -861,6 +864,10 @@ fn build_scene(detail: Detail) -> Scene {
     let flame = b.mesh("flames", &flames);
     let warm = Vec3::new(1.0, 0.62, 0.3);
     let mut lights = Vec::new();
+    // Every candle flame, for the candle-lit variant (candles.rs); by default one light per
+    // fixture.
+    let candle_lit = candles::candle_lights();
+    let mut flames = Vec::new();
     for i in 1..BAYS {
         let x = i as f32 * BAY;
         for z in [NAVE_HALF - 1.9, -NAVE_HALF + 1.9] {
@@ -870,6 +877,7 @@ fn build_scene(detail: Detail) -> Scene {
             let h = b.scene.add_instance(flame, m.flame, t);
             b.scene.set_cast_shadow(h, false);
             lights.push(t.transform_point3(flame_offsets[1]));
+            flames.extend(flame_offsets.map(|o| (t.transform_point3(o), Fixture::Candelabrum)));
         }
     }
     for z in [-1.6f32, 1.6] {
@@ -881,8 +889,9 @@ fn build_scene(detail: Detail) -> Scene {
         let h = b.scene.add_instance(fm, m.flame, t);
         b.scene.set_cast_shadow(h, false);
         lights.push(t.transform_point3(Vec3::Y * 0.46));
+        flames.push((t.transform_point3(Vec3::Y * 0.46), Fixture::Altar));
     }
-    let (ring, ring_wax, ring_flames) = chandelier(detail);
+    let (ring, ring_wax, ring_flames, ring_flame_centres) = chandelier(detail);
     let ring = b.mesh("chandelier", &ring);
     let ring_wax = b.mesh("chandelier candles", &ring_wax);
     let ring_flames = b.mesh("chandelier flames", &ring_flames);
@@ -892,10 +901,15 @@ fn build_scene(detail: Detail) -> Scene {
         b.place(ring_wax, m.wax, t);
         let h = b.scene.add_instance(ring_flames, m.flame, t);
         b.scene.set_cast_shadow(h, false);
-        b.scene.add_light(Light { source_radius: 1.4, ..Light::point(t.transform_point3(Vec3::Y * 0.35), warm, 3.0, 16.0) });
+        flames.extend(ring_flame_centres.iter().map(|&c| (t.transform_point3(c), Fixture::Chandelier)));
+        if candle_lit.is_none() {
+            b.scene.add_light(Light { source_radius: 1.4, ..Light::point(t.transform_point3(Vec3::Y * 0.35), warm, 3.0, 16.0) });
+        }
     }
-    for p in lights {
-        b.scene.add_light(Light { source_radius: 0.15, ..Light::point(p, warm, 0.6, 9.0) });
+    if candle_lit.is_none() {
+        for p in lights {
+            b.scene.add_light(Light { source_radius: 0.15, ..Light::point(p, warm, 0.6, 9.0) });
+        }
     }
 
     // Wrought-iron screens in the choir arcades: alpha-tested cards that cast lattice shadows.
@@ -931,6 +945,15 @@ fn build_scene(detail: Detail) -> Scene {
     for (angle, tint) in [(0.6, Vec3::new(1.0, 0.72, 0.3)), (-0.6, Vec3::new(0.4, 0.62, 1.0))] {
         let clear = b.scene.add_material(Material { kind: MaterialKind::Glass, base_color: tint, roughness: 0.05, ..Default::default() });
         b.glass(small, clear, at(6.0, aisle + 0.9) * across * Mat4::from_rotation_y(angle));
+    }
+
+    // Candle-lit variant: votive racks against the aisle walls of every bay, then a light per
+    // flame (built last, like the screens).
+    if let Some(count) = candle_lit {
+        let rack_offset = AISLE_WALL - WALL_T * 0.5 - 0.5;
+        let racks: Vec<Mat4> = (0..BAYS).flat_map(|i| [at(i as f32 * BAY + half, rack_offset), at(i as f32 * BAY + half, -rack_offset) * flip]).collect();
+        flames.extend(candles::place_votive_racks(b.scene, &racks, m.iron, m.wax, m.flame));
+        candles::light_flames(b.scene, &flames, count);
     }
     scene
 }
