@@ -64,6 +64,8 @@ pub fn all() -> Vec<Setting> {
         flag("volumetric_fog", "Volumetric fog", "Atmosphere", |s| json!(s.volumetric_fog), |s, v| s.volumetric_fog = b(v)),
         flag("wind", "Wind animation", "Atmosphere", |s| json!(s.wind), |s, v| s.wind = b(v)),
         number("lod_threshold", "Nanite error (px)", "Geometry", (0.125, 16.0, 0.125), |s| json!(s.lod_threshold), |s, v| s.lod_threshold = f(v)),
+        flag("tessellation", "Nanite tessellation (displacement)", "Geometry", |s| json!(s.tessellation), |s, v| s.tessellation = b(v)),
+        number("dice_rate", "Tessellation dice rate (px)", "Geometry", (0.5, 8.0, 0.25), |s| json!(s.dice_rate), |s, v| s.dice_rate = f(v)),
         flag("occlusion_culling", "Occlusion culling", "Geometry", |s| json!(s.occlusion_culling), |s, v| s.occlusion_culling = b(v)),
         flag("sw_raster", "Software rasteriser", "Geometry", |s| json!(s.sw_raster_threshold > 0.0), |s, v| {
             s.sw_raster_threshold = if b(v) { 2.5 } else { 0.0 }

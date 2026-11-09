@@ -79,8 +79,8 @@ fn rasterize(
     let n = i32(vsm.page_texels);
     let material = instances[draw.x].material;
     let mask = alpha_mask_of(material);
-    if is_alpha_masked(mask) != MASKED {
-        return; // the other specialisation's item (uniform: one item per workgroup)
+    if is_alpha_masked(mask) != MASKED || is_tessellated(instances[draw.x].flags, cluster) {
+        return; // the other specialisation's or a tessellated item (vsm_tess.wgsl; uniform: one item per workgroup)
     }
 
     if valid && lid < cluster_vertex_count(cluster) {

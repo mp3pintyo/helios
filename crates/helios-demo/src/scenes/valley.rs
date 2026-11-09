@@ -1,6 +1,7 @@
 //! The valley: a procedural mountain landscape, hundreds of high-density boulders, a metal
 //! sculpture and a small lake — all rendered through the virtual geometry pipeline (the lake's
-//! water through the forward translucency pass).
+//! water through the forward translucency pass) — and, behind the initial view, a cobblestone path
+//! and boulders displaced by Nanite tessellation (`stone_path.rs`).
 
 use glam::{Mat4, Quat, Vec2, Vec3};
 use helios_geometry::modeling::cuboid;
@@ -190,6 +191,8 @@ fn build_scene(detail: Detail) -> (Scene, DemoMotion) {
     // the translucency corner it is seen through the panes).
     scene.volumes.push(VolumeEmitter::mist(Vec3::new(LAKE_CENTER.x, WATER_LEVEL - 0.2, LAKE_CENTER.y), Vec3::new(22.0, 3.5, 32.0)));
     raft(&mut scene, &mut motion, detail);
+    // Displaced (tessellated) cobblestones and boulders behind the initial view.
+    super::stone_path::add(&mut scene, &mut motion, detail, ground_height);
     (scene, motion)
 }
 

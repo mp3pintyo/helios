@@ -76,8 +76,8 @@ fn rasterize(
     let instance = instances[entry.x];
     let material = instance.material;
     let mask = alpha_mask_of(material);
-    if is_alpha_masked(mask) != MASKED {
-        return; // the other specialisation's cluster (uniform: one cluster per workgroup)
+    if is_alpha_masked(mask) != MASKED || is_tessellated(instance.flags, cluster) {
+        return; // the other specialisation's or a tessellated cluster (tess.wgsl; uniform: one cluster per workgroup)
     }
 
     if lid < cluster_vertex_count(cluster) {

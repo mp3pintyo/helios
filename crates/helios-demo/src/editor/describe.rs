@@ -52,6 +52,7 @@ pub fn state(editor: &Editor, world: &World) -> Value {
                 "graph": graph,
                 "parameters": parameters,
                 "slab": materials::slab_value(m),
+                "displacement": materials::displacement_value(m),
             })
         })
         .collect();

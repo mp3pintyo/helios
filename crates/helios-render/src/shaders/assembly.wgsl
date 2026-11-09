@@ -127,8 +127,8 @@ fn expand(
         record.cluster_count = part.cluster_count;
         record.visibility_offset = a.visibility_base + part.visibility;
         record.max_scale = scale;
-        // Movable assemblies have movable parts (dynamic shadow casters, like the base).
-        record.flags = (base.flags & (INSTANCE_CAST_SHADOW | INSTANCE_ALPHA_MASKED | INSTANCE_TRANSLUCENT | INSTANCE_MOVABLE)) | INSTANCE_PART;
+        // Movable (dynamic shadow casters) and displaced (tessellated) like the base.
+        record.flags = (base.flags & (INSTANCE_CAST_SHADOW | INSTANCE_ALPHA_MASKED | INSTANCE_TRANSLUCENT | INSTANCE_MOVABLE | INSTANCE_DISPLACED)) | INSTANCE_PART;
         instances[params.static_count + first_slot + p] = record;
         part_owners[1u + first_slot + p] = a.instance;
     }

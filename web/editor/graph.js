@@ -490,6 +490,6 @@ export function materialParams(m) {
   for (const p of m.parameters || []) if (p.kind !== "texture") parameters[p.name] = p.value;
   return {
     base_color: m.base_color, roughness: m.roughness, metallic: m.metallic, emissive: m.emissive, opacity: m.opacity,
-    graph: m.graph || "", parameters, slab: m.slab,
+    graph: m.graph || "", parameters, slab: m.slab, displacement: m.displacement,
   };
 }

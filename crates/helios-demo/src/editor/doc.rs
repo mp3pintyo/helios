@@ -131,6 +131,24 @@ pub struct MaterialParams {
     /// Substrate slab overrides.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub slab: Option<SlabDef>,
+    /// Displacement (Nanite tessellation) overrides.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub displacement: Option<DisplacementDef>,
+}
+
+/// Displacement overrides (see `helios_render::Displacement`): a material without one gets one
+/// by its own texture's height; a magnitude of 0 removes it.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct DisplacementDef {
+    /// Object-space distance between heights 0 and 1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub magnitude: Option<f32>,
+    /// Height that stays in place.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub center: Option<f32>,
+    /// Channel of the height layer's data texel (3: a procedural texture's height).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel: Option<u32>,
 }
 
 /// A graph parameter's value (texture parameters are not stored: textures have no names).

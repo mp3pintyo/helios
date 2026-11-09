@@ -115,7 +115,7 @@ export function createDetails(ed) {
     if (!nested) header("material", name, `Material · ${m.kind}`);
     const title = nested ? `Material · ${name}` : "Parameters";
     const sections = [section(title, [h("div", { class: "ed-note" }, `${m.kind} shading model · shared by every instance using it`), ...rows])];
-    if (!["glass", "water", "translucent"].includes(m.kind)) sections.push(graphSection(m, params, send), slabSection(m, params, send));
+    if (!["glass", "water", "translucent"].includes(m.kind)) sections.push(graphSection(m, params, send), slabSection(m, params, send), displacementSection(params, send));
     return sections;
   }
 
@@ -160,6 +160,19 @@ export function createDetails(ed) {
       field("Specular", "specular", { min: 0, max: 1, step: 0.01 }),
       row("Unlit", checkbox(slab.unlit, (v) => ((slab.unlit = v), send(true)))),
     ], { open: on });
+  }
+
+  // Displacement (Nanite tessellation): the surface moves along its normal by the height of a
+  // texture channel, at render time.
+  function displacementSection(params, send) {
+    const d = params.displacement;
+    const field = (label, prop, opts) => row(label, slider(d[prop], { ...opts, onInput: (v) => ((d[prop] = v), send(false)), onCommit: (v) => ((d[prop] = v), send(true)) }));
+    return section("Displacement", [
+      h("div", { class: "ed-note" }, "Magnitude 0: none. PageDown toggles tessellation; debug view 25 shows it"),
+      field("Magnitude (m)", "magnitude", { min: 0, max: 0.5, step: 0.005, precision: 3 }),
+      field("Centre", "center", { min: 0, max: 1, step: 0.01 }),
+      row("Height channel", select([["0", "R"], ["1", "G"], ["2", "B"], ["3", "A (procedural height)"]], String(d.channel), (v) => ((d.channel = Number(v)), send(true)))),
+    ], { open: d.magnitude > 0 });
   }
 
   // ---- Lights ------------------------------------------------------------------------------

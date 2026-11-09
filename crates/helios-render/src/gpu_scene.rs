@@ -12,6 +12,7 @@ use crate::motion::SceneChanges;
 use crate::scene::{Instance, Material, Mobility, Scene, TextureHandle, TextureSource, UvTransform};
 use crate::skin::{instance_skin_flags, SkinPalettes};
 use crate::streaming::{StreamingStats, Streamer};
+use crate::tessellation;
 use crate::util::{storage_buffer, storage_buffer_init};
 use crate::vsm_motion::ShadowMove;
 use crate::wind::WindUniform;
@@ -48,6 +49,11 @@ pub struct GpuScene {
     pub material_uploads: u64,
     /// [`WindUniform`], written every frame ([`GpuScene::write_wind`]).
     pub wind: wgpu::Buffer,
+    /// The tessellation uniform: a per-frame header ([`GpuScene::write_tessellation_view`]) and the
+    /// materials' displacement (`tessellation.rs`).
+    pub tessellation: wgpu::Buffer,
+    /// Tessellate displaced materials (the renderer's setting; instances carry it as a flag).
+    pub tessellation_enabled: bool,
     /// Alpha masks of alpha-tested materials, sampled by every rasteriser.
     pub masks: AlphaMasks,
     /// Joint palettes of skinned instances, written every frame.
@@ -68,6 +74,9 @@ pub struct GpuScene {
     wind_shadows: bool,
     /// Some mesh has voxel LODs (the voxel rasterisers run).
     voxels: bool,
+    /// Some instance is displaced (the tessellator runs), and the setting its flags were made with.
+    displaced: bool,
+    tessellation_uploaded: bool,
     /// Scene versions last uploaded: geometry, materials, instances, textures.
     versions: (u64, u64, u64, u64),
 }
@@ -87,6 +96,8 @@ impl GpuScene {
             uv_extensions: false,
             material_uploads: 0,
             wind: crate::util::uniform_buffer(device, "wind", std::mem::size_of::<WindUniform>() as u64),
+            tessellation: crate::util::uniform_buffer(device, "tessellation", tessellation::UNIFORM_SIZE),
+            tessellation_enabled: true,
             masks: AlphaMasks::new(device),
             skins: SkinPalettes::new(device),
             assemblies: Assemblies::new(device),
@@ -99,6 +110,8 @@ impl GpuScene {
             shadow_moves: Vec::new(),
             wind_shadows: false,
             voxels: false,
+            displaced: false,
+            tessellation_uploaded: true,
             versions: (u64::MAX, u64::MAX, u64::MAX, u64::MAX),
         }
     }
@@ -120,6 +133,16 @@ impl GpuScene {
     /// Whether some mesh has voxel LODs.
     pub fn has_voxels(&self) -> bool {
         self.voxels
+    }
+
+    /// Whether some instance is displaced and tessellated.
+    pub fn has_displacement(&self) -> bool {
+        self.displaced
+    }
+
+    /// Writes the tessellation uniform's per-frame header.
+    pub fn write_tessellation_view(&self, queue: &wgpu::Queue, view: &tessellation::TessView) {
+        queue.write_buffer(&self.tessellation, 0, bytemuck::bytes_of(view));
     }
 
     /// Instances culling visits: the scene's and the assemblies' part slots after them.
@@ -161,7 +184,8 @@ impl GpuScene {
         }
         // Palettes first: shadow moves of skinned instances cover their largest reach.
         self.skins.sync(device, queue, scene);
-        let instances_changed = self.versions.2 != scene.instance_version;
+        // Switching tessellation changes the instances' displaced flags.
+        let instances_changed = self.versions.2 != scene.instance_version || self.tessellation_enabled != self.tessellation_uploaded;
         self.shadow_moves.clear();
         let mut bounds_grew = false;
         if materials_changed || instances_changed || changes.structural {
@@ -288,6 +312,8 @@ impl GpuScene {
         materials.resize(MAX_MATERIALS, bytemuck::Zeroable::zeroed());
         queue.write_buffer(&self.materials, 0, bytemuck::cast_slice(&materials));
         self.material_uploads += 1;
+        let header = std::mem::size_of::<tessellation::TessView>() as u64;
+        queue.write_buffer(&self.tessellation, header, bytemuck::cast_slice(&tessellation::material_table(scene)));
     }
 
     /// How far (object space) the skin of `instance` may have moved any vertex from its rest pose
@@ -311,6 +337,9 @@ impl GpuScene {
             | instance_skin_flags(scene, instance);
         if self.assemblies.is_assembly(instance.mesh.0) {
             flags |= instance_flags::ASSEMBLY;
+        }
+        if self.tessellation_enabled && displaced(scene, instance) && flags & (instance_flags::HIDDEN | instance_flags::ALPHA_MASKED) == 0 {
+            flags |= instance_flags::DISPLACED;
         }
         GpuInstance {
             world,
@@ -370,6 +399,8 @@ impl GpuScene {
 
         self.instance_count = count as u32;
         self.wind_shadows = wind_shadows;
+        self.displaced = instances.iter().any(|i| i.flags & instance_flags::DISPLACED != 0);
+        self.tessellation_uploaded = self.tessellation_enabled;
         self.records = instances;
     }
 }
@@ -418,6 +449,11 @@ fn gpu_instance_flags(scene: &Scene, instance: &Instance, alpha_masked: bool) ->
         flags |= instance_flags::TRANSLUCENT;
     }
     flags
+}
+
+/// Whether the instance's material displaces it (skinned meshes are not tessellated).
+fn displaced(scene: &Scene, instance: &Instance) -> bool {
+    instance.skin.is_none() && scene.materials.get(instance.material.0 as usize).is_some_and(|m| tessellation::height_layer(m).is_some())
 }
 
 /// The instance's wind response; translucent instances are drawn by the forward pass, which

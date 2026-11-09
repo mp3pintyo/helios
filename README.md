@@ -82,7 +82,7 @@ underwater view. Round 4 (all letters were taken): `0` pauses / resumes the demo
 turning sculpture, drifting raft), `-` next animation clip of a skinned model (0.4 s crossfade; after the last one
 it pauses), `;` GI final gather Lumen ↔ Lumen Lite (ends the automatic choice), `=` MegaLights, `'` volumes +
 particles, `Insert` voxel LODs (off: the triangle-only cut of the same DAG), `PageUp` Substrate slabs (off: every
-material renders as its plain base), `Tab` editor (natively: the editor tools without panels — click to select,
+material renders as its plain base), `PageDown` Nanite tessellation (off: displaced materials render undisplaced), `Tab` editor (natively: the editor tools without panels — click to select,
 `Del`, `Ctrl+D`, `F`, `Ctrl+Z` / `Ctrl+Y`, `Ctrl+S` saves the scene file; in `editor.html`: play mode).
 
 Editor (`web/editor.html`, viewport focused, right mouse button not held): `W` / `E` / `R` move / rotate / scale,
@@ -91,10 +91,11 @@ Editor (`web/editor.html`, viewport focused, right mouse button not held): `W` /
 `WASD`/`QE` flies, the wheel dollies; `Shift` / `Ctrl` click adds / toggles; drag content into the viewport, drop a
 material onto an object to assign it.
 
-Headless flags: `--scene`, `--detail`, `--size WxH`, `--frames N`, `--view i` (debug view by index, 0–24; also
+Headless flags: `--scene`, `--detail`, `--size WxH`, `--frames N`, `--view i` (debug view by index, 0–25; also
 `heliosSetView(i)`; 14 = Lumen mesh cards, 15 = local light shadow pages, 16 = invalidation, 17 = skin weights,
 18 / 19 = MegaLights samples / samples | denoised, 20 = Lumen Lite probes, 21 = volume march steps and particle
-overdraw, 22 = voxel clusters, 23 = assembly parts, 24 = material features), `--eye x,h,z` /
+overdraw, 22 = voxel clusters, 23 = assembly parts, 24 = material features, 25 = tessellation depth and
+micro-triangles), `--eye x,h,z` /
 `--at x,h,z` (heights relative to the ground), `--camera x,y,z,yaw,pitch`, `--lod px`, `--pool-mb N`
 (geometry pool size, to exercise streaming), `--texture-pool-mb N` (texture tile atlases), `--no-texture-compression` (uncompressed tiles; in
 the browser `?texture-compression=0`), `--no-occlusion`, `--no-sw-raster`,
@@ -114,7 +115,8 @@ glTF paths resolve against it), `--select i,j` (outline these instances, as the 
 lit, each a shadow-casting light), `--no-skinning` (import a glTF model's skinned meshes as static bind-pose meshes, for
 cost comparisons), `--full-invalidation` (every move invalidates everything, as before per-instance invalidation),
 `--movers N` (only the first N moving prop groups move), `--static-motion` (the props move as `Mobility::Static`
-instances: the one-off edit path).
+instances: the one-off edit path), `--no-tessellation`, `--dice-rate N` (pixels per micro-triangle edge, default 2),
+`--speed N` (fly speed in m/s for held keys, e.g. a slow dolly: `--hold KeyW --speed 0.3`).
 
 **Streaming from files.** `--stream-from` / `?stream=` build the same procedural scene but substitute every baked
 mesh with its pre-baked counterpart: only the header (cluster and page records, dependencies, bounds, distance field)
@@ -127,7 +129,7 @@ honouring `Range`, e.g. a CDN) streams pages on demand. Imported glTF models are
 
 | Scene | What it shows | Size |
 |---|---|---|
-| `valley` | Mountain valley, 600 boulders, a gold sculpture (turning once in 45 s) and a small lake with a log raft that drifts, bobs and rolls on it, procedural (not simulated) mist over the water; terrain textured through a runtime virtual texture; at the lake's north end, out of the initial view, a glass pane and two crossing tinted panels standing in the water (layered translucency test) | 613 instances, 50 M (medium) / 199 M (high) source triangles |
+| `valley` | Mountain valley, 600 boulders, a gold sculpture (turning once in 45 s) and a small lake with a log raft that drifts, bobs and rolls on it, procedural (not simulated) mist over the water; terrain textured through a runtime virtual texture; at the lake's north end, out of the initial view, a glass pane and two crossing tinted panels standing in the water (layered translucency test); behind the initial view a cobblestone path and displaced boulders (Nanite tessellation; one turning slowly on its plinth: a movable displaced instance), e.g. `--eye -26,1.8,39 --at -33,0.2,53` | 613 instances, 50 M (medium) / 199 M (high) source triangles |
 | `cathedral` | Gothic basilica: 11-bay nave with clustered piers, triforium, stained-glass clerestory and aisles, quadripartite rib vaults, flying buttresses, polygonal apse with half dome, west front with rose window and twin spired towers; pews, altar, candelabra and eleven chandeliers swinging on their 12 m chains (7 s pendulums, 1–3°, their candle lights moving along), 33 candle lights in all; dust motes in the clerestory's light shafts and incense rising from a censer before the altar; alpha-tested wrought-iron choir screens; at the west end of the north aisle, behind the initial view, a stained-glass screen and two crossing tinted glass panes (layered translucency test). **Candle-lit** with `--lights N` / `?lights=N`: every candle flame its own shadow-casting light (60 candelabrum, 88 chandelier and 2 altar candles) plus votive racks of tea lights against the aisle walls (858), the first N lit, up to 1008 | 458 instances, 4 M (medium) / 18 M (high) |
 | `forest` | Mixed broadleaf / conifer forest with real leaf geometry, bushes, ferns, grass, mossy boulders, fallen logs and mushrooms at golden hour, swaying in a gusty breeze; conifers built from shared needle-spray assemblies, foliage with voxel LODs; a campfire in the clearing in front of the initial view (simulated fire and smoke, sparks that bounce, embers that settle and cool, a flickering fire light; best at night, `--sun 200,-30 --eye 3.5,1.4,1.0 --at 7,1.0,-1`) | 8 278 instances (≈ 26 400 assembly parts when expanded), 82 M (medium) source triangles |
 | `gallery` | The material gallery: a paved courtyard at golden hour with a row of plinths — clear-coat car paint, velvet with sheen, subsurface skin, a lit wax candle and a marble egg, a bush whose leaves let a lamp's light through, an anisotropic brushed-metal pot, dielectrics of IOR 1.33 / 2.4 and a tinted specular, an unlit sign — and three material graphs: animated lava (a pool and an egg), stylised water (two instances of one graph with different parameters) and a terrace of wet stone with puddles | 33 instances |
@@ -277,14 +279,15 @@ sky LUTs ─ fire-driven light colours (volume emission) ─ light culling (frox
 assembly expansion: assembly bases too coarse for the main view → part instances (for every view)
 cull instances → page batches → pages (residency + LOD prune) → clusters (EARLY: visible last frame)
   → HW raster (big triangles; alpha-masked ones in a second bin) + SW raster (tiny triangles)
-    + voxel raster (foliage voxel clusters, compute) → merge → HZB
+    + voxel raster (foliage voxel clusters, compute)
+    + tessellation (displaced clusters: patches → split passes → dice → SW raster, compute) → merge → HZB
   → cull clusters (LATE vs HZB) → HW + SW + voxel raster → merge                  ⇒ visibility buffer + depth
 material classification (8×8 tiles) → one resolve pipeline per shading model, extended pipelines per
   (shading model, material graph) for Substrate slabs and graphs              ⇒ G-buffer (+ slab texels)
 pick (editor: one thread, on request)
 runtime virtual texture: allocate + render requested landscape pages
 virtual shadow maps: mark (sun + local lights) → page cache (+ moved casters' footprints) → clear dirty pages
-  → cull per clipmap level and once for all local lights → (cluster, page) draws → HW + SW + voxel page raster
+  → cull per clipmap level and once for all local lights → (cluster, page) draws → HW + SW + voxel + tessellated page raster
 Lumen: global SDF clipmap (+ recompose bricks under moved instances) → surface cache (mesh cards + voxel lighting)
   → radiance cache → final gather: screen probes, or Lumen Lite's irradiance field → reflections → GI temporal
 clouds: half-resolution checkerboard march → temporal · cloud shadow map
@@ -709,6 +712,93 @@ are the reliable numbers. The per-feature notes in [`docs/round4/`](docs/round4/
   branches. Coverage tests on a leaf cloud: within 3.4 % of the full mesh along each axis at 30–2000 m (9 %
   diagonally at the finest voxels), where the triangle cut is off by up to 13 %. Temporal stability (2560×1440,
   static camera, % px > 24/255): 0.077 → 0.083 % with wind, 0.027 → 0.033 % calm.
+* **Nanite Tessellation** (`tessellation.rs`, `displacement.wgsl`, `displacement_height.wgsl`, `tess_core.wgsl`,
+  `tess_queue.wgsl`, `tess.wgsl`, `vsm_tess.wgsl`, `tess_resolve.wgsl`; UE 5.4+'s Nanite tessellation as Brian Karis
+  describes it). A material's `Material::displacement` (`Displacement`: a height channel of a texture layer — a
+  procedural `TexturePattern`'s height, or any channel of an image layer — sampled through the material's own
+  mapping, a magnitude and a centre) moves its surface along the normal at render time; the meshes stay smooth
+  and small, the detail comes from the texture. **Culling**: displaced instances carry a flag and every bounding
+  sphere (instance, page, cluster; frustum, HZB, shadow pages and the shadow page expansion) is padded by the
+  material's displacement bound `magnitude · max(centre, 1 − centre)`, as for the wind; the LOD cut keeps the
+  undisplaced errors (as UE). Their triangle clusters always go to the software list. **Patches**: every triangle
+  of a displaced cluster is a patch, a triangle in its base triangle's barycentric space with fixed-point
+  corners (15 fractional bits, so midpoints are exact). Per edge, a tessellation factor is the *undisplaced*
+  edge length projected to pixels as if it faced the camera (so displacement towards the viewer still gets
+  diced), over the **dice rate** (`RenderSettings::dice_rate`, 2 px as in UE); edges are oriented by their end
+  points' positions, so both triangles of an edge — across clusters and LOD levels, whose shared vertices are
+  bit-identical — compute the same factor. **PatchSplit**: patches with an edge factor above 8 are split at the
+  midpoints of exactly those edges (one, two or three: two, three or four children — red-green refinement), so a
+  split depends on the edge alone and neighbours agree; the children go through a global queue in a storage
+  buffer, ping-ponged between split passes. WebGPU has no forward-progress guarantee, so instead of persistent
+  threads each pass is an indirect dispatch sized by a one-thread pass (as UE does on all platforms), and the
+  number of passes follows the deepest split of recent frames (one spare; patches still too coarse after the last
+  are diced as they are). **Dicing**: an edge with factor c gets 2^ceil(log2(c/√2)) segments (lengths within √2
+  of the dice rate), the inside a uniform grid of F = 2^level segments per side with the finest edge's level
+  (F = 1, 2, 4, 8 — up to 64 micro-triangles per patch); grid vertices on an edge with fewer segments snap to its
+  segments (a zipper of degenerate triangles). Vertices new at a level are **geomorphed**: they grow out of the
+  coarser segment they split, from its midpoint to their displaced place as the factor goes from 2^(level−1) to
+  2^level — in displaced space (as CDLOD does for terrain): morphing the parameter instead slides the
+  displacement across the surface, which swims. Both sides of an edge snap and morph its vertices alike, so the
+  micro-mesh is watertight and changes continuously as the camera moves (a CPU mirror of the split and dice
+  logic checks shared edges vertex for vertex — parameters and displaced, morphed positions — on a jittered mesh
+  from near and far eyes, and that edge vertices stay on the previous frame's displaced edge while the eye moves
+  through doublings and splits: < 0.01 with the morph, 0.031 without it for a 0.15-amplitude displacement of
+  unit edges). **Displacement**: a vertex
+  moves along its interpolated, normalised normal by `magnitude · (height − centre)`; the height is filtered for
+  the size of a dice segment at the vertex (UE picks the displacement mip from the mesh's UV density likewise:
+  the dicer has no screen derivatives; `Displacement::uv_density_of` measures a mesh's), read from the 512²
+  array layer, a pure function of the vertex, so every pass and both sides of an edge agree. The wind applies
+  after the displacement (WPO on the displaced position). **Raster**: patches are diced by grid level — one
+  thread per patch for F ≤ 2, 16 or 64 threads per patch for F = 4, 8 (vertices displaced and projected into
+  shared memory, then one thread per micro-triangle) — and rasterised with the software rasteriser's rules into
+  its target and two passes (depth `atomicMax`, then payload), alongside the other software clusters. All
+  micro-triangles go through compute, as in UE (whose patches never take the hardware path either): the dice
+  rate keeps them at a few pixels; ones stretched over 4096 pixels by a cliff in the height are dropped, and ones
+  crossing the near plane are culled. **Visibility payload**: unchanged — `(cluster slot << 7 | base triangle)`,
+  as for any software triangle — so material classification, picking, selection and Lumen's screen traces see an
+  ordinary id. The G-buffer resolve (a `TESSELLATION` permutation, used only while the scene has displaced
+  instances) recovers the displaced point from the merged depth: it projects the hit onto the base triangle's
+  plane after taking off the displacement there (a fixed-point iteration: the offset runs along the nearly face
+  normal, so four steps converge), shades the base triangle's attributes there and tilts the interpolated
+  normal by the surface gradient of the displacement (height differences a pixel apart along both edges), so
+  shading is smooth across micro-triangles; motion vectors carry the hit's own position (otherwise the tiny
+  offset between the solved point and the micro-triangle read as motion, and TSR plus motion blur flickered on a
+  still surface: 0.45 % → 0.003 % of pixels changing by > 24/255 per frame). **Shadows**: `vsm_tess.wgsl` runs the
+  same emit / split / dice on the (cluster, page) software items of displaced clusters, with factors in the
+  page's texels (clipmap level or local light face mip at the point), patches culled against the page and
+  micro-triangles rasterised like `vsm_raster.wgsl` (24.8 fixed point, page clip, slope bias) into the atlas'
+  mirror, scratch tiles included: displacement is static, so the static / dynamic page cache treats displaced
+  instances like any other and moving ones (dynamic world) re-render over their static layer; heights are the
+  main view's, so shadows fall from the surface the camera sees. **Interplay**: skinned instances and voxel
+  clusters are not tessellated; alpha-masked or translucent displaced materials render undisplaced; Lumen's
+  distance fields and mesh cards stay undisplaced (the displacement is far below their voxels; screen traces see
+  it). Debug view **25** colours displaced surfaces by tessellation depth (splits, then dice level: blue → green →
+  red) and shades every micro-triangle; `PageDown` toggles tessellation. The valley gained a cobblestone path
+  and displaced boulders behind the initial view (one turning on its plinth: a movable displaced instance).
+  Measured (RTX 3090 shared with up to six other agents: interleaved runs, minima of 3; valley high, tessellation
+  on vs `--no-tessellation`): path view (`--eye -26,1.8,39 --at -33,0.2,53`) at 1600×900: 1.82 M micro-triangles
+  (69 k patches; 0.05 M in refreshed shadow pages), GPU frame 4.17 → 5.87 ms — software raster + merge 0.08 →
+  1.62 ms (emit, split, dice and both raster passes; late pass 0.04 → 0.12), material resolve 0.46 → 0.53 ms,
+  shadow page tessellation 0.14 ms; at 2560×1440: 4.19 M micro-triangles, 7.85 → 11.87 ms (raster 0.11 → 3.44 ms,
+  resolve 1.06 → 1.24 ms). Grazing close-up (`--eye -27.5,0.35,41.5 --at -31,0.12,49`, the path filling the
+  screen): 3.42 M micro-triangles, 3.92 → 7.13 ms (raster 2.86 ms) at 1600×900; 7.76 M, 6.93 → 13.63 ms (raster
+  5.89 ms) at 2560×1440 — about 0.85 ms per million micro-triangles for both raster passes, and grazing views
+  dice finer than the screen needs (the factor measures edges as if they faced the camera, as in UE). Centring
+  segment lengths on the dice rate (the 1/√2 in the factor) halved the micro-triangles (6.5 → 3.4 M in the
+  grazing view) at no visible loss. Scenes without displacement are unchanged: forest (medium) and cathedral
+  (high) every pass within ±0.03 ms of the base build (frame 8.80 → 8.98 / 9.11 → 9.14 ms min, noise), images
+  differ from the base build no more than two runs of the base build differ from each other (forest: 0.25 % vs
+  0.27 % of pixels over 24/255, from its wind; cathedral and valley 0.000 %). The valley's default view (the displaced content behind the camera, none on screen): 4.89 → 5.15 ms —
+  the empty tessellation dispatches (≈ 0.08 ms over both culling passes and the shadow pages) and the resolve's
+  `TESSELLATION` permutation (0.36 → 0.45 ms: its registers cost every pixel once a scene has displaced
+  instances). Temporal stability (sunlit view, 16 frames, pixels changing by > 24/255 per frame): static camera
+  0.003 % (tessellation off 0.000 %). Under a slowly changing factor (dice rate ramped 1 % per frame, TAA off)
+  frames change at 0.11 % per frame with the morph and 0.09 % with snapping instead, vs 0.03 % for a fixed rate:
+  at a 2 px dice rate the per-frame change is dominated by the height filter following the segment size, and
+  a pop moves a surface by less than a pixel; the morph is what keeps the edges watertight and continuous (the
+  CPU mirror's continuity test fails without it), not a visible difference in this view. A slow dolly (0.3 m/s)
+  changes 2.8 % of the path's pixels per frame (0.6 % without displacement): the parallax of real micro-geometry,
+  which TSR resolves like any other.
 * **Lumen-style GI** (`lumen.rs`). A 4-level global distance field (0.25–2 m voxels) is composited on the GPU from
   per-mesh SDFs; a voxel **surface cache** stores the radiance leaving nearby surfaces (sun with SDF soft shadows,
   sky with SDF occlusion, local lights, emission, one bounce from the **radiance cache** of world probes), so bounces
@@ -1117,7 +1207,7 @@ are the reliable numbers. The per-feature notes in [`docs/round4/`](docs/round4/
   Outliner (World → Environment / Render settings, lights, PCG volumes, the instances grouped by mesh or material,
   search, eye toggles; virtualised rows, so the forest's 8 278 instances scroll smoothly) and a Details panel
   (transform with scrubbable X/Y/Z fields and a uniform-scale lock, mesh, material slot and the material's
-  parameters, graph and Substrate slab, rendering; light colour, intensity, attenuation radius, source radius,
+  parameters, graph, Substrate slab and displacement (magnitude, centre, height channel), rendering; light colour, intensity, attenuation radius, source radius,
   shadows, spot aim and cones; PCG volume, surface, seed and every node's parameters; sun / fog / clouds / wind;
   render settings). The engine owns the scene: the UI reads it as JSON and sends edit operations through the wasm
   page API (`heliosEditorState`, `heliosEditorApply`, `heliosEditorPreview`, `heliosEditorPick`, `heliosEditorCamera`,
@@ -1202,7 +1292,7 @@ are the reliable numbers. The per-feature notes in [`docs/round4/`](docs/round4/
 | No bindless textures | Material textures are layers of two texture arrays; image detail beyond 512² lives in tile atlases behind a page table; glTF extension textures are repacked into two extra array layers per material |
 | 16 sampled textures per stage (default limit) | The extended (Substrate / graph) resolve needs 17: the device requests up to 24 where the adapter offers them, otherwise slab materials render as their plain base |
 | No viewport arrays | VSM pages are rasterised with per-draw tile transforms and clip distances (optional feature) or fragment clipping |
-| No forward-progress guarantee | Hierarchy is flattened into instance → page-batch → page → cluster dispatches |
+| No forward-progress guarantee | Hierarchy is flattened into instance → page-batch → page → cluster dispatches; tessellation's PatchSplit is a fixed number of indirect split passes over a ping-pong queue, sized by the deepest split of recent frames |
 | Indirect dispatch ≤ 65535 per dimension | Large dispatches are 2D |
 | No float atomics | Local exposure's bilateral grid and the fire light's summed emission use fixed-point workgroup atomics |
 | Read-write storage textures only for 32-bit single-channel formats | Subsurface diffusion adds its result to the rgba16f scene colour with a full-screen pass and additive blending instead of a compute read-modify-write |
@@ -1217,7 +1307,7 @@ Honest differences that remain:
    files store the GPU format as is. Triangle indices are plain fixed-width (no strip / delta coding). Every mesh's
    header — including all cluster records — stays resident. Cached shadow pages are invalidated per instance for
    moves, streaming, wind and skeletal animation; structural scene changes (instances added or hidden, materials
-   reassigned, shadow casting toggled, new geometry), moves that grow the scene bounds and toggling voxel LODs
+   reassigned, shadow casting toggled, new geometry), moves that grow the scene bounds and toggling voxel LODs or tessellation
    invalidate them globally.
 2. **Lumen**'s mesh cards are axis-aligned (6 directions × 3 depth layers per mesh, no per-mesh card fitting as in UE5),
    carry the material's *average* albedo (no per-texel textures), are lit with one bounce from the radiance cache
@@ -1269,7 +1359,7 @@ Honest differences that remain:
    of subsurface pixels is not diffused (MegaLights keeps diffuse light whole). Translucent materials (glass, water,
    `BLEND`) ignore slabs. Unlit colours are scaled to a white surface in full sun. Devices limited to WebGPU's default
    16 sampled textures per stage render slab materials as their plain base. **Material graphs** run in the G-buffer
-   resolve only: no graph-driven opacity mask, world position offset, tessellation, translucent or decal materials
+   resolve only: no graph-driven opacity mask, world position offset, displacement, translucent or decal materials
    (raster and translucency shaders are fixed); at most 8 distinct (shading model, graph) pipelines per frame (further
    materials render without their graph, with a warning) and 1024 parameter slots in all; no custom HLSL/WGSL node,
    material functions, static switches, texture objects or per-node previews; noise and texture outputs carry no
@@ -1400,3 +1490,21 @@ Honest differences that remain:
     runs on the main thread (no partitioned / hierarchical generation, no runtime generation around the camera), and
     spawned instances are not individually editable. Native and wasm builds may differ in the last bits of `sin` /
     `cos`, so a point exactly at a filter threshold could flip between them; saved output sidesteps it.
+14. **Nanite Tessellation**: displacement is a height along the interpolated normal from one texture channel
+    through the material's mapping (UE: any material graph output, including vector displacement); the height is
+    read from the 512² texture array layer (streamed image tiles are not consulted) at a mip chosen from the dice
+    segment size, so heights finer than the layer's texels are lost. Dicing uses a uniform 2^k grid per patch with
+    snapped edges instead of UE's precomputed table of patterns for every factor triple (more micro-triangles for long
+    thin patches; F is set by the finest edge), and splitting is binary at edge midpoints (UE splits with wider
+    factors). Hard edges (split normals) and UV seams under a UV-mapped height crack, as in UE: the two sides
+    displace a shared position differently. Patches are culled by frustum (main view) or page (shadows) only, not by
+    the HZB or backfacing. Micro-triangles larger than 4096 pixels (a cliff in the height) are dropped and ones
+    crossing the near plane culled — there is no hardware fallback for them; the shadow pages' hardware fallbacks
+    (local light items reaching the near plane, dynamic pages without a scratch tile, dynamic casters of split pages)
+    draw displaced clusters undisplaced. Lists hold 512 k patches per split queue and 256 k per dice level: when
+    they overflow, the dice rate is raised until they fit (HUD). The visibility payload names the base triangle:
+    the resolve finds the displaced point by an iterative projection, which is approximate where the displacement
+    folds over itself, and texture derivatives are the base plane's. Lumen sees displaced surfaces only through
+    screen traces. Skinned, alpha-masked, translucent and voxel geometry is not tessellated; the wind does not
+    rotate displaced normals. A material graph cannot drive the displacement (no displacement output: the
+    tessellation passes read one texture channel, not the G-buffer resolve's graph code).

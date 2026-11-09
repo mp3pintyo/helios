@@ -33,6 +33,7 @@ const DEBUG_VOXELS: u32 = 22u;
 const DEBUG_ASSEMBLY_PARTS: u32 = 23u;
 // Substrate slab features and layer count per pixel (substrate.wgsl).
 const DEBUG_MATERIAL_FEATURES: u32 = 24u;
+const DEBUG_TESSELLATION: u32 = 25u;
 
 /// Debug views that show lit (exposed, tonemapped) radiance rather than raw attributes.
 fn is_lit_view(view: u32) -> bool {
@@ -61,6 +62,7 @@ const INSTANCE_MOVABLE: u32 = 16u;      // Mobility::Movable: a dynamic shadow c
 const INSTANCE_ASSEMBLY: u32 = 32u;     // an assembly's base (assembly.wgsl)
 const INSTANCE_EXPANDED: u32 = 64u;     // the assembly is drawn as its parts this frame
 const INSTANCE_PART: u32 = 128u;        // an assembly part written by the expansion
+const INSTANCE_DISPLACED: u32 = 256u;   // its material displaces it: Nanite tessellation (tess.wgsl)
 // Bits 12..32: the skin palette index (INSTANCE_SKIN_SHIFT, skin_palette.wgsl).
 
 // Visible cluster entry flags (entry.z).
@@ -99,6 +101,12 @@ fn cluster_is_voxel(c: Cluster) -> bool { return cluster_voxel_bricks(c) != 0u; 
 // triangle clusters they stand in for are alternatives.
 fn cluster_in_mode(c: Cluster, voxels: bool) -> bool {
     return select(!cluster_is_voxel(c), (c.voxel & CLUSTER_VOXEL_ALTERNATE) == 0u, voxels);
+}
+
+// Triangle clusters of displaced instances are tessellated and rasterised by tess.wgsl and
+// vsm_tess.wgsl (voxel clusters are not displaced); the other rasterisers skip them.
+fn is_tessellated(instance_flags: u32, c: Cluster) -> bool {
+    return (instance_flags & INSTANCE_DISPLACED) != 0u && !cluster_is_voxel(c);
 }
 
 struct Page {

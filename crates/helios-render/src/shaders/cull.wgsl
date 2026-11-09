@@ -18,8 +18,11 @@
 // hardware clusters of alpha-masked materials are flagged CLUSTER_MASKED and their slots also
 // listed after the entries (`masked_capacity` u32s, four per vec4) for the masked draw.
 // Bounding spheres of instances the wind moves are padded by their maximum displacement
-// (wind.wgsl), those of skinned instances grown to hold their current pose (skin_palette.wgsl), for
-// every visibility test (frustum, shadow pages, HZB), not for the LOD cut.
+// (wind.wgsl), those of displaced instances by their material's displacement bound
+// (displacement.wgsl), those of skinned instances grown to hold their current pose
+// (skin_palette.wgsl), for every visibility test (frustum, shadow pages, HZB), not for the LOD cut.
+// Triangle clusters of displaced instances always go to the software list: they are tessellated
+// in compute (tess.wgsl, vsm_tess.wgsl).
 // Shadow pages refreshed for their dynamic casters only (vsm_common.wgsl) keep static casters
 // out from the instance test on.
 
@@ -27,6 +30,7 @@
 #include "wind.wgsl"
 #include "skin_palette.wgsl"
 #include "dynamic_caster.wgsl"
+#include "displacement.wgsl"
 
 override CULL_MODE: u32 = 0u;
 
@@ -62,6 +66,7 @@ struct CullState {
 @group(0) @binding(9) var hzb: texture_2d<f32>;
 @group(0) @binding(65) var<uniform> wind: Wind;
 @group(0) @binding(66) var skin_palette: texture_2d<f32>;
+@group(0) @binding(67) var<uniform> tess: Tessellation;
 
 fn sphere_in_frustum(s: vec4<f32>) -> bool {
     for (var i = 0u; i < 6u; i++) {
@@ -216,7 +221,7 @@ fn cull_instances(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
     let strength = wind_strength(instance);
-    let bounds = posed_bounds(instance, wind_padded(instance, strength, instance.bounds));
+    let bounds = posed_bounds(instance, wind_padded(instance, strength, displacement_padded(instance, instance.bounds)));
     if !sphere_in_frustum(bounds) || !vsm_overlaps(bounds, dynamic_caster(instance, strength)) {
         return;
     }
@@ -261,7 +266,7 @@ fn cull_pages(
             let page = pages[page_id];
             let scale = instance.max_scale;
             let strength = wind_strength(instance);
-            let bounds = posed_bounds(instance, wind_padded(instance, strength, transform_sphere(instance.world, page.bounds, scale)));
+            let bounds = posed_bounds(instance, wind_padded(instance, strength, displacement_padded(instance, transform_sphere(instance.world, page.bounds, scale))));
             if page_table[page_id] != INVALID_ID && sphere_in_frustum(bounds) && vsm_overlaps(bounds, dynamic_caster(instance, strength)) {
                 // If even the coarsest parent in the page is fine enough, every cluster in it
                 // would be rejected by the LOD test: skip the page entirely.
@@ -359,7 +364,7 @@ fn test_cluster(instance_id: u32, cluster_id: u32) -> ClusterResult {
     let parent = projected_error(world_error(cluster.parent_error, scale), transform_sphere(instance.world, cluster.parent_lod_bounds, scale));
     let bounds = transform_sphere(instance.world, cluster.bounds, scale);
     let strength = wind_strength(instance);
-    let padded = posed_bounds(instance, wind_padded(instance, strength, bounds));
+    let padded = posed_bounds(instance, wind_padded(instance, strength, displacement_padded(instance, bounds)));
     let own_ok = own <= view.lod_threshold;
     let candidate = parent > view.lod_threshold && sphere_in_frustum(padded) && vsm_overlaps(padded, dynamic_caster(instance, strength));
     // Streaming feedback (main view): this cluster is on the cut but wants finer children.
@@ -384,9 +389,10 @@ fn test_cluster(instance_id: u32, cluster_id: u32) -> ClusterResult {
         }
     }
 
-    // Voxels are only rasterised in compute (voxel_raster.wgsl).
-    if result.draw && (view.sw_raster_threshold > 0.0 || cluster_is_voxel(cluster)) {
-        result.software = cluster_is_voxel(cluster) || prefers_software_raster(cluster, bounds);
+    // Voxels and tessellated clusters are only rasterised in compute (voxel_raster.wgsl, tess.wgsl).
+    let compute_only = cluster_is_voxel(cluster) || is_tessellated(instance.flags, cluster);
+    if result.draw && (view.sw_raster_threshold > 0.0 || compute_only) {
+        result.software = compute_only || prefers_software_raster(cluster, bounds);
     }
     // The software rasteriser alpha-tests per cluster, shadow rasterisers per draw: only the
     // main view's hardware path needs a separate list.

@@ -7,6 +7,7 @@ pub mod forest;
 pub mod gallery;
 pub mod model;
 pub mod skeletal;
+pub mod stone_path;
 pub mod valley;
 
 use helios_geometry::{build_virtual_mesh, BuildConfig, Mesh, VirtualMesh};

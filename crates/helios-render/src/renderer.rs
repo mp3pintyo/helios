@@ -109,10 +109,14 @@ pub enum DebugView {
     /// transmission green, anisotropy yellow, specular / IOR cyan, unlit white (blended when
     /// several), brighter with more layers, striped for graph materials; plain materials grey.
     MaterialFeatures = 24,
+    /// Nanite tessellation: displaced surfaces coloured by tessellation depth (blue: one
+    /// micro-triangle per patch, through green, to red: deeply split), shaded per micro-triangle;
+    /// the rest grey.
+    Tessellation = 25,
 }
 
 impl DebugView {
-    pub const ALL: [DebugView; 25] = [
+    pub const ALL: [DebugView; 26] = [
         Self::Lit,
         Self::Clusters,
         Self::Triangles,
@@ -138,6 +142,7 @@ impl DebugView {
         Self::Voxels,
         Self::AssemblyParts,
         Self::MaterialFeatures,
+        Self::Tessellation,
     ];
 
     /// The view with index `index` (its `--view` number), if any.
@@ -172,6 +177,7 @@ impl DebugView {
             Self::Voxels => "Voxel clusters (triangles grey)",
             Self::AssemblyParts => "Assembly parts",
             Self::MaterialFeatures => "Material features (Substrate slabs)",
+            Self::Tessellation => "Tessellation (depth, micro-triangles)",
         }
     }
 
@@ -260,6 +266,12 @@ pub struct RenderSettings {
     /// Voxel LODs of aggregate meshes (foliage): voxel clusters replace the simplified
     /// triangles they beat (off: the triangle-only cut of the same DAG).
     pub voxel_lods: bool,
+    /// Nanite tessellation of displaced materials ([`crate::Displacement`]); off: their
+    /// surfaces render undisplaced.
+    pub tessellation: bool,
+    /// Target length of micro-triangle edges in pixels (UE's dice rate, 2 by default): smaller is
+    /// finer and costlier.
+    pub dice_rate: f32,
     /// Internal render resolution in percent of the output (UE's `r.ScreenPercentage`,
     /// 25–100); temporal super resolution reconstructs the output. Ignored while dynamic
     /// resolution is on.
@@ -315,6 +327,8 @@ impl Default for RenderSettings {
             volumes: true,
             particles: true,
             voxel_lods: true,
+            tessellation: true,
+            dice_rate: 2.0,
             screen_percentage: 100.0,
             dynamic_resolution: None,
             per_instance_invalidation: true,
@@ -398,8 +412,9 @@ pub struct Renderer {
     previous_view_proj: Option<Mat4>,
     /// Geometry or instances changed structurally this frame (invalidates cached shadow pages).
     scene_changed: bool,
-    /// Voxel LODs as the cached shadow pages were rendered.
+    /// Voxel LODs and tessellation as the cached shadow pages were rendered.
     voxel_lods_cached: bool,
+    tessellation_cached: bool,
     time: f32,
     /// Multiplier on `lod_threshold` that keeps the main view's visible work inside the GPU
     /// list capacities (see [`Renderer::lod_budget_scale`]).
@@ -486,6 +501,7 @@ impl Renderer {
             previous_view_proj: None,
             scene_changed: true,
             voxel_lods_cached: true,
+            tessellation_cached: true,
             time: 0.0,
             lod_budget_scale: 1.0,
             percentage: 100.0,
@@ -601,6 +617,11 @@ impl Renderer {
         self.scene.has_voxels()
     }
 
+    /// Nanite tessellation statistics of a recent frame (`None` without displaced instances).
+    pub fn tessellation_stats(&self) -> Option<crate::TessellationStats> {
+        self.culling.tessellation(&self.scene).map(|t| t.stats())
+    }
+
     /// Local lights rendered into virtual shadow maps this frame.
     pub fn shadow_mapped_lights(&self) -> usize {
         self.vsm.local.active_count()
@@ -658,6 +679,7 @@ impl Renderer {
         self.motion.incremental = self.settings.per_instance_invalidation;
         self.motion.update(scene);
         let changes = &self.motion.changes;
+        self.scene.tessellation_enabled = self.settings.tessellation;
         let sync = self.scene.sync(&self.device, &self.queue, scene, changes, self.motion.previous(), frame);
         if sync.geometry_changed {
             self.history_valid = false;
@@ -670,12 +692,16 @@ impl Renderer {
         // voxel LODs (other casters). Moves and streaming only invalidate the pages under the
         // affected instances (done by the VSM on the GPU); growing scene bounds change the shadow
         // clipmap's depth range.
-        self.scene_changed = changes.structural || sync.bounds_grew || self.settings.voxel_lods != self.voxel_lods_cached;
+        let switched = self.settings.voxel_lods != self.voxel_lods_cached || self.settings.tessellation != self.tessellation_cached;
+        self.scene_changed = changes.structural || sync.bounds_grew || switched;
         self.voxel_lods_cached = self.settings.voxel_lods;
+        self.tessellation_cached = self.settings.tessellation;
         self.textures.sync(&self.device, &self.queue, scene);
+        self.culling.prepare_tessellation(&self.device, &self.scene, &self.textures.data, &self.samplers.material);
         let substrate = self.settings.substrate;
         self.extended.sync(&self.device, &self.queue, scene, &self.scene, substrate, self.targets.capacity);
-        self.material.sync(&self.device, self.scene.uv_extensions, self.scene.skins.skinned_instances, &self.extended, substrate);
+        let tessellation = self.scene.has_displacement();
+        self.material.sync(&self.device, self.scene.uv_extensions, self.scene.skins.skinned_instances, tessellation, &self.extended, substrate);
         let slab_lighting = self.extended.lighting.then_some(&self.extended.lighting_layout);
         self.lighting.sync_substrate(&self.device, slab_lighting);
         self.megalights.sync_substrate(&self.device, self.extended.lighting.then_some(&self.extended.megalights_layout));
@@ -720,6 +746,9 @@ impl Renderer {
         if self.stats.poll(self.scene.instance_count) {
             self.update_lod_budget();
             self.scene.assemblies.update_budget(self.stats.latest.assembly_parts_requested);
+        }
+        if let Some(tessellation) = &mut self.culling.tessellation {
+            tessellation.poll();
         }
         // Volumes and particles are drawn over lit radiance and in their own debug view.
         let effects = matches!(self.settings.debug_view, DebugView::Lit | DebugView::VolumesParticles);
@@ -899,6 +928,7 @@ impl Renderer {
         let read_stats = self.stats.record(&mut rec.encoder, &states, [&self.vsm.cache.lists, self.vsm.draws()], assembly_parts);
         let read_feedback = self.scene.record_feedback(&mut rec.encoder, frame);
         let read_texture_feedback = self.svt.record_feedback(&mut rec.encoder, frame);
+        let read_tessellation = self.culling.tessellation(&self.scene).is_some_and(|t| t.record_readback(&mut rec.encoder));
 
         let (commands, map_profiler) = rec.finish();
         self.queue.submit([commands]);
@@ -912,6 +942,9 @@ impl Renderer {
         }
         if read_texture_feedback {
             self.svt.map_feedback();
+        }
+        if let Some(tessellation) = self.culling.tessellation(&self.scene) {
+            tessellation.after_submit(read_tessellation);
         }
         let _ = self.device.poll(wgpu::PollType::Poll);
 
@@ -1018,6 +1051,11 @@ impl Renderer {
             _pad: [0; 3],
         };
         self.queue.write_buffer(&self.main_view.uniform, 0, bytemuck::bytes_of(&main));
+        if let Some(tessellation) = self.culling.tessellation(&self.scene) {
+            // Dice rate in internal pixels, like the software raster heuristic.
+            let view = tessellation.view(s.dice_rate, camera.lod_scale(h), camera.near, camera.position);
+            self.scene.write_tessellation_view(&self.queue, &view);
+        }
         self.scene.assemblies.write_params(&self.queue);
 
         // Wind: positions at this and the previous frame's time (motion vectors). Its "too small

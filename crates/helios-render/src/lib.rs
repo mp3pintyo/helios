@@ -14,6 +14,9 @@
 //!   (point) or perspective (spot) virtual shadow maps for the most important local lights.
 //! * **Wind** – vegetation animated by World Position Offset in every rasteriser, with padded
 //!   culling bounds and per-page shadow invalidation.
+//! * **Tessellation** – materials displace their surfaces at render time ([`Displacement`]):
+//!   displaced clusters are split and diced on the GPU into pixel-sized micro-triangles, crack-free
+//!   and geomorphed, in the main view and the shadow pages (Nanite tessellation).
 //! * **Skeletal meshes** – virtual geometry deformed by joint palettes (linear blend skinning in
 //!   every rasteriser and the G-buffer resolve), with conservative posed culling bounds and
 //!   dynamic shadow casting ([`Scene::add_skin`]).
@@ -79,6 +82,7 @@ mod substrate_gpu;
 mod subsurface;
 mod svt;
 mod targets;
+mod tessellation;
 mod textures;
 mod translucency;
 mod util;
@@ -98,7 +102,7 @@ pub use renderer::{DebugView, DynamicStats, RenderSettings, Renderer, RendererCo
 pub use lumen_lite::{GiMethod, LiteFallback};
 pub use resolution::{DynamicResolution, MAX_SCREEN_PERCENTAGE, MIN_SCREEN_PERCENTAGE};
 pub use scene::{
-    AssemblyPart, CloudLayer, FogVolume, Image, ImageTexture, InstanceHandle, Light, LightHandle, LightKind, Material, MaterialHandle, MaterialKind,
+    AssemblyPart, CloudLayer, Displacement, FogVolume, Image, ImageTexture, InstanceHandle, Light, LightHandle, LightKind, Material, MaterialHandle, MaterialKind,
     MeshHandle, Mobility, Scene, Sun, TextureDesc, TextureHandle, TextureMapping, TexturePattern, TextureSource,
     UvTransform, Water, Wrap,
 };
@@ -114,6 +118,7 @@ pub use skin::SkinHandle;
 pub use stats::RenderStats;
 pub use streaming::StreamingStats;
 pub use svt::TextureStreamingStats;
+pub use tessellation::TessellationStats;
 pub use wind::{Wind, WindResponse};
 
 pub use helios_geometry as geometry;
