@@ -21,6 +21,8 @@
 #include "wind.wgsl"
 #include "water.wgsl"
 #include "shore.wgsl"
+#include "voxel.wgsl"
+#include "voxel_resolve.wgsl"
 
 override MATERIAL_KIND: u32 = 0u;
 
@@ -242,6 +244,10 @@ fn resolve(
     let entry = visible_clusters[slot];
     let instance = instances[entry.x];
     let cluster = clusters[entry.y];
+    if cluster_is_voxel(cluster) {
+        resolve_voxel(pixel, id);
+        return;
+    }
     let base = cluster_base(cluster);
     let corners = cluster_triangle(cluster, base, triangle);
     let wind_force = wind_strength(instance);
@@ -357,6 +363,9 @@ fn resolve(
             surface.albedo = path * (0.6 + 0.4 * hash_color(entry.y).x);
         }
         case DEBUG_MATERIALS: { surface.albedo = hash_color(MATERIAL_KIND * 31u + 7u); }
+        // Triangles grey (voxel_resolve.wgsl colours voxel clusters).
+        case DEBUG_VOXELS: { surface.albedo = vec3<f32>(0.3 + 0.1 * hash_color(entry.y).x); }
+        case DEBUG_ASSEMBLY_PARTS: { surface.albedo = assembly_part_color(instance); }
         default: {}
     }
 

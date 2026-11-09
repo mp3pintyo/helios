@@ -26,6 +26,9 @@ use crate::util::{bind, bind_group, bind_group_layout, compute_pipeline, workgro
 use crate::water::BINDING_WATER;
 use crate::wind::{wind_entry, wind_resource};
 
+/// The merged visibility depth (voxel_resolve.wgsl finds the voxel a pixel hit from it).
+const BINDING_DEPTH: u32 = 91;
+
 /// Shading models with a resolve pipeline (see `MATERIAL_*` in material.wgsl); 7 is the sky.
 /// Glass (5) is translucent: it never reaches the visibility buffer (see translucency.rs).
 const KINDS: [u32; 6] = [0, 1, 2, 3, 4, 7];
@@ -79,6 +82,7 @@ impl MaterialPass {
                 (80, bind::texture(true)),
                 wind_entry(),
                 (BINDING_WATER, bind::uniform()),
+                (BINDING_DEPTH, bind::texture(false)),
             ],
         );
         let resolve = [Some(resolve_pipelines(device, &module, &layout, false)), None];
@@ -164,6 +168,7 @@ impl MaterialPass {
                 (80, TextureView(&svt.material)),
                 wind_resource(scene),
                 (BINDING_WATER, water.as_entire_binding()),
+                (BINDING_DEPTH, TextureView(&targets.depth)),
             ],
         );
         let classify_group = bind_group(

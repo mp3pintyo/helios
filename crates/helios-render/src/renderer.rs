@@ -16,7 +16,7 @@ use glam::{Mat4, Vec2, Vec4};
 
 use crate::camera::frustum_planes;
 use crate::gpu_scene::GpuScene;
-use crate::gpu_types::{flags, CullViewUniform, FrameUniform};
+use crate::gpu_types::{flags, view_flags, CullViewUniform, FrameUniform};
 use crate::passes::culling::{CullCapacity, CullMode, CullView, Culling};
 use crate::profiler::{GpuProfiler, Recorder};
 use crate::streaming::StreamingStats;
@@ -76,10 +76,14 @@ pub enum DebugView {
     /// Virtual shadow map pages of the local light that contributes most at each pixel: mip
     /// and page grid, shaded by its shadow.
     LocalShadowPages = 15,
+    /// Voxel clusters in colour (one per cluster), triangle clusters grey.
+    Voxels = 22,
+    /// Assembly part instances in colour (one per part), everything else grey.
+    AssemblyParts = 23,
 }
 
 impl DebugView {
-    pub const ALL: [DebugView; 16] = [
+    pub const ALL: [DebugView; 18] = [
         Self::Lit,
         Self::Clusters,
         Self::Triangles,
@@ -96,7 +100,14 @@ impl DebugView {
         Self::Reflections,
         Self::SurfaceCards,
         Self::LocalShadowPages,
+        Self::Voxels,
+        Self::AssemblyParts,
     ];
+
+    /// The view with index `index` (the `DEBUG_*` value).
+    pub fn from_index(index: usize) -> Option<Self> {
+        Self::ALL.into_iter().find(|&v| v as usize == index)
+    }
 
     pub fn name(self) -> &'static str {
         match self {
@@ -116,11 +127,14 @@ impl DebugView {
             Self::Reflections => "Reflections",
             Self::SurfaceCards => "Lumen surface cache (cards)",
             Self::LocalShadowPages => "Local light shadow pages (mips)",
+            Self::Voxels => "Voxel clusters (triangles grey)",
+            Self::AssemblyParts => "Assembly parts",
         }
     }
 
     pub fn next(self) -> Self {
-        Self::ALL[(self as usize + 1) % Self::ALL.len()]
+        let position = Self::ALL.iter().position(|&v| v == self).unwrap_or(0);
+        Self::ALL[(position + 1) % Self::ALL.len()]
     }
 }
 
@@ -187,6 +201,9 @@ pub struct RenderSettings {
     pub depth_of_field: Option<DepthOfField>,
     /// Animate vegetation with the scene's wind ([`crate::Scene::wind`]).
     pub wind: bool,
+    /// Voxel LODs of aggregate meshes (foliage): voxel clusters replace the simplified
+    /// triangles they beat (off: the triangle-only cut of the same DAG).
+    pub voxel_lods: bool,
     /// Internal render resolution in percent of the output (UE's `r.ScreenPercentage`,
     /// 25–100); temporal super resolution reconstructs the output. Ignored while dynamic
     /// resolution is on.
@@ -227,6 +244,7 @@ impl Default for RenderSettings {
             motion_blur: 0.5,
             depth_of_field: None,
             wind: true,
+            voxel_lods: true,
             screen_percentage: 100.0,
             dynamic_resolution: None,
         }
@@ -295,6 +313,8 @@ pub struct Renderer {
     /// Geometry or instances changed this frame (invalidates cached shadow pages).
     scene_changed: bool,
     last_scene_versions: (u64, u64),
+    /// Voxel LODs as the cached shadow pages were rendered.
+    voxel_lods_cached: bool,
     time: f32,
     /// Multiplier on `lod_threshold` that keeps the main view's visible work inside the GPU
     /// list capacities (see [`Renderer::lod_budget_scale`]).
@@ -371,6 +391,7 @@ impl Renderer {
             previous_view_proj: None,
             scene_changed: true,
             last_scene_versions: (u64::MAX, u64::MAX),
+            voxel_lods_cached: true,
             time: 0.0,
             lod_budget_scale: 1.0,
             percentage: 100.0,
@@ -458,6 +479,11 @@ impl Renderer {
         self.profiler.supported().then(|| self.profiler.total_ms())
     }
 
+    /// Whether some mesh of the scene has voxel LODs ([`RenderSettings::voxel_lods`]).
+    pub fn has_voxels(&self) -> bool {
+        self.scene.has_voxels()
+    }
+
     /// Local lights rendered into virtual shadow maps this frame.
     pub fn shadow_mapped_lights(&self) -> usize {
         self.vsm.local.active_count()
@@ -476,8 +502,7 @@ impl Renderer {
     fn update_lod_budget(&mut self) {
         let st = self.stats.latest;
         let capacity = self.main_view.capacity;
-        let fill = (st.clusters as f32 / capacity.clusters as f32).max(st.pages as f32 / capacity.pages as f32);
-        if st.overflow > 0 || fill > 0.9 {
+        let fill = (st.clusters as f32 / capacity.clusters as f32).max(st.pages as f32 / capacity.pages as f32);        if st.overflow > 0 || fill > 0.9 {
             // Projected error scales with 1/distance, so cluster counts fall roughly with the
             // square of the threshold: step proportionally to the excess.
             let step = (fill / 0.8).sqrt().clamp(1.1, 2.0);
@@ -500,10 +525,16 @@ impl Renderer {
         if self.scene.sync(&self.device, &self.queue, scene, frame) {
             self.history_valid = false;
         }
-        // New geometry or instances invalidate every cached shadow page. Streaming changes only
-        // invalidate the pages under the affected instances (done by the VSM on the GPU).
-        self.scene_changed = versions != self.last_scene_versions;
+        // Assembly parts each take a page batch in every culling view.
+        let parts = self.scene.assemblies.part_capacity();
+        self.main_view.reserve_batches(&self.device, MAIN_CAPACITY.batches + parts);
+        self.vsm.reserve_batches(&self.device, parts);
+        // New geometry or instances invalidate every cached shadow page, and so does switching
+        // voxel LODs (other casters). Streaming changes only invalidate the pages under the
+        // affected instances (done by the VSM on the GPU).
+        self.scene_changed = versions != self.last_scene_versions || self.settings.voxel_lods != self.voxel_lods_cached;
         self.last_scene_versions = versions;
+        self.voxel_lods_cached = self.settings.voxel_lods;
         self.textures.sync(&self.device, &self.queue, scene);
         self.material.sync(&self.device, self.scene.uv_extensions);
         self.rvt.sync(&self.device, &self.queue, scene, self.settings.virtual_texturing, frame);
@@ -537,6 +568,7 @@ impl Renderer {
         self.fog.update(&self.device, &self.queue, &scene.fog, self.settings.volumetric_fog, self.time + delta_time, capacity);
         if self.stats.poll(self.scene.instance_count) {
             self.update_lod_budget();
+            self.scene.assemblies.update_budget(self.stats.latest.assembly_parts_requested);
         }
         self.time += delta_time;
 
@@ -552,7 +584,9 @@ impl Renderer {
         self.sky.record(&mut rec, &self.frame_uniform, &self.samplers.linear, scene.ground_albedo);
         self.lights.record(&mut rec, &self.frame_uniform);
 
-        // Virtual geometry: two-pass occlusion culling into the visibility buffer.
+        // Virtual geometry: assemblies the main view needs as parts get part instances (for
+        // every view), then two-pass occlusion culling into the visibility buffer.
+        self.scene.assemblies.record(&mut rec, &self.main_view, &self.scene.instances);
         let (culling, view, gpu_scene, targets) = (&self.culling, &self.main_view, &self.scene, &self.targets);
         if self.settings.occlusion_culling {
             culling.cull(&mut rec, view, gpu_scene, CullMode::Early, Some(&targets.hzb));
@@ -650,7 +684,8 @@ impl Renderer {
 
         let mut states = vec![&self.main_view.state];
         states.extend(self.vsm.level_states());
-        let read_stats = self.stats.record(&mut rec.encoder, &states, [&self.vsm.cache.lists, self.vsm.draws()]);
+        let assembly_parts = self.scene.assemblies.cull_dispatch().map(|(counter, _)| counter);
+        let read_stats = self.stats.record(&mut rec.encoder, &states, [&self.vsm.cache.lists, self.vsm.draws()], assembly_parts);
         let read_feedback = self.scene.record_feedback(&mut rec.encoder, frame);
         let read_texture_feedback = self.svt.record_feedback(&mut rec.encoder, frame);
 
@@ -740,7 +775,7 @@ impl Renderer {
         };
         self.queue.write_buffer(&self.frame_uniform, 0, bytemuck::bytes_of(&frame));
 
-        let instance_count = self.scene.instance_count;
+        let instance_count = self.scene.cull_instance_count();
         let main = CullViewUniform {
             view_proj,
             view,
@@ -765,8 +800,11 @@ impl Renderer {
             batch_capacity: self.main_view.capacity.batches,
             masked_capacity: self.main_view.capacity.masked,
             vsm: Vec4::ZERO,
+            flags: self.cull_flags(),
+            _pad: [0; 3],
         };
         self.queue.write_buffer(&self.main_view.uniform, 0, bytemuck::bytes_of(&main));
+        self.scene.assemblies.write_params(&self.queue);
 
         // Wind: positions at this and the previous frame's time (motion vectors). Its "too small
         // to see" distance is judged in output pixels, like the LOD.
@@ -803,9 +841,19 @@ impl Renderer {
                 geometry_streamed: self.scene.streaming_stats().changed(),
                 wind: wind_moves_shadows,
                 volume_distance: if self.fog.enabled() { scene.fog.distance } else { 0.0 },
+                cull_flags: self.cull_flags(),
             },
         );
         unjittered
+    }
+
+    /// `CullViewUniform::flags` of every culling view.
+    fn cull_flags(&self) -> u32 {
+        if self.settings.voxel_lods {
+            view_flags::VOXELS
+        } else {
+            0
+        }
     }
 }
 

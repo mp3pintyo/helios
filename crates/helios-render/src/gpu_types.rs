@@ -8,6 +8,9 @@ use glam::{Mat4, Vec4};
 pub struct GpuInstance {
     pub world: Mat4,
     pub prev_world: Mat4,
+    /// Columns of the inverse transpose of `world`'s linear part (times `max_scale`); their `w`
+    /// hold the plant origin the wind bends about (the instance's position, an assembly part's
+    /// assembly's).
     pub normal_matrix: [Vec4; 3],
     /// World-space bounding sphere.
     pub bounds: Vec4,
@@ -95,6 +98,15 @@ pub struct CullViewUniform {
     pub masked_capacity: u32,
     /// Virtual shadow map views: (level, page world size, absolute origin page x, y).
     pub vsm: Vec4,
+    /// [`view_flags`].
+    pub flags: u32,
+    pub _pad: [u32; 3],
+}
+
+/// Bit flags in [`CullViewUniform::flags`].
+pub mod view_flags {
+    /// Voxel LODs: voxel clusters replace the triangle clusters they stand in for.
+    pub const VOXELS: u32 = 1;
 }
 
 #[repr(C)]
@@ -137,6 +149,10 @@ pub mod instance_flags {
     /// The material is translucent: the main view's culling skips the instance (it is drawn by
     /// the forward translucency pass and must not occlude through the visibility buffer / HZB).
     pub const TRANSLUCENT: u32 = 4;
+    /// An instance of an assembly's base (assembly.rs). The GPU's expansion adds two more each
+    /// frame: 16 on assemblies drawn as their parts, 32 on the part instances it writes
+    /// (`INSTANCE_EXPANDED`, `INSTANCE_PART` in common.wgsl).
+    pub const ASSEMBLY: u32 = 8;
 }
 
 /// Bit flags in [`GpuMaterial::flags`].
@@ -168,7 +184,7 @@ pub mod flags {
 const _: () = {
     assert!(std::mem::size_of::<GpuInstance>() == 240);
     assert!(std::mem::size_of::<GpuMaterial>() == 192);
-    assert!(std::mem::size_of::<CullViewUniform>() == 320);
+    assert!(std::mem::size_of::<CullViewUniform>() == 336);
     assert!(std::mem::size_of::<FrameUniform>() == 496);
     assert!(std::mem::size_of::<helios_geometry::GpuCluster>() == 80);
     assert!(std::mem::size_of::<helios_geometry::GpuPage>() == 64);

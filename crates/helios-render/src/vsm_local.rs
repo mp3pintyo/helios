@@ -214,6 +214,8 @@ pub struct LocalCull {
     pub frame: u32,
     pub lod_threshold: f32,
     pub sw_raster_threshold: f32,
+    /// `CullViewUniform::flags`.
+    pub flags: u32,
 }
 
 pub struct LocalShadows {
@@ -245,6 +247,11 @@ impl LocalShadows {
             any_stale: false,
             info_base,
         }
+    }
+
+    /// Makes room for `extra` more page batches in the lights' culling view (assembly parts).
+    pub fn reserve_batches(&mut self, device: &wgpu::Device, base: u32, extra: u32) {
+        self.view.reserve_batches(device, base + extra);
     }
 
     /// Chooses this frame's shadowed lights. Call before uploading the lights.
@@ -306,6 +313,8 @@ impl LocalShadows {
             batch_capacity: self.view.capacity.batches,
             masked_capacity: 0,
             vsm: Vec4::new(self.info_base as f32, BOX_UNIT, LOCAL_SLOTS as f32, 0.0),
+            flags: cull.flags,
+            _pad: [0; 3],
         };
         queue.write_buffer(&self.view.uniform, 0, bytemuck::bytes_of(&uniform));
     }

@@ -32,6 +32,18 @@ const WIND_FLUTTER_HZ: f32 = 2.6;
 const WIND_BEND_BOUND: f32 = 1.05;
 const WIND_FLUTTER_BOUND: f32 = 1.7321;
 
+// The plant's origin, which it bends about and takes its phase from: the instance's position,
+// or for an assembly part its assembly's, so parts move with the plant they make up (stored in
+// the normal matrix's spare w components).
+fn wind_origin(instance: Instance) -> vec3<f32> {
+    return vec3<f32>(instance.normal_matrix_0.w, instance.normal_matrix_1.w, instance.normal_matrix_2.w);
+}
+
+// The origin in the previous frame: moved like the instance (exact for translations).
+fn wind_previous_origin(instance: Instance) -> vec3<f32> {
+    return wind_origin(instance) + (instance.prev_world[3].xyz - instance.world[3].xyz);
+}
+
 // Strength of the wind at an instance: the scene's, faded out over the last quarter of the
 // instance's disable distance — where its motion becomes too small to see on screen (grass
 // before trees), at most the scene's disable distance. Per instance, so a plant never deforms
@@ -42,7 +54,7 @@ fn wind_strength(instance: Instance) -> f32 {
         return 0.0;
     }
     let limit = min(wind.camera.w, wind_reach(instance, strength, instance.bounds) * wind.params.x);
-    let d = distance(instance.world[3].xyz, wind.camera.xyz);
+    let d = distance(wind_origin(instance), wind.camera.xyz);
     let fade = saturate(4.0 * (limit - d) / max(limit, 1e-3));
     return strength * fade * fade * (3.0 - 2.0 * fade);
 }
@@ -67,10 +79,9 @@ fn wind_phase(origin: vec3<f32>) -> f32 {
     return f32(h & 0xffffu) * (WIND_TAU / 65536.0);
 }
 
-// World-space displacement at `time` of the vertex with rest position `rest` of an instance with
-// transform `world` and response `response` (bend, sway, flutter, frequency).
-fn wind_offset(world: mat4x4<f32>, response: vec4<f32>, strength: f32, rest: vec3<f32>, time: f32) -> vec3<f32> {
-    let origin = world[3].xyz;
+// World-space displacement at `time` of the vertex with rest position `rest` of a plant with
+// origin `origin` (wind_origin) and response `response` (bend, sway, flutter, frequency).
+fn wind_offset(origin: vec3<f32>, response: vec4<f32>, strength: f32, rest: vec3<f32>, time: f32) -> vec3<f32> {
     let rel = rest - origin;
     let height = max(rel.y, 0.0);
     let reach = length(rel.xz);
@@ -96,7 +107,7 @@ fn wind_offset(world: mat4x4<f32>, response: vec4<f32>, strength: f32, rest: vec
 
 // Upper bound of the displacement of any vertex inside the world-space `sphere` (for culling).
 fn wind_reach(instance: Instance, strength: f32, sphere: vec4<f32>) -> f32 {
-    let origin = instance.world[3].xyz;
+    let origin = wind_origin(instance);
     let height = max(sphere.y + sphere.w - origin.y, 0.0);
     let reach = length(sphere.xz - origin.xz) + sphere.w;
     let r = instance.wind;
@@ -106,7 +117,7 @@ fn wind_reach(instance: Instance, strength: f32, sphere: vec4<f32>) -> f32 {
 // Upper bound of the speed (m/s) of any vertex inside `sphere`: the derivative of wind_offset
 // term by term (shadow pages under it are refreshed once it may have moved far enough).
 fn wind_speed(instance: Instance, strength: f32, sphere: vec4<f32>) -> f32 {
-    let origin = instance.world[3].xyz;
+    let origin = wind_origin(instance);
     let height = max(sphere.y + sphere.w - origin.y, 0.0);
     let reach = length(sphere.xz - origin.xz) + sphere.w;
     let r = instance.wind;
@@ -134,7 +145,7 @@ fn wind_world_position(instance: Instance, strength: f32, object: vec3<f32>) -> 
     if strength <= 0.0 {
         return rest;
     }
-    return rest + wind_offset(instance.world, instance.wind, strength, rest, wind.time.x);
+    return rest + wind_offset(wind_origin(instance), instance.wind, strength, rest, wind.time.x);
 }
 
 // The same vertex in the previous frame (motion vectors).
@@ -143,5 +154,5 @@ fn wind_previous_world_position(instance: Instance, strength: f32, object: vec3<
     if strength <= 0.0 {
         return rest;
     }
-    return rest + wind_offset(instance.prev_world, instance.wind, strength, rest, wind.time.y);
+    return rest + wind_offset(wind_previous_origin(instance), instance.wind, strength, rest, wind.time.y);
 }

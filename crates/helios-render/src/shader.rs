@@ -2,6 +2,7 @@
 
 const SOURCES: &[(&str, &str)] = &[
     ("alpha_mask.wgsl", include_str!("shaders/alpha_mask.wgsl")),
+    ("assembly.wgsl", include_str!("shaders/assembly.wgsl")),
     ("atmosphere.wgsl", include_str!("shaders/atmosphere.wgsl")),
     ("bloom.wgsl", include_str!("shaders/bloom.wgsl")),
     ("classify.wgsl", include_str!("shaders/classify.wgsl")),
@@ -49,6 +50,10 @@ const SOURCES: &[(&str, &str)] = &[
     ("translucency.wgsl", include_str!("shaders/translucency.wgsl")),
     ("tsr.wgsl", include_str!("shaders/tsr.wgsl")),
     ("visbuffer.wgsl", include_str!("shaders/visbuffer.wgsl")),
+    ("voxel.wgsl", include_str!("shaders/voxel.wgsl")),
+    ("voxel_raster.wgsl", include_str!("shaders/voxel_raster.wgsl")),
+    ("voxel_resolve.wgsl", include_str!("shaders/voxel_resolve.wgsl")),
+    ("vsm_voxel_raster.wgsl", include_str!("shaders/vsm_voxel_raster.wgsl")),
     ("vsm.wgsl", include_str!("shaders/vsm.wgsl")),
     ("vsm_common.wgsl", include_str!("shaders/vsm_common.wgsl")),
     ("vsm_draw.wgsl", include_str!("shaders/vsm_draw.wgsl")),

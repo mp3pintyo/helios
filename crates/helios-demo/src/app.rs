@@ -58,7 +58,7 @@ pub struct DemoApp {
 const SCREEN_PERCENTAGES: [f32; 4] = [50.0, 67.0, 75.0, 100.0];
 
 pub const HELP: &str = "WASD/QE fly · drag to look · wheel speed · Shift fast\n\
-N next scene · V debug view · G GI · H shadows · 1 local light shadow maps · [ ] screen percentage (50/67/75/100 %) · \\ dynamic resolution · T TAA · O occlusion · K software raster · I texture streaming · F fog · C clouds · U translucency · / translucency layers · L wind · M motion blur · B depth of field · ` local exposure · Z/X zoom · , . LOD error · ←→↑↓ sun · P animate sun · J day/night cycle · Y camera tour · R reset";
+N next scene · V debug view · Insert voxel LODs · G GI · H shadows · 1 local light shadow maps · [ ] screen percentage (50/67/75/100 %) · \\ dynamic resolution · T TAA · O occlusion · K software raster · I texture streaming · F fog · C clouds · U translucency · / translucency layers · L wind · M motion blur · B depth of field · ` local exposure · Z/X zoom · , . LOD error · ←→↑↓ sun · P animate sun · J day/night cycle · Y camera tour · R reset";
 
 impl DemoApp {
     pub fn new(
@@ -184,6 +184,8 @@ impl DemoApp {
             "Backquote" => s.local_exposure = if s.local_exposure.is_some() { None } else { Some(helios_render::LocalExposure::default()) },
             "KeyI" => s.texture_streaming = !s.texture_streaming,
             "KeyK" => s.sw_raster_threshold = if s.sw_raster_threshold > 0.0 { 0.0 } else { 2.5 },
+            // Voxel LODs of foliage on / off (the triangle-only cut), for A/B comparisons.
+            "Insert" => s.voxel_lods = !s.voxel_lods,
             // Screen percentage one step down / up. With dynamic resolution on, a press turns it
             // off (back to the fixed percentage).
             "BracketLeft" | "BracketRight" => {
@@ -376,6 +378,15 @@ impl DemoApp {
             st.shadow_page_overflow,
             self.renderer.shadow_mapped_lights(),
         ));
+        if self.renderer.has_voxels() {
+            text.push_str(&format!(
+                "\nvoxel LODs {} (Insert): {:.2} M voxels visible, {:.2} M in shadows · assembly parts drawn: {}",
+                on(s.voxel_lods),
+                st.voxels as f64 / 1e6,
+                st.shadow_voxels as f64 / 1e6,
+                st.assembly_parts
+            ));
+        }
         let tex = self.renderer.texture_streaming_stats();
         if tex.layers > 0 {
             text.push_str(&format!(

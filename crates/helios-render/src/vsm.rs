@@ -175,6 +175,8 @@ pub struct VsmFrame<'a> {
     /// View depth up to which volumetric fog samples the shadow map (0 = no volumetrics):
     /// coarse pages are requested throughout that part of the frustum.
     pub volume_distance: f32,
+    /// `CullViewUniform::flags` of the shadow views (voxel LODs as in the main view).
+    pub cull_flags: u32,
 }
 
 pub struct VirtualShadowMap {
@@ -213,6 +215,8 @@ pub struct VirtualShadowMap {
     raster_sw: wgpu::ComputePipeline,
     /// The software rasteriser specialised for alpha-masked clusters.
     raster_sw_masked: wgpu::ComputePipeline,
+    /// Voxel clusters' page items (vsm_voxel_raster.wgsl).
+    raster_voxels: wgpu::ComputePipeline,
     resolve: wgpu::RenderPipeline,
     raster: wgpu::RenderPipeline,
     static_layout: wgpu::BindGroupLayout,
@@ -409,6 +413,14 @@ impl VirtualShadowMap {
                 &sw_layout,
                 &[("SLOPE_BIAS", SLOPE_BIAS as f64), ("MASKED", 1.0)],
             ),
+            raster_voxels: compute_pipeline(
+                device,
+                "vsm raster voxels",
+                &create_module(device, "vsm_voxel_raster.wgsl"),
+                "rasterize",
+                &sw_layout,
+                &[("SLOPE_BIAS", SLOPE_BIAS as f64)],
+            ),
             resolve: render(
                 "vsm resolve",
                 &resolve_pipeline_layout,
@@ -542,6 +554,8 @@ impl VirtualShadowMap {
                 batch_capacity: view.capacity.batches,
                 masked_capacity: 0,
                 vsm: Vec4::new(level as f32, page_world, origin.x as f32, origin.y as f32),
+                flags: f.cull_flags,
+                _pad: [0; 3],
             };
             queue.write_buffer(&view.uniform, 0, bytemuck::bytes_of(&uniform));
         }
@@ -556,8 +570,18 @@ impl VirtualShadowMap {
             frame: f.frame,
             lod_threshold: f.lod_threshold,
             sw_raster_threshold: f.sw_raster_threshold * SW_THRESHOLD_SCALE,
+            flags: f.cull_flags,
         };
         self.local.update(queue, f.local_resolution_bias, &local);
+    }
+
+    /// Makes room in every shadow culling view for `extra` more page batches: the part
+    /// instances of assemblies take one each.
+    pub fn reserve_batches(&mut self, device: &wgpu::Device, extra: u32) {
+        for view in &mut self.levels {
+            view.reserve_batches(device, LEVEL_CAPACITY.batches + extra);
+        }
+        self.local.reserve_batches(device, LOCAL_CAPACITY.batches, extra);
     }
 
     /// Chooses the local lights that get shadow maps this frame (before the lights are
@@ -752,6 +776,10 @@ impl VirtualShadowMap {
             pass.dispatch_workgroups_indirect(&self.draws, SW_DISPATCH_OFFSET);
             if scene.masks.any() {
                 pass.set_pipeline(&self.raster_sw_masked);
+                pass.dispatch_workgroups_indirect(&self.draws, SW_DISPATCH_OFFSET);
+            }
+            if scene.has_voxels() {
+                pass.set_pipeline(&self.raster_voxels);
                 pass.dispatch_workgroups_indirect(&self.draws, SW_DISPATCH_OFFSET);
             }
         }

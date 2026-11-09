@@ -239,7 +239,7 @@ mod native {
 
         fn apply(&self, app: &mut DemoApp) {
             if let Some(index) = self.view {
-                app.renderer.settings.debug_view = DebugView::ALL[index.min(DebugView::ALL.len() - 1)];
+                app.renderer.settings.debug_view = DebugView::from_index(index).unwrap_or_default();
             }
             if let Some([x, y, z, yaw, pitch]) = self.camera {
                 app.camera.position = Vec3::new(x, y, z);

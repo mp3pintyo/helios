@@ -7,13 +7,14 @@
 use glam::{Mat4, Quat, Vec2, Vec3};
 use helios_geometry::modeling::{lathe, merge, tube};
 use helios_geometry::noise::fbm;
-use helios_geometry::vegetation::{self, LeafShape, TreeParams};
-use helios_geometry::{primitives, BuildConfig, Mesh, SdfMode};
+use helios_geometry::assembly::build_assembly_base;
+use helios_geometry::vegetation::{self, LeafShape, PlantAssembly, TreeParams};
+use helios_geometry::{primitives, BuildConfig, Mesh, SdfMode, VirtualMesh, VoxelConfig};
 use helios_render::{
-    Camera, Light, Material, MaterialHandle, MaterialKind, MeshHandle, Scene, Sun, TextureDesc, TextureMapping, TexturePattern, Wind, WindResponse,
+    AssemblyPart, Camera, Light, Material, MaterialHandle, MaterialKind, MeshHandle, Scene, Sun, TextureDesc, TextureMapping, TexturePattern, Wind, WindResponse,
 };
 
-use super::{add_baked_with, smoothstep, Detail, Rng, SceneSetup};
+use super::{add_baked_with, add_built, smoothstep, Detail, Rng, SceneSetup};
 
 const SIZE: f32 = 900.0;
 const SUN: (f32, f32, f32) = (2.5, 0.26, 9.0);
@@ -39,8 +40,33 @@ struct Meshes<'a> {
 
 impl Meshes<'_> {
     fn add(&mut self, name: &str, mesh: &Mesh, sdf: bool) -> MeshHandle {
-        let config = BuildConfig { sdf: if sdf { SdfMode::Volume { resolution: 40 } } else { SdfMode::None }, ..Default::default() };
-        add_baked_with(self.scene, name, mesh, config)
+        add_baked_with(self.scene, name, mesh, Self::config(sdf))
+    }
+
+    /// Aggregate geometry (leaves, needles, fronds, blades): voxel LODs at a distance.
+    fn add_foliage(&mut self, name: &str, mesh: &Mesh, sdf: bool) -> MeshHandle {
+        add_baked_with(self.scene, name, mesh, Self::foliage_config(sdf))
+    }
+
+    /// A tree's foliage as an assembly: its sprays are the parts, the base (with the distance
+    /// field Lumen sees) is built from their roots.
+    fn add_assembly(&mut self, name: &str, plant: &PlantAssembly) -> MeshHandle {
+        let parts: Vec<MeshHandle> = plant.sprays.iter().map(|spray| self.add_foliage(&format!("{name} spray"), spray, false)).collect();
+        let meshes: Vec<VirtualMesh> = parts.iter().map(|&p| self.scene.mesh(p).clone()).collect();
+        let base = add_built(self.scene, name, || {
+            let geometry: Vec<(&VirtualMesh, Mat4)> = plant.placements.iter().map(|&(i, transform)| (&meshes[i], transform)).collect();
+            build_assembly_base(&geometry, &Self::foliage_config(true)).0
+        });
+        self.scene.set_assembly(base, plant.placements.iter().map(|&(i, transform)| AssemblyPart { mesh: parts[i], transform }).collect());
+        base
+    }
+
+    fn foliage_config(sdf: bool) -> BuildConfig {
+        BuildConfig { voxels: Some(VoxelConfig::default()), ..Self::config(sdf) }
+    }
+
+    fn config(sdf: bool) -> BuildConfig {
+        BuildConfig { sdf: if sdf { SdfMode::Volume { resolution: 40 } } else { SdfMode::None }, ..Default::default() }
     }
 }
 
@@ -141,7 +167,7 @@ fn build_scene(detail: Detail) -> Scene {
     let leaves = detail.pick(34, 56);
     let mut species: Vec<Species> = Vec::new();
     for (i, (height, radius, depth)) in [(18.0f32, 0.45f32, detail.pick(3u32, 4)), (14.0, 0.34, detail.pick(3, 4)), (9.0, 0.2, 3)].iter().enumerate() {
-        let tree = vegetation::broadleaf_tree(&TreeParams {
+        let tree = vegetation::broadleaf_assembly(&TreeParams {
             seed: 11 + i as u32 * 7,
             height: *height,
             trunk_radius: *radius,
@@ -154,16 +180,16 @@ fn build_scene(detail: Detail) -> Scene {
         });
         species.push(Species {
             wood: m.add("broadleaf wood", &tree.wood, true),
-            foliage: m.add("broadleaf foliage", &tree.foliage, true),
+            foliage: m.add_assembly("broadleaf foliage", &tree),
             bark: oak_bark_m,
             leaves: leaves_m[i],
         });
     }
     for (i, height) in [22.0f32, 15.0].iter().enumerate() {
-        let tree = vegetation::conifer(41 + i as u32, *height, height * 0.018, detail.pick(34, 56), detail.pick(10, 14));
+        let tree = vegetation::conifer_assembly(41 + i as u32, *height, height * 0.018, detail.pick(34, 56), detail.pick(10, 14));
         species.push(Species {
             wood: m.add("conifer wood", &tree.wood, true),
-            foliage: m.add("conifer needles", &tree.foliage, true),
+            foliage: m.add_assembly("conifer needles", &tree),
             bark: pine_bark_m,
             leaves: needles_m,
         });
@@ -171,11 +197,11 @@ fn build_scene(detail: Detail) -> Scene {
     let bushes: Vec<(MeshHandle, MeshHandle)> = (0..2)
         .map(|i| {
             let b = vegetation::bush(61 + i, 1.4, detail.pick(10, 16));
-            (m.add("bush wood", &b.wood, false), m.add("bush leaves", &b.foliage, true))
+            (m.add("bush wood", &b.wood, false), m.add_foliage("bush leaves", &b.foliage, true))
         })
         .collect();
-    let ferns: Vec<MeshHandle> = (0..3).map(|i| m.add("fern", &vegetation::fern(81 + i, 9, 0.9, detail.pick(14, 22)), false)).collect();
-    let grass: Vec<MeshHandle> = (0..2).map(|i| m.add("grass", &vegetation::grass_clump(91 + i, detail.pick(40, 80), 0.45), false)).collect();
+    let ferns: Vec<MeshHandle> = (0..3).map(|i| m.add_foliage("fern", &vegetation::fern(81 + i, 9, 0.9, detail.pick(14, 22)), false)).collect();
+    let grass: Vec<MeshHandle> = (0..2).map(|i| m.add_foliage("grass", &vegetation::grass_clump(91 + i, detail.pick(40, 80), 0.45), false)).collect();
     let rocks: Vec<MeshHandle> = (0..3).map(|i| m.add("boulder", &primitives::rock(101 + i * 5, detail.pick(5, 6)), true)).collect();
     let log = {
         let path: Vec<Vec3> = (0..=16).map(|i| Vec3::new(i as f32 * 0.6, (i as f32 * 0.7).sin() * 0.05, (i as f32 * 0.4).sin() * 0.15)).collect();

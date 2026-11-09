@@ -43,7 +43,8 @@ struct CullState {
     overflow: atomic<u32>,
     masked_count: atomic<u32>,
     masked_early: u32,
-    _pad: array<u32, 5>,
+    voxel_count: atomic<u32>,
+    _pad: array<u32, 4>,
 }
 
 @group(0) @binding(0) var<uniform> view: CullView;
@@ -203,6 +204,10 @@ fn cull_instances(@builtin(global_invocation_id) gid: vec3<u32>) {
     if view.kind == VIEW_MAIN && (instance.flags & INSTANCE_TRANSLUCENT) != 0u {
         return;
     }
+    // An assembly drawn as its parts this frame (assembly.wgsl): they replace its base.
+    if (instance.flags & INSTANCE_EXPANDED) != 0u {
+        return;
+    }
     let strength = wind_strength(instance);
     let bounds = wind_padded(instance, strength, instance.bounds);
     if !sphere_in_frustum(bounds) || !vsm_overlaps(bounds, dynamic_caster(strength)) {
@@ -337,6 +342,10 @@ fn test_cluster(instance_id: u32, cluster_id: u32) -> ClusterResult {
     var result = ClusterResult(false, false, false);
     let instance = instances[instance_id];
     let cluster = clusters[cluster_id];
+    // Voxel clusters and their triangle alternates: only one representation takes part.
+    if !cluster_in_mode(cluster, (view.flags & VIEW_VOXELS) != 0u) {
+        return result;
+    }
     let scale = instance.max_scale;
 
     let own = projected_error(world_error(cluster.lod_error, scale), transform_sphere(instance.world, cluster.lod_bounds, scale));
@@ -368,8 +377,9 @@ fn test_cluster(instance_id: u32, cluster_id: u32) -> ClusterResult {
         }
     }
 
-    if result.draw && view.sw_raster_threshold > 0.0 {
-        result.software = prefers_software_raster(cluster, bounds);
+    // Voxels are only rasterised in compute (voxel_raster.wgsl).
+    if result.draw && (view.sw_raster_threshold > 0.0 || cluster_is_voxel(cluster)) {
+        result.software = cluster_is_voxel(cluster) || prefers_software_raster(cluster, bounds);
     }
     // The software rasteriser alpha-tests per cluster, shadow rasterisers per draw: only the
     // main view's hardware path needs a separate list.
@@ -402,6 +412,7 @@ var<workgroup> sw_local: atomic<u32>;
 var<workgroup> tri_local: atomic<u32>;
 var<workgroup> sw_tri_local: atomic<u32>;
 var<workgroup> masked_local: atomic<u32>;
+var<workgroup> voxel_local: atomic<u32>;
 var<workgroup> hw_base: u32;
 var<workgroup> sw_base: u32;
 var<workgroup> masked_base: u32;
@@ -418,6 +429,7 @@ fn cull_clusters(
         atomicStore(&tri_local, 0u);
         atomicStore(&sw_tri_local, 0u);
         atomicStore(&masked_local, 0u);
+        atomicStore(&voxel_local, 0u);
     }
     workgroupBarrier();
 
@@ -442,6 +454,7 @@ fn cull_clusters(
     if result.draw {
         let triangles = cluster_triangle_count(clusters[cluster_id]);
         atomicAdd(&tri_local, triangles);
+        atomicAdd(&voxel_local, cluster_voxel_count(clusters[cluster_id]));
         if result.software {
             local_slot = atomicAdd(&sw_local, 1u);
             atomicAdd(&sw_tri_local, triangles);
@@ -471,10 +484,15 @@ fn cull_clusters(
             atomicAdd(&state.triangle_count, tris);
             atomicAdd(&state.sw_triangles, atomicLoad(&sw_tri_local));
         }
+        let voxels = atomicLoad(&voxel_local);
+        if voxels > 0u {
+            atomicAdd(&state.voxel_count, voxels);
+        }
     }
     workgroupBarrier();
     if result.draw {
-        var entry = vec4<u32>(instance_id, cluster_id, select(0u, CLUSTER_SOFTWARE, result.software), 0u);
+        let flags = select(0u, CLUSTER_SOFTWARE, result.software) | select(0u, CLUSTER_VOXEL, cluster_is_voxel(clusters[cluster_id]));
+        var entry = vec4<u32>(instance_id, cluster_id, flags, 0u);
         if result.masked {
             let index = masked_base + masked_slot;
             if index < view.masked_capacity {

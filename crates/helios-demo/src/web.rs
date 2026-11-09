@@ -462,7 +462,6 @@ pub fn helios_scene() -> String {
 #[wasm_bindgen(js_name = heliosSetView)]
 pub fn helios_set_view(index: u32) {
     with_state(|st| {
-        let views = helios_render::DebugView::ALL;
-        st.app.renderer.settings.debug_view = views[(index as usize).min(views.len() - 1)];
+        st.app.renderer.settings.debug_view = helios_render::DebugView::from_index(index as usize).unwrap_or_default();
     });
 }

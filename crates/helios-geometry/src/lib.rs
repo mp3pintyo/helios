@@ -16,12 +16,15 @@
 //!    dependencies, so the GPU can render whatever subset is resident without cracks.
 //! 6. **Compression** – cluster vertices are quantised to per-mesh grids and bit-packed
 //!    ([`encoding`]), on the GPU as on disk.
+//! 6b. **Voxel LODs** – aggregate geometry (foliage) gets voxel clusters where they beat the
+//!    simplified triangles ([`voxel`]), preserving coverage at a distance.
 //! 7. **Distance fields** – a narrow-band SDF (or heightfield) per mesh for software ray tracing.
 //! 8. **Cards** – orthographic depth/normal captures of a mesh's surfaces ([`cards`]) for a
 //!    card-based surface cache.
 //!
 //! The output, [`VirtualMesh`], is a set of flat, GPU-ready arrays.
 
+pub mod assembly;
 mod bounds;
 pub mod cards;
 mod cluster;
@@ -37,14 +40,16 @@ pub mod primitives;
 mod sdf;
 mod simplify;
 pub mod vegetation;
+pub mod voxel;
 
 pub use bounds::{Aabb, Sphere};
 pub use cards::{Card, CardConfig, MeshCards};
 pub use cluster::{build_clusters, ClusterLimits};
 pub use dag::{
-    build_virtual_mesh, lod_cut, lod_cut_resident, BuildConfig, GpuCluster, GpuPage, LodView, VirtualMesh, VirtualMeshStats,
-    INVALID_PAGE, ROOT_ERROR,
+    build_virtual_mesh, lod_cut, lod_cut_in, lod_cut_resident, BuildConfig, GpuCluster, GpuPage, LodView, VirtualMesh, VirtualMeshStats,
+    CLUSTER_VOXEL_ALTERNATE, INVALID_PAGE, ROOT_ERROR,
 };
+pub use voxel::{Voxel, VoxelConfig};
 pub use encoding::{decode_octahedral, encode_octahedral, Quantization, VertexAttributes};
 pub use mesh::{canonical_ids, Mesh, Vertex};
 pub use partition::{group_clusters, partition_graph, Graph};

@@ -87,6 +87,12 @@ fn emit_page_draw(item: vec4<u32>, dynamic: bool, software: bool, physical: u32,
     } else if kind == PAGE_SPLIT && dynamic {
         list = LIST_SPLIT;
     }
+    // Voxels have no hardware path: in a dynamic page without a scratch tile, or a split page
+    // (whose dynamic casters are drawn after its static layer is captured), they sit out this
+    // refresh.
+    if (item.z & CLUSTER_VOXEL) != 0u && list != LIST_SOFTWARE {
+        return;
+    }
     emit(list, vec4<u32>(item.x, item.y, target_page | (level << 16u), tag));
 }
 
@@ -200,7 +206,8 @@ fn expand_into_light(item: vec4<u32>, dynamic: bool, sphere: vec4<f32>, slot: u3
             let page_lo = max(vec2<i32>(floor(uv_lo * pages)), vec2<i32>(info[rect], info[rect + 1u]));
             let page_hi = min(vec2<i32>(floor(uv_hi * pages)), vec2<i32>(info[rect + 2u], info[rect + 3u]));
             let extent = (uv_hi - uv_lo) * pages * f32(vsm.page_texels);
-            let sw = software && front > 2.0 * near && all(extent <= vec2<f32>(LOCAL_SW_MAX_TEXELS));
+            // Voxels are always software (vsm_voxel_raster.wgsl clips per voxel).
+            let sw = software && ((item.z & CLUSTER_VOXEL) != 0u || (front > 2.0 * near && all(extent <= vec2<f32>(LOCAL_SW_MAX_TEXELS))));
             let level = LOCAL_LEVEL + view_index * LOCAL_MIPS + mip;
             for (var y = page_lo.y; y <= page_hi.y; y++) {
                 for (var x = page_lo.x; x <= page_hi.x; x++) {
