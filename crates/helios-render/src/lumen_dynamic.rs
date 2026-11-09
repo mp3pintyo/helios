@@ -454,6 +454,20 @@ mod tests {
     }
 
     #[test]
+    fn displacement_bounds_every_point_of_the_box() {
+        let aabb = helios_geometry::Aabb { min: Vec3::new(-1.0, 0.0, -1.0), max: Vec3::new(1.0, 12.0, 1.0) };
+        let shift = Mat4::from_translation(Vec3::new(0.3, 0.0, 0.4));
+        assert!((displacement(&aabb, Mat4::IDENTITY, shift) - 0.5).abs() < 1e-5);
+        // A pendulum swing about the top: the bottom corners move the most.
+        let pivot = Vec3::new(0.0, 12.0, 0.0);
+        let swing = Mat4::from_translation(pivot) * Mat4::from_rotation_z(0.05) * Mat4::from_translation(-pivot);
+        let bottom = Vec3::new(1.0, 0.0, 1.0);
+        let d = displacement(&aabb, Mat4::IDENTITY, swing);
+        assert!(d >= swing.transform_point3(bottom).distance(bottom) - 1e-5 && d < 12.1 * 0.05);
+        assert_eq!(displacement(&aabb, swing, swing), 0.0);
+    }
+
+    #[test]
     fn records_follow_their_instance() {
         let aabb = helios_geometry::Aabb { min: Vec3::splat(-1.0), max: Vec3::splat(1.0) };
         let mut record = SdfInstance::zeroed();
