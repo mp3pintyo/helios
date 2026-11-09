@@ -1,28 +1,40 @@
 # Helios
 
 A Rust + WebGPU (wgpu) rendering library that implements the core ideas behind Unreal Engine 5's
-**Nanite** (virtual geometry with streaming and a software rasteriser), **Virtual Shadow Maps**,
-**Lumen** (software ray-traced global illumination and reflections) and its material / lighting
-stack, running natively and in the browser.
+**Nanite** (virtual geometry with streaming and a software rasteriser, skinned meshes, voxel foliage LODs and
+assemblies), **Virtual Shadow Maps**, **Lumen** (software ray-traced global illumination and reflections, plus a
+Lumen Lite irradiance field for weak GPUs), **MegaLights** (stochastic shadowed lighting from hundreds of local
+lights), **Substrate**-style layered materials with material graphs, heterogeneous volumes, GPU particles and a
+dynamic world of moving instances, with its material / lighting / post stack — running natively and in the
+browser, where a UE-style level editor with scene files and a PCG graph sits around the live viewport.
 
 **Live showcase:** https://mp3pintyo.github.io/helios/ (needs a WebGPU browser, e.g. recent Chrome or Edge).
 Redeploy with `python site/build.py` then `python site/deploy_pages.py`.
+Round 4's design notes, measurements and screenshots, one file per feature: [`docs/round4/`](docs/round4/).
 
 ```
 crates/
   helios-geometry   pure Rust, no GPU: clustering, METIS-style grouping, seam-aware QEM simplification,
-                    LOD DAG + streaming pages, mesh distance fields, procedural modelling and vegetation
-  helios-asset      pure Rust: glTF 2.0 import (.gltf / .glb) -> meshes, node instances, PBR materials, RGBA8 images
-  helios-render     wgpu renderer: GPU-driven culling, HW + SW raster, streaming, materials, VSM, Lumen, post
-  helios-demo       three demo scenes (valley, cathedral, forest): native window, headless PNG capture, wasm
-web/                index.html + generated pkg/ for the browser build
+                    LOD DAG + streaming pages, skin weights, voxel LODs, assemblies, mesh distance fields,
+                    procedural modelling and vegetation
+  helios-asset      pure Rust: glTF 2.0 import (.gltf / .glb) -> meshes, node instances, PBR materials (with the
+                    clearcoat / sheen / ior / specular / anisotropy / transmission / unlit extensions), skins and
+                    animation clips, RGBA8 images
+  helios-material   pure Rust: material graphs (serde data) validated and compiled to WGSL, with screen derivatives
+  helios-pcg        pure Rust: deterministic procedural content generation graphs (sample, filter, prune, spawn)
+  helios-render     wgpu renderer: GPU-driven culling, HW + SW + voxel raster, streaming, materials, VSM, Lumen,
+                    MegaLights, volumes, particles, OIT, post
+  helios-demo       four demo scenes (valley, cathedral, forest, gallery) + glTF viewer: native window, headless PNG
+                    capture, wasm; the editor core (scene documents, scene files, PCG volumes)
+web/                index.html, editor.html + editor/ (ES modules, no build step), generated pkg/ for the browser build
 ```
 
 ## Quick start
 
 ```powershell
-# Native (interactive). Scenes: valley, cathedral, forest. Detail: medium | high.
+# Native (interactive). Scenes: valley, cathedral, forest, gallery. Detail: medium | high.
 cargo run -p helios-demo --release -- --scene cathedral
+cargo run -p helios-demo --release -- --scene gallery                         # the material gallery
 
 # Headless screenshot (CI / regression images)
 cargo run -p helios-demo --release -- --scene forest --screenshot out.png --size 1600x900 --frames 120 --detail medium
@@ -33,8 +45,20 @@ cargo install wasm-bindgen-cli --version 0.2.130
 ./build-web.ps1
 python -m http.server 8080 --directory web     # open http://localhost:8080/?scene=cathedral
 
-# Your own content: a glTF 2.0 model (.glb, or .gltf with its files)
+# The level editor (browser): outliner, details, gizmos, content browser, PCG volumes, material graphs
+python serve.py 8080 web
+#   http://localhost:8080/editor.html?scene=valley                 (or Tab in index.html)
+#   http://localhost:8080/editor.html?scene-file=my.helios.json    open a saved scene file (also ?scene-file= in index.html)
+cargo run -p helios-demo --release -- --scene-file my.helios.json     # natively (Tab: editor tools, no panels)
+
+# Lighting options: GI final gather, MegaLights, the candle-lit cathedral (every flame a shadow-casting light)
+cargo run -p helios-demo --release -- --scene cathedral --gi lite                      # lumen | lite | auto (default)
+cargo run -p helios-demo --release -- --scene cathedral --lights 1000 --megalights --sun 200,-30
+#   browser: ?gi=lite, ?megalights=1, ?lights=300 (or heliosConfig.gi / .megaLights / .lights)
+
+# Your own content: a glTF 2.0 model (.glb, or .gltf with its files); skinned models play their animations
 cargo run -p helios-demo --release -- --gltf path/to/Sponza.gltf      # [--no-ground]
+cargo run -p helios-demo --release -- --gltf path/to/Fox.glb          # - (Minus) crossfades to the next clip
 #   browser: http://localhost:8080/?gltf=models/DamagedHelmet.glb (fetched relative to the page)
 #   browser resolution: dynamic resolution (14 ms GPU budget) is on by default; ?sp=67 fixes the screen
 #   percentage, ?budget=10 changes the budget, ?budget=0 turns it off
@@ -54,9 +78,23 @@ accumulation (TSR history; off = spatial upscale only), `O` occlusion culling, `
 makes the depth of field shallower), arrow keys move the sun (down past the horizon into the night),
 `P` animates the sun, `J` runs a day-and-night time-lapse, `Y` starts a camera tour, `F12` saves a screenshot, `R` resets
 the camera. The camera stays above the ground but may dive into the valley's lake (`Q` down over the water) for the
-underwater view.
+underwater view. Round 4 (all letters were taken): `0` pauses / resumes the demo motion (swinging chandeliers,
+turning sculpture, drifting raft), `-` next animation clip of a skinned model (0.4 s crossfade; after the last one
+it pauses), `;` GI final gather Lumen ↔ Lumen Lite (ends the automatic choice), `=` MegaLights, `'` volumes +
+particles, `Insert` voxel LODs (off: the triangle-only cut of the same DAG), `PageUp` Substrate slabs (off: every
+material renders as its plain base), `Tab` editor (natively: the editor tools without panels — click to select,
+`Del`, `Ctrl+D`, `F`, `Ctrl+Z` / `Ctrl+Y`, `Ctrl+S` saves the scene file; in `editor.html`: play mode).
 
-Headless flags: `--scene`, `--detail`, `--size WxH`, `--frames N`, `--view i` (debug view; 14 = Lumen mesh cards, 15 = local light shadow pages), `--eye x,h,z` /
+Editor (`web/editor.html`, viewport focused, right mouse button not held): `W` / `E` / `R` move / rotate / scale,
+`Space` cycles them, `` Ctrl+` `` world / local axes, `F` frames the selection, `Del` delete, `Ctrl+D` duplicate,
+`Ctrl+Z` / `Ctrl+Y` undo / redo, `Ctrl+S` save, `Ctrl+O` open, `Esc` cancels a drag or deselects; right mouse +
+`WASD`/`QE` flies, the wheel dollies; `Shift` / `Ctrl` click adds / toggles; drag content into the viewport, drop a
+material onto an object to assign it.
+
+Headless flags: `--scene`, `--detail`, `--size WxH`, `--frames N`, `--view i` (debug view by index, 0–24; also
+`heliosSetView(i)`; 14 = Lumen mesh cards, 15 = local light shadow pages, 16 = invalidation, 17 = skin weights,
+18 / 19 = MegaLights samples / samples | denoised, 20 = Lumen Lite probes, 21 = volume march steps and particle
+overdraw, 22 = voxel clusters, 23 = assembly parts, 24 = material features), `--eye x,h,z` /
 `--at x,h,z` (heights relative to the ground), `--camera x,y,z,yaw,pitch`, `--lod px`, `--pool-mb N`
 (geometry pool size, to exercise streaming), `--texture-pool-mb N` (texture tile atlases), `--no-texture-compression` (uncompressed tiles; in
 the browser `?texture-compression=0`), `--no-occlusion`, `--no-sw-raster`,
@@ -70,7 +108,13 @@ blurred luminance blend), `--switch-to SCENE` (reload another scene halfway), `-
 measure temporal stability), `--bake-hvm DIR` (write the scene's baked meshes and exit), `--stream-from DIR` (build
 the scene from them, streaming page payloads from disk; scene and detail come from the library), `--io-latency-ms N`
 (emulate slow storage), `--fov DEG`, `--move-light` (the shadow-casting light nearest the camera circles every frame,
-so its shadow map is re-rendered every frame).
+so its shadow map is re-rendered every frame). Round 4: `--scene-file PATH` (build a `.helios.json` scene file; relative
+glTF paths resolve against it), `--select i,j` (outline these instances, as the editor's selection),
+`--gi lumen|lite|auto`, `--megalights`, `--lights N` (the candle-lit cathedral: the first N of up to 1008 candle flames
+lit, each a shadow-casting light), `--no-skinning` (import a glTF model's skinned meshes as static bind-pose meshes, for
+cost comparisons), `--full-invalidation` (every move invalidates everything, as before per-instance invalidation),
+`--movers N` (only the first N moving prop groups move), `--static-motion` (the props move as `Mobility::Static`
+instances: the one-off edit path).
 
 **Streaming from files.** `--stream-from` / `?stream=` build the same procedural scene but substitute every baked
 mesh with its pre-baked counterpart: only the header (cluster and page records, dependencies, bounds, distance field)
@@ -83,12 +127,14 @@ honouring `Range`, e.g. a CDN) streams pages on demand. Imported glTF models are
 
 | Scene | What it shows | Size |
 |---|---|---|
-| `valley` | Mountain valley, 600 boulders, a gold sculpture and a small lake; terrain textured through a runtime virtual texture; at the lake's north end, out of the initial view, a glass pane and two crossing tinted panels standing in the water (layered translucency test) | 612 instances, 50 M (medium) / 199 M (high) source triangles |
-| `cathedral` | Gothic basilica: 11-bay nave with clustered piers, triforium, stained-glass clerestory and aisles, quadripartite rib vaults, flying buttresses, polygonal apse with half dome, west front with rose window and twin spired towers; pews, altar, candelabra and chandeliers with 33 candle lights; alpha-tested wrought-iron choir screens; at the west end of the north aisle, behind the initial view, a stained-glass screen and two crossing tinted glass panes (layered translucency test) | 457 instances, 4 M (medium) / 18 M (high) |
-| `forest` | Mixed broadleaf / conifer forest with real leaf geometry, bushes, ferns, grass, mossy boulders, fallen logs and mushrooms at golden hour, swaying in a gusty breeze | 8 261 instances, 82 M (medium) source triangles |
+| `valley` | Mountain valley, 600 boulders, a gold sculpture (turning once in 45 s) and a small lake with a log raft that drifts, bobs and rolls on it, procedural (not simulated) mist over the water; terrain textured through a runtime virtual texture; at the lake's north end, out of the initial view, a glass pane and two crossing tinted panels standing in the water (layered translucency test) | 613 instances, 50 M (medium) / 199 M (high) source triangles |
+| `cathedral` | Gothic basilica: 11-bay nave with clustered piers, triforium, stained-glass clerestory and aisles, quadripartite rib vaults, flying buttresses, polygonal apse with half dome, west front with rose window and twin spired towers; pews, altar, candelabra and eleven chandeliers swinging on their 12 m chains (7 s pendulums, 1–3°, their candle lights moving along), 33 candle lights in all; dust motes in the clerestory's light shafts and incense rising from a censer before the altar; alpha-tested wrought-iron choir screens; at the west end of the north aisle, behind the initial view, a stained-glass screen and two crossing tinted glass panes (layered translucency test). **Candle-lit** with `--lights N` / `?lights=N`: every candle flame its own shadow-casting light (60 candelabrum, 88 chandelier and 2 altar candles) plus votive racks of tea lights against the aisle walls (858), the first N lit, up to 1008 | 458 instances, 4 M (medium) / 18 M (high) |
+| `forest` | Mixed broadleaf / conifer forest with real leaf geometry, bushes, ferns, grass, mossy boulders, fallen logs and mushrooms at golden hour, swaying in a gusty breeze; conifers built from shared needle-spray assemblies, foliage with voxel LODs; a campfire in the clearing in front of the initial view (simulated fire and smoke, sparks that bounce, embers that settle and cool, a flickering fire light; best at night, `--sun 200,-30 --eye 3.5,1.4,1.0 --at 7,1.0,-1`) | 8 278 instances (≈ 26 400 assembly parts when expanded), 82 M (medium) source triangles |
+| `gallery` | The material gallery: a paved courtyard at golden hour with a row of plinths — clear-coat car paint, velvet with sheen, subsurface skin, a lit wax candle and a marble egg, a bush whose leaves let a lamp's light through, an anisotropic brushed-metal pot, dielectrics of IOR 1.33 / 2.4 and a tinted specular, an unlit sign — and three material graphs: animated lava (a pool and an egg), stylised water (two instances of one graph with different parameters) and a terrace of wet stone with puddles | 33 instances |
 
 These are procedural: meshes come from `helios_geometry::modeling` / `vegetation`, textures from GPU
-texture synthesis (`TexturePattern`).
+texture synthesis (`TexturePattern`). `0` pauses the moving props; `Y` tours each procedural scene, the gallery
+included.
 
 `model` (`--gltf FILE`, `?gltf=URL`) builds a scene from a glTF 2.0 file: every unique mesh (glTF primitive) is baked
 once into virtual geometry — in parallel, with a distance field sized to its world extent — and placed by the file's
@@ -98,11 +144,20 @@ textures*). `N` cycles through it with the procedural scenes. Beyond the core: a
 texture, `KHR_texture_transform` (offset, rotation, scale, `texCoord` override) and sampler wrap modes per texture,
 vertex colours (`COLOR_0`), ambient occlusion maps (indirect light only), `KHR_materials_emissive_strength` and
 `KHR_mesh_quantization` (8/16-bit normalized or integer attributes, interleaved or sparse accessors). Checked against
-the Khronos sample models TextureTransformTest, TextureTransformMultiTest (every row but clearcoat and unlit),
+the Khronos sample models TextureTransformTest, TextureTransformMultiTest (every row but clearcoat and unlit, checked
+before those extensions were imported),
 MultiUVTest, VertexColorTest, TextureCoordinateTest, EmissiveStrengthTest, the quantized Lantern and Avocado,
 DamagedHelmet and WaterBottle. Alpha-masked materials (`alphaMode: MASK`: foliage
 cards, chains) are alpha-tested; `BLEND` materials become `MaterialKind::Translucent` (forward translucency pass,
 coverage = base colour alpha × texture alpha); their meshes get no distance field and their instances cast no shadow.
+The PBR extensions `KHR_materials_clearcoat`, `_sheen`, `_ior`, `_specular`, `_unlit` and `_anisotropy` (factors) become
+Substrate-lite slabs and `KHR_materials_transmission` (+ `_volume` attenuation) glass (see *Substrate-lite*); checked
+against ClearCoatTest, ClearcoatWicker, SheenChair, SheenTestGrid, SpecularTest, IORTestGrid, TransmissionTest, UnlitTest,
+AnisotropyBarnLamp and CarConcept. Skinned meshes (`JOINTS_0` / `WEIGHTS_0`, any component type) play the file's
+animations: the first clip starts on load, `-` (Minus) crossfades to the next clip and pauses after the last
+(single-clip models: play / pause); the HUD shows the clip, its time and whether it is paused. Checked against Fox,
+CesiumMan, BrainStem, RiggedFigure, RiggedSimple and SimpleSkin. The model is placed by its posed bounds at the start
+of the first clip.
 
 ## Showcase site
 
@@ -110,9 +165,10 @@ coverage = base colour alpha × texture alpha); their meshes get no distance fie
 telemetry (GPU time, resolution, triangles, per-pass GPU time against a 16.7 ms frame) next to chapters whose
 buttons drive it (scene, camera, sun, debug views, feature toggles), before/after sliders, camera-tour videos and
 the story of how Helios was built. It talks to the engine through the page API in `crates/helios-demo/src/web.rs`:
-`globalThis.heliosConfig = { scene, embedded, screenPercentage, gpuBudgetMs }` before loading the module, then
-`heliosLoadScene`, `heliosKey`, `heliosLookAt`, `heliosSetSun`, `heliosSetView`, `heliosSetPaused`, `heliosHud` and
-`heliosScene`. `embedded: true` keeps keyboard input on the focused canvas and leaves the mouse wheel to the page.
+`globalThis.heliosConfig = { scene, embedded, screenPercentage, gpuBudgetMs, gi, megaLights, lights }` before loading
+the module, then `heliosLoadScene`, `heliosKey`, `heliosLookAt`, `heliosSetSun`, `heliosSetView`, `heliosSetPaused`,
+`heliosHud` and `heliosScene`. `embedded: true` keeps keyboard input on the focused canvas and leaves the mouse wheel to
+the page. The editor uses a second set of exports (`heliosEditor*`, `heliosMaterialNodes`; see *Editor*).
 
 ```powershell
 ./build-web.ps1                     # web/pkg
@@ -147,10 +203,23 @@ settings fields: `scene.clouds = CloudLayer::cumulus(0.4)`, `scene.fog = FogVolu
 `renderer.settings.depth_of_field = Some(DepthOfField { f_stop: 1.8, ..Default::default() })`,
 `renderer.settings.motion_blur = 0.5` (shutter fraction).
 
+Round 4's scene API: `scene.set_transform(instance, m)` moves an instance and invalidates only what it touches, and
+`scene.set_mobility(instance, Mobility::Movable)` marks one that moves often (a dynamic shadow caster);
+`scene.add_skin` / `set_instance_skin` / `set_skin_pose` (every frame) animate skinned meshes, with
+`helios_asset::animation::AnimationPlayer` producing the palette from glTF clips; `scene.set_assembly(base, parts)`
+draws a mesh (`helios_geometry::assembly::build_assembly_base`) as placed part meshes up close; `scene.volumes` /
+`scene.particles` hold `VolumeEmitter`s and `ParticleEmitter`s; `Material::slab` (`Slab`: clear coat, sheen,
+subsurface, transmission, anisotropy, IOR, specular, unlit) and `Material::graph` (a `helios_material::MaterialGraph`
+added with `scene.add_material_graph`) extend a material, and `scene.set_material_parameter` overrides a graph
+parameter per material (a material instance). Settings: `mega_lights`, `gi_method` (`GiMethod::ScreenProbes` /
+`LumenLite`), `gi_lite_fallback`, `voxel_lods`, `substrate`, `volumes`, `particles`, `per_instance_invalidation`.
+
 Any indexed triangle mesh works (`helios_geometry::Mesh`); `Mesh::weld` merges identical vertices while keeping UV
 seams and hard edges as separate wedges. Baking is deterministic and can run offline: `VirtualMesh::to_bytes` /
-`from_bytes` (`.hvm`, version 3: compressed page payloads last, so a reader can stream page byte ranges; version 2
-files, which held float vertices, are rejected with a request to bake again).
+`from_bytes` (`.hvm`, version 4: compressed page payloads last, so a reader can stream page byte ranges; voxel LOD
+payloads and skin sections; version 2 files, which held float vertices, and version 3 files, which had no voxel LODs,
+are rejected with a request to bake again). Foliage meshes opt into voxel LODs with `BuildConfig::voxels =
+Some(VoxelConfig { voxels_per_triangle })`.
 
 To stream a baked mesh instead of keeping it in memory, load its header and root pages and give the scene a
 `PageSource` for the rest (`FileSource` natively, `HttpSource` in the browser, or your own):
@@ -179,6 +248,9 @@ scene.add_streamed_mesh(mesh, source, 0);                                       
 | DAG | Simplified groups are re-clustered until one root remains; each cluster stores its own and its parent's error and LOD sphere | `dag.rs` |
 | Pages | Member clusters of whole groups are packed into **streaming pages** with explicit parent-page dependencies | `dag.rs` |
 | Compression | Positions snap to a **per-mesh grid** (power-of-two step ≈ 1/64 of the mean shortest triangle edge, ≤ 1 mm), UVs to a 2^-15 grid; each cluster stores offsets from its minimum grid point with just enough bits per axis, 10+10-bit octahedral normals and `⌈log2 vertices⌉`-bit indices — about 10 bytes per vertex instead of 24, 2.1–2.5× smaller pages overall | `encoding.rs` |
+| Skin weights | Imported joint influences (≤ 4 per vertex) are renormalised and quantised **once per vertex** to 8-bit weights summing to exactly 255, then welded, clustered, simplified and compressed like any attribute: a cluster stores its joints as offsets from its smallest joint and the weights of all but the heaviest influence with just enough bits, in a skin section behind the vertex stream (a header bit; meshes without skin encode bit-identically). Simplification adds a **weight-deviation cost** (the weight a collapse hands to other joints), so strong weight seams collapse last | `skin.rs`, `encoding.rs`, `simplify.rs` |
+| Voxel LODs | For aggregate meshes (`BuildConfig::voxels`), every DAG group also gets a voxel candidate built from the full-detail triangles under it; where the voxels' error is below the simplified triangles' (where pruning starts deleting leaves) the group switches to voxels at the triangles' error, and both representations stay in the DAG (see *Nanite Foliage*) | `voxel.rs`, `dag.rs` |
+| Assemblies | A base mesh built from placed part meshes at their roots, merged in place and simplified (and voxelised) further, its errors offset by the parts' worst root error so they continue where the parts end | `assembly.rs` |
 | Distance fields | Narrow-band mesh SDFs (flood-filled sign that seals sub-voxel cracks, pseudonormals only at the surface; a half-voxel shell around parts thinner than a voxel; two-sided for genuinely open surfaces) or heightfields for terrain and large slabs | `sdf.rs` |
 
 **Why it is crack-free.** Every cluster created from group *G* stores *G*'s error/sphere as its own; every cluster
@@ -201,27 +273,44 @@ run on decoded positions, including on a deliberately coarse grid.
 ### 2. GPU pipeline — `helios-render`
 
 ```
-sky LUTs ─ light culling (froxels)
+sky LUTs ─ fire-driven light colours (volume emission) ─ light culling (froxels, ≤ 255 lights each)
+assembly expansion: assembly bases too coarse for the main view → part instances (for every view)
 cull instances → page batches → pages (residency + LOD prune) → clusters (EARLY: visible last frame)
-  → HW raster (big triangles; alpha-masked ones in a second bin) + SW raster (tiny triangles) → merge → HZB
-  → cull clusters (LATE vs HZB) → HW + SW raster → merge                          ⇒ visibility buffer + depth
-material classification (8×8 tiles) → one resolve pipeline per shading model     ⇒ G-buffer
+  → HW raster (big triangles; alpha-masked ones in a second bin) + SW raster (tiny triangles)
+    + voxel raster (foliage voxel clusters, compute) → merge → HZB
+  → cull clusters (LATE vs HZB) → HW + SW + voxel raster → merge                  ⇒ visibility buffer + depth
+material classification (8×8 tiles) → one resolve pipeline per shading model, extended pipelines per
+  (shading model, material graph) for Substrate slabs and graphs              ⇒ G-buffer (+ slab texels)
+pick (editor: one thread, on request)
 runtime virtual texture: allocate + render requested landscape pages
-virtual shadow maps: mark (sun + local lights) → page cache → clear dirty pages → cull per clipmap level and once
-  for all local lights → (cluster, page) draws
-Lumen: global SDF clipmap → surface cache (mesh cards + voxel lighting) → radiance cache → screen probes → reflections
+virtual shadow maps: mark (sun + local lights) → page cache (+ moved casters' footprints) → clear dirty pages
+  → cull per clipmap level and once for all local lights → (cluster, page) draws → HW + SW + voxel page raster
+Lumen: global SDF clipmap (+ recompose bricks under moved instances) → surface cache (mesh cards + voxel lighting)
+  → radiance cache → final gather: screen probes, or Lumen Lite's irradiance field → reflections → GI temporal
 clouds: half-resolution checkerboard march → temporal · cloud shadow map
 volumetric fog: froxel injection (sun and local lights via VSM, radiance cache) → temporal → front-to-back integration
-deferred lighting (sun + VSM + cloud shadows, clustered local lights + VSM / SDF shadows, GI, reflections, sky +
-  stars + clouds, fog)
+MegaLights (when on): sample lights per 2×2 block → shadow rays (screen, VSM march, distance fields) → shade
+  → temporal + à-trous denoise
+deferred lighting (sun + VSM + cloud shadows, clustered local lights + VSM / SDF shadows or MegaLights' result, GI,
+  reflections, sky + stars + clouds, fog; Substrate slabs where flagged)
+  → subsurface diffusion (horizontal compute + vertical full-screen blur, added back)
+  → volumes (fluid simulation · lighting cache) · particles (simulation · per-particle lighting)
+  → nearest translucent depth → volume march + temporal resolve → particles into OIT targets (front / back)
+  → composite of what lies behind the nearest translucent surface
   → translucency (depth-peel overlapping layers → copy lit scene + mips → forward glass / water / blended draws,
     per layer back to front)
+  → composite of what lies in front of it (+ TSR reactive mask)
   → TSR (internal → output resolution) → depth of field → motion blur → histogram exposure → local exposure → bloom
-  → ACES
+  → ACES → selection outline (editor, only while something is selected)
 ```
 
 Everything before TSR runs at the internal resolution (the screen percentage), everything after it at the output
 resolution.
+
+**Measurements.** Unless stated otherwise, costs are GPU times at 1600×900 on an RTX 3090. Those added in round 4
+were taken while the GPU was shared with up to six other agents' builds and renders: they are minima (medians where
+stated) of interleaved on/off runs, whole-frame totals were at times swamped by the other load, and per-pass minima
+are the reliable numbers. The per-feature notes in [`docs/round4/`](docs/round4/) hold the full tables.
 
 * **Streaming** (`streaming.rs`, `page_source/`). Cluster and page records are always resident; vertex/triangle data
   lives in a fixed GPU pool. Culling stamps "a resident parent wants to refine into this page" into a feedback buffer,
@@ -281,9 +370,90 @@ resolution.
   other scenes pay for transforms, AO and the optional-attribute check only (Sponza resolve 0.28 → 0.31 ms, best of
   8 at 1600×900).
   Pixels are classified by shading model per 8×8 tile and each model (standard, rock,
-  terrain, metal, foliage) is resolved by its own pipeline over just its tiles. UV mapping uses analytic
+  terrain, metal, foliage) is resolved by its own pipeline over just its tiles (classification slots 0–7; slots 8–15
+  are the extended pipelines of *Substrate-lite* and *Material graphs*). UV mapping uses analytic
   barycentric derivatives for proper filtering; per-triangle tangent frames replace stored tangents; triplanar
-  mapping is available in world or object space.
+  mapping is available in world or object space. The G-buffer resolve and the hardware shadow page raster
+  compile skinning only into a `SKINNING` permutation used while the scene has skinned instances (see *Skeletal
+  meshes*).
+* **Substrate-lite** (`substrate.rs`, `substrate_gpu.rs`, `substrate.wgsl`, `brdf.wgsl`, `resolve_extended.wgsl`,
+  `subsurface.rs`, `subsurface.wgsl`; UE 5.7's Substrate reduced to one slab per material). `Material::slab`
+  (`Slab`) extends the metallic-roughness base with the dielectric's F0 / F90 from an **index of refraction** and a
+  **specular colour / factor** (`KHR_materials_ior`, `_specular`), **anisotropic** GGX (Burley's distribution,
+  Heitz's height-correlated visibility, a tangent rotated by `anisotropy_rotation`), a **clear coat** (a second,
+  colourless GGX interface with its own roughness and normal), a **sheen** (Charlie distribution with Neubelt's
+  visibility, as `KHR_materials_sheen`), **subsurface scattering** (wrapped diffuse plus a screen-space diffusion)
+  and **thin diffuse transmission** (leaves, paper), and an **unlit** flag. Layering is energy-aware: the coat
+  takes `coat · F(n·v)` and `coat · F(n·l)` from everything below it, the sheen its directional albedo, both from
+  the view and the light side. **Data path.** The G-buffer stays as it is for plain materials. A material with slab
+  features (or a graph, below) is classified into an *extended resolve pipeline* — one per distinct (shading model,
+  graph), so its 8×8 tiles are resolved apart from the plain ones (the classification bitmask grew from 8 to 16
+  slots, the tile buffer accordingly). The extended pipeline writes one **rgba32uint slab texel** per pixel
+  (features, material index, clear coat; base normal octahedral under a coat or the anisotropy tangent; sheen colour
+  and roughness; F0 and the subsurface / transmission amount; 16 bytes, allocated only while some material is
+  extended) and sets a `SURFACE_SUBSTRATE` shading flag, so lighting reads it only there. With a clear coat the
+  G-buffer's normal and roughness are the coat's, so Lumen traces reflections for the top interface; the base's go
+  into the texel. Per-material constants (F90, subsurface colour and radius, transmission colour, texture layers) sit
+  in a 28 KiB uniform slab table. Voxel foliage pixels (*Nanite Foliage*) in an extended pipeline evaluate their
+  material the same way, slab texel included. **Every lighting path, one BRDF.** The slab lobes are functions of
+  `brdf.wgsl` (`shade_slab`, `evaluate_slab`, `slab_ambient_specular`), the file the classic light loop and
+  MegaLights share; the deferred lighting (sun with its VSM, clustered local lights, transmitted back light with
+  the back side's shadow, image-based light: the coat reflects Lumen's traced reflections, the base layer under it
+  the prefiltered sky / GI along its own — for anisotropy bent — normal) and MegaLights' shading evaluate them. The
+  passes that read slabs are *variants*: the same source composed with `substrate_read.wgsl` in place of
+  `substrate_read_off.wgsl` (`shader::compose_variant`), compiled the first time a scene has slab materials and used
+  only while it does — scenes without them run the unchanged shaders. **Subsurface scattering** (UE's subsurface
+  profile, Jimenez's separable SSS): the lighting writes the diffuse light of scattering pixels apart, demodulated
+  and attenuated by the fog in front of them; a horizontal compute pass and a vertical full-screen pass blur it
+  with a two-Gaussian approximation of Burley's diffusion profile, per channel scaled by the material's scattering
+  colour and radius (projected to pixels per depth), 7 jittered taps per side that skip other surfaces and depth
+  steps, and the vertical pass adds it back × the diffuse colour through additive blending (storage textures cannot
+  read-modify-write the HDR format), so specular light and texture detail stay sharp. `PageUp`
+  (`RenderSettings::substrate`) switches slabs off — every material renders as its plain base — for A/B
+  comparisons. Debug view **24** shows each pixel's features (clear coat blue, sheen magenta, subsurface red,
+  transmission green, anisotropy yellow, specular cyan, unlit white, blended; brighter per layer; striped where a
+  graph produced them; plain grey). **glTF**: `KHR_materials_clearcoat`, `_sheen`, `_ior`, `_specular`, `_unlit`
+  and `_anisotropy` (factors) become slabs; their textures are rearranged on the CPU into two optional texture
+  layers per material (sheen colour + sheen roughness + coat normal + coat roughness + coat; specular colour +
+  specular), sampled from the 512² arrays with the main texture's coordinates; `KHR_materials_transmission` makes
+  the material glass (the forward translucency pass, refracting), tinted by the base colour and
+  `KHR_materials_volume`'s attenuation over its thickness. Lumen's surface cache keeps the average albedo (slabs
+  don't change GI bounces). The extended path needs 17 sampled textures per shader stage (WebGPU's default limit is
+  16; device creation requests up to 24 where the adapter offers them): with 16, slab materials render as their plain
+  base. Cost: scenes without slabs render the same images (valley, cathedral, forest and Sponza differ from the
+  previous build by 61–70 dB PSNR, as much as two runs of it differ) and cost the same; the gallery (eleven slab materials, three graphs, about half the screen
+  extended) resolves in 0.41 ms and lights in 0.42 ms with slabs, 0.38 ms lighting with them off, the subsurface
+  passes take 0.02 + 0.03 ms. Memory only while used: the slab texels 16 bytes per internal pixel (23 MB at
+  1600×900) while some material is extended, the subsurface light and its diffusion 2 × 8 bytes per pixel while some
+  slab scatters; the classification's tile lists doubled (1.4 instead of 0.7 MB at 1600×900).
+* **Material graphs** (`crates/helios-material`, `material_graphs.rs`, `material_graph.wgsl`; UE's Material Editor
+  and material instances). A `MaterialGraph` is plain serde data — nodes (`Op`) with canvas positions and the
+  constants of their unconnected inputs, links from output to input pins by name — stored in scene files.
+  45 node types: constants, scalar / vector / texture **parameters**, texture sample (the material's layers,
+  streamed through the SVT path), triplanar, mesh UVs (both sets, tiling), world / object position, vertex normal
+  and colour, time, camera vector, math (add … divide, lerp, power, min, max, clamp, saturate, one-minus, abs,
+  sine, cosine, frac, floor, step, smoothstep, dot, cross, normalize, length, append, component mask), footprint-
+  filtered fractal **noise**, **fresnel**, **panner**, reoriented **normal blend**, **if**, and the output (base
+  colour, metallic, roughness, specular, tangent-space normal, emissive, ambient occlusion and the slab parameters:
+  clear coat and its roughness, sheen colour and roughness, subsurface, transmission, anisotropy). **Compilation**
+  (`helios_material::compile`): ids, links, pins, a single output and cycles are validated, value widths inferred
+  (float to vec4, scalars broadcast) and every problem reported with its node ("node #4: Add: cannot combine a
+  vec2<f32> with a vec3<f32>"); the result is one WGSL function `graph_eval(m, input, params, vertex_color,
+  defaults) -> GraphOutput`, every operation parenthesised and every identifier generated (Tint-safe), plus the
+  parameter slots and the connected outputs. **Derivatives without hardware**: the resolve is a compute shader over
+  the visibility buffer, so values that feed a texture coordinate, a triplanar or noise position carry their screen
+  derivatives through the math by the chain rule (forward-mode differentiation from the resolve's analytic UV and
+  position derivatives) — texture filtering, the SVT's tile requests and noise filtering work in graphs; other
+  values pay nothing. **Pipelines**: a graph's code replaces `material_graph_off.wgsl` in the extended resolve,
+  compiled at runtime (WGSL shader modules are created in the browser too) and cached by the code's FNV hash, so
+  editing a graph compiles one module, identical graphs share one, and moving nodes compiles nothing.
+  **Material instances**: `Scene::set_material_parameter` overrides a parameter for one material; values live in a
+  16 KiB uniform block (one vec4 per parameter, the material's offset in its slab record), so changing them
+  recompiles nothing (the gallery's two water spheres are one graph with different colours). Unset texture
+  parameters sample the material's own texture, so a graph assigned to an imported material picks up its images.
+  Unit tests compile every node type (on a texture-coordinate path, so its derivative code too) and every preset
+  into the extended resolve and validate it with naga and the Tint bitwise-precedence check. The node editor is part
+  of the browser editor (see *Material graph editor*).
 * **Runtime virtual texture** (`rvt.rs`). The layered landscape material (height-blended texture layers driven by
   slope, altitude and noise) is rendered on demand into 128² pages of a 128k² virtual texture, cached in a 24×24-page
   atlas by a generic GPU **page cache** (request → keep/free → allocate → dirty list). It cut the valley's material
@@ -330,10 +500,11 @@ resolution.
   feature, four clip distances clip every page draw to its tile (`vsm_draw_clipped.wgsl`), so triangles larger than
   a page — common near local lights, and above all those crossing a light's near plane, which project across the
   whole atlas — no longer rasterise discarded fragments (a moving candle light near the camera: page raster 4.8 →
-  1.3 ms). Streaming and wind invalidate only the cached pages under
-  the instances concerned (see *Wind*).
+  1.3 ms). Streaming, wind, skeletal animation and moved instances invalidate only the cached pages under
+  the instances concerned (see *Wind*, *Dynamic world*).
   **Static and dynamic casters** are cached separately, as in UE5's "static separate" page cache: casters the wind
-  moves this frame are *dynamic*, all others *static*. A page that must be refreshed only because dynamic casters
+  moves this frame, `Mobility::Movable` instances and skins whose pose changed are *dynamic* (one definition,
+  `dynamic_caster.wgsl`), all others *static*. A page that must be refreshed only because dynamic casters
   moved keeps the depth of its static casters as a *static layer* in its tile of the software raster's u32 mirror —
   otherwise just scratch space between the software raster and the page clear, so the layers cost no memory of their
   own — and its clear writes that layer instead of the far plane; culling drops static instances at the instance test
@@ -342,8 +513,9 @@ resolution.
   the atlas' tiles (16 MiB), which the page clear max-merges over the static layer. A page gets its static layer at
   its first such refresh: it is rendered in full once more, static casters first, whose depth is then copied into the
   mirror (`vsm_static.wgsl`) before the dynamic ones are drawn. Anything that changes static casters — the sun or a
-  light moving, a scene change, streaming of static instances, the wind being switched on or off (per instance: no
-  global invalidation) — frees the page, so it is rendered in full. A caster fading into or out of the wind as the
+  light moving, a structural scene change, a static instance being moved (its footprint only), streaming of static
+  instances, the wind being switched on or off (per instance: no global invalidation), voxel LODs being toggled —
+  frees the page, so it is rendered in full. A caster fading into or out of the wind as the
   camera approaches or leaves it is at rest then: the cached depth stays right, so the pages under it only drop their
   static layer and are rendered in full at their next refresh (re-rendering them at once doubled the shadow work of
   a camera flying through the forest). The sampled atlas always holds the merged depth, so sampling is unchanged. Sun
@@ -371,6 +543,172 @@ resolution.
   ~1.6 instead of ~1.8 ms of shadow work). Almost every shadow caster in the forest sways (trees included); only
   terrain, rocks and logs are static, so the remaining cost is that of the moving vegetation. A camera flying through
   the forest renders the same number of pages, with 70 k instead of 80 k draws.
+* **Skeletal meshes** (`skin.rs`, `skinning.wgsl`, `skin_palette.wgsl`; UE 5.5's Nanite skinned meshes). A
+  `SkinHandle` is a joint palette (`Scene::add_skin`, `Scene::set_skin_pose` every frame,
+  `Scene::set_instance_skin`); each matrix maps a rest vertex to its posed position in the instance's object space.
+  Skinning — the linear blend of the vertex's joint matrices by its quantised weights, zero weights skipped, in slot
+  order — is a pure function of the decoded rest vertex, its weights and the palette, evaluated by all four
+  rasterisers (visibility buffer and shadow pages, hardware and software) and by the G-buffer resolve, as the wind's
+  offset is: clusters and LOD levels sharing a vertex put it on the same bits, so cuts stay watertight under animation
+  (the geometry tests pose a three-joint limb with four-influence vertices and check every LOD cut, full and partial
+  residency, for open edges on the posed positions). Normals use the blended matrix's cofactor; motion vectors read the
+  previous frame's palette (per-corner previous positions interpolated with the barycentrics — exact, skinning is
+  affine per triangle), so TSR and motion blur follow the limbs (TSR vs. no-TAA on CesiumMan's walk at 100 % and 50 %:
+  differences only along edges, no trails). The palettes live in one `Rgba32Float` texture (`textureLoad`, so no
+  shader stage gains a storage buffer; the G-buffer resolve was at WebGPU's 8): per skin a header and six texels per
+  joint (current and previous rows), rewritten each frame (24 joints: 2.3 KiB); instances find theirs through
+  `GpuInstance::flags` bits 12..32 (no layout change). **Culling bounds**: per frame and skin the CPU derives, from
+  per-joint rest spheres of the vertices each joint influences, a *posed sphere* (every joint's posed rest sphere — a
+  blended vertex lies in the convex hull of its joints' transforms of it) and a *reach* `max |P c − c| + ‖A − I‖₂ r`
+  (spectral norms in closed form) that bounds every vertex's displacement; frustum, HZB and shadow-page tests use the
+  rest cluster / page / instance sphere padded by the reach, or the posed sphere where that is smaller (unit tests
+  check both against random poses with scale). The LOD cut keeps the rest spheres, which keeps the DAG's monotonic
+  errors (crack-free). **Shadows**: a skin whose pose changed is a dynamic caster in the static/dynamic page cache, as
+  vegetation in the wind: cached pages under it re-render their dynamic casters over the static layer once it may have
+  moved 2 texels, bounded per frame by the joints' motion `|ΔP c| + ‖ΔA‖₂ r`; the footprint is the rest sphere padded
+  by the largest reach so far (it covers every pose a cached page may still show); a paused skin returns to the static
+  layer. **Lumen**: as in UE, skinned meshes get no distance field or cards (the demo bakes them without); screen
+  traces still see them. Skinned meshes never get voxel LODs (voxels carry no weights). **Animation**
+  (`helios_asset::animation`): glTF skins, node hierarchy and clips (translation, rotation, scale; `STEP`, `LINEAR`
+  with shortest-arc slerp, `CUBICSPLINE` Hermite), an `AnimationPlayer` (clip, time, speed, looping, pause,
+  crossfade). The palette is `inverse(mesh node) · joint · inverse bind matrix`, i.e. relative to the node that places
+  the mesh, so the rest-pose bounds and LOD stay meaningful while `node · palette` is exactly glTF's pose. Debug view
+  **17** colours each joint and blends the colours by weight (grey: unskinned). **Permutations**: the G-buffer resolve
+  and the hardware shadow page raster compile the skinning code only into a `SKINNING` permutation used while the
+  scene has skinned instances (like `UV_EXTENSIONS`): unconditionally it took the forest's resolve from 0.39 to
+  0.74 ms and its page raster 5 % slower, although no pixel there is skinned. Instance, page and cluster culling are
+  specialised the same way (two pipeline sets): with ~26 000 assembly parts in the forest, the palette lookups cost
+  registers in passes that test every part (forest high, medians of 8 interleaved runs: cull instances 0.36 →
+  0.31 ms, pages 0.30 → 0.27, clusters 0.55 → 0.53; images unchanged). The visibility rasterisers and page expansion carry it at no measurable cost.
+  Cost (shared GPU; min / median of 5 interleaved runs, BrainStem — 61 k triangles, 59 meshes, 18 joints — animated
+  vs. the same model imported as a static mesh with `--no-skinning`): main-view raster unchanged (hw 0.02, sw
+  0.06–0.07 ms), cull 0.20 → 0.23 ms, material resolve 0.31 → 0.35 ms (the skinning permutation; paused: also 0.35),
+  vsm expand 0.09 → 0.12 ms, shadow page raster (hw + sw + resolve) 0.02 → 0.29 ms — the moving caster's pages
+  re-rendered every frame, which a paused model doesn't (0.02 ms: its pages stay cached); GPU frame 4.16 → 4.41 ms
+  (paused 4.14). Compressed payload: +2.5 bytes per cluster vertex on the Fox, +3.3 on CesiumMan (+19 / +25 %), +0.3 on
+  the mostly rigid BrainStem (+3 %). Scenes without skins: every pass within ±0.02 ms of the build before skinning,
+  images within run-to-run noise.
+* **Dynamic world** (`motion.rs`, `vsm_motion.rs`, `lumen_dynamic.rs`, `dynamic_debug.rs`; UE5's movable
+  primitives). Any instance can move every frame without invalidating the world around it. `Scene::set_transform`
+  stamps the instance with a version instead of bumping the scene's instance version, and `Scene::set_mobility`
+  declares it `Mobility::Static` (placed once; moving it is a one-off edit) or `Mobility::Movable` (moves often) as UE's
+  component mobility. Each frame a `MotionTracker` turns the stamps into the list of moved instances with their
+  previous transforms (a scan of the instances only in frames where something moved), and every subsystem applies
+  just those moves; adding or hiding instances, reassigning materials, toggling shadow casting or new geometry are
+  still structural changes that rebuild everything once. **GPU scene**: only the moved records are rewritten (one
+  `write_buffer` per run of consecutive instances, previously all instances every frame something moved), with the
+  previous frame's transform as `prev_world`, so motion vectors (TSR, motion blur) follow rigid motion; an instance
+  that stops is rewritten once more to drop its motion. Temporal history is never reset by moves. **Virtual shadow
+  maps**: movable instances are *dynamic casters* like wind-animated vegetation (the `MOVABLE` instance flag), so they
+  stay out of the pages' static layers. The CPU writes each moved caster's footprint into the invalidation list
+  before the GPU appends its streaming and wind footprints: the light-space rectangle around the instance's oriented
+  box in its old and new pose (one swept footprint for a small move, one per pose for a jump) — for a chandelier on
+  its 12 m chain a third of the area of its bounding circle — and its bounding spheres for local lights' faces and
+  mips (a skinned instance's padded by its skin's largest reach). Pages under a movable caster re-render only their
+  dynamic casters over their cached static layer; pages under a static instance that was moved are freed and
+  rendered in full. At rest a movable instance costs nothing. **Lumen**: the instance's distance-field record is
+  rewritten in place and the 8³-voxel bricks of each global-field clipmap level under its old and new box (plus the
+  narrow band) are recomposed — distance, albedo and the per-voxel closest card instance — by two new passes over a
+  brick list (`cull_listed`, `compose_listed` in `lumen_sdf.wgsl`, one workgroup per brick), within a budget of 1024
+  bricks per frame (the rest queue up, finest level first). A level recomposes under an instance only once some
+  point of it moved a quarter of that level's voxel since the level last composed it, so the 0.25 m level follows a
+  swinging chandelier every few frames and the 2 m level rarely. Movable instances stay in the global field, as in
+  UE5 (it updates movable primitives' distance fields rather than excluding them): a fast mover only costs more
+  bricks per frame and, beyond the budget, lags a few frames. The near field rewrites the instance's record and
+  rebuilds its culling grid only when the instance's box crossed into other 2 m cells; mesh cards move with their
+  instance (its transform in the card records; nothing is recaptured) and its card pages are relit first, within half
+  the card lighting budget so the round-robin refresh keeps going. The voxel surface cache and the radiance cache are
+  not invalidated: they are refreshed continuously (a quarter of the voxels and an eighth of the probes per frame)
+  from the updated field. **Translucency** re-places moved instances' candidates (and water bodies when a water
+  instance moves) instead of rebuilding its lists. Growing the scene bounds (the shadow clipmap's depth range) is the
+  one move that invalidates every cached shadow page. `RenderSettings::per_instance_invalidation = false`
+  (`--full-invalidation`) restores the old behaviour (every move a structural change) for comparisons. Debug view
+  16 (*Invalidation*) shows what moves cost this frame: movable instances orange, sun shadow pages rendered this
+  frame hatched red, recomposed distance-field bricks (finest level at each pixel) cyan with their outlines; the HUD
+  has a "moving (0)" line with the moved instances, shadow casters and recomposed bricks. The demo scenes move (`0`
+  pauses): the cathedral's chandeliers swing, the valley's sculpture turns and its raft drifts.
+  Cost (high detail, shared GPU; minima of 3 interleaved runs, per-pass minima where whole-frame totals were swamped).
+  Cathedral, sun shadows only (local lights' shadow maps off): GPU frame 5.88 ms at rest; moving 1 / 3 / 11
+  chandeliers (3 / 9 / 33 instances) 6.04 / 6.05 / 6.04 ms with 7 / 32 / 57 sun pages re-drawing only their dynamic
+  casters, versus 7.87 / 7.63 / 8.03 ms with full invalidation (all 123 cached pages rendered in full, page raster
+  0.83–0.92 ms instead of 0.01–0.02 ms, and all 4 distance-field levels recomposed every frame, 0.93–0.98 ms, instead
+  of ~24 bricks). With the chandeliers' candle lights' shadow maps on, the lights moving with them dominate: 1 / 3 /
+  11 chandeliers render 96 / 314 / 520 pages (88 / 288 / 440 dynamic-only), page raster 0.28 / 1.11 / 3.62 ms,
+  versus 609 full pages and 8.6 / 7.9 / 13.5 ms with full invalidation (138 k instead of 391 k (cluster, page) draws
+  for all eleven); one uncontended pair: GPU frame 14.7 ms moving vs 25.8 ms full invalidation. Valley (sculpture +
+  raft): 5.00 ms at rest, 5.66 ms with both moving (25 dynamic-only pages) vs 6.44 ms full; the sculpture alone 5.28
+  vs 7.89 ms. Distance-field bricks: without the quarter-voxel threshold the chandeliers recomposed ~390 bricks a frame
+  (0.42 ms), with it 24–120 (≤ 0.07 ms). CPU: a scan of the instances in frames where something moved plus a few
+  record writes. Temporal stability (valley, static camera, pixels changing by more than 24/255 outside the movers and
+  their shadow pages): 0.049 % moving vs 0.042 % paused (noise: water waves). Scenes without moving instances render
+  as before.
+* **Nanite Foliage** (`helios-geometry/src/voxel.rs`, `assembly.rs`; `helios-render/src/assembly.rs`,
+  `voxel.wgsl`, `voxel_raster.wgsl`, `vsm_voxel_raster.wgsl`, `voxel_resolve.wgsl`, `assembly.wgsl`; UE 5.7's
+  experimental Nanite Foliage). Aggregate geometry — canopies, needles, fronds, grass — cannot be simplified as
+  triangles without deleting pieces: component pruning thins it, and distant forests lose coverage and colour (the
+  conifers turned into reddish skeletons of bare branches). Two parts:
+  **Voxel LODs.** Meshes built with `BuildConfig::voxels` (the forest's foliage, ferns and grass) give every
+  DAG group a voxel candidate: the *full-detail* triangles under the group, voxelised on a grid as fine as its
+  budget allows (`voxels_per_triangle`, 4 per triangle the group keeps). Each voxel stores what the geometry
+  inside it does to light, not its shape: its coverage seen along each axis — each *piece* (a connected leaf,
+  needle or blade) covers its projected share of the face (`max` of the areas facing either way, so a two-sided
+  or folded leaf counts once), independent pieces multiply what they leave open — an octahedral normal blending
+  the leaves' principal orientation with the canopy's outward direction (the coverage gradient over the group),
+  and its brick's mean texture coordinate and spread. Seen from a direction, a voxel's coverage is the leaves'
+  projection over the cube's footprint, in optical depth (`sqrt(Σ(d_i τ_i)²) / Σ|d_i|`, exact for leaves facing
+  an axis and for isotropic tangles; adding the axes linearly counts a leaf seen diagonally up to √3 times).
+  Clusters hold up to 128 bricks of 4³ voxels (occupancy bits, position, first voxel, uv) and one 32-bit word per
+  voxel. Where the voxels' error is below the simplified triangles' the group switches to voxels — at the
+  triangles' error, so the LOD switches where it did — and every output cluster gets *voxel alternates* standing for
+  the same source triangles, with the same LOD values; every group above is voxelised too. Both representations
+  stay in the DAG, so `Insert` switches between the voxel cut and the triangle-only cut of the same DAG instantly,
+  and all its invariants (monotonic errors, one side of every group boundary, page dependencies) hold in both; voxel
+  groups' member sets get pages of their own per mode, so a mode never streams the other's data. Voxel clusters are
+  always rasterised in compute: a workgroup per cluster takes its voxels (up to 8192) in turn, projects each cube
+  from its centre (moved by the wind like a vertex there: voxels shift rigidly, they don't flutter) and the
+  instance's half-voxel axes, rejects voxels between pixel centres with a conservative bound, and covers a pixel
+  where one of its three front faces does, at that face's depth, with the probability of the voxel's coverage along
+  the view (stochastic transparency: interleaved gradient noise animated per frame and decorrelated per voxel,
+  averaged by TSR). It shares the software rasteriser's depth / payload passes and target (payload = cluster slot,
+  brick), so the merge with the hardware and software triangle paths is unchanged; the G-buffer resolve finds the
+  voxel from the merged depth (the brick cell under the hit point, with its exact wind offset) and shades it with
+  its normal (facing the viewer like a two-sided leaf) and the material sampled at the brick's uv with its spread as
+  the footprint (the leaves' average colour) — through its shading model's pipeline, or the extended one (slab,
+  graph) where its material has one. Shadow pages (sun clipmap and local light faces) rasterise voxels the same way
+  in page texels, with the triangles' slope-scaled bias and hashed, static noise per absolute texel (cached and
+  refreshed pages agree). Culling treats voxel clusters like triangle clusters (frustum, HZB, LOD, streaming);
+  `.hvm` is version 4. **Assemblies** (`Scene::set_assembly`): a mesh can be made of *parts* — meshes placed by
+  transforms in its space — so the forest's conifers share six needle sprays per species (one per branch span, as
+  many copies as branches) instead of each species baking all its needles (`vegetation::conifer_assembly`;
+  `broadleaf_assembly` builds broadleaf trees from leaf sprays the same way). The parts are resolved on the GPU
+  before culling: each instance of an assembly tests its *base* — one ordinary virtual mesh built from the parts at
+  their roots, merged in place and simplified (and voxelised) further, its errors offset by the parts' worst root
+  error so they continue where the parts end — with the main view's LOD rule; where the base's finest level is too
+  coarse, the instance writes one record per part into part slots after the scene's instances (its transform times
+  the part's, the assembly's bounds and plant origin for the wind, and per-(assembly instance, part) visibility bits
+  for two-pass occlusion) and flags its base (`EXPANDED`) so culling skips it. Every view culls the same records (the
+  instance dispatch covers only the slots handed out), so shadows always match the view. Parts inherit `MOVABLE`,
+  hidden bases expand nothing, and part slots record their owning instance (`part_owner.wgsl`), so picking returns
+  the tree and the selection outline covers its parts. Up to 32768 part slots: when the parts requested near them,
+  the expansion's LOD threshold is raised just enough (CPU feedback with hysteresis, like the culling budget) so
+  the nearest assemblies keep their parts. Debug views 22 (voxel clusters coloured, triangles grey) and 23 (assembly
+  parts coloured, bases light grey). The wind takes a plant origin from the instance (spare `w` of the normal
+  matrix), so a part sways about its tree's origin exactly as the baked foliage did.
+  Measured (forest high, shared GPU, interleaved runs, minimum of 4, before → after): GPU frame 8.38 → 10.09 ms —
+  voxels on / off (`Insert`) 10.09 / 9.40 ms: software raster + merge 1.47 → 1.99 ms, material resolve 0.38 →
+  0.45 ms, shadow software raster 0.52 → 0.72 ms; the conifer assemblies (≈ 26 400 part instances) cost the rest,
+  mostly culling (0.48 → 0.91 ms, late pass 0.06 → 0.12 ms; the non-skinning culling variant later took
+  0.02–0.05 ms per culling pass back) and the parts' finer triangles. Default view: 5.23 M triangles → 3.97 M triangles + 4.3 M voxels (shadows
+  4.46 M → 2.7 M triangles + 2.8 M voxels). Geometry 43.3 → 39.6 MiB in RAM and in `.hvm`; conifer needles 7.9 MiB as
+  baked meshes with voxels → 1.1 MiB as assemblies, baked in 0.5 instead of 2.0 s (whole scene 6.9 → 8.2 s:
+  voxelisation). Broadleaf trees as leaf-spray assemblies would save 6.6 → 2.9 MiB for the same ≈ 0.7 ms of GPU time
+  (their 144-triangle sprays are poor parts), so the forest bakes them whole. Distant canopy (albedo averaged over 16
+  frames from 30 m above the forest, `--eye 0,30,0 --at 200,0,-60`, canopy 150–400 m away, vs. a full-detail
+  reference at a 1/8 px LOD threshold): mean colour error +2.0/+1.3/+1.0 % → −0.2/−0.5/−1.2 % (RGB), 16×16-block error
+  1.75 → 1.53/255, 40×40 1.19 → 0.88/255; the distant conifers keep their needles instead of showing bare red
+  branches. Coverage tests on a leaf cloud: within 3.4 % of the full mesh along each axis at 30–2000 m (9 %
+  diagonally at the finest voxels), where the triangle cut is off by up to 13 %. Temporal stability (2560×1440,
+  static camera, % px > 24/255): 0.077 → 0.083 % with wind, 0.027 → 0.033 % calm.
 * **Lumen-style GI** (`lumen.rs`). A 4-level global distance field (0.25–2 m voxels) is composited on the GPU from
   per-mesh SDFs; a voxel **surface cache** stores the radiance leaving nearby surfaces (sun with SDF soft shadows,
   sky with SDF occlusion, local lights, emission, one bounce from the **radiance cache** of world probes), so bounces
@@ -403,11 +741,77 @@ resolution.
   sun patches through windows bounce. Debug view 14 shows the card lighting each pixel would read (purple: voxels).
   GPU memory: 32 MiB lighting atlas, 16 MiB instance ids (16 bits per global-SDF voxel), a capture atlas within 16 MiB
   (cathedral 7.7, Sponza 9.4 MiB).
-* **Local lights** (`lights.rs`). Point and spot lights are culled into 16×9×24 froxels. Lights are also injected into
-  the surface cache, so they bounce.
+  **Radiance cache refresh** (`update_probes` in `lumen_light.wgsl`): it ran one thread per probe tracing its 32 rays
+  in turn — ~3500 long serial threads, most of the GPU idle; it now runs a workgroup per probe, a thread per ray,
+  with a shared-memory reduction of the SH: the "lumen surface + radiance cache" pass went from 1.42–1.49 to
+  0.22–0.35 ms (cathedral 1.48 → 0.35, forest 1.42 → 0.24, Sponza 1.49 → 0.22, valley 1.43 → 0.22; shared GPU,
+  minimums of interleaved runs), images unchanged within noise. Both final gathers profit. Moved instances update
+  the global field, cards and near field in place (see *Dynamic world*).
+* **Lumen Lite** (`lumen_lite.rs`, `lumen_lite.wgsl`, `lumen_trace.wgsl`; UE 5.8's `r.Lumen.FinalGatherMethod 0`).
+  An alternative final gather for weak GPUs (`RenderSettings::gi_method = GiMethod::LumenLite`): instead of tracing
+  64 rays from every 16×16 screen tile (plus adaptive probes) every frame, diffuse GI is gathered from a world-space
+  **irradiance field** (DDGI-like) that changes slowly and is shared by every pixel near it. 4 camera-centred clipmap
+  levels of 16³ probes (1, 2, 4, 8 m spacing: ±8 … ±64 m) scroll by whole spacings with a little hysteresis;
+  probe slots are addressed toroidally (world coordinate mod 16), so a move keeps every probe still inside a window
+  and only the slab that entered is new. Each probe holds an octahedral irradiance map (6×6 texels: cosine-weighted
+  mean radiance + sky visibility) and an octahedral map of ray-distance moments (14×14: mean and mean square in
+  probe spacings) for Chebyshev visibility, each with a one-texel octahedral border in its atlas so shading samples
+  them bilinearly (rgba16f atlases of 40 MiB, plus 3 MiB of buffers, allocated on first use). **Update budget**: 512
+  probes a frame are picked on the GPU without readback — a pass scores every probe (new probes first, finest levels
+  first; then age × 4 on screen × ⅛ for *sleeping* probes × 1/64 for *buried* ones) into a 64-bucket histogram, one
+  workgroup finds the threshold that fills the budget and a third pass appends the winners (indirect dispatches from
+  there). **Classification**: before tracing, the global distance field moves a probe that sits within 0.1 spacing
+  of a surface along its gradient (≤ 0.45 spacing), disables (*buries*) it if it cannot get out — inside walls, under
+  terrain — and puts it to *sleep* where no surface lies within 1.8 spacings (no pixel interpolates it; it is still
+  refreshed now and then, as foliage is not in the global field). **Tracing**: 128 rays per probe (spherical
+  Fibonacci, randomly rotated per refresh) through Lumen's own tracing — near-field mesh SDFs, global distance field,
+  mesh-card and voxel surface caches, radiance-cache far field, sky — one shared WGSL function
+  (`trace_world_radiance`, which the screen probes call after their screen trace), so the irradiance field sees the
+  same surface cache and the same multi-bounce light. The rays are projected into the probe's texels with hysteresis
+  0.85 (halved where the irradiance changed by more than half: switched lights, a moving sun; new probes take their
+  first rays as they are), then copied into the atlases with their borders. **Shading**: per half-resolution pixel,
+  the 8 probes around a shading point biased 0.15 spacing along the normal and 0.3 towards the eye, weighted by
+  trilinear × smooth backface × Chebyshev (cubed, crushed below 0.2, as DDGI) terms, from the finest level that holds
+  the pixel, blended into the next coarser level over its window's last 2 cells and into Lumen's radiance cache beyond
+  the last level. The result replaces the screen-probe gather in `gi_raw` (same format), so the GI denoiser, sky
+  visibility (specular occlusion), material AO and the lighting pass are unchanged. **Reflections**: rough ones come
+  from the irradiance field — the lighting pass already blends specular towards the gathered irradiance between
+  roughness 0.2 and 0.5 and fades the traced reflection out between 0.35 and 0.55; glossy ones keep Lumen's traced
+  reflections (one GGX ray per half-resolution pixel), since a probe's 6×6 irradiance cannot show a reflected image.
+  **Selection**: `--gi lumen|lite|auto` natively, `?gi=lumen|lite` in the browser (page config `gi`), `;` toggles. By
+  default (`auto`) integrated and software adapters start in Lumen Lite, and `RenderSettings::gi_lite_fallback`
+  switches to it when dynamic resolution has sat at its minimum percentage for 180 frames (the screen-probe gather is
+  the largest GI cost that does not shrink with the resolution) — browsers do not report the adapter type, so there
+  the fallback decides. Debug view 20 shows the probes as spheres shaded with their irradiance (sleeping: blue tint,
+  buried: red, not yet traced: magenta) over the irradiance each pixel gets.
+  **Cost** (shared GPU, interleaved runs, sum of per-pass minimums of 3–6 runs; "GI" = mesh cards + surface /
+  radiance cache + final gather + reflections + GI temporal): the final gather drops from 0.77–1.07 ms to
+  0.36–0.40 ms (probe update 0.28–0.35 ms, independent of the resolution, + per-pixel gather 0.05–0.08 ms), all of GI
+  from 1.20–1.71 to 0.74–1.04 ms (1.5–1.8× cheaper; 2.5–3.4× cheaper than round 3's 2.48–2.91 ms):
+
+  | Scene | final gather: screen probes → Lumen Lite | GI round 3 | GI Lumen | GI Lumen Lite |
+  |---|---|---|---|---|
+  | valley | 0.77 → 0.40 (probes 0.35 + gather 0.05) | 2.61 | 1.20 | 0.81 |
+  | cathedral | 0.91 → 0.36 (0.28 + 0.08) | 2.72 | 1.62 | 1.04 |
+  | forest (medium) | 0.92 → 0.37 (0.30 + 0.07) | 2.48 | 1.29 | 0.74 |
+  | Sponza (atrium) | 1.07 → 0.39 (0.32 + 0.07) | 2.91 | 1.71 | 0.95 |
+
+  Images: the cathedral's lit frame differs from Lumen by 36.5 dB PSNR (valley 33.8, forest 43.4); its indirect
+  light is 7 % darker on average, with more contrast where the probes see occlusion (pew undersides: 5th percentile
+  0.20 vs 0.30) and less where the screen probes resolved it (pillar bases, vault ribs); Sponza's atrium is 9 % darker
+  in indirect light (the far end of the gallery most; 23.6 dB); no light leaks through the 1.2 m aisle walls next to
+  the sunlit exterior. Temporal stability (static camera, 24 frames, % of pixels changing by > 24/255): cathedral
+  0.002 % for both, valley 0.042 % (Lumen 0.053 %), forest 0.056 % (Lumen 0.060 %); the indirect light alone changes
+  by more than 4/255 in 1.05 % of the pixels (Lumen 0.30 %) — a fine uniform grain from the probe refreshes rather
+  than the screen probes' blotches. Moving camera: within 2 % of Lumen's frame-to-frame change, no pops as slabs
+  scroll in.
+* **Local lights** (`lights.rs`). Point and spot lights are culled into 16×9×24 froxels of up to 255 lights each
+  (63 before MegaLights). Lights are also injected into the surface cache, so they bounce.
 * **Local light virtual shadow maps** (`vsm_local.rs`, `vsm_local_common.wgsl`, `vsm_local_sample.wgsl`). As in UE5,
   up to 32 shadow-casting point and spot lights per frame — the most influential on screen (range sphere coverage ×
-  brightness, with hysteresis so slots and their pages stick) — get virtual shadow maps: six cube faces for a point
+  brightness, with hysteresis so slots and their pages stick), static lights first: a light that moved within the
+  last 30 frames only gets a slot static lights left over (its cube re-renders in full every frame it moves), and
+  under MegaLights, which traces every light's shadow anyway, none — get virtual shadow maps: six cube faces for a point
   light, one perspective face for a spot light, each a 4096² virtual map with a mip chain down to one 128² page.
   Their pages are entries of the sun's page cache after its clipmap levels and live in the same physical atlas, so
   the sun and all lights share one pool, one allocation, one dirty list and the same page renderer (the (cluster,
@@ -434,6 +838,57 @@ resolution.
   pillars and through the choir screens. Lights beyond the budget keep cone-traced distance-field soft shadows for
   the strongest few per pixel (mesh SDFs within 2 m of the receiver and of the light, the global field between).
   Debug view 15 shows the sampled mip and page grid of each pixel's strongest shadow-mapped light.
+  Slot order matters with moving lights: in the candle-lit cathedral (300 lights, MegaLights) the swinging
+  chandeliers' candles took slots and re-rendered ~970 pages a frame (page raster 11–15 ms); static lights first cut
+  that to 713 dynamic-only refreshes (0.11 ms), but near the altar six swinging candles still took the slots left
+  over (11.6 ms), hence no slots for moving lights under MegaLights (0.06 ms). The clustered loop keeps the
+  leftover-slot rule; the default cathedral (33 lights) is unchanged.
+* **MegaLights** (`megalights.rs`, `megalights_sample.wgsl`, `megalights_shade.wgsl`, `megalights_denoise.wgsl`,
+  `megalights_common.wgsl`, `megalights_surface.wgsl`; UE 5.5's MegaLights). `RenderSettings::mega_lights` (`=`)
+  replaces the clustered light loop — which can shadow only the 32 shadow-mapped lights plus four distance-field
+  traced ones per pixel and lets every other light leak through walls — by a fixed budget per pixel in which *every*
+  local light casts soft shadows. **Sampling**: per 2×2 block, at a representative pixel that moves every frame, four
+  lights are drawn from the froxel's light list in proportion to their unshadowed contribution through the shared BRDF
+  (`brdf.wgsl`, the same functions the classic loop calls), by systematic resampling over at most 32 candidates;
+  longer lists are thinned to a stratified subset in which every light has the same chance, its weight scaled by the
+  inverse, so the estimate stays unbiased and the cost per pixel constant. A small floor keeps lights behind the
+  representative's normal possible for the rest of its block. **Visibility guiding**: per 8×8 tile, bit masks (light
+  index mod 256) of the lights some ray was traced to and of those some ray reached; a light whose rays were all
+  blocked in last frame's (reprojected) tile keeps a tenth of its weight. **Shadow rays**: one per sample, to a random
+  point of the light's disk (the source radius makes the penumbra): a 1 m screen trace against the depth buffer
+  (contact shadows), then over the whole ray the light's virtual shadow map where it has one — shadow-map ray marching
+  (UE's SMRT, 8 steps; the first is the receiver's classic test, the later ones see occluders off to the side as the
+  ray converges on its point of the light, within an assumed thickness) — otherwise Lumen's distance fields (mesh SDFs
+  within 2 m of either end, the global field between, narrow cones). The screen trace treats the depth buffer as 3 cm
+  shells (a thicker assumption shadowed walls behind any object in front of them) and ignores emissive pixels (candle
+  flames are in the depth buffer but cast no shadow). **Shading**: every pixel evaluates the BRDF of its block's four
+  samples (Substrate slabs through a variant) with their unbiased contribution weights and visibilities and writes
+  its direct light *demodulated* (diffuse without the diffuse colour, specular divided by the environment BRDF), so the
+  denoiser never blurs texture detail. **Denoising** (SVGF): temporal accumulation with reprojection, depth-checked
+  disocclusion, a 2.5σ variance clip and up to 24 (diffuse) / 12 (specular) frames, with luminance moments; then four
+  à-trous iterations (3×3 binomial, strides 1–8) with depth-plane, normal and luminance edge-stopping scaled by the
+  variance of the accumulated mean (so converged pixels keep normal-mapped lighting detail); the last one modulates
+  the result back into one texture, which the lighting pass adds instead of running its loop. Debug views **18**
+  (each sample's light, one hue per light, dark where blocked) and **19** (this frame's samples | denoised).
+  Cost (cathedral medium at night, shared GPU, minimum of 4 interleaved runs; "direct" = light culling + local light
+  shadow mask + lighting + MegaLights):
+
+  | Lights | Classic direct | MegaLights direct | MegaLights passes | Classic lighting pass | Frame (classic → ML) |
+  |---|---|---|---|---|---|
+  | 33 (default scene) | 1.03 | 1.84 | 1.37 | 0.88 | 6.38 → 7.15 |
+  | 100 (`--lights 100`) | 2.45 | 2.52 | 1.95 | 1.95 | 8.49 → 8.60 |
+  | 300 | 2.78 | 2.54 | 1.99 | 2.15 | 9.03 → 8.71 |
+  | 1000 | 3.53 | 2.74 | 1.95 | 2.50 | 10.55 → 9.75 |
+  | 1000, aisle view | 3.63 | 2.61 | 1.86 | 2.52 | 10.11 → 9.08 |
+
+  At 33 lights the MegaLights passes split into sample 0.16, trace 0.40, shade 0.08, temporal 0.14, spatial 0.59 ms;
+  from 100 to 1000 lights only the share of distance-field rays grows, and the lighting pass itself drops to 0.46 ms
+  — while the classic path shadows only 36 of those lights per pixel. Image vs the classic path at 33 lights: 39.7 dB
+  PSNR (nave), 39.8 dB (candelabrum close-up; two classic runs differ by 66.7 dB); the differences are shadows the
+  classic PCSS blurs away. Static camera, pixels changing by more than 24/255 frame to frame: nave 0.0093 → 0.0091 %,
+  close-up 0.0017 → 0.0009 %, 1000-light aisle 0.0005 → 0.0007 % (classic → MegaLights). Browser (headless Chromium,
+  1280×720, 300 lights): 1.2 ms. Memory (only while on): 56 bytes per internal pixel (two rgba16f raw, two sets of
+  rgba16f diffuse + specular + r32uint history) plus 36 bytes per 2×2 block of samples.
 * **Volumetric clouds** (`clouds.rs`). A cumulus layer around the planet, ray-marched where the depth buffer shows
   sky: tileable Perlin–Worley shape and Worley detail volumes generated once on the GPU, a weather field for coverage,
   adaptive stepping (long steps through clear air, short ones inside clouds), sun light marched through the cloud with
@@ -509,6 +964,87 @@ resolution.
   Cost (valley high, 1600×900, RTX 3090, min of 5): looking down at the lake filling the screen, translucency 2.00 →
   2.40 ms and the material pass 0.26 → 0.48 ms (GPU 5.93 → 6.64 ms); the default view (lake ~10 % of the screen)
   4.54 → 4.59 ms; scenes without water are unchanged. Under water (full-screen pass + surface from below): 1.97 ms.
+* **Heterogeneous volumes** (`volumes.rs`, `volume_sim.wgsl`, `volume_render.wgsl`, `media.rs`, `media_common.wgsl`;
+  UE's Heterogeneous Volumes). `Scene::volumes` holds `VolumeEmitter`s: boxes of soot density, temperature and fuel on
+  a voxel grid (the campfire 40×80×40 over 1.6×3.2×1.6 m, the incense 32×112×32). A `FluidSimulation` runs on the GPU
+  every frame in 3D textures: vorticity, forces (Boussinesq buoyancy — heat lifts, soot weighs down —, vorticity
+  confinement that restores the eddies numerical diffusion removes, a source sphere whose injection flickers with
+  animated noise, ambient wind, damping), divergence, 12–16 red-black SOR sweeps of the pressure Poisson equation
+  (warm-started from the last frame; solid floor, open sides and top), projection, semi-Lagrangian self-advection of
+  the velocity and **MacCormack** advection of the state (back-advected, corrected by half the round-trip error and
+  clamped to the departure point's 8 texels, so smoke keeps detail without overshoot; half of the plain
+  semi-Lagrangian result is mixed back in — pure MacCormack left voxel-sharp fronts that read as blocks wherever the
+  smoke turns opaque), then combustion (fuel burns into heat and soot), cooling, dissipation and a fade at the open
+  boundaries. A `ProceduralVolume` (the valley's lake mist) fills the grid from animated noise instead — no
+  simulation for distant or static media. Rendering: a **lighting cache** at half the grid resolution stores per
+  voxel the sun's transmittance (16 steps through the volume towards the sun × the virtual shadow map at the fog's
+  page level × cloud shadows) and the isotropically scattered light: ambient from Lumen's radiance cache (the sky
+  above occluded by the volume itself, an 8-step march up) and up to 8 local lights with their shadow maps. The
+  **march** runs once per pixel of the visible volumes' screen rectangle (up to 4 boxes, ordered per pixel) at the
+  internal resolution: trilinear density and temperature (each sample offset randomly by up to half a voxel —
+  stochastic filtering that turns the trilinear filter's voxel staircases into a smooth falloff once the temporal
+  resolve averages it), the cache with a Henyey–Greenstein phase for the sun plus a second, softer and less attenuated
+  octave standing in for multiple scattering (Wrenninge's approximation; without it thick smoke turned black away
+  from the sun), **blackbody emission** from temperature (Planck's law at three wavelengths: dull red edges, a
+  yellow-white core ~40× brighter), energy-conserving integration, strides that grow 4× through clear air and step
+  back at the medium's edge, early exit at 0.3 % transmittance; each part is fogged at its opacity-weighted depth
+  (froxel fog + aerial perspective, as translucency). Step offsets are jittered per pixel and frame; a **temporal
+  resolve** reprojects the last result with the depth of the volume each pixel sees, clamps it to the current 3×3
+  neighbourhood and blends 25 % — the jitter noise averages out, the flames don't ghost. The ray is **split at the
+  nearest translucent surface** (see *Order-independent transparency*), so glass and water show the smoke behind
+  them. A fire **drives a scene light** (`VolumeEmitter::light`): each frame, before the light culling, a
+  one-thread-per-light pass sets its colour to the scene's colour × the simulation's summed blackbody emission
+  (workgroup sums into fixed-point atomics) relative to its running average — the flicker the viewer sees, on the
+  clearing, the logs' shadows and Lumen's surface cache, a frame late and without a read-back.
+* **GPU particles** (`particles.rs`, `particles.wgsl`; a Niagara-lite). `Scene::particles` holds `ParticleEmitter`s
+  (spawn rate and bursts, sphere / box / disc shapes, lifetime range, a velocity cone, gravity, drag, curl-noise
+  turbulence, collision, size and a 4-key colour/opacity gradient over life, lit or emissive — colour or blackbody
+  cooling over life —, billboard or velocity-stretched quads, soft distance, phase anisotropy). Every emitter owns a
+  fixed range of slots in one buffer; the CPU only turns rates and bursts into a spawn count per frame (a carried
+  fraction), dead slots claim spawns with one atomic counter per emitter — no free lists, compaction or read-back;
+  an emitter's first frame pre-warms its sustained population at random ages. **Simulation** (one dispatch for all
+  emitters): gravity, drag, curl noise (the curl of a 3-component gradient-noise potential: divergence-free swirls),
+  and **collision with the depth buffer**: a particle that went behind the visible surface (within a thickness that
+  grows with its speed) is put back onto it and bounces off the G-buffer normal with restitution and friction, or
+  sticks (embers settle on the ground and keep glowing). **Lighting** once per particle per frame (UE's per-particle
+  translucent lighting): sun through the virtual shadow map and cloud shadows with a Henyey–Greenstein phase (dust
+  glints in the clerestory's shafts when looking towards the sun), Lumen's radiance cache, the clustered local lights
+  with one shadow-map tap, emission, then the fog in front — the premultiplied radiance each fragment scales. **Draw**:
+  one instanced draw of every slot (dead ones collapse in the vertex shader), camera-facing or stretched along the
+  screen-space velocity by the distance covered in 40 ms (sparks), procedural glow / puff sprites, cut by the opaque
+  depth and faded in front of it (soft particles), bright emitters bloom.
+* **Order-independent transparency** (`oit.rs`, `oit.wgsl`, `effects.rs`). Particles use **weighted blended OIT**
+  (McGuire and Bavoil 2013): each fragment adds premultiplied colour × a depth weight to an rgba16f accumulation
+  target and multiplies an r16f revealage target by 1 − opacity; a full-screen pass composites average colour ×
+  coverage — any number of layers (a shower of sparks, thousands of motes), no sorting. **Order with the translucency
+  pass**: when translucent surfaces are drawn, their nearest depth is rendered first (the translucency module's first
+  peeling layer, on its own); particles write a *front* or *back* pair of targets and the volume march splits its
+  rays at that depth. The back bucket (particles over volume over scene) is composited before the translucency pass —
+  glass tints and water refracts the mist and sparks behind it —, the front bucket after it. **TSR**: the front
+  composite writes a reactive mask into the motion target's z (free by then; UE's responsive AA): there TSR keeps at
+  most 1.5 frames of history (mixed by coverage; volumes at half strength, they have their own temporal filter), a
+  tight clip box and no thin-feature lock, so sparks and flames leave no trails. Scenes without emitters, or with `'`
+  off, record none of these passes and render as before (valley with `'` off: max 5/255, within run-to-run noise).
+  Debug view 21: particle overdraw (red → yellow) and volume march steps (blue → cyan) over a grey albedo;
+  empty-space skipping leaves the clear air of a box at a quarter of the steps.
+  Cost of volumes + particles + OIT (shared GPU, medium detail, interleaved on/off runs, medians of 3; "passes" = every
+  pass the feature adds):
+
+  | View | 1600×900: GPU off → on | passes | 2560×1440: GPU off → on | passes |
+  |---|---|---|---|---|
+  | Forest campfire close-up (`--eye 4.3,1.3,0.6 --at 7,1.0,-1`) | 9.19 → 9.65 ms | 0.58 ms | 16.4 → 17.2 ms (min) | 1.19 ms |
+  | Cathedral censer (`--eye 66.2,1.8,0.4 --at 68.4,2.4,1.9`) | 6.26 → 6.46 ms | 0.38 ms | 10.88 → 11.18 ms (min) | 0.59 ms |
+  | Cathedral initial view (24 000 motes, incense far) | 6.36 → 6.81 ms (min) | 0.37 ms (min) | 11.56 → 11.89 ms (min) | 0.45 ms (min) |
+  | Valley initial view (lake mist, 100×10×91 cells) | 5.19 → 5.86 ms | 0.53 ms | 8.75 → 9.72 ms | 1.24 ms |
+
+  Per pass: campfire simulation (16 SOR sweeps) 0.10–0.11 ms, incense 0.08 ms (both resolution-independent);
+  lighting caches 0.02–0.03 ms; march + temporal resolve 0.15–0.45 ms at 1600×900 (the valley mist covers a third of
+  the screen), 0.29–1.07 ms at 2560×1440; particle simulation + lighting 0.02 ms (1 280 fire particles) – 0.09 ms
+  (24 000 motes); OIT draw 0.02–0.04 ms; nearest translucent depth 0.01 ms; composites 0.04 / 0.10 ms. GPU memory
+  while on screen: 72 bytes per internal pixel (104 MiB at 1600×900) plus the grids (campfire: seven 1 MiB rgba16f
+  fields, 1 MiB of pressure and divergence, a 0.1 MiB cache). Temporal stability (static camera, pixels changing by
+  more than 24/255): inside the campfire's rectangle 0.11 → 0.42 % (the flames and sparks move), outside it 0.070 →
+  0.083 %; cathedral 0.002 → 0.005 %.
 * **Temporal stability.** The renderer coarsens the LOD threshold when visible work nears the culling list
   capacities, instead of letting the GPU drop arbitrary clusters (which flickers). Lumen clamps ray radiance relative
   to the exposure (as UE's `MaxRayIntensity`: tiny bright emitters such as candle flames otherwise tint random probes
@@ -545,7 +1081,9 @@ resolution.
   min_percentage, max_percentage }`, off by default natively, on in the browser) averages the GPU timestamp totals of
   six frames, holds inside 80–100 % of the budget and otherwise steps towards 90 % assuming time ∝ area (which
   under-corrects, so it approaches from one side), in whole percents, ignoring the frames still in flight after a
-  change. Lumen, clouds and fog run at the internal resolution (fog froxels per 16 px of the upper bound).
+  change. Lumen, clouds and fog run at the internal resolution (fog froxels per 16 px of the upper bound). Pixels the
+  particle / volume composite marks *reactive* keep at most 1.5 frames of history (see *Order-independent
+  transparency*).
 * **Camera** (`passes/post_fx.rs`). A thin-lens camera (focal length from the field of view and sensor size,
   f-number, autofocus on the screen centre) drives scatter-as-gather depth of field; motion blur reconstructs along
   per-tile dominant velocities with depth-aware weights (McGuire et al. 2012) and a 180° shutter by default. Exposure
@@ -569,6 +1107,90 @@ resolution.
 * **Profiling** (`profiler.rs`). Every pass is timed with timestamp queries (when the adapter supports them) and shown
   per pass in the HUD — in the browser too.
 
+### 3. Editor, scene files and PCG — `helios-demo`, `helios-pcg`, `web/editor`
+
+* **Editor** (`web/editor.html`, `web/editor/*.js|css`, `crates/helios-demo/src/editor/`, `web_editor.rs`,
+  `app_editor.rs`; UE's Level Editor). A dark, UE5-style editor around the live WebGPU viewport, plain ES modules
+  without a build step or CDN: toolbar (file, undo / redo, W/E/R gizmo modes, world / local axes, grid, rotation and
+  scale snapping, scene switch, Play, Material Graph), a Content browser (engine shapes and nature prefabs, point /
+  spot lights, PCG presets, the scene's materials and meshes, glTF import by URL or by dropping a `.glb`), a World
+  Outliner (World → Environment / Render settings, lights, PCG volumes, the instances grouped by mesh or material,
+  search, eye toggles; virtualised rows, so the forest's 8 278 instances scroll smoothly) and a Details panel
+  (transform with scrubbable X/Y/Z fields and a uniform-scale lock, mesh, material slot and the material's
+  parameters, graph and Substrate slab, rendering; light colour, intensity, attenuation radius, source radius,
+  shadows, spot aim and cones; PCG volume, surface, seed and every node's parameters; sun / fog / clouds / wind;
+  render settings). The engine owns the scene: the UI reads it as JSON and sends edit operations through the wasm
+  page API (`heliosEditorState`, `heliosEditorApply`, `heliosEditorPreview`, `heliosEditorPick`, `heliosEditorCamera`,
+  `heliosEditorSetSelection`, `heliosEditorSave`, `heliosEditorLoad`, `heliosEditorImport`, …). **Edits are
+  documents**: every operation produces a new `SceneDoc` (one undo step; slider drags carry a merge key and form one
+  step), and `Editor::sync` reconciles the scene with it, touching only what differs (an instance's transform, a
+  material's parameters, one PCG volume's instances), so undo / redo are document swaps and loading a file is the
+  same reconcile from an empty document. Instances are never removed — `Scene::set_visible` hides them (the
+  `HIDDEN` instance flag, culled for every view; translucency, water bodies, Lumen and assembly expansion skip hidden
+  instances) and hidden slots are reused for the next instance of the same mesh — so handles in the outliner, the
+  selection and picking stay valid. Transform edits and gizmo previews go through `Scene::set_transform`, i.e. the
+  per-instance path of *Dynamic world* (edited instances stay `Static`, so the shadow pages under them are rendered
+  in full); hiding, deleting, duplicating, reassigning materials and PCG regeneration are structural changes.
+  **Picking** reads the visibility buffer: a request maps the clicked output pixel to the internal resolution, a
+  one-thread compute pass (`pick.wgsl`) decodes the visible-cluster entry into its instance (an assembly part into
+  its owning tree) and reconstructs the world position and normal, and the 48-byte result is read back
+  asynchronously (it arrives 1–2 frames later) — exact per pixel, so alpha-tested holes, swaying leaves, voxels and
+  software-rasterised clusters pick what is drawn; translucent surfaces (not in the visibility buffer) are tested
+  against their oriented bounds on the CPU and win when nearer. PCG-spawned instances select their volume. The
+  **selection outline** (`selection.rs`, `selection.wgsl`) is a full-screen pass after tone mapping that tints
+  selected instances and draws a 2-px orange outline from eight visibility taps per output pixel, against a
+  per-instance selection bit set; it is only recorded while something is selected. The **gizmo** (translate arrows
+  + plane handles + screen-plane centre, rotation rings with angle readout, local-axis scale handles + uniform
+  centre) is drawn in a 2D overlay canvas from the engine's unjittered view-projection and hit-tested in screen
+  space; drags apply a delta to every selected object around the primary's pivot, preview through
+  `heliosEditorPreview` (no undo step) and commit one transform edit on release (Esc cancels); axes pointing at the
+  camera switch to screen-space dragging. The overlay also shows light icons (clickable), spot cones, light ranges,
+  PCG volume boxes with labels and the bounds of selected instances. Placing content picks the surface under the
+  viewport centre (or the drop point) on the GPU. Natively, Tab switches the same editor core on without panels.
+  Cost (shared GPU): selection outline 0.05 ms (a first version with 20 taps cost 0.34–0.57 ms), pick ≈ 0 (one
+  thread, once per click); with nothing selected the frame is unchanged.
+* **Scene files** (`.helios.json`, `editor/doc.rs`, serde). A base scene — a procedural scene and detail (both change
+  the instance list) or a glTF URL — plus only the edits: base-instance overrides keyed by index with the mesh name
+  for validation (transform as TRS, visibility, material, deleted), added instances by mesh and material *name*,
+  material parameter overrides by name, material graphs (`graphs`) and slabs, base light definitions by index and
+  added lights, the environment, render-setting overrides by key, imported models (name + URL), PCG volumes (volume,
+  surface, graph) **and their generated output** (parts + per-instance TRS), so a file reloads with exactly the
+  instances it was saved with. Meshes get stable names where scenes create them (`mesh_store::add` names every baked
+  mesh, duplicates become `rock #2`; glTF imports are `MODEL/MESH`), materials get explicit names in the valley and
+  the forest and `<shading model> <n>` elsewhere. Save downloads the file (Ctrl+S), Open uses a file picker (Ctrl+O),
+  `?scene-file=URL` builds the file's base scene directly; natively `--scene-file PATH` (relative glTF paths resolve
+  against the file). The render settings the Details panel shows come from a data-driven registry
+  (`editor/settings.rs`: key, label, group, kind, getter / setter) that also stores them in scene files — a new
+  setting is one entry.
+* **PCG** (`crates/helios-pcg`, `editor/pcg.rs`; UE 5.7's Procedural Content Generation framework). A deterministic
+  point graph: `SurfaceSampler` (on the landscape heightfield, one jittered candidate per cell of a world-anchored
+  grid of `1/density` m², or on any mesh instance's triangles, area-weighted), filters (`SlopeFilter`,
+  `HeightFilter`, `NoiseDensity` — world-space fractal value noise —, `DensityFilter` with stochastic thinning,
+  `DistanceFilter` to points / splines with falloff, `BoundsFilter`), `SelfPruning` (Poisson-disk thinning by
+  priority = density then seed, hash-grid accelerated), `Difference` and `Merge` (graphs are DAGs: nodes read any
+  earlier nodes), `Transform` (scale range and jitter, random yaw, tilt, align to normal, offset) and a weighted
+  `Spawner` of prefabs (several mesh / material parts per entry: trunk + foliage, stem + petals). Every random
+  number is a hash of the graph seed, the node and the point's own seed (from its world grid cell or triangle), never
+  of processing order, so output is bit-identical run to run and moving a volume keeps the points in the area it still
+  covers (unit tests: determinism, pruning distance and order independence, slope / distance / bounds filters,
+  density vs. area, weights, DAG difference, JSON round trip, presets). In the editor, a PCG volume (oriented box,
+  movable / scalable / yaw-rotatable with the gizmo) runs a preset graph — *Rocks on slopes*, *Flowers in meadows*,
+  *Forest edge* (trees thickening away from an edge spline, bushes and ferns along it, cleared around the trunks)
+  — on built-in engine content (`editor/content.rs`, baked on first use), and regenerates live while a node's
+  parameter is dragged (at most once per frame, one undo step per gesture); spawned instances reuse the volume's
+  instance slots per mesh. Browser (wasm, headless Chromium): flowers in a 28×28 m volume 3 170 instances, regenerate
+  15–20 ms; forest edge (80×50 m) 408 instances, 7–12 ms; rocks on slopes 3–8 ms.
+* **Material graph editor** (`web/editor/graph.js`, `editor/materials.rs`). A dark node canvas docks over the
+  viewport (toolbar *Material Graph*): pan (right / middle drag), zoom (wheel), drag nodes, drag pin to pin to link
+  (an input takes one link), Alt+click unlinks, right-click or double-click opens a searchable palette built from the
+  engine's catalog (`heliosMaterialNodes`), inline editors for constants, colours, parameter names and defaults, UV
+  sets, channels; *New from preset* (lava, wet stone, stylised water, blank), *Assign to material*; compile errors
+  mark their nodes and list below. Every change is a scene-document edit (`{op: "graph"}`: undo / redo, saved in
+  `.helios.json` under `graphs`, gestures merged into one undo step) and recompiles live. The Details panel shows a
+  material's graph (assign / open), its parameters as sliders and colour pickers (material instance values, saved
+  per material) and its Substrate slab (clear coat, sheen, subsurface and radius, transmission, anisotropy, IOR,
+  specular, unlit).
+
 ### WebGPU constraints that shaped the design
 
 | Constraint | Consequence |
@@ -576,21 +1198,27 @@ resolution.
 | No 64-bit atomics | Software raster writes depth and payload in two passes |
 | No storage-texture atomics, no storage depth textures | Shadow software raster writes a u32 buffer that the page clear copies into the depth atlas; the same buffer keeps the pages' static layers |
 | No multi-draw-indirect / `first_instance` | One instanced indirect draw per pass; late passes offset slots via the early count |
-| 8 storage buffers per stage | Culling packs feedback + visibility bits into one buffer; materials live in a uniform array |
-| No bindless textures | Material textures are layers of two texture arrays; image detail beyond 512² lives in tile atlases behind a page table |
+| 8 storage buffers per stage | Culling packs feedback + visibility bits into one buffer; materials live in a uniform array; skin palettes live in an `Rgba32Float` texture read with `textureLoad` (the G-buffer resolve was at 8); Substrate's slab table and graph parameters are uniform blocks |
+| No bindless textures | Material textures are layers of two texture arrays; image detail beyond 512² lives in tile atlases behind a page table; glTF extension textures are repacked into two extra array layers per material |
+| 16 sampled textures per stage (default limit) | The extended (Substrate / graph) resolve needs 17: the device requests up to 24 where the adapter offers them, otherwise slab materials render as their plain base |
 | No viewport arrays | VSM pages are rasterised with per-draw tile transforms and clip distances (optional feature) or fragment clipping |
 | No forward-progress guarantee | Hierarchy is flattened into instance → page-batch → page → cluster dispatches |
 | Indirect dispatch ≤ 65535 per dimension | Large dispatches are 2D |
-
+| No float atomics | Local exposure's bilateral grid and the fire light's summed emission use fixed-point workgroup atomics |
+| Read-write storage textures only for 32-bit single-channel formats | Subsurface diffusion adds its result to the rgba16f scene colour with a full-screen pass and additive blending instead of a compute read-modify-write |
+| No hardware ray tracing | MegaLights' shadow rays march the depth buffer, the lights' virtual shadow maps and Lumen's distance fields |
+| No derivatives in compute shaders (the material resolve is compute over the visibility buffer) | Analytic barycentric UV derivatives; material graphs carry screen derivatives through their math by forward-mode differentiation |
 ## Status vs. Unreal Engine 5 — what is still simpler
 
-Everything that was on the roadmap is implemented. Honest differences that remain:
+Honest differences that remain:
 
 1. **Streaming**: page payloads use a quantised, bit-packed GPU format like Nanite's, but are not entropy-coded on
    disk on top of it (Nanite adds Oodle): measured per page, LZ4 would save only 0.4–5 % and DEFLATE 3–16 %, so `.hvm`
    files store the GPU format as is. Triangle indices are plain fixed-width (no strip / delta coding). Every mesh's
-   header — including all cluster records — stays resident. Cached shadow pages are invalidated globally when the
-   scene changes (per instance only for streaming and wind).
+   header — including all cluster records — stays resident. Cached shadow pages are invalidated per instance for
+   moves, streaming, wind and skeletal animation; structural scene changes (instances added or hidden, materials
+   reassigned, shadow casting toggled, new geometry), moves that grow the scene bounds and toggling voxel LODs
+   invalidate them globally.
 2. **Lumen**'s mesh cards are axis-aligned (6 directions × 3 depth layers per mesh, no per-mesh card fitting as in UE5),
    carry the material's *average* albedo (no per-texel textures), are lit with one bounce from the radiance cache
    rather than card-to-card radiosity, and local lights shadow them through the global field only; surfaces no card
@@ -602,33 +1230,78 @@ Everything that was on the roadmap is implemented. Honest differences that remai
    cathedral, the valley and the forest all request more), so they are thinned at random each frame; they cost
    0.3–0.4 ms at 1600×900 (the final gather goes from 0.5–0.55 to 0.8–0.95 ms). Remaining slow flicker on thin geometry
    comes from the surface caches' incremental updates (cards, voxels, radiance cache), not from probe placement.
+   The surface caches see neither skinned meshes, volumes nor particles (only a fire's driven light), and follow
+   moved instances over a few frames (item 9). **Lumen Lite**'s irradiance field covers ±64 m around the camera
+   (4 levels of 16³ probes; beyond, Lumen's radiance cache with an estimated sky visibility); probes are refreshed
+   within a fixed budget of 512 a frame (128 rays each), so lighting changes reach distant and off-screen probes over a
+   few hundred milliseconds and a refreshed probe changes in small steps (fine grain in the indirect light: 1.05 % of
+   pixels change by > 4/255 per frame on a static camera vs 0.30 % with screen probes); classification uses the
+   global distance field only (alpha-masked foliage is not in it, so probes in tree crowns can sleep); there is no
+   per-probe variability-driven update rate or probe-to-probe irradiance feedback into the surface cache (the bounce
+   still comes from the radiance cache); glossy reflections still trace per pixel; the adapter-based default can only
+   see integrated GPUs natively (browsers hide the adapter type, so there only the dynamic-resolution fallback
+   switches).
 3. **Materials**: streamed image tiles are block-compressed only where BC is available (no ETC2 / ASTC encoders: mobile
    GPUs get uncompressed tiles), are encoded at load (natively) or on demand (web) rather than cooked offline, and are
-   cut from decoded images kept in CPU memory (no tiled on-disk cache); the 512² texture arrays are uncompressed; triplanar mappings and passes other than the G-buffer resolve (Lumen,
-   landscape RVT) see the 512² layers; procedural textures are not virtualised. glTF: the images of
-   one layer (base colour, normal, metallic-roughness) must share their coordinates — a normal or metallic-roughness
-   map with another UV set or transform than the base colour is sampled with the base colour's (with a warning); UV
-   sets beyond `TEXCOORD_1`, `KHR_materials_unlit`, `KHR_materials_clearcoat` (no G-buffer room: albedo + metallic,
-   normal + roughness and motion + emission + flags/AO are full; UE spends extra G-buffer targets on it),
-   `KHR_materials_ior` / `_specular` (dielectric F0 is a constant 0.04; a per-pixel specular would need another
-   G-buffer channel too) and transmission / volume are not imported. Alpha tests ignore wrap modes and vertex alpha.
-   Lumen's cards and voxels see a material's average albedo, without vertex colours, texture transforms or AO.
-   Simplification keeps second-UV and colour seams but does not weigh their deviation. Alpha tests read image
-   textures with mesh UVs only (not procedural textures or triplanar mapping), with 8-bit cutoffs.
-   In Lumen an alpha-masked instance is partially transparent by
+   cut from decoded images kept in CPU memory (no tiled on-disk cache); the 512² texture arrays are uncompressed;
+   triplanar mappings and passes other than the G-buffer resolve (Lumen, landscape RVT) see the 512² layers;
+   procedural textures are not virtualised. glTF: the images of one layer (base colour, normal, metallic-roughness)
+   must share their coordinates — a normal or metallic-roughness map with another UV set or transform than the base
+   colour is sampled with the base colour's (with a warning); UV sets beyond `TEXCOORD_1`, `KHR_materials_iridescence`,
+   `_dispersion` and `anisotropyTexture` (the anisotropy factors are) are not imported; the clear-coat, sheen and
+   specular textures are sampled with the main texture's coordinates from the 512² arrays (not streamed);
+   `KHR_materials_transmission` becomes refracting glass (refraction of the screen, not a thin-walled BTDF;
+   `transmissionTexture` and `thicknessTexture` are ignored). Alpha tests ignore wrap modes and vertex alpha. Lumen's
+   cards and voxels see a material's average albedo, without vertex colours, texture transforms, AO, slabs or graphs
+   (a lava graph glows on screen but bounces its base colour). Simplification keeps second-UV and colour seams but
+   does not weigh their deviation. Alpha tests read image textures with mesh UVs only (not procedural textures or
+   triplanar mapping), with 8-bit cutoffs. In Lumen an alpha-masked instance is partially transparent by
    one average coverage (its partial shadows and occlusion are uniform, not shaped like its holes), only in the near
    field: rays and local-light shadows see it within 2 m of their ends, beyond which the global field lets light
    through; its cards are captured from the geometry, holes and all, with the material's average albedo.
-4. **Local lights**: at most 32 lights per frame get virtual shadow maps (the rest distance-field shadows), sharing
-   the sun's 1024-page physical pool (UE's default pool is four times larger), so local lights request pages half a
-   mip coarser than the screen footprint. Soft shadows are PCSS-filtered, not ray-marched (no SMRT); a light's pages
-   are all re-rendered when it moves.
+   **Substrate-lite** has one slab per material: no vertical layering of arbitrary slabs, no horizontal mixing (UE's
+   Substrate mixes / layers / blends any number, with per-pixel slab counts and a closure-count–adaptive G-buffer); no
+   hazy gloss, iridescence, dispersion, glint or fuzz beyond sheen, no specular profiles, no volumetric media. A slab
+   with a clear coat ignores anisotropy (they share the texel's direction), and subsurface + transmission share one
+   per-pixel amount (transmission then takes the material constant). Subsurface diffusion is screen-space (no light
+   from behind thick objects except through thin transmission, no subsurface for translucent materials), uses the
+   material's colour and radius rather than a measured profile, and under MegaLights the local lights' diffuse light
+   of subsurface pixels is not diffused (MegaLights keeps diffuse light whole). Translucent materials (glass, water,
+   `BLEND`) ignore slabs. Unlit colours are scaled to a white surface in full sun. Devices limited to WebGPU's default
+   16 sampled textures per stage render slab materials as their plain base. **Material graphs** run in the G-buffer
+   resolve only: no graph-driven opacity mask, world position offset, tessellation, translucent or decal materials
+   (raster and translucency shaders are fixed); at most 8 distinct (shading model, graph) pipelines per frame (further
+   materials render without their graph, with a warning) and 1024 parameter slots in all; no custom HLSL/WGSL node,
+   material functions, static switches, texture objects or per-node previews; noise and texture outputs carry no
+   derivatives (a texture read at coordinates computed from another texture or from noise filters as if they were
+   constant, i.e. at its finest level there); texture parameters are not editable in the UI (they default to the
+   material's texture) or stored in scene files; time is the renderer's clock.
+4. **Local lights**: at most 32 lights per frame get virtual shadow maps, sharing the sun's 1024-page physical pool
+   (UE's default pool is four times larger), so local lights request pages half a mip coarser than the screen
+   footprint; a moving light gets a slot only where static lights leave one spare, and then re-renders all its pages
+   every frame it moves. With the classic clustered loop, the rest get distance-field shadows for the strongest few
+   per pixel and no shadows beyond those (light leaks through walls), and shadow-map soft shadows are PCSS-filtered,
+   not ray-marched. **MegaLights** shadows every light but traces no hardware rays (WebGPU has none): beyond the 1 m
+   screen trace, rays use the light's virtual shadow map (only the ≤ 32 static lights with one; SMRT-style, 8 steps) or
+   Lumen's distance fields, which are coarser than triangles (mesh SDFs of at most 48 voxels per axis, 0.25 m global
+   voxels beyond 2 m from both ends). The screen trace marches the depth buffer linearly (8 steps, no HZB traversal:
+   the HZB holds the farthest depth, made for culling). Samples come from one representative pixel per 2×2 block (all
+   four pixels shade with its pdf; edges between surfaces converge over the rotating representative), always four per
+   block (no adaptive sample count, no "skip rays outside penumbrae" of UE 5.8, no per-light-type budget); guiding uses
+   a 256-bit hash per tile (lights 256 indices apart share a bit). The sun stays on its classic path (virtual shadow
+   map), and so do volumetric fog (the clustered lights, shadowed only by the shadow-mapped ones), translucent
+   surfaces (forward clustered loop) and particles: with hundreds of lights they still see the unshadowed ones.
+   Lumen's surface cache still lights every card texel and voxel with every light in range (one global-field shadow
+   cone each), which becomes the dominant light-count-dependent cost (cathedral 33 → 1000 lights: surface + radiance
+   cache 1.5 → 2.4 ms, cards 0.07 → 0.35 ms, in both modes). Light culling stays brute force per froxel (0.01 →
+   0.30 ms at 1000 lights; up to 255 lights per froxel, 1024 per scene). The denoiser lags behind moving lights by up to
+   24 frames where the variance clip does not catch the change, and its spatial filter softens lighting detail on
+   fresh (disoccluded) pixels.
 5. **Translucency** is ordered per pixel up to 4 layers deep (depth peeling; deeper layers fall back to per-instance
    order). The layer count comes from projected bounding boxes, so boxes that overlap on screen cost up to three extra
-   depth-only draws, scene-colour copies and shading passes even where the surfaces themselves don't; no
-   order-independent blending for many-layer effects such as particles. Refraction reads the screen-space copy (what
-   is off screen or hidden is not refracted; where a nearer layer covers the displaced lookup it falls back to the
-   pixel behind); translucent surfaces don't request shadow pages (where the
+   depth-only draws, scene-colour copies and shading passes even where the surfaces themselves don't. Refraction reads
+   the screen-space copy (what is off screen or hidden is not refracted; where a nearer layer covers the displaced
+   lookup it falls back to the pixel behind); translucent surfaces don't request shadow pages (where the
    opaque scene didn't request theirs, they fall back to coarser resident levels) and are drawn without LOD. **Water**
    is a normal-mapped plane (no displacement or tessellation, no FFT spectrum, no simulation or interaction with
    objects, no flow maps or rivers / oceans, no spline-shaped bodies: a body is its instance's bounding rectangle, at
@@ -646,10 +1319,84 @@ Everything that was on the roadmap is implemented. Honest differences that remai
    detection) and needs timestamp queries.
 7. **Wind** is procedural (no pivot-painter data per branch or leaf, no simulation) and does not rotate normals;
    leaves flutter around their position rather than their stem. Shadow pages cache static casters separately (as
-   UE's static cache), but only the wind makes a caster dynamic: an instance whose transform changes still
-   invalidates every cached page (item 1). Refreshes are decided per instance and redraw every dynamic caster in the
+   UE's static cache); the wind, `Mobility::Movable` and animated skins make a caster dynamic. Refreshes are decided
+   per instance and redraw every dynamic caster in the
    page, so in the forest — where trees, bushes, ferns and grass all sway and only terrain, rocks and logs are
    static — the wind still costs most of what it did (see *Wind*); a page gets its static layer by being rendered in
    full once more at its first dynamic refresh, and only 256 pages a frame have scratch space for software-rasterised
-   dynamic casters (beyond that they take the hardware path). Distance fields, the surface cache and translucent
-   materials don't move.
+   dynamic casters (beyond that they take the hardware path). The wind doesn't move distance fields, the surface cache
+   or translucent materials (rigid moves do).
+8. **Skeletal meshes**: linear blend skinning with up to 4 influences per vertex (glTF's first joint set; UE allows
+   8–12) and 8-bit weights; no dual-quaternion skinning, morph targets (imported files with them render their base
+   shape, with a warning), cloth or physics. Culling bounds are per instance (posed joint spheres) and per cluster only
+   as the rest sphere padded by the instance's largest displacement — UE bounds clusters by their own influencing
+   bones, which is tighter for large motions (a waving arm makes every cluster's sphere grow by the arm's reach). The
+   LOD error is that of the rest pose: the weight-deviation cost only orders the collapses (coarse levels keep weight
+   seams longest; a test measures half the posed deviation), it does not enter the error. Skinned meshes get no
+   distance field, mesh cards or voxel LODs (as in UE: Lumen sees them through screen traces only), and translucent
+   (`BLEND`) skinned surfaces are drawn by the forward pass in their rest pose. Shadow pages under a moving skin
+   re-render its whole caster set each refresh (as for the wind); the footprint grows with the largest reach seen, so
+   a figure that once stretched far refreshes a larger area. Root motion is not extracted (animated root joints move
+   the posed bounds, not the instance).
+9. **Dynamic world**: moves are rigid transforms of whole instances (deformation is skinning, item 8). A moved
+   caster's shadow footprint is its whole oriented box in light space, so a long, thin caster (a chandelier's chain)
+   refreshes pages its geometry doesn't touch; UE invalidates per primitive too, but its instance-culled page
+   invalidation is tighter. Rigid moves have no bounded speed, so every page under a moving caster is refreshed every
+   frame it moves (the wind skips pages it cannot have changed by two texels). A moving local light that holds a
+   shadow-map slot re-renders all of its pages every frame (item 4; in the demo the chandeliers' lights dominate the
+   cost of their motion). The global distance field lags by up to a quarter voxel per level (and further for a fast
+   mover beyond the brick budget); an instance that stops within that distance of where a level last composed it
+   stays there. The voxel surface cache and radiance cache follow moves over a few frames instead of being
+   invalidated locally. Instance records are rewritten with one `write_buffer` per contiguous run, not a GPU scatter
+   of dirty records (UE's GPU-scene update); adding, hiding or removing instances still rebuilds all instance data.
+   The landscape (runtime virtual texture) and water bodies' lake beds don't follow a moved terrain instance.
+10. **Nanite Foliage**: voxels carry per-axis coverage, one normal and their brick's mean texture coordinate — no
+    per-voxel colour, so textures varying within a brick, vertex colours and alpha-masked (card) foliage's mask
+    coverage are averaged away or ignored; coverage along a diagonal is modelled from the three axes (exact for
+    axis-aligned and isotropic leaves). Voxels are rasterised as stochastic cubes (no ray-marched depth buckets or
+    front-to-back ordering), rely on TSR to average their dithering, move rigidly with the wind at their centre (no
+    flutter, no bone-driven wind), and have no hardware path: in shadow pages refreshed over a static layer without a
+    scratch tile, or split pages, they sit out that refresh. Voxels win only where pruning reports a larger error than
+    the voxel budget allows (4 voxels per kept triangle: the forest's conifers and ferns from mid-distance, the
+    broadleaf canopies near their roots). Assemblies are one level deep (no nested parts), their parts take the
+    instance's material (wood and leaves are separate instances), and the base ↔ parts switch is per assembly
+    instance, not per part (UE resolves part instances inside the cluster hierarchy): an expanded tree culls every
+    part as an instance (part slot, page batch, cluster workgroups), which costs ≈ 0.4 ms of culling for the forest's
+    ≈ 26 k conifer parts, and parts are only as coarse as their own small DAG allows, so the expanded range draws more
+    triangles and fewer voxels than one merged mesh would. When more parts are wanted than the 32768 slots, the
+    expansion threshold rises, so trees near the edge of the expanded range draw their base up to ~1.5 px coarse.
+    Parts are rigid copies (a needle spray follows its branch span, not each branch's own curve); part instances'
+    shadow pages are not invalidated by their pages streaming in (the base's are).
+11. **Volumes and particles**: volumes are dense grids per emitter (no sparse / VDB volumes, no streaming of
+    sequences, at most 8 emitters simulated and 4 marched per frame, each up to 192 steps per ray); the fluid solver
+    is a single-grid red-black SOR (no multigrid), collocated (no MAC grid), with a solid floor only (no obstacles from
+    the scene's geometry, no interaction with other emitters or particles) and a fixed time step clamped to 1/30 s.
+    The lighting cache holds the sun's transmittance plus isotropic ambient and up to 8 local lights (no
+    self-shadowing for local lights; multiple scattering is one approximate octave of the sun, not simulated), the
+    march samples it trilinearly at half the grid resolution; close up, a 4 cm campfire grid shows its resolution in
+    the smoke's edges. Volumes don't cast shadows on the scene or into the virtual shadow map, don't feed Lumen (only
+    the fire's driven light does) and are not seen by reflections or refraction outside the screen. Overlapping
+    volume boxes are composited box by box in entry order, not interleaved; particles go over the volume of their
+    bucket (sparks inside the smoke are not attenuated by the smoke in front of them). Particles: weighted blended OIT
+    approximates the order of layers at similar depths and saturates for very many opaque layers; one translucent
+    surface (the nearest) splits the order — particles between two glass layers are composited with the farther
+    bucket; collision only against the visible depth buffer (no off-screen or occluded collisions, no distance-field
+    collision), no ribbons, meshes, sub-UV flipbooks, events or GPU sorting; lighting is per particle (no per-pixel
+    normal-mapped lighting). Memory: 72 bytes per internal pixel while volumes and particles are on screen (volume
+    march + history front/back, OIT targets, nearest translucent depth: 104 MiB at 1600×900).
+12. **Editor**: no actors or hierarchy — a tree's trunk and foliage are two instances, selected separately; deleted
+    instances and lights stay as hidden / disabled slots (reused, never compacted); undo history is in memory (200
+    steps); no landscape sculpting or painting, no multi-viewport, no editor-only billboards in the renderer (light and
+    volume icons are a 2D overlay without depth test), the gizmo draws over everything; typed transform values apply to
+    the primary selection only; the native window has the editor core without panels. Edited instances stay
+    `Static`, so the shadow pages under a dragged object are rendered in full every preview frame, and hiding,
+    deleting, duplicating, reassigning materials and PCG regeneration are structural changes (all instance data
+    re-uploaded, Lumen's instance lists rebuilt). Scene files address base instances by build order (a changed scene
+    builder is detected by mesh name and the edit skipped with a warning); dropped `.glb` files are referenced by file
+    name and must be hosted next to the page to reload; glTF imports bake on the main thread in the browser.
+13. **PCG**: a fixed node set without a graph canvas (nodes and their parameters are edited in the Details panel; the
+    graph's structure comes from the presets / the file), no attribute system or custom nodes, no spline editing in
+    the viewport (distance targets are volume-local data), spawners reference meshes and materials by name, generation
+    runs on the main thread (no partitioned / hierarchical generation, no runtime generation around the camera), and
+    spawned instances are not individually editable. Native and wasm builds may differ in the last bits of `sin` /
+    `cos`, so a point exactly at a filter threshold could flip between them; saved output sidesteps it.
