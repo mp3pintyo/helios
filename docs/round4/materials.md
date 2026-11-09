@@ -60,7 +60,13 @@ cargo run -p helios-demo --release -- --gltf ClearCoatTest.glb         # glTF PB
   `KHR_materials_volume`'s attenuation over its thickness. Checked against ClearCoatTest, ClearcoatWicker,
   SheenChair, SheenTestGrid, SpecularTest, IORTestGrid, TransmissionTest, UnlitTest, AnisotropyBarnLamp and
   CarConcept. Lumen's surface cache keeps the average albedo (slabs don't change GI bounces).
-  Cost: COST_TABLE
+  Cost (1600×900, RTX 3090 shared with other agents: minima of 3 interleaved runs): scenes without slabs
+  render the same images and cost the same as before (see *Measurements*); the gallery (eleven slab materials,
+  three graphs, about half the screen extended) resolves in 0.41 ms and lights in 0.42 ms with slabs, 0.38 ms
+  lighting with them off (`PageUp`), the subsurface passes take 0.02 + 0.03 ms. Memory only while used: the slab
+  texels 16 bytes per internal pixel (23 MB at 1600×900) while some material is extended, the subsurface light
+  and its diffusion 2 × 8 bytes per pixel while some slab scatters; the classification's tile lists doubled (16
+  slots: 1.4 instead of 0.7 MB at 1600×900).
 * **Material graphs** (`crates/helios-material`, `material_graphs.rs`, `material_graph.wgsl`; UE's Material Editor
   and material instances). A `MaterialGraph` is plain serde data — nodes (`Op`) with canvas positions and the
   constants of their unconnected inputs, links from output to input pins by name — stored in scene files.
@@ -135,4 +141,26 @@ cargo run -p helios-demo --release -- --gltf ClearCoatTest.glb         # glTF PB
 
 ## Measurements
 
-MEASUREMENTS
+Base: the integration branch before this work (01ce9ac); this branch at its final commit. 1600×900, medium
+detail, 90–120 frames, RTX 3090 shared with up to six other agents' jobs (whole-frame totals were swamped at
+times; per-pass minima are the reliable numbers). Image differences are PSNR of the final frame against the base
+build, next to two runs of the base build (temporal noise).
+
+| Scene | Image vs base (noise base vs base) | Resolve min (base → new) | Lighting min (base → new) |
+|---|---|---|---|
+| valley | 64.8 dB, max 13/255 (65.3 dB, 14) | 0.55 → 0.43 ms | 0.40 → 0.41 ms |
+| cathedral | 60.8 dB, max 15 (60.9 dB, 11) | 0.87 → 1.17 ms (medians 2.40 → 1.19: contention) | 3.43 → 2.82 ms |
+| forest | 65.1 dB, max 4 (64.1 dB, 7) | 0.68 → 0.75 ms | 0.86 → 0.62 ms |
+| Sponza (glTF) | 70.2 dB, max 2 (68.3 dB, 3) | 0.35 → 0.37 ms | 0.36 → 0.36 ms |
+
+Gallery (this branch, minima of 3 interleaved runs): slabs on — GPU 3.77 ms, resolve 0.41, lighting 0.42,
+subsurface 0.02 + blend 0.03 ms; slabs off (`PageUp`) — GPU 4.00 ms (noise), lighting 0.38 ms; MegaLights on —
+its shading pass (slab variant) 0.06 ms. Temporal stability (static camera, 12 frames, pixels changing by more than
+24/255): gallery view 0.0020 % with slabs and 0.0020 % without; subsurface close-ups (candle and marble egg at night,
+skin sphere) 0.0002 % and 0.0003 %.
+
+Browser (headless Chromium, WebGPU, `./build-web.ps1`): the gallery, `PageUp`, view 24 and the editor's material
+graph (open the lava graph, change a material instance's parameters, unlink a pin: recompiled to a new hash) run
+without console, WGSL or validation errors. Screenshots: `docs/round4/materials/` (gallery, slabs off, view 24,
+subsurface wax and marble, clear-coat car paint, wet stone graph, anisotropy and IOR, glTF ClearCoatTest with and
+without slabs, SheenChair, CarConcept, TransmissionTest, the material graph editor, the gallery in the browser).
