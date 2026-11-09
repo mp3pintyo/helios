@@ -29,6 +29,8 @@ const DEBUG_INVALIDATION: u32 = 16u;
 const DEBUG_SKIN_WEIGHTS: u32 = 17u;
 const DEBUG_MEGALIGHTS_SAMPLES: u32 = 18u;
 const DEBUG_MEGALIGHTS_DENOISING: u32 = 19u;
+// Substrate slab features and layer count per pixel (substrate.wgsl).
+const DEBUG_MATERIAL_FEATURES: u32 = 24u;
 
 /// Debug views that show lit (exposed, tonemapped) radiance rather than raw attributes.
 fn is_lit_view(view: u32) -> bool {
@@ -141,7 +143,10 @@ struct Material {
     uv_occlusion: UvTransform,
     occlusion_texture: u32,     // layer whose albedo alpha is ambient occlusion
     occlusion_strength: f32,
-    _pad: vec2<u32>,
+    // Resolve pipeline (classify.wgsl): the shading model, or an extended pipeline (Substrate
+    // slab, material graph) in slots MATERIAL_KINDS.. (passes/material.rs).
+    resolve: u32,
+    _pad: u32,
 }
 
 // The transform's UV set out of a point's two (meshes without a second set repeat the first).

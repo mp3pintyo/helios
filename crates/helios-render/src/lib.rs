@@ -46,6 +46,7 @@ mod lights;
 mod lumen;
 mod lumen_dynamic;
 mod lumen_lite;
+mod material_graphs;
 mod megalights;
 mod motion;
 mod near_field;
@@ -64,6 +65,9 @@ mod shader;
 mod skin;
 mod stats;
 mod streaming;
+mod substrate;
+mod substrate_gpu;
+mod subsurface;
 mod svt;
 mod targets;
 mod textures;
@@ -89,6 +93,10 @@ pub use scene::{
     UvTransform, Water, Wrap,
 };
 pub use page_source::{PageLocation, PageRead, PageSource, ReadCompletion};
+pub use material_graphs::{MaterialGraphHandle, ParameterValue};
+pub use substrate::{features as slab_features, Slab};
+/// Material graphs: data model, validation, WGSL code generation, presets.
+pub use helios_material as material_graph;
 pub use scene_edit::transformed_bounds;
 pub use skin::SkinHandle;
 pub use stats::RenderStats;

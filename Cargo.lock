@@ -814,6 +814,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "helios-material"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "helios-pcg"
 version = "0.1.0"
 dependencies = [
@@ -829,6 +837,7 @@ dependencies = [
  "bytemuck",
  "glam",
  "helios-geometry",
+ "helios-material",
  "js-sys",
  "log",
  "naga",

@@ -14,6 +14,10 @@ use crate::{AlphaMode, Asset, AssetError, Image, Instance, Material, NamedMesh, 
 /// Extensions the importer interprets; others are ignored (with a warning).
 const UNDERSTOOD_EXTENSIONS: &[&str] = &["KHR_materials_emissive_strength", "KHR_texture_transform", "KHR_mesh_quantization"];
 
+fn understood(extension: &str) -> bool {
+    UNDERSTOOD_EXTENSIONS.contains(&extension) || crate::material_extensions::EXTENSIONS.contains(&extension)
+}
+
 /// The `gltf` crate's validation, except that a document may require extensions the importer
 /// implements itself: `KHR_mesh_quantization` (attributes are decoded by [`read_floats`], not
 /// by the crate's readers, which assume the core formats). Other unsupported required
@@ -25,7 +29,7 @@ pub fn validate(document: &gltf::Document) -> Result<(), AssetError> {
     root.validate(root, gltf::json::Path::new, &mut |path, error| errors.push((path(), error)));
     errors.retain(|(path, _)| {
         !root.extensions_required.iter().enumerate().any(|(i, ext)| {
-            UNDERSTOOD_EXTENSIONS.contains(&ext.as_str()) && path.as_str() == format!("extensionsRequired[{i}] = \"{ext}\"")
+            understood(ext) && path.as_str() == format!("extensionsRequired[{i}] = \"{ext}\"")
         })
     });
     if errors.is_empty() {
@@ -37,7 +41,7 @@ pub fn validate(document: &gltf::Document) -> Result<(), AssetError> {
 
 pub fn import(document: &gltf::Document, blob: Option<Vec<u8>>, resources: &HashMap<String, Vec<u8>>) -> Result<Asset, AssetError> {
     for ext in document.extensions_used() {
-        if !UNDERSTOOD_EXTENSIONS.contains(&ext) {
+        if !understood(ext) {
             log::warn!("glTF extension {ext} is ignored");
         }
     }
@@ -56,7 +60,7 @@ pub fn import(document: &gltf::Document, blob: Option<Vec<u8>>, resources: &Hash
                 Some(first)
             })
             .collect(),
-        materials: document.materials().map(|m| read_material(&m)).collect(),
+        materials: document.materials().map(|m| read_material(&m, document)).collect(),
         default_material: None,
         mesh_index: HashMap::new(),
         asset: Asset { images, ..Default::default() },
@@ -424,7 +428,15 @@ fn transform_from_json(value: Option<&gltf::json::Value>) -> Option<(TextureTran
     Some((transform, value.get("texCoord").and_then(|v| v.as_u64()).map(|s| s as u32)))
 }
 
-fn read_material(m: &gltf::Material) -> Material {
+/// A texture info of an extension (`{ "index", "texCoord", "extensions" }`).
+fn texture_from_json(document: &gltf::Document, value: &gltf::json::Value) -> Option<TextureRef> {
+    let texture = document.textures().nth(value.get("index")?.as_u64()? as usize)?;
+    let set = value.get("texCoord").and_then(|t| t.as_u64()).unwrap_or(0) as u32;
+    let transform = transform_from_json(value.get("extensions").and_then(|e| e.get("KHR_texture_transform")));
+    Some(texture_ref(texture, set, transform))
+}
+
+fn read_material(m: &gltf::Material, document: &gltf::Document) -> Material {
     let info = |info: Option<gltf::texture::Info>| {
         info.map(|info| {
             let transform = info.texture_transform().map(|t| {
@@ -457,6 +469,7 @@ fn read_material(m: &gltf::Material) -> Material {
             gltf::material::AlphaMode::Blend => AlphaMode::Blend,
         },
         double_sided: m.double_sided(),
+        extensions: crate::material_extensions::read(m, &|value| texture_from_json(document, value)),
     }
 }
 

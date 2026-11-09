@@ -1,6 +1,13 @@
 // MegaLights (megalights.rs): a G-buffer pixel as its passes see it - the same surface terms as
 // lighting.wgsl. Requires common.wgsl, brdf.wgsl and these bindings: frame: Frame, depth_texture,
 // gbuffer_albedo, gbuffer_normal, gbuffer_motion (texture_2d<f32>).
+//
+// The shading pass's slab variant (substrate_read.wgsl) also reads the pixel's Substrate slab and
+// evaluates its lobes. Demodulation keeps using the plain terms (diffuse colour, the G-buffer's
+// environment BRDF) in every pass: they only scale what the denoiser blurs, and must match
+// between the shading and the denoiser's final modulation.
+
+#include "substrate_read_off.wgsl"
 
 struct MlSurface {
     valid: bool,
@@ -17,6 +24,9 @@ struct MlSurface {
     a: f32,
     // Foliage transmits light arriving from behind (lighting.wgsl's wrap term).
     wrap: f32,
+    // The Substrate slab (slab variant only).
+    substrate: bool,
+    slab: SlabShading,
 }
 
 fn ml_surface(pixel: vec2<u32>) -> MlSurface {
@@ -39,7 +49,13 @@ fn ml_surface(pixel: vec2<u32>) -> MlSurface {
     s.f0 = mix(vec3<f32>(0.04), s.albedo, albedo_metal.a);
     s.roughness = clamp(normal_rough.w, 0.045, 1.0);
     s.a = s.roughness * s.roughness;
-    s.wrap = select(0.0, 0.35, surface_flags_of(textureLoad(gbuffer_motion, pixel, 0).w) == 1u);
+    let flags = surface_flags_of(textureLoad(gbuffer_motion, pixel, 0).w);
+    s.wrap = select(0.0, 0.35, flags == 1u);
+    s.substrate = SUBSTRATE_LIGHTING && flags >= SURFACE_SUBSTRATE_FLAG;
+    if s.substrate {
+        let slab = load_slab(pixel);
+        s.slab = shade_slab(slab, slab_constants(slab.material), s.n, s.roughness, s.albedo, albedo_metal.a, s.v);
+    }
     return s;
 }
 

@@ -4,6 +4,7 @@
 pub mod candles;
 pub mod cathedral;
 pub mod forest;
+pub mod gallery;
 pub mod model;
 pub mod skeletal;
 pub mod valley;
@@ -38,18 +39,21 @@ pub enum SceneKind {
     Valley,
     Cathedral,
     Forest,
+    /// The material gallery (Substrate slabs and material graphs).
+    Gallery,
     /// The imported glTF model (only available when one was loaded).
     Model,
 }
 
 impl SceneKind {
-    pub const ALL: [SceneKind; 4] = [SceneKind::Valley, SceneKind::Cathedral, SceneKind::Forest, SceneKind::Model];
+    pub const ALL: [SceneKind; 5] = [SceneKind::Valley, SceneKind::Cathedral, SceneKind::Forest, SceneKind::Gallery, SceneKind::Model];
 
     pub fn name(self) -> &'static str {
         match self {
             SceneKind::Valley => "valley",
             SceneKind::Cathedral => "cathedral",
             SceneKind::Forest => "forest",
+            SceneKind::Gallery => "gallery",
             SceneKind::Model => "model",
         }
     }
@@ -97,6 +101,7 @@ pub fn build_with(kind: SceneKind, detail: Detail, model: Option<&model::Model>,
         (SceneKind::Valley, _) => valley::build(detail),
         (SceneKind::Cathedral, _) => cathedral::build(detail),
         (SceneKind::Forest, _) => forest::build(detail),
+        (SceneKind::Gallery, _) => gallery::build(detail),
         (SceneKind::Model, Some(m)) => model::build(m),
         (SceneKind::Model, None) => {
             log::warn!("no model loaded (use --gltf FILE or ?gltf=URL); showing the valley");

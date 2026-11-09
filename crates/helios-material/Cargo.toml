@@ -1,0 +1,12 @@
+[package]
+name = "helios-material"
+description = "Material graphs (UE's Material Editor): a node graph data model, validation and WGSL code generation for the G-buffer resolve."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

@@ -44,6 +44,8 @@ use crate::translucency::Translucency;
 use crate::passes::sky::Sky;
 use crate::passes::Samplers;
 use crate::stats::{RenderStats, StatsReadback};
+use crate::substrate_gpu::ExtendedMaterials;
+use crate::subsurface::SubsurfacePass;
 use crate::svt::{StreamingVirtualTexture, TextureStreamingStats, TileFormat};
 use crate::targets::FrameTargets;
 use crate::util::uniform_buffer;
@@ -96,10 +98,14 @@ pub enum DebugView {
     /// Lumen Lite's irradiance probes (spheres shaded with their irradiance; sleeping: blue,
     /// buried in geometry: red) over the irradiance they give each pixel. Runs Lumen Lite.
     LumenLiteProbes = 20,
+    /// Substrate slab features per pixel: clear coat blue, sheen magenta, subsurface red,
+    /// transmission green, anisotropy yellow, specular / IOR cyan, unlit white (blended when
+    /// several), brighter with more layers, striped for graph materials; plain materials grey.
+    MaterialFeatures = 24,
 }
 
 impl DebugView {
-    pub const ALL: [DebugView; 21] = [
+    pub const ALL: [DebugView; 22] = [
         Self::Lit,
         Self::Clusters,
         Self::Triangles,
@@ -121,6 +127,7 @@ impl DebugView {
         Self::MegaLightsSamples,
         Self::MegaLightsDenoising,
         Self::LumenLiteProbes,
+        Self::MaterialFeatures,
     ];
 
     /// The view with index `index` (its `--view` number), if any.
@@ -151,6 +158,7 @@ impl DebugView {
             Self::MegaLightsSamples => "MegaLights samples (light per sample, dark = blocked)",
             Self::MegaLightsDenoising => "MegaLights lighting: samples | denoised",
             Self::LumenLiteProbes => "Lumen Lite probes",
+            Self::MaterialFeatures => "Material features (Substrate slabs)",
         }
     }
 
@@ -243,6 +251,10 @@ pub struct RenderSettings {
     /// `motion.rs`). Off: every move rebuilds the instance data and invalidates every cached
     /// shadow page, as structural changes do (for comparisons).
     pub per_instance_invalidation: bool,
+    /// Substrate slabs (clear coat, sheen, subsurface, transmission, IOR / specular colour,
+    /// anisotropy, unlit). Off: every material renders as its plain metallic-roughness base;
+    /// material graphs still run (`substrate.rs`).
+    pub substrate: bool,
 }
 
 impl Default for RenderSettings {
@@ -283,6 +295,7 @@ impl Default for RenderSettings {
             screen_percentage: 100.0,
             dynamic_resolution: None,
             per_instance_invalidation: true,
+            substrate: true,
         }
     }
 }
@@ -324,6 +337,9 @@ pub struct Renderer {
     hzb: Hzb,
     sky: Sky,
     material: MaterialPass,
+    /// Substrate slabs and material graphs (`substrate_gpu.rs`) and the subsurface diffusion.
+    extended: ExtendedMaterials,
+    subsurface: SubsurfacePass,
     textures: TextureLibrary,
     rvt: RuntimeVirtualTexture,
     svt: StreamingVirtualTexture,
@@ -398,6 +414,8 @@ impl Renderer {
             hzb: Hzb::new(device),
             sky: Sky::new(device),
             material: MaterialPass::new(device),
+            extended: ExtendedMaterials::new(device),
+            subsurface: SubsurfacePass::new(device),
             textures: TextureLibrary::new(device, queue),
             rvt: RuntimeVirtualTexture::new(device, queue),
             svt: StreamingVirtualTexture::new(device, config.texture_pool_bytes, TileFormat::select(device.features(), config.texture_compression)),
@@ -616,7 +634,12 @@ impl Renderer {
         // growing scene bounds change the shadow clipmap's depth range.
         self.scene_changed = changes.structural || sync.bounds_grew;
         self.textures.sync(&self.device, &self.queue, scene);
-        self.material.sync(&self.device, self.scene.uv_extensions, self.scene.skins.skinned_instances);
+        let substrate = self.settings.substrate;
+        self.extended.sync(&self.device, &self.queue, scene, &self.scene, substrate, self.targets.capacity);
+        self.material.sync(&self.device, self.scene.uv_extensions, self.scene.skins.skinned_instances, &self.extended, substrate);
+        let slab_lighting = self.extended.lighting.then_some(&self.extended.lighting_layout);
+        self.lighting.sync_substrate(&self.device, slab_lighting);
+        self.megalights.sync_substrate(&self.device, self.extended.lighting.then_some(&self.extended.megalights_layout));
         self.rvt.sync(&self.device, &self.queue, scene, self.settings.virtual_texturing, frame);
         // Texture feedback is per rendered pixel (internal size); the froxel volume and the
         // screen targets of Lumen, clouds and translucency are sized for the capacity, so a
@@ -687,6 +710,7 @@ impl Renderer {
         }
 
         // Shading.
+        let resolve_group = self.extended.resolve_group(&device);
         self.material.record(
             &mut rec,
             &self.frame_uniform,
@@ -698,6 +722,7 @@ impl Renderer {
             &self.svt,
             self.translucency.water_uniform(),
             &self.samplers,
+            resolve_group.as_ref(),
         );
         self.picker.record(&mut rec, &self.queue, &self.frame_uniform, &self.targets, &self.main_view.visible_clusters);
         self.rvt.record(&mut rec, &self.textures, &self.samplers.material, self.settings.virtual_texturing);
@@ -743,6 +768,7 @@ impl Renderer {
             self.fog.record(&mut rec, &inputs, current);
         }
         let reflection = if self.settings.global_illumination { self.lumen.reflection(current).unwrap_or(&self.black) } else { &self.black };
+        let megalights_slabs = self.extended.megalights_group(&device);
         let megalights_inputs = MegaLightsInputs {
             frame: &self.frame_uniform,
             targets: &self.targets,
@@ -750,10 +776,12 @@ impl Renderer {
             vsm: &self.vsm,
             lumen: &self.lumen,
             samplers: &self.samplers,
+            substrate: megalights_slabs.as_ref(),
         };
         if megalights {
             self.megalights.record(&mut rec, &megalights_inputs, current);
         }
+        let lighting_slabs = self.extended.lighting_group(&device);
         let lighting = LightingInputs {
             frame: &self.frame_uniform,
             targets: &self.targets,
@@ -769,8 +797,12 @@ impl Renderer {
             fog: &self.fog,
             megalights: self.megalights.output(current).filter(|_| self.settings.mega_lights),
             black: &self.black,
+            substrate: lighting_slabs.as_ref(),
         };
         self.lighting.record(&mut rec, &lighting);
+        if self.extended.subsurface && lit {
+            self.subsurface.record(&mut rec, &self.frame_uniform, &self.targets, &self.extended);
+        }
         if megalights && megalights_debug {
             self.megalights.record_debug(&mut rec, &megalights_inputs, current);
         }

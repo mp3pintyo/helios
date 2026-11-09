@@ -61,6 +61,8 @@ pub struct MegaLightsInputs<'a> {
     pub vsm: &'a VirtualShadowMap,
     pub lumen: &'a Lumen,
     pub samplers: &'a Samplers,
+    /// Bind group 1 of the shading's slab variant while the scene has slab materials.
+    pub substrate: Option<&'a wgpu::BindGroup>,
 }
 
 /// Textures and buffers at the internal resolution's capacity.
@@ -105,6 +107,8 @@ pub struct MegaLights {
     trace: wgpu::ComputePipeline,
     shade_layout: wgpu::BindGroupLayout,
     shade: wgpu::ComputePipeline,
+    /// Shading with Substrate slabs (`substrate_gpu.rs`), compiled when first needed.
+    shade_substrate: Option<wgpu::ComputePipeline>,
     debug_layout: wgpu::BindGroupLayout,
     debug: wgpu::ComputePipeline,
     temporal_layout: wgpu::BindGroupLayout,
@@ -174,6 +178,7 @@ impl MegaLights {
             trace: compute_pipeline(device, "megalights trace", &sample_module, "trace", &sample_layout, &[]),
             sample_layout,
             shade: compute_pipeline(device, "megalights shade", &shade_module, "shade", &shade_layout, &[]),
+            shade_substrate: None,
             shade_layout,
             debug: compute_pipeline(device, "megalights debug", &shade_module, "debug", &debug_layout, &[]),
             debug_layout,
@@ -183,6 +188,17 @@ impl MegaLights {
             spatial_layout,
             spatial_params,
             targets: None,
+        }
+    }
+
+    /// Compiles the slab variant of the shading once a scene needs it (`substrate`: its group 1
+    /// layout).
+    pub fn sync_substrate(&mut self, device: &wgpu::Device, substrate: Option<&wgpu::BindGroupLayout>) {
+        if let (Some(group), None) = (substrate, &self.shade_substrate) {
+            let source = crate::shader::compose_variant("megalights_shade.wgsl", &crate::shader::substrate_lighting());
+            let module = crate::shader::create_module_from(device, "megalights shade (substrate)", source);
+            let layouts = [&self.shade_layout, group];
+            self.shade_substrate = Some(crate::util::compute_pipeline_with(device, "megalights shade (substrate)", &module, "shade", &layouts, &[]));
         }
     }
 
@@ -262,8 +278,14 @@ impl MegaLights {
         );
         {
             let mut pass = rec.compute_pass("megalights shade");
-            pass.set_pipeline(&self.shade);
             pass.set_bind_group(0, &shade_group, &[]);
+            match (inputs.substrate, &self.shade_substrate) {
+                (Some(slabs), Some(pipeline)) => {
+                    pass.set_pipeline(pipeline);
+                    pass.set_bind_group(1, slabs, &[]);
+                }
+                _ => pass.set_pipeline(&self.shade),
+            }
             pass.dispatch_workgroups(workgroups(w, 8), workgroups(h, 8), 1);
         }
 

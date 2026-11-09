@@ -24,6 +24,8 @@ use helios_render::SkinHandle;
 use super::skeletal::{posed_bounds, SkeletalAnimation, SkinBindings};
 use super::SceneSetup;
 
+mod extensions;
+
 const SUN: (f32, f32, f32) = (0.9, 0.95, 10.0);
 
 /// Target world-space voxel size of mesh distance fields. Lumen's finest global distance field
@@ -136,7 +138,8 @@ pub fn add_model(scene: &mut Scene, model: &Model) -> AddedModel {
         scene.set_material_name(handle, &name);
     }
     let skipped: Vec<bool> = asset.materials.iter().map(fully_cut_out).collect();
-    let blended = |material: usize| asset.materials[material].alpha_mode == AlphaMode::Blend;
+    // Blended and transmitting (glass) surfaces are drawn by the translucency pass.
+    let blended = |material: usize| asset.materials[material].alpha_mode == AlphaMode::Blend || transmissive(&asset.materials[material]);
 
     // Bake every mesh some visible instance uses, with a distance field sized to its world extent
     // (none for meshes only drawn with blended materials: translucent surfaces neither occlude
@@ -260,6 +263,7 @@ fn add_materials(scene: &mut Scene, model: &Model) -> Vec<helios_render::Materia
             })
         })
     };
+    let mut extension_layers = extensions::SlabLayers::default();
     model
         .asset
         .materials
@@ -270,11 +274,21 @@ fn add_materials(scene: &mut Scene, model: &Model) -> Vec<helios_render::Materia
             let emissive_texture = keys.emission.map(|key| layer(scene, key));
             let occlusion_texture = if keys.occlusion_in_main { texture } else { keys.occlusion.map(|key| layer(scene, key)) };
             // BLEND is opt-in translucency: the forward translucency pass, alpha-blended by the
-            // base colour alpha (factor × texture). OPAQUE and MASK stay in the visibility buffer.
-            let kind = if m.alpha_mode == AlphaMode::Blend { MaterialKind::Translucent } else { MaterialKind::Standard };
+            // base colour alpha (factor × texture). Transmission (KHR_materials_transmission) is
+            // glass, refracting the scene behind it. OPAQUE and MASK stay in the visibility buffer.
+            let (kind, base_color, texture) = if m.alpha_mode == AlphaMode::Blend {
+                (MaterialKind::Translucent, m.base_color.truncate(), texture)
+            } else if transmissive(m) {
+                // A clear pane tinted by the base colour and the volume's attenuation.
+                (MaterialKind::Glass, m.base_color.truncate() * volume_tint(&m.extensions), None)
+            } else {
+                (MaterialKind::Standard, m.base_color.truncate(), texture)
+            };
+            let slab = extension_layers.slab(scene, model, m);
             scene.add_material(Material {
                 kind,
-                base_color: m.base_color.truncate(),
+                slab,
+                base_color,
                 opacity: m.base_color.w,
                 roughness: m.roughness,
                 metallic: m.metallic,
@@ -293,6 +307,21 @@ fn add_materials(scene: &mut Scene, model: &Model) -> Vec<helios_render::Materia
             })
         })
         .collect()
+}
+
+/// `KHR_materials_transmission`: the surface lets light through (rendered as glass).
+fn transmissive(m: &helios_asset::Material) -> bool {
+    m.extensions.transmission > 0.0
+}
+
+/// The colour `KHR_materials_volume` gives light crossing the medium's thickness once
+/// (Beer–Lambert: the attenuation colour is what remains after the attenuation distance).
+fn volume_tint(e: &helios_asset::MaterialExtensions) -> Vec3 {
+    if e.attenuation_distance.is_finite() && e.attenuation_distance > 0.0 && e.thickness > 0.0 {
+        e.attenuation_color.max(Vec3::splat(1e-3)).powf(e.thickness / e.attenuation_distance)
+    } else {
+        Vec3::ONE
+    }
 }
 
 /// Appends reversed copies of all triangles (normals flipped) so double-sided materials render

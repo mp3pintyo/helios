@@ -12,6 +12,16 @@
 //! Likewise, skinning (posing corners, previous positions for motion vectors) is a `SKINNING`
 //! permutation used only while the scene has skinned instances: in the forest it would take the
 //! resolve from 0.39 to 0.74 ms although no pixel is skinned.
+//!
+//! Materials with a Substrate slab or a material graph get **extended pipelines** in resolve
+//! slots 8–15 (`substrate_gpu.rs` assigns one per distinct shading model and graph): the
+//! resolve composed with `resolve_extended.wgsl` and the graph's generated code, bound to a
+//! second group (slab table, graph parameters, slab texels). Classification bins their tiles
+//! apart, so the plain pipelines stay exactly as they are. Modules are cached by graph hash and
+//! pipelines by slot, model, graph, permutation and the Substrate switch: editing a graph
+//! compiles one module; changing a parameter compiles nothing.
+
+use std::collections::HashMap;
 
 use wgpu::BindingResource::{Sampler, TextureView};
 use wgpu::{ShaderStages, TextureFormat};
@@ -21,11 +31,12 @@ use crate::gpu_scene::GpuScene;
 use crate::passes::culling::CullView;
 use crate::profiler::Recorder;
 use crate::rvt::RuntimeVirtualTexture;
-use crate::shader::create_module;
+use crate::shader::{create_module, create_module_from, extended_resolve};
+use crate::substrate_gpu::ExtendedMaterials;
 use crate::svt::StreamingVirtualTexture;
 use crate::targets::FrameTargets;
 use crate::textures::TextureLibrary;
-use crate::util::{bind, bind_group, bind_group_layout, compute_pipeline, workgroups};
+use crate::util::{bind, bind_group, bind_group_layout, compute_pipeline, compute_pipeline_with, workgroups};
 use crate::water::BINDING_WATER;
 use crate::skin::{skin_entry, skin_resource};
 use crate::wind::{wind_entry, wind_resource};
@@ -33,6 +44,16 @@ use crate::wind::{wind_entry, wind_resource};
 /// Shading models with a resolve pipeline (see `MATERIAL_*` in material.wgsl); 7 is the sky.
 /// Glass (5) is translucent: it never reaches the visibility buffer (see translucency.rs).
 const KINDS: [u32; 6] = [0, 1, 2, 3, 4, 7];
+/// The sky's slot; slots below `PLAIN_SLOTS` are the shading models'.
+pub const SKY_SLOT: u32 = 7;
+pub const PLAIN_SLOTS: u32 = 8;
+/// Extended pipelines a frame can use (slots 8–15; classify.wgsl's tile buffer layout).
+pub const EXTENDED_SLOTS: u32 = 8;
+/// Word offset of the per-slot indirect dispatch arguments in the tile buffer.
+const TILE_ARGS: u64 = 16;
+
+/// An extended pipeline: slot, shading model, graph hash (0: none), permutation, Substrate on.
+type ExtendedKey = (u32, u32, u64, usize, bool);
 
 pub struct MaterialPass {
     module: wgpu::ShaderModule,
@@ -45,6 +66,11 @@ pub struct MaterialPass {
     resolve: [Option<Vec<(u32, wgpu::ComputePipeline)>>; 4],
     /// The permutation in use.
     permutation: usize,
+    /// Extended resolve modules by graph hash (0: slab materials without a graph) and pipelines.
+    extended_modules: HashMap<u64, wgpu::ShaderModule>,
+    extended_pipelines: HashMap<ExtendedKey, wgpu::ComputePipeline>,
+    /// The extended pipelines of this frame, by slot.
+    extended: Vec<(u32, ExtendedKey)>,
 }
 
 /// Index of a resolve permutation: `UV_EXTENSIONS` in bit 0, `SKINNING` in bit 1.
@@ -115,16 +141,42 @@ impl MaterialPass {
             layout,
             classify_layout,
             permutation: 0,
+            extended_modules: HashMap::new(),
+            extended_pipelines: HashMap::new(),
+            extended: Vec::new(),
         }
     }
 
-    /// Selects the resolve permutation the scene's materials and instances need, compiling it on
-    /// first use.
-    pub fn sync(&mut self, device: &wgpu::Device, uv_extensions: bool, skinning: bool) {
+    /// Selects the resolve permutation the scene's materials and instances need and the extended
+    /// pipelines of its slab and graph materials, compiling them on first use.
+    pub fn sync(&mut self, device: &wgpu::Device, uv_extensions: bool, skinning: bool, extended: &ExtendedMaterials, substrate: bool) {
         self.permutation = permutation(uv_extensions, skinning);
         let slot = &mut self.resolve[self.permutation];
         if slot.is_none() {
             *slot = Some(resolve_pipelines(device, &self.module, &self.layout, self.permutation));
+        }
+        self.extended.clear();
+        for s in &extended.slots {
+            let hash = s.graph.as_ref().map_or(0, |g| g.0);
+            let key = (s.slot, s.kind, hash, self.permutation, substrate);
+            if !self.extended_pipelines.contains_key(&key) {
+                let module = self.extended_modules.entry(hash).or_insert_with(|| {
+                    let code = s.graph.as_ref().map(|g| g.1.as_str());
+                    create_module_from(device, if code.is_some() { "graph material resolve" } else { "slab material resolve" }, extended_resolve(code))
+                });
+                let flag = |bit: usize| ((self.permutation >> bit) & 1) as f64;
+                let constants = [
+                    ("MATERIAL_KIND", s.kind as f64),
+                    ("RESOLVE_SLOT", s.slot as f64),
+                    ("UV_EXTENSIONS", flag(0)),
+                    ("SKINNING", flag(1)),
+                    ("SUBSTRATE", substrate as u32 as f64),
+                ];
+                let layouts = [&self.layout, &extended.resolve_layout];
+                let pipeline = compute_pipeline_with(device, "extended material resolve", module, "resolve", &layouts, &constants);
+                self.extended_pipelines.insert(key, pipeline);
+            }
+            self.extended.push((s.slot, key));
         }
     }
 
@@ -141,6 +193,7 @@ impl MaterialPass {
         svt: &StreamingVirtualTexture,
         water: &wgpu::Buffer,
         samplers: &Samplers,
+        extended: Option<&wgpu::BindGroup>,
     ) {
         let group = bind_group(
             rec.device,
@@ -200,9 +253,17 @@ impl MaterialPass {
         pass.set_pipeline(&self.prepare);
         pass.dispatch_workgroups(1, 1, 1);
         pass.set_bind_group(0, &group, &[]);
+        let args = |slot: u32| (TILE_ARGS + slot as u64 * 4) * 4;
         for (kind, pipeline) in self.resolve[self.permutation].iter().flatten() {
             pass.set_pipeline(pipeline);
-            pass.dispatch_workgroups_indirect(&targets.material_tiles, (8 + kind * 4) as u64 * 4);
+            pass.dispatch_workgroups_indirect(&targets.material_tiles, args(*kind));
+        }
+        if let Some(group) = extended {
+            pass.set_bind_group(1, group, &[]);
+            for (slot, key) in &self.extended {
+                pass.set_pipeline(&self.extended_pipelines[key]);
+                pass.dispatch_workgroups_indirect(&targets.material_tiles, args(*slot));
+            }
         }
     }
 }
@@ -213,7 +274,7 @@ fn resolve_pipelines(device: &wgpu::Device, module: &wgpu::ShaderModule, layout:
         .iter()
         .map(|&kind| {
             let flag = |bit: usize| ((permutation >> bit) & 1) as f64;
-            let constants = [("MATERIAL_KIND", kind as f64), ("UV_EXTENSIONS", flag(0)), ("SKINNING", flag(1))];
+            let constants = [("MATERIAL_KIND", kind as f64), ("RESOLVE_SLOT", kind as f64), ("UV_EXTENSIONS", flag(0)), ("SKINNING", flag(1))];
             (kind, compute_pipeline(device, "material resolve", module, "resolve", layout, &constants))
         })
         .collect()

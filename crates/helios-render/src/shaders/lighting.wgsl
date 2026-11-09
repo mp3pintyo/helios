@@ -13,6 +13,8 @@
 #include "lumen_mesh_sdf.wgsl"
 #include "lights.wgsl"
 #include "brdf.wgsl"
+#include "substrate_read_off.wgsl"
+#include "subsurface_store_off.wgsl"
 #include "clouds_common.wgsl"
 #include "fog_common.wgsl"
 #include "stars.wgsl"
@@ -256,6 +258,23 @@ fn sky_occlusion_blend(sky_visibility: f32) -> f32 {
     return 1.0 - 0.6 * saturate(sky_visibility);
 }
 
+// Prefiltered radiance along reflection `r` for `roughness`, before traced reflections: the
+// sky, blurred towards irradiance for rough surfaces, and with GI on, the radiance the screen
+// probes gathered over the hemisphere (it sees walls and windows, not the open sky, which
+// matters indoors).
+fn specular_environment(r: vec3<f32>, roughness: f32, gi_radiance: vec3<f32>, sky_visibility: f32) -> vec3<f32> {
+    let sharp = sky_radiance(r);
+    let blurry = sh_irradiance(sky_sh, r) * frame.sun_illuminance.rgb / PI;
+    var environment = mix(sharp, blurry, smoothstep(0.15, 0.75, roughness));
+    // Below the horizon the sky LUT only holds thin air; reflect the lit ground instead.
+    environment = mix(environment, blurry, 1.0 - smoothstep(-0.15, 0.02, r.y));
+    if has_flag(frame.flags, FLAG_GI) {
+        let rough = mix(environment, gi_radiance, sky_occlusion_blend(sky_visibility));
+        environment = mix(environment, rough, smoothstep(0.2, 0.5, roughness));
+    }
+    return environment;
+}
+
 fn sun_disk(dir: vec3<f32>) -> vec3<f32> {
     let sun = normalize(frame.sun_direction.xyz);
     let radius = frame.sun_direction.w;
@@ -334,7 +353,20 @@ fn shade(@builtin(global_invocation_id) gid: vec3<u32>) {
     let sun_transmittance = sample_transmittance(transmittance_lut, lut_sampler, atmosphere_position(world_position), sun);
     let sun_light = frame.sun_illuminance.rgb * sun_transmittance;
     let n_dot_l = saturate(dot(n, sun));
-    let shadow = select(0.0, sun_shadow(world_position, n, noise), n_dot_l > 0.0);
+    let surface_flags = surface_flags_of(motion.w);
+
+    // The Substrate slab of pixels whose material has one (substrate.wgsl). Without slabs in
+    // the scene this is compiled out.
+    let substrate = SUBSTRATE_LIGHTING && surface_flags >= SURFACE_SUBSTRATE_FLAG;
+    var slab = slab_none();
+    var sh: SlabShading;
+    if substrate {
+        slab = load_slab(pixel);
+        sh = shade_slab(slab, slab_constants(slab.material), n, roughness, albedo, metallic, v);
+    }
+    // Subsurface scattering lights a little past the terminator (wrapped diffuse).
+    let sun_reaches = n_dot_l > 0.0 || (substrate && dot(n, sun) + sh.wrap > 0.0);
+    let shadow = select(0.0, sun_shadow(world_position, n, noise), sun_reaches);
 
     // Debug views that only need simple shading.
     switch frame.debug_view {
@@ -355,21 +387,46 @@ fn shade(@builtin(global_invocation_id) gid: vec3<u32>) {
             textureStore(output, pixel, vec4<f32>(debug_local_shadow_pages(pixel, linear_depth, world_position, n), 1.0));
             return;
         }
+        case DEBUG_MATERIAL_FEATURES: {
+            let shade = 0.3 + 0.7 * n_dot_l * mix(0.4, 1.0, shadow);
+            textureStore(output, pixel, vec4<f32>(slab_debug_color(slab, pixel, substrate) * shade, 1.0));
+            return;
+        }
         default: {}
+    }
+
+    // Unlit slabs (KHR_materials_unlit) show their colour as bright as a white surface in full
+    // sun, fogged like everything else.
+    if substrate && has_feature(slab, SLAB_UNLIT) {
+        let unlit = apply_aerial_perspective(albedo * (luminance(frame.sun_illuminance.rgb) / PI), world_position, view_dir);
+        textureStore(output, pixel, vec4<f32>(apply_volumetric_fog(unlit, uv, linear_depth), 1.0));
+        return;
     }
 
     let diffuse_color = albedo * (1.0 - metallic);
     let f0 = mix(vec3<f32>(0.04), albedo, metallic);
 
     // Direct sun.
-    let h = normalize(v + sun);
-    let n_dot_h = saturate(dot(n, h));
-    let v_dot_h = saturate(dot(v, h));
-    let fresnel = f_schlick(f0, v_dot_h);
-    let specular = d_ggx(n_dot_h, a) * v_smith_ggx_correlated(n_dot_v, n_dot_l, a) * fresnel;
-    let diffuse = diffuse_color / PI * (vec3<f32>(1.0) - fresnel);
-    var color = (diffuse + specular) * sun_light * n_dot_l * shadow;
-    let surface_flags = surface_flags_of(motion.w);
+    var color: vec3<f32>;
+    // Subsurface pixels' diffuse light, demodulated: subsurface.wgsl diffuses it on screen.
+    var scattered = vec3<f32>(0.0);
+    if substrate {
+        let c = evaluate_slab(sh, sun);
+        let lit = sun_light * shadow;
+        color = (diffuse_color * (c.diffuse * (1.0 - sh.subsurface)) + c.specular) * lit;
+        scattered = c.diffuse * sh.subsurface * lit;
+        if sh.transmission > 0.0 {
+            color += diffuse_color * sh.transmission_color * (c.back * sun_shadow(world_position, -n, noise)) * sun_light;
+        }
+    } else {
+        let h = normalize(v + sun);
+        let n_dot_h = saturate(dot(n, h));
+        let v_dot_h = saturate(dot(v, h));
+        let fresnel = f_schlick(f0, v_dot_h);
+        let specular = d_ggx(n_dot_h, a) * v_smith_ggx_correlated(n_dot_v, n_dot_l, a) * fresnel;
+        let diffuse = diffuse_color / PI * (vec3<f32>(1.0) - fresnel);
+        color = (diffuse + specular) * sun_light * n_dot_l * shadow;
+    }
 
     // Local lights: MegaLights' stochastic, denoised lighting, or the clustered grid's lights
     // shadowed as select_shadowed_lights describes.
@@ -389,7 +446,9 @@ fn shade(@builtin(global_invocation_id) gid: vec3<u32>) {
             let ls = sample_light(light, world_position);
             let nl = saturate(dot(n, ls.l));
             let wrap = select(0.0, 0.35, surface_flags == 1u); // foliage transmits
-            if nl + wrap <= 0.0 {
+            // Slabs: wrapped subsurface diffuse and thin transmission reach behind the terminator.
+            let reach = select(nl + wrap, max(dot(n, ls.l) + sh.wrap, sh.transmission), substrate);
+            if reach <= 0.0 {
                 continue;
             }
             var radiance = ls.radiance;
@@ -404,8 +463,14 @@ fn shade(@builtin(global_invocation_id) gid: vec3<u32>) {
             } else if listed_at(selected.traced, index) < MAX_SHADOWED_LIGHTS {
                 radiance *= local_light_shadow(world_position + n * 0.04, light.position_range.xyz, light.color.w);
             }
-            let brdf = evaluate_brdf(n, v, ls.l, n_dot_v, f0, a);
-            color += (diffuse_color * brdf.diffuse * (nl + wrap * albedo) + brdf.specular * nl) * radiance;
+            if substrate {
+                let c = evaluate_slab(sh, ls.l);
+                color += (diffuse_color * (c.diffuse * (1.0 - sh.subsurface) + sh.transmission_color * c.back) + c.specular) * radiance;
+                scattered += c.diffuse * sh.subsurface * radiance;
+            } else {
+                let brdf = evaluate_brdf(n, v, ls.l, n_dot_v, f0, a);
+                color += (diffuse_color * brdf.diffuse * (nl + wrap * albedo) + brdf.specular * nl) * radiance;
+            }
         }
     }
     if surface_flags == 1u {
@@ -430,28 +495,48 @@ fn shade(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Material ambient occlusion (baked creases) darkens indirect light only, as in UE.
     let occlusion = surface_occlusion_of(motion.w);
     indirect *= occlusion;
+    // Slabs: the coat and the sheen take their share; subsurface pixels scatter theirs.
+    var irradiance = vec3<f32>(0.0);
+    if substrate {
+        irradiance = select(sh_irradiance(sky_sh, n) * frame.sun_illuminance.rgb / PI, gi_radiance, has_flag(frame.flags, FLAG_GI));
+        let under = irradiance * (occlusion * sh.coat_view * sh.sheen_view);
+        indirect = diffuse_color * under * (1.0 - sh.subsurface);
+        scattered += under * sh.subsurface;
+        if sh.transmission > 0.0 {
+            // Thin surfaces pass on the sky light reaching their back.
+            let back = sh_irradiance(sky_sh, -n) * frame.sun_illuminance.rgb / PI * (sky_visibility * occlusion);
+            indirect += diffuse_color * sh.transmission_color * back * sh.transmission;
+        }
+    }
 
     // Indirect specular from the sky, blurred towards irradiance for rough surfaces.
     let r = reflect(-v, n);
-    let sharp = sky_radiance(r);
-    let blurry = sh_irradiance(sky_sh, r) * frame.sun_illuminance.rgb / PI;
-    var environment = mix(sharp, blurry, smoothstep(0.15, 0.75, roughness));
-    // Below the horizon the sky LUT only holds thin air; reflect the lit ground instead.
-    environment = mix(environment, blurry, 1.0 - smoothstep(-0.15, 0.02, r.y));
+    var environment = specular_environment(r, roughness, gi_radiance, sky_visibility);
+    var reflection = vec4<f32>(0.0);
+    var reflection_weight = 0.0;
     if has_flag(frame.flags, FLAG_GI) {
-        // Lumen: traced reflections for glossy surfaces; rough surfaces reuse the radiance the
-        // screen probes gathered over the hemisphere (it sees walls and windows, not the open
-        // sky, which matters indoors). A single ray per pixel cannot resolve a wide lobe without
-        // fireflies, so tracing stops at MAX_REFLECTION_ROUGHNESS in lumen_gather.wgsl.
-        let rough = mix(environment, gi_radiance, sky_occlusion_blend(sky_visibility));
-        environment = mix(environment, rough, smoothstep(0.2, 0.5, roughness));
-        let reflection = textureSampleLevel(reflection_texture, lut_sampler, viewport_uv(uv, frame.viewport.xy * 0.5, textureDimensions(reflection_texture)), 0.0);
-        let w = (1.0 - smoothstep(0.35, 0.55, roughness)) * saturate(reflection.a);
-        environment = mix(environment, reflection.rgb, w);
+        // Lumen: traced reflections for glossy surfaces. A single ray per pixel cannot resolve a
+        // wide lobe without fireflies, so tracing stops at MAX_REFLECTION_ROUGHNESS in
+        // lumen_gather.wgsl.
+        reflection = textureSampleLevel(reflection_texture, lut_sampler, viewport_uv(uv, frame.viewport.xy * 0.5, textureDimensions(reflection_texture)), 0.0);
+        reflection_weight = (1.0 - smoothstep(0.35, 0.55, roughness)) * saturate(reflection.a);
+        environment = mix(environment, reflection.rgb, reflection_weight);
     }
     let visibility = sky_visibility * occlusion;
     let specular_occlusion = saturate(pow(n_dot_v + visibility, exp2(-16.0 * a - 1.0)) - 1.0 + visibility);
-    let indirect_specular = environment * env_brdf(f0, roughness, n_dot_v) * specular_occlusion;
+    var indirect_specular = environment * env_brdf(f0, roughness, n_dot_v) * specular_occlusion;
+    if substrate {
+        // Lumen traced the G-buffer's interface: the coat where there is one. The base layer
+        // under a coat, or an anisotropic one, reflects about its own (bent) normal.
+        var base_environment = environment;
+        if (sh.features & (SLAB_CLEARCOAT | SLAB_ANISOTROPY)) != 0u {
+            base_environment = specular_environment(reflect(-v, slab_reflection_normal(sh)), sh.roughness, gi_radiance, sky_visibility);
+            if !has_feature(slab, SLAB_CLEARCOAT) {
+                base_environment = mix(base_environment, reflection.rgb, reflection_weight);
+            }
+        }
+        indirect_specular = slab_ambient_specular(sh, base_environment, environment, irradiance * occlusion) * specular_occlusion;
+    }
 
     if frame.debug_view == DEBUG_SURFACE_CACHE {
         let level = sdf_finest_level(world_position);
@@ -471,6 +556,13 @@ fn shade(@builtin(global_invocation_id) gid: vec3<u32>) {
         color += indirect + indirect_specular + emitted;
         color = apply_aerial_perspective(color, world_position, view_dir);
         color = apply_volumetric_fog(color, uv, linear_depth);
+        if substrate && sh.subsurface > 0.0 {
+            // Both fogs apply affinely (c T + inscatter): their transmittance in front of the
+            // pixel, which the scattered light still has to pass.
+            let clear = apply_volumetric_fog(apply_aerial_perspective(vec3<f32>(0.0), world_position, view_dir), uv, linear_depth);
+            let transmittance = apply_volumetric_fog(apply_aerial_perspective(vec3<f32>(1.0), world_position, view_dir), uv, linear_depth) - clear;
+            store_subsurface(pixel, scattered * transmittance);
+        }
     }
     textureStore(output, pixel, vec4<f32>(color, 1.0));
 }

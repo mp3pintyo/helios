@@ -10,8 +10,12 @@
 //              rasterisers placed them (wind.wgsl, skinning.wgsl); motion vectors evaluate the
 //              previous frame's offset and palette.
 //
-// tiles buffer: [0, 8) per-model counts, [8, 40) per-model dispatch args (x, y, z, -),
-// [64 + kind * tile_capacity ...) per-model tile lists.
+// Materials with a Substrate slab or a material graph resolve in extended pipelines of their own
+// tiles (slots 8-15): the shader composed with resolve_extended.wgsl in place of
+// resolve_extended_off.wgsl. Plain pipelines compile that path out.
+//
+// tiles buffer: [0, 16) per-slot counts, [16, 80) per-slot dispatch args (x, y, z, -),
+// [80 + slot * tile_capacity ...) per-slot tile lists.
 
 #include "common.wgsl"
 #include "noise.wgsl"
@@ -23,13 +27,17 @@
 #include "skinning.wgsl"
 #include "water.wgsl"
 #include "shore.wgsl"
+#include "resolve_extended_off.wgsl"
 
 override MATERIAL_KIND: u32 = 0u;
+// The tile list this pipeline resolves: MATERIAL_KIND for plain pipelines, 8-15 for extended ones.
+override RESOLVE_SLOT: u32 = 0u;
 // The scene has skinned instances (passes/material.rs): without them the skinning code is
 // compiled out, so it costs other scenes no registers.
 override SKINNING: bool = true;
 
-const TILE_LISTS: u32 = 64u;
+const RESOLVE_SLOTS: u32 = 16u;
+const TILE_LISTS: u32 = 80u;
 
 @group(0) @binding(0) var<uniform> frame: Frame;
 @group(0) @binding(1) var<uniform> materials: array<Material, MAX_MATERIALS>;
@@ -67,13 +75,24 @@ fn tile_capacity() -> u32 {
     return ((size.x + 7u) / 8u) * ((size.y + 7u) / 8u);
 }
 
-fn pixel_kind(pixel: vec2<u32>) -> u32 {
+fn pixel_slot(pixel: vec2<u32>) -> u32 {
     let id = textureLoad(visibility_buffer, pixel, 0).r;
     if id == INVALID_ID {
         return MATERIAL_SKY;
     }
     let entry = visible_clusters[id >> TRIANGLE_BITS];
-    return min(materials[instances[entry.x].material].kind, MATERIAL_KINDS - 1u);
+    return min(materials[instances[entry.x].material].resolve, RESOLVE_SLOTS - 1u);
+}
+
+// The pipeline's shading model.
+fn evaluate_kind(m: Material, input: SurfaceInput) -> Surface {
+    switch MATERIAL_KIND {
+        case MATERIAL_ROCK: { return evaluate_rock(m, input); }
+        case MATERIAL_TERRAIN: { return evaluate_terrain(m, input); }
+        case MATERIAL_METAL: { return evaluate_metal(m, input); }
+        case MATERIAL_FOLIAGE: { return evaluate_foliage(m, input); }
+        default: { return evaluate_standard(m, input); }
+    }
 }
 
 // ---- Runtime virtual texture sampling --------------------------------------------------------------
@@ -246,13 +265,13 @@ fn resolve(
     @builtin(local_invocation_id) lid: vec3<u32>,
 ) {
     let tile_index = wid.x + wid.y * groups.x;
-    if tile_index >= tiles[MATERIAL_KIND] {
+    if tile_index >= tiles[RESOLVE_SLOT] {
         return;
     }
-    let tile = tiles[TILE_LISTS + MATERIAL_KIND * tile_capacity() + tile_index];
+    let tile = tiles[TILE_LISTS + RESOLVE_SLOT * tile_capacity() + tile_index];
     let pixel = vec2<u32>(tile & 0xffffu, tile >> 16u) * 8u + lid.xy;
     let size = vec2<u32>(frame.viewport.xy);
-    if any(pixel >= size) || pixel_kind(pixel) != MATERIAL_KIND {
+    if any(pixel >= size) || pixel_slot(pixel) != RESOLVE_SLOT {
         return;
     }
     let uv = (vec2<f32>(pixel) + 0.5) * frame.viewport.zw;
@@ -358,7 +377,8 @@ fn resolve(
     // Per-triangle tangent frame from positions and the UVs of the material's texture (no stored
     // tangents needed; a rotated or mirrored texture transform turns the frame with the image).
     var m = materials[instance.material];
-    m.base_color *= interpolate4(colors, b.lambda);
+    let vertex_color = interpolate4(colors, b.lambda);
+    m.base_color *= vertex_color;
     let texture_uv = m.uv_texture;
     let e1 = world_positions[1] - world_positions[0];
     let e2 = world_positions[2] - world_positions[0];
@@ -379,12 +399,10 @@ fn resolve(
     input.bitangent = cross(normal, tangent) * -handedness;
 
     var surface: Surface;
-    switch MATERIAL_KIND {
-        case MATERIAL_ROCK: { surface = evaluate_rock(m, input); }
-        case MATERIAL_TERRAIN: { surface = evaluate_terrain(m, input); }
-        case MATERIAL_METAL: { surface = evaluate_metal(m, input); }
-        case MATERIAL_FOLIAGE: { surface = evaluate_foliage(m, input); }
-        default: { surface = evaluate_standard(m, input); }
+    if EXTENDED_RESOLVE {
+        surface = resolve_extended(pixel, m, input, instance.material, vertex_color);
+    } else {
+        surface = evaluate_kind(m, input);
     }
 
     switch frame.debug_view {
@@ -402,7 +420,7 @@ fn resolve(
             }
             surface.albedo = path * (0.6 + 0.4 * hash_color(entry.y).x);
         }
-        case DEBUG_MATERIALS: { surface.albedo = hash_color(MATERIAL_KIND * 31u + 7u); }
+        case DEBUG_MATERIALS: { surface.albedo = hash_color(RESOLVE_SLOT * 31u + 7u); }
         // Movable instances in orange, the rest grey (dynamic_debug.wgsl adds the invalidation).
         case DEBUG_INVALIDATION: { surface.albedo = select(vec3<f32>(0.2 + 0.6 * luminance(surface.albedo)), vec3<f32>(1.0, 0.45, 0.08), (instance.flags & INSTANCE_MOVABLE) != 0u); }
         case DEBUG_SKIN_WEIGHTS: { surface.albedo = skin_weight_color(instance, cluster, base, corners, b.lambda); }

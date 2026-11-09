@@ -53,6 +53,9 @@ impl GpuContext {
             max_storage_buffer_binding_size: available.max_storage_buffer_binding_size,
             max_buffer_size: available.max_buffer_size,
             max_storage_textures_per_shader_stage: available.max_storage_textures_per_shader_stage.min(8),
+            // The lighting pass's Substrate variant samples a 17th texture (desktop adapters and
+            // browsers offer 48 or more; see substrate_gpu.rs).
+            max_sampled_textures_per_shader_stage: available.max_sampled_textures_per_shader_stage.min(24),
             max_texture_dimension_2d: available.max_texture_dimension_2d.min(16384),
             ..wgpu::Limits::default()
         };

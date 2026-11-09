@@ -70,6 +70,7 @@ pub fn all() -> Vec<Setting> {
         }),
         flag("virtual_texturing", "Runtime virtual texture", "Materials", |s| json!(s.virtual_texturing), |s, v| s.virtual_texturing = b(v)),
         flag("texture_streaming", "Texture streaming", "Materials", |s| json!(s.texture_streaming), |s, v| s.texture_streaming = b(v)),
+        flag("substrate", "Substrate slabs", "Materials", |s| json!(s.substrate), |s, v| s.substrate = b(v)),
         flag("translucency", "Translucency", "Materials", |s| json!(s.translucency), |s, v| s.translucency = b(v)),
         flag("translucency_layers", "Translucency layers", "Materials", |s| json!(s.translucency_layers), |s, v| s.translucency_layers = b(v)),
         flag("taa", "Temporal accumulation (TSR)", "Camera", |s| json!(s.taa), |s, v| s.taa = b(v)),

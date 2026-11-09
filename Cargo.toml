@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/helios-geometry", "crates/helios-asset", "crates/helios-render", "crates/helios-pcg", "crates/helios-demo"]
+members = ["crates/helios-geometry", "crates/helios-asset", "crates/helios-render", "crates/helios-pcg", "crates/helios-material", "crates/helios-demo"]
 
 [workspace.package]
 version = "0.1.0"
@@ -12,6 +12,7 @@ helios-geometry = { path = "crates/helios-geometry" }
 helios-asset = { path = "crates/helios-asset" }
 helios-render = { path = "crates/helios-render" }
 helios-pcg = { path = "crates/helios-pcg" }
+helios-material = { path = "crates/helios-material" }
 wgpu = "30"
 glam = { version = "0.34", features = ["bytemuck"] }
 bytemuck = { version = "1.25", features = ["derive", "extern_crate_alloc"] }

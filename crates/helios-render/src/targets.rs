@@ -38,7 +38,7 @@ pub struct FrameTargets {
     /// Full HZB mip chain (sampled) and one view per mip (storage).
     pub hzb: wgpu::TextureView,
     pub hzb_mips: Vec<wgpu::TextureView>,
-    /// Per-shading-model tile lists of the material classification.
+    /// Per-resolve-slot tile lists of the material classification.
     pub material_tiles: wgpu::Buffer,
     pub gbuffer_albedo: wgpu::TextureView,
     pub gbuffer_normal: wgpu::TextureView,
@@ -106,7 +106,8 @@ impl FrameTargets {
             material_tiles: crate::util::storage_buffer(
                 device,
                 "material tiles",
-                (64 + 8 * (width.div_ceil(8) * height.div_ceil(8)) as u64) * 4,
+                // Counts and dispatch arguments, then a tile list per resolve slot (classify.wgsl).
+                (80 + 16 * (width.div_ceil(8) * height.div_ceil(8)) as u64) * 4,
                 wgpu::BufferUsages::INDIRECT,
             ),
             gbuffer_albedo: view(&make("gbuffer albedo", width, height, 1, F::Rgba8Unorm, storage)),

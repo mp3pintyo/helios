@@ -78,6 +78,9 @@ pub struct LightingPass {
     /// Soft shadows of the strongest shadow-mapped local lights per pixel, before the shading.
     local_shadows: wgpu::ComputePipeline,
     layout: wgpu::BindGroupLayout,
+    /// The shading with Substrate slabs (bind group 1: `substrate_gpu.rs`), compiled when a
+    /// scene first has slab materials.
+    substrate: Option<wgpu::ComputePipeline>,
 }
 
 pub struct LightingInputs<'a> {
@@ -99,6 +102,8 @@ pub struct LightingInputs<'a> {
     pub megalights: Option<&'a wgpu::TextureView>,
     /// A 1×1 black texture for unused inputs.
     pub black: &'a wgpu::TextureView,
+    /// Bind group 1 of the slab variant while the scene has slab materials.
+    pub substrate: Option<&'a wgpu::BindGroup>,
 }
 
 impl LightingPass {
@@ -148,6 +153,16 @@ impl LightingPass {
             pipeline: compute_pipeline(device, "lighting", &module, "shade", &layout, &[]),
             local_shadows: compute_pipeline(device, "local light shadows", &module, "local_shadows", &layout, &[]),
             layout,
+            substrate: None,
+        }
+    }
+
+    /// Compiles the slab variant once a scene needs it (`substrate`: its group 1 layout).
+    pub fn sync_substrate(&mut self, device: &wgpu::Device, substrate: Option<&wgpu::BindGroupLayout>) {
+        if let (Some(group), None) = (substrate, &self.substrate) {
+            let source = crate::shader::compose_variant("lighting.wgsl", &crate::shader::substrate_lighting());
+            let module = crate::shader::create_module_from(device, "lighting (substrate)", source);
+            self.substrate = Some(crate::util::compute_pipeline_with(device, "lighting (substrate)", &module, "shade", &[&self.layout, group], &[]));
         }
     }
 
@@ -202,8 +217,14 @@ impl LightingPass {
             dispatch_full(&mut pass, t.width, t.height);
         }
         let mut pass = rec.compute_pass("lighting");
-        pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &group, &[]);
+        match (inputs.substrate, &self.substrate) {
+            (Some(slabs), Some(pipeline)) => {
+                pass.set_pipeline(pipeline);
+                pass.set_bind_group(1, slabs, &[]);
+            }
+            _ => pass.set_pipeline(&self.pipeline),
+        }
         dispatch_full(&mut pass, t.width, t.height);
     }
 }
