@@ -35,7 +35,7 @@ use crate::encoding::{decode_triangle, encode_cluster, ClusterEncoding, Quantiza
 use crate::hash::{FxHashMap, FxHashSet};
 use crate::sdf::{MeshSdf, SdfMode};
 use crate::simplify::{simplify, SimplifyMesh, SimplifyOptions};
-use crate::{build_clusters, canonical_ids, group_clusters, Aabb, ClusterLimits, Mesh, Sphere};
+use crate::{build_clusters, canonical_ids, group_clusters, Aabb, ClusterLimits, Mesh, SkinWeights, Sphere};
 
 /// Error value used for "no parent" (DAG roots). Finite to stay well-behaved in shaders.
 pub const ROOT_ERROR: f32 = 3.0e38;
@@ -208,6 +208,7 @@ pub fn build_virtual_mesh(mesh: &Mesh, config: &BuildConfig) -> VirtualMesh {
     // Optional attributes (empty when absent) follow their vertices like the UVs.
     let mut uv1 = mesh.uv1.clone();
     let mut colors = mesh.colors.clone();
+    let mut skin = mesh.skin.clone();
     let mut canonical = canonical_ids(mesh.vertices.iter().map(|v| v.position));
     let all_triangles: Vec<[u32; 3]> = mesh.triangles().collect();
 
@@ -257,7 +258,7 @@ pub fn build_virtual_mesh(mesh: &Mesh, config: &BuildConfig) -> VirtualMesh {
             let result = {
                 let is_locked = |v: u32| locked_forever[v as usize] || shared.contains(&canonical[v as usize]);
                 simplify(
-                    SimplifyMesh { positions: &positions, normals: &normals, uvs: &uvs, canonical: &canonical },
+                    SimplifyMesh { positions: &positions, normals: &normals, uvs: &uvs, canonical: &canonical, skin: &skin },
                     &triangles,
                     &is_locked,
                     triangles.len() / 2,
@@ -290,6 +291,9 @@ pub fn build_virtual_mesh(mesh: &Mesh, config: &BuildConfig) -> VirtualMesh {
                 if !colors.is_empty() {
                     colors.push(colors[nv.source as usize]);
                 }
+                if !skin.is_empty() {
+                    skin.push(skin[nv.source as usize]);
+                }
                 canonical.push(base + nv.class);
                 locked_forever.push(false);
             }
@@ -321,7 +325,7 @@ pub fn build_virtual_mesh(mesh: &Mesh, config: &BuildConfig) -> VirtualMesh {
         current = next;
     }
 
-    let vertices = Vertices { positions: &positions, normals: &normals, uvs: &uvs, uv1: &uv1, colors: &colors };
+    let vertices = Vertices { positions: &positions, normals: &normals, uvs: &uvs, uv1: &uv1, colors: &colors, skin: &skin };
     let mut vm = pack(&vertices, &work, group_count as usize, config);
     vm.sdf = bake_sdf(&vm, config.sdf);
     vm
@@ -334,6 +338,7 @@ struct Vertices<'a> {
     /// Optional attributes: empty or one per vertex.
     uv1: &'a [Vec2],
     colors: &'a [Vec4],
+    skin: &'a [SkinWeights],
 }
 
 impl Vertices<'_> {
@@ -353,7 +358,7 @@ impl Vertices<'_> {
             max_abs(&mut self.positions.iter().flat_map(|p| p.to_array())),
             max_abs(&mut self.uvs.iter().chain(self.uv1).flat_map(|uv| uv.to_array())),
         )
-        .with_attributes(VertexAttributes { uv1: !self.uv1.is_empty(), color: !self.colors.is_empty() })
+        .with_attributes(VertexAttributes { uv1: !self.uv1.is_empty(), color: !self.colors.is_empty(), skin: !self.skin.is_empty() })
     }
 
     /// Vertex `v` on the grids of `quantization`.
@@ -364,6 +369,9 @@ impl Vertices<'_> {
         }
         if let Some(&color) = self.colors.get(v) {
             q = q.with_color(color);
+        }
+        if let Some(&skin) = self.skin.get(v) {
+            q = q.with_skin(skin);
         }
         q
     }
@@ -632,6 +640,17 @@ impl VirtualMesh {
         (encoding.uv1(stream, count, i), encoding.color(stream, count, i))
     }
 
+    /// Skin weights of vertex `i` of `cluster` (`None` for meshes without skin).
+    pub fn cluster_vertex_skin(&self, cluster: usize, i: u32) -> Option<SkinWeights> {
+        let (encoding, stream) = self.cluster_encoding(cluster);
+        encoding.skin(stream, self.clusters[cluster].vertex_count(), i)
+    }
+
+    /// Whether the mesh has skin weights (a skeletal mesh).
+    pub fn is_skinned(&self) -> bool {
+        (0..self.clusters.len()).find(|&c| self.has_payload(self.clusters[c].page as usize)).is_some_and(|c| self.cluster_encoding(c).0.attributes.skin)
+    }
+
     /// Triangles of `cluster` as cluster-local vertex indices.
     pub fn cluster_triangles(&self, cluster: usize) -> impl Iterator<Item = [u32; 3]> + '_ {
         let c = &self.clusters[cluster];
@@ -878,11 +897,17 @@ mod tests {
     use crate::primitives;
 
     fn assert_watertight(mesh: &VirtualMesh, selected: &[u32]) {
+        assert_watertight_with(selected, &|c| mesh.cluster_triangle_positions(c));
+    }
+
+    /// `triangles(cluster)`: the triangle corner positions of a cluster as some consumer sees
+    /// them (decoded, or decoded and skinned).
+    fn assert_watertight_with(selected: &[u32], triangles: &dyn Fn(usize) -> Vec<[Vec3; 3]>) {
         // Vertex identity = position bits (wedges at seams share positions).
         let mut ids: FxHashMap<[u32; 3], u32> = FxHashMap::default();
         let mut edges: FxHashMap<u64, u32> = FxHashMap::default();
         for &c in selected {
-            for t in mesh.cluster_triangle_positions(c as usize) {
+            for t in triangles(c as usize) {
                 let id = t.map(|p| {
                     let next = ids.len() as u32;
                     *ids.entry(p.to_array().map(f32::to_bits)).or_insert(next)
@@ -1140,6 +1165,153 @@ mod tests {
         let extra = vm.payload_bytes() - vm_plain.payload_bytes();
         assert!(extra > vm.clusters.len() * 16 && extra < vm.clusters.len() * 20 + vertices * 8, "{extra} bytes for {vertices} vertices");
         println!("optional attributes: +{extra} bytes ({:.1} per vertex) on {} bytes", extra as f32 / vertices as f32, vm_plain.payload_bytes());
+    }
+
+    /// A limb: a capped cylinder (y from 0 to 2) following three joints — blended smoothly
+    /// around y = 0.7, with a hard (rigid) seam at y = 1.4 — where a few vertices carry all four
+    /// influences. Skins are functions of the position, so seam wedges agree.
+    fn skinned_limb() -> Mesh {
+        let mesh = primitives::cylinder(40, 48, 0.2, 2.0, true);
+        let skin = mesh
+            .vertices
+            .iter()
+            .map(|v| {
+                let y = v.position[1];
+                let t = ((y - 0.6) / 0.2).clamp(0.0, 1.0);
+                if y >= 1.4 {
+                    SkinWeights::rigid(2)
+                } else if (v.position[0].to_bits() ^ v.position[2].to_bits()) % 7 == 0 {
+                    SkinWeights::new([0, 1, 2, 3], [1.0 - t, t, 0.1, 0.05])
+                } else {
+                    SkinWeights::new([0, 1, 0, 0], [1.0 - t, t, 0.0, 0.0])
+                }
+            })
+            .collect();
+        mesh.with_skin(skin)
+    }
+
+    /// The limb bent at both joints, and a small extra joint.
+    fn limb_pose(bend: f32) -> [glam::Mat4; 4] {
+        use glam::Mat4;
+        let about = |pivot: Vec3, angle: f32| Mat4::from_translation(pivot) * Mat4::from_rotation_x(angle) * Mat4::from_translation(-pivot);
+        let elbow = about(Vec3::new(0.0, 0.7, 0.0), bend);
+        [Mat4::IDENTITY, elbow, elbow * about(Vec3::new(0.0, 1.4, 0.0), -0.8 * bend), Mat4::from_translation(Vec3::new(0.03, 0.0, -0.02))]
+    }
+
+    fn posed_triangles(vm: &VirtualMesh, cluster: usize, palette: &[glam::Mat4]) -> Vec<[Vec3; 3]> {
+        let corner = |i: u32| crate::skin::skin_point(&vm.cluster_vertex_skin(cluster, i).unwrap(), palette, vm.cluster_vertex(cluster, i).0);
+        vm.cluster_triangles(cluster).map(|t| t.map(corner)).collect()
+    }
+
+    /// Skinning is a function of the decoded rest position and the decoded weights, both
+    /// identical wherever a vertex is shared, so posed cuts are as watertight as rest ones —
+    /// with full and partial residency.
+    #[test]
+    fn skinned_lod_cuts_stay_watertight_when_posed() {
+        let vm = build_virtual_mesh(&skinned_limb(), &BuildConfig { sdf: SdfMode::None, ..Default::default() });
+        assert!(vm.is_skinned() && vm.stats.level_count() >= 3, "{:?}", vm.stats);
+        let resident: Vec<bool> = (0..vm.pages.len()).map(|p| vm.pages[p].root != 0 || p % 3 != 1).collect();
+        let resident = |p: u32| resident[p as usize] && vm.page_dependencies(p as usize).iter().all(|&d| d as usize % 3 != 1 || vm.pages[d as usize].root != 0);
+        for bend in [0.0f32, 0.6, 1.4] {
+            let palette = limb_pose(bend);
+            for distance in [0.8f32, 1.5, 3.0, 6.0, 12.0, 25.0, 100.0] {
+                let selected = lod_cut(&vm, &view(distance));
+                assert_watertight_with(&selected, &|c| posed_triangles(&vm, c, &palette));
+                let partial = lod_cut_resident(&vm, &view(distance), &resident);
+                assert_watertight_with(&partial, &|c| posed_triangles(&vm, c, &palette));
+            }
+        }
+    }
+
+    /// Simplification keeps source vertices, so every LOD level carries each vertex's own
+    /// weights.
+    #[test]
+    fn skin_weights_follow_their_vertices_through_every_level() {
+        let mesh = skinned_limb();
+        let vm = build_virtual_mesh(&mesh, &BuildConfig { sdf: SdfMode::None, ..Default::default() });
+        let source: FxHashMap<[u32; 3], SkinWeights> = mesh.vertices.iter().zip(&mesh.skin).map(|(v, &s)| (v.position.map(f32::to_bits), s)).collect();
+        let (encoding, _) = vm.cluster_encoding(0);
+        let step = f32::from_bits(((encoding.position_exponent + 127) as u32) << 23);
+        let mut four = 0;
+        for c in 0..vm.clusters.len() {
+            for i in 0..vm.clusters[c].vertex_count() {
+                let skin = vm.cluster_vertex_skin(c, i).unwrap();
+                let p = vm.cluster_vertex(c, i).0;
+                // Decoded positions are on the grid: find the source vertex within half a step.
+                let matches = mesh.vertices.iter().zip(&mesh.skin).any(|(v, s)| (v.position() - p).abs().max_element() <= step * 0.5 + 1e-6 && *s == skin);
+                assert!(matches, "cluster {c} vertex {i} at {p}: {skin:?}");
+                four += (skin.influences() == 4) as usize;
+            }
+        }
+        assert!(four > 0 && !source.is_empty());
+        // The same mesh without skin bakes to the plain format.
+        let plain = build_virtual_mesh(&Mesh { skin: Vec::new(), ..mesh }, &BuildConfig { sdf: SdfMode::None, ..Default::default() });
+        assert!(!plain.is_skinned());
+        assert!((0..plain.clusters.len()).all(|c| plain.cluster_encoding(c).0.header_words() == 7));
+        println!("skin: +{} bytes on {} ({} clusters)", vm.payload_bytes() as i64 - plain.payload_bytes() as i64, plain.payload_bytes(), vm.clusters.len());
+    }
+
+    fn point_triangle_distance(p: Vec3, [a, b, c]: [Vec3; 3]) -> f32 {
+        // Ericson, Real-Time Collision Detection 5.1.5.
+        let (ab, ac, ap) = (b - a, c - a, p - a);
+        let (d1, d2) = (ab.dot(ap), ac.dot(ap));
+        if d1 <= 0.0 && d2 <= 0.0 {
+            return p.distance(a);
+        }
+        let bp = p - b;
+        let (d3, d4) = (ab.dot(bp), ac.dot(bp));
+        if d3 >= 0.0 && d4 <= d3 {
+            return p.distance(b);
+        }
+        let vc = d1 * d4 - d3 * d2;
+        if vc <= 0.0 && d1 >= 0.0 && d3 <= 0.0 {
+            return p.distance(a + ab * (d1 / (d1 - d3)));
+        }
+        let cp = p - c;
+        let (d5, d6) = (ab.dot(cp), ac.dot(cp));
+        if d6 >= 0.0 && d5 <= d6 {
+            return p.distance(c);
+        }
+        let vb = d5 * d2 - d1 * d6;
+        if vb <= 0.0 && d2 >= 0.0 && d6 <= 0.0 {
+            return p.distance(a + ac * (d2 / (d2 - d6)));
+        }
+        let va = d3 * d6 - d5 * d4;
+        if va <= 0.0 && (d4 - d3) >= 0.0 && (d5 - d6) >= 0.0 {
+            return p.distance(b + (c - b) * ((d4 - d3) / ((d4 - d3) + (d5 - d6))));
+        }
+        let denom = 1.0 / (va + vb + vc);
+        p.distance(a + ab * (vb * denom) + ac * (vc * denom))
+    }
+
+    /// The weight-deviation cost keeps coarse levels from collapsing across the weight seams: a
+    /// vertex that follows one joint merging into one that follows another bends the coarse
+    /// limb where the source doesn't. Measured as the mean distance of the posed source
+    /// vertices from the posed LOD cut, relative to the same distance at rest (which is all the
+    /// LOD error accounts for).
+    #[test]
+    fn weight_seams_collapse_last() {
+        let mesh = skinned_limb();
+        let palette = limb_pose(1.2);
+        let posed_source: Vec<Vec3> = mesh.vertices.iter().zip(&mesh.skin).map(|(v, s)| crate::skin::skin_point(s, &palette, v.position())).collect();
+        let excess = |skin_weight: f32| {
+            let config = BuildConfig { sdf: SdfMode::None, simplify: SimplifyOptions { skin_weight, ..Default::default() }, ..Default::default() };
+            let vm = build_virtual_mesh(&mesh, &config);
+            let mut total = 0.0;
+            for distance in [3.0f32, 6.0, 12.0] {
+                let selected = lod_cut(&vm, &view(distance));
+                let mean = |points: &[Vec3], triangles: &[[Vec3; 3]]| {
+                    points.iter().map(|&p| triangles.iter().map(|&t| point_triangle_distance(p, t)).fold(f32::MAX, f32::min)).sum::<f32>() / points.len() as f32
+                };
+                let rest: Vec<[Vec3; 3]> = selected.iter().flat_map(|&c| vm.cluster_triangle_positions(c as usize)).collect();
+                let posed: Vec<[Vec3; 3]> = selected.iter().flat_map(|&c| posed_triangles(&vm, c as usize, &palette)).collect();
+                total += mean(&posed_source, &posed) - mean(&mesh.positions(), &rest);
+            }
+            total / 3.0
+        };
+        let (aware, blind) = (excess(SimplifyOptions::default().skin_weight), excess(0.0));
+        println!("posed LOD deviation beyond the rest one: {aware:.5} (weights considered) vs {blind:.5} (ignored)");
+        assert!(aware < blind * 0.75, "{aware} vs {blind}");
     }
 
     /// The compressed payload is at least twice smaller than 24-byte float vertices plus one

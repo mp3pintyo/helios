@@ -4,7 +4,7 @@ use bytemuck::{Pod, Zeroable};
 use glam::{Mat3, Mat4, Vec2, Vec3, Vec4};
 
 use crate::hash::FxHashMap;
-use crate::{Aabb, Sphere};
+use crate::{Aabb, SkinWeights, Sphere};
 
 /// Source vertex: two `vec4<f32>` — `(position, u)` and `(normal, v)`.
 #[repr(C)]
@@ -41,9 +41,9 @@ impl Vertex {
 /// Call [`Mesh::weld`] after procedural construction so identical vertices are merged and
 /// simplification sees the true topology.
 ///
-/// Imported meshes may carry optional attributes beyond [`Vertex`]: a second UV set and
-/// vertex colours. Each is either empty (absent: no memory, and the compressed clusters of
-/// the mesh stay exactly as without the attribute) or holds one value per vertex.
+/// Imported meshes may carry optional attributes beyond [`Vertex`]: a second UV set, vertex
+/// colours and skin weights. Each is either empty (absent: no memory, and the compressed
+/// clusters of the mesh stay exactly as without the attribute) or holds one value per vertex.
 #[derive(Clone, Debug, Default)]
 pub struct Mesh {
     pub vertices: Vec<Vertex>,
@@ -54,12 +54,15 @@ pub struct Mesh {
     /// Linear RGBA vertex colours (glTF `COLOR_0`, multiplying the base colour): empty, or one
     /// per vertex.
     pub colors: Vec<Vec4>,
+    /// Joint influences of a skeletal mesh (glTF `JOINTS_0` / `WEIGHTS_0`, quantised): empty, or
+    /// one per vertex. Joints index the skin's joint list.
+    pub skin: Vec<SkinWeights>,
 }
 
 impl Mesh {
     pub fn new(vertices: Vec<Vertex>, indices: Vec<u32>) -> Self {
         assert!(indices.len().is_multiple_of(3), "index count must be a multiple of 3");
-        Self { vertices, indices, uv1: Vec::new(), colors: Vec::new() }
+        Self { vertices, indices, uv1: Vec::new(), colors: Vec::new(), skin: Vec::new() }
     }
 
     /// A mesh with optional attributes; `uv1` and `colors` are empty or one per vertex.
@@ -78,6 +81,17 @@ impl Mesh {
     /// Colour of vertex `i` (white if the mesh has no vertex colours).
     pub fn color_of(&self, i: usize) -> Vec4 {
         self.colors.get(i).copied().unwrap_or(Vec4::ONE)
+    }
+
+    /// Skin weights of vertex `i` (rigidly bound to joint 0 if the mesh has none).
+    pub fn skin_of(&self, i: usize) -> SkinWeights {
+        self.skin.get(i).copied().unwrap_or_default()
+    }
+
+    /// The mesh with skin weights (`skin`: one per vertex).
+    pub fn with_skin(self, skin: Vec<SkinWeights>) -> Self {
+        assert_eq!(skin.len(), self.vertices.len(), "skin: one per vertex");
+        Self { skin, ..self }
     }
 
     /// Builds a mesh from positions and indices, computing smooth normals.
@@ -171,32 +185,38 @@ impl Mesh {
         canonical_ids(self.vertices.iter().map(|v| v.position))
     }
 
-    /// Merges bit-identical vertices (position, normal, UVs and colour) and drops degenerate
-    /// triangles.
+    /// Merges bit-identical vertices (position, normal, UVs, colour and skin weights) and drops
+    /// degenerate triangles.
     pub fn weld(&mut self) {
-        let mut map: FxHashMap<[u32; 14], u32> = FxHashMap::default();
+        let mut map: FxHashMap<[u32; 17], u32> = FxHashMap::default();
         let mut remap = Vec::with_capacity(self.vertices.len());
         let mut vertices = Vec::new();
-        let (mut uv1, mut colors) = (Vec::new(), Vec::new());
+        let (mut uv1, mut colors, mut skin) = (Vec::new(), Vec::new(), Vec::new());
         for (i, v) in self.vertices.iter().enumerate() {
-            let mut key = [0u32; 14];
+            let mut key = [0u32; 17];
             key[..8].copy_from_slice(&bytemuck::cast::<Vertex, [u32; 8]>(*v));
             if let Some(uv) = self.uv1.get(i) {
                 key[8..10].copy_from_slice(&uv.to_array().map(f32::to_bits));
             }
             if let Some(color) = self.colors.get(i) {
-                key[10..].copy_from_slice(&color.to_array().map(f32::to_bits));
+                key[10..14].copy_from_slice(&color.to_array().map(f32::to_bits));
+            }
+            if let Some(s) = self.skin.get(i) {
+                let j = s.joints.map(u32::from);
+                key[14..].copy_from_slice(&[j[0] | (j[1] << 16), j[2] | (j[3] << 16), u32::from_le_bytes(s.weights)]);
             }
             let id = *map.entry(key).or_insert_with(|| {
                 vertices.push(*v);
                 uv1.extend(self.uv1.get(i));
                 colors.extend(self.colors.get(i));
+                skin.extend(self.skin.get(i));
                 (vertices.len() - 1) as u32
             });
             remap.push(id);
         }
         self.uv1 = uv1;
         self.colors = colors;
+        self.skin = skin;
         let positions: Vec<[u32; 3]> = vertices.iter().map(|v: &Vertex| v.position.map(f32::to_bits)).collect();
         let mut indices = Vec::with_capacity(self.indices.len());
         for [a, b, c] in self.triangles() {
@@ -220,12 +240,14 @@ impl Mesh {
         }
         self.uv1.clear();
         self.colors.clear();
+        self.skin.clear();
         self.weld();
         self.compute_normals();
     }
 
     /// Appends `other`, transformed by `transform`. An optional attribute present in either
-    /// mesh is kept, with the defaults of [`Mesh::uv1_of`] / [`Mesh::color_of`] where missing.
+    /// mesh is kept, with the defaults of [`Mesh::uv1_of`] / [`Mesh::color_of`] /
+    /// [`Mesh::skin_of`] where missing.
     pub fn append(&mut self, other: &Mesh, transform: Mat4) {
         let base = self.vertices.len() as u32;
         if !self.uv1.is_empty() || !other.uv1.is_empty() {
@@ -233,6 +255,9 @@ impl Mesh {
         }
         if !self.colors.is_empty() || !other.colors.is_empty() {
             self.colors = (0..self.vertices.len()).map(|i| self.color_of(i)).chain((0..other.vertices.len()).map(|i| other.color_of(i))).collect();
+        }
+        if !self.skin.is_empty() || !other.skin.is_empty() {
+            self.skin = (0..self.vertices.len()).map(|i| self.skin_of(i)).chain((0..other.vertices.len()).map(|i| other.skin_of(i))).collect();
         }
         let normal_matrix = Mat3::from_mat4(transform).inverse().transpose();
         let flip = Mat3::from_mat4(transform).determinant() < 0.0;

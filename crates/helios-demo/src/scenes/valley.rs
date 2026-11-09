@@ -214,5 +214,5 @@ fn initial_camera() -> Camera {
 }
 
 pub fn build(detail: Detail) -> SceneSetup {
-    SceneSetup { scene: build_scene(detail), camera: initial_camera(), sun: SUN, floor: camera_floor }
+    SceneSetup { scene: build_scene(detail), camera: initial_camera(), sun: SUN, floor: camera_floor, animation: None }
 }

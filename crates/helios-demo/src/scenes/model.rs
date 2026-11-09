@@ -3,7 +3,9 @@
 //! Every unique mesh is baked into virtual geometry once (in parallel natively) and placed by
 //! the file's node instances. The model is moved so its bounding box is centred on x = z = 0
 //! with its bottom at y = 0, standing on an optional procedural ground; the camera frames its
-//! bounds.
+//! bounds. Skinned meshes follow joint palettes posed by the file's animations
+//! ([`super::skeletal`]); like UE's skinned meshes they get no distance field (Lumen's screen
+//! traces still see them).
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -16,6 +18,7 @@ use helios_render::{
 };
 use web_time::Instant;
 
+use super::skeletal::{posed_bounds, SkeletalAnimation, SkinBindings};
 use super::SceneSetup;
 
 const SUN: (f32, f32, f32) = (0.9, 0.95, 10.0);
@@ -65,7 +68,8 @@ pub fn build(model: &Model) -> SceneSetup {
     let mut scene = Scene::new();
     scene.sun = Sun::from_angles(SUN.0, SUN.1, SUN.2);
 
-    let bounds = asset.bounds();
+    let skins = SkinBindings::of(asset);
+    let bounds = posed_bounds(asset, &skins);
     let size = bounds.extent();
     let placement = Mat4::from_translation(Vec3::new(-bounds.center().x, -bounds.min.y, -bounds.center().z));
     log::info!(
@@ -91,6 +95,10 @@ pub fn build(model: &Model) -> SceneSetup {
     let mut world_scale = vec![0.0f32; asset.meshes.len()];
     let mut double_sided = vec![false; asset.meshes.len()];
     let mut opaque = vec![false; asset.meshes.len()];
+    let mut skinned = vec![false; asset.meshes.len()];
+    for (i, instance) in asset.instances.iter().enumerate() {
+        skinned[instance.mesh] |= skins.instance_skin.contains_key(&i);
+    }
     for instance in asset.instances.iter().filter(|i| !skipped[i.material]) {
         let m = instance.transform;
         let scale = m.x_axis.truncate().length().max(m.y_axis.truncate().length()).max(m.z_axis.truncate().length());
@@ -105,7 +113,7 @@ pub fn build(model: &Model) -> SceneSetup {
         let mesh = if double_sided[i] { with_back_faces(&source.mesh) } else { source.mesh.clone() };
         let extent = source.mesh.aabb().extent().max_element() * world_scale[i];
         let resolution = ((extent / SDF_VOXEL).ceil() as u32).clamp(SDF_RESOLUTION.0, SDF_RESOLUTION.1);
-        let sdf = if opaque[i] { SdfMode::Volume { resolution } } else { SdfMode::None };
+        let sdf = if opaque[i] && !skinned[i] { SdfMode::Volume { resolution } } else { SdfMode::None };
         super::bake_with(&source.name, &mesh, BuildConfig { sdf, ..Default::default() })
     });
     let voxels: usize = baked.iter().filter_map(|vm: &VirtualMesh| vm.sdf.as_ref()).map(|s| s.voxel_count()).sum();
@@ -115,10 +123,19 @@ pub fn build(model: &Model) -> SceneSetup {
     for (&i, vm) in jobs.iter().zip(baked) {
         handles.insert(i, scene.add_mesh(vm));
     }
-    for instance in asset.instances.iter().filter(|i| !skipped[i.material]) {
+    let skin_handles: Vec<_> = skins.joint_bounds(asset).into_iter().map(|bounds| scene.add_skin(bounds)).collect();
+    for (i, instance) in asset.instances.iter().enumerate().filter(|(_, i)| !skipped[i.material]) {
         let handle = scene.add_instance(handles[&instance.mesh], materials[instance.material], placement * instance.transform);
         // Blended surfaces let light through.
         scene.set_cast_shadow(handle, !blended(instance.material));
+        if let Some(&skin) = skins.instance_skin.get(&i) {
+            scene.set_instance_skin(handle, Some(skin_handles[skin]));
+        }
+    }
+    let bindings = skins.skins.iter().zip(&skin_handles).map(|(&(skin, bind), &handle)| (handle, skin, bind)).collect();
+    let mut animation = SkeletalAnimation::new(asset, bindings);
+    if let Some(animation) = &mut animation {
+        animation.update(&mut scene, 0.0);
     }
 
     if model.ground {
@@ -126,7 +143,7 @@ pub fn build(model: &Model) -> SceneSetup {
     }
     scene.ground_albedo = Vec3::splat(0.25);
     scene.clouds = helios_render::CloudLayer::cumulus(0.35);
-    SceneSetup { scene, camera: frame_camera(size), sun: SUN, floor: |_, _| 0.0 }
+    SceneSetup { scene, camera: frame_camera(size), sun: SUN, floor: |_, _| 0.0, animation }
 }
 
 /// The renderer's texture coordinates for a glTF texture reference.
@@ -235,7 +252,7 @@ fn with_back_faces(mesh: &Mesh) -> Mesh {
     let offset = mesh.vertices.len() as u32;
     let mut indices = mesh.indices.clone();
     indices.extend(mesh.triangles().flat_map(|[a, b, c]| [a + offset, c + offset, b + offset]));
-    Mesh::with_attributes(vertices, indices, twice(&mesh.uv1), twice(&mesh.colors))
+    Mesh { skin: twice(&mesh.skin), ..Mesh::with_attributes(vertices, indices, twice(&mesh.uv1), twice(&mesh.colors)) }
 }
 
 /// The optional attribute `values` for the front and the back copy of every vertex.

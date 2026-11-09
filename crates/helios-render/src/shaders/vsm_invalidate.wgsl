@@ -1,10 +1,11 @@
-// Local invalidation of cached shadow pages: geometry streaming and wind.
+// Local invalidation of cached shadow pages: geometry streaming, wind and skeletal animation.
 //
-// Cached pages assume static geometry. Two things change it, but only inside the light-space
+// Cached pages assume static geometry. Three things change it, but only inside the light-space
 // footprint of the instances concerned, so only the cached pages there are re-rendered instead of
 // the whole cache:
 //  * streaming a page in or out changes the cluster cut of every instance of that mesh;
-//  * the wind (wind.wgsl) moves vegetation every frame, up to its disable distance.
+//  * the wind (wind.wgsl) moves vegetation every frame, up to its disable distance;
+//  * animated skeletal meshes (skinning.wgsl) move whenever their pose changes.
 // Pages keep their static casters in a static layer (vsm_common.wgsl): a footprint of a dynamic
 // caster (one the wind moves this frame) only requests a refresh of its dynamic casters, while a
 // footprint of a static caster that changed frees the page, so it is rendered again in full.
@@ -37,6 +38,7 @@
 #include "common.wgsl"
 #include "vsm_common.wgsl"
 #include "wind.wgsl"
+#include "skin_palette.wgsl"
 #include "vsm_local_common.wgsl"
 
 // Footprint capacity; set by vsm.rs.
@@ -86,6 +88,7 @@ struct Footprints {
 // The VSM info buffer (vsm.wgsl): pending refresh flags per physical page.
 @group(0) @binding(8) var<storage, read_write> info: array<u32>;
 @group(0) @binding(65) var<uniform> wind: Wind;
+@group(0) @binding(66) var skin_palette: texture_2d<f32>;
 
 fn residency_changed(instance: Instance) -> bool {
     for (var p = instance.page_offset; p < instance.page_offset + instance.page_count; p++) {
@@ -113,6 +116,14 @@ fn collect(@builtin(global_invocation_id) gid: vec3<u32>) {
         reach = max(wind_reach(instance, strength, instance.bounds), 1e-6);
         f.change = 2.0 * reach;
         f.per_frame = wind_speed(instance, strength, instance.bounds) * max(wind.time.x - wind.time.y, 0.0);
+    }
+    if skin_dynamic(instance) {
+        // A moving skin: every pose since the scene was loaded lies within the largest reach of
+        // the rest sphere, so the footprint covers whatever a cached page may still show.
+        let motion = skin_motion(instance);
+        reach = max(reach, max(motion.x, 1e-6));
+        f.change = max(f.change, 2.0 * motion.x);
+        f.per_frame = max(f.per_frame, motion.y);
     }
     if RESIDENCY && residency_changed(instance) {
         f.change = ALWAYS;

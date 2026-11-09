@@ -76,10 +76,13 @@ pub enum DebugView {
     /// Virtual shadow map pages of the local light that contributes most at each pixel: mip
     /// and page grid, shaded by its shadow.
     LocalShadowPages = 15,
+    /// Joint weights of skinned meshes: each joint's colour, blended by its weight (grey:
+    /// unskinned).
+    SkinWeights = 17,
 }
 
 impl DebugView {
-    pub const ALL: [DebugView; 16] = [
+    pub const ALL: [DebugView; 17] = [
         Self::Lit,
         Self::Clusters,
         Self::Triangles,
@@ -96,6 +99,7 @@ impl DebugView {
         Self::Reflections,
         Self::SurfaceCards,
         Self::LocalShadowPages,
+        Self::SkinWeights,
     ];
 
     pub fn name(self) -> &'static str {
@@ -116,11 +120,13 @@ impl DebugView {
             Self::Reflections => "Reflections",
             Self::SurfaceCards => "Lumen surface cache (cards)",
             Self::LocalShadowPages => "Local light shadow pages (mips)",
+            Self::SkinWeights => "Skin weights (joints)",
         }
     }
 
     pub fn next(self) -> Self {
-        Self::ALL[(self as usize + 1) % Self::ALL.len()]
+        let index = Self::ALL.iter().position(|&v| v == self).unwrap_or(0);
+        Self::ALL[(index + 1) % Self::ALL.len()]
     }
 }
 
@@ -775,7 +781,8 @@ impl Renderer {
         self.scene.write_wind(&self.queue, &wind);
         // Starting or stopping the wind moves vegetation between the shadow pages' static and
         // dynamic layers: the VSM re-renders the pages under it (per instance).
-        let wind_moves_shadows = wind.is_active() && self.scene.wind_moves_shadows();
+        // Animated skeletal meshes are dynamic casters too (see skin.rs).
+        let wind_moves_shadows = (wind.is_active() && self.scene.wind_moves_shadows()) || self.scene.skins.moving_shadows;
 
         let (scene_min, scene_max) = self.scene.bounds();
         self.vsm.update(

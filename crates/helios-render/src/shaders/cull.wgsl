@@ -18,12 +18,14 @@
 // hardware clusters of alpha-masked materials are flagged CLUSTER_MASKED and their slots also
 // listed after the entries (`masked_capacity` u32s, four per vec4) for the masked draw.
 // Bounding spheres of instances the wind moves are padded by their maximum displacement
-// (wind.wgsl) for every visibility test (frustum, shadow pages, HZB), not for the LOD cut.
+// (wind.wgsl), those of skinned instances grown to hold their current pose (skinning.wgsl), for
+// every visibility test (frustum, shadow pages, HZB), not for the LOD cut.
 // Shadow pages refreshed for their dynamic casters only (vsm_common.wgsl) keep static casters
 // out from the instance test on.
 
 #include "common.wgsl"
 #include "wind.wgsl"
+#include "skin_palette.wgsl"
 
 override CULL_MODE: u32 = 0u;
 
@@ -57,6 +59,7 @@ struct CullState {
 @group(0) @binding(8) var<storage, read_write> atomics: array<atomic<u32>>;
 @group(0) @binding(9) var hzb: texture_2d<f32>;
 @group(0) @binding(65) var<uniform> wind: Wind;
+@group(0) @binding(66) var skin_palette: texture_2d<f32>;
 
 fn sphere_in_frustum(s: vec4<f32>) -> bool {
     for (var i = 0u; i < 6u; i++) {
@@ -204,8 +207,8 @@ fn cull_instances(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
     let strength = wind_strength(instance);
-    let bounds = wind_padded(instance, strength, instance.bounds);
-    if !sphere_in_frustum(bounds) || !vsm_overlaps(bounds, dynamic_caster(strength)) {
+    let bounds = skin_padded(instance, wind_padded(instance, strength, instance.bounds));
+    if !sphere_in_frustum(bounds) || !vsm_overlaps(bounds, dynamic_caster(strength) || skin_dynamic(instance)) {
         return;
     }
     let batches = (instance.page_count + PAGES_PER_BATCH - 1u) / PAGES_PER_BATCH;
@@ -249,8 +252,8 @@ fn cull_pages(
             let page = pages[page_id];
             let scale = instance.max_scale;
             let strength = wind_strength(instance);
-            let bounds = wind_padded(instance, strength, transform_sphere(instance.world, page.bounds, scale));
-            if page_table[page_id] != INVALID_ID && sphere_in_frustum(bounds) && vsm_overlaps(bounds, dynamic_caster(strength)) {
+            let bounds = skin_padded(instance, wind_padded(instance, strength, transform_sphere(instance.world, page.bounds, scale)));
+            if page_table[page_id] != INVALID_ID && sphere_in_frustum(bounds) && vsm_overlaps(bounds, dynamic_caster(strength) || skin_dynamic(instance)) {
                 // If even the coarsest parent in the page is fine enough, every cluster in it
                 // would be rejected by the LOD test: skip the page entirely.
                 let parent = transform_sphere(instance.world, page.parent_lod_bounds, scale);
@@ -343,9 +346,9 @@ fn test_cluster(instance_id: u32, cluster_id: u32) -> ClusterResult {
     let parent = projected_error(world_error(cluster.parent_error, scale), transform_sphere(instance.world, cluster.parent_lod_bounds, scale));
     let bounds = transform_sphere(instance.world, cluster.bounds, scale);
     let strength = wind_strength(instance);
-    let padded = wind_padded(instance, strength, bounds);
+    let padded = skin_padded(instance, wind_padded(instance, strength, bounds));
     let own_ok = own <= view.lod_threshold;
-    let candidate = parent > view.lod_threshold && sphere_in_frustum(padded) && vsm_overlaps(padded, dynamic_caster(strength));
+    let candidate = parent > view.lod_threshold && sphere_in_frustum(padded) && vsm_overlaps(padded, dynamic_caster(strength) || skin_dynamic(instance));
     // Streaming feedback (main view): this cluster is on the cut but wants finer children.
     if candidate && !own_ok && cluster.child_page != INVALID_PAGE && CULL_MODE != 2u && view.kind == VIEW_MAIN {
         atomicMax(&atomics[cluster.child_page], view.frame_index);

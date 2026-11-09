@@ -47,6 +47,8 @@ pub struct DemoApp {
     animate_day: bool,
     /// A running camera tour and its clock.
     tour: Option<(crate::tour::Tour, f32)>,
+    /// Skeletal animation of the model scene's skinned meshes.
+    animation: Option<scenes::skeletal::SkeletalAnimation>,
     /// Exposure compensation the scene asked for in daylight.
     day_exposure: f32,
     frame_ms: f32,
@@ -58,7 +60,7 @@ pub struct DemoApp {
 const SCREEN_PERCENTAGES: [f32; 4] = [50.0, 67.0, 75.0, 100.0];
 
 pub const HELP: &str = "WASD/QE fly · drag to look · wheel speed · Shift fast\n\
-N next scene · V debug view · G GI · H shadows · 1 local light shadow maps · [ ] screen percentage (50/67/75/100 %) · \\ dynamic resolution · T TAA · O occlusion · K software raster · I texture streaming · F fog · C clouds · U translucency · / translucency layers · L wind · M motion blur · B depth of field · ` local exposure · Z/X zoom · , . LOD error · ←→↑↓ sun · P animate sun · J day/night cycle · Y camera tour · R reset";
+N next scene · V debug view · G GI · H shadows · 1 local light shadow maps · [ ] screen percentage (50/67/75/100 %) · \\ dynamic resolution · T TAA · O occlusion · K software raster · I texture streaming · - animation clip / pause · F fog · C clouds · U translucency · / translucency layers · L wind · M motion blur · B depth of field · ` local exposure · Z/X zoom · , . LOD error · ←→↑↓ sun · P animate sun · J day/night cycle · Y camera tour · R reset";
 
 impl DemoApp {
     pub fn new(
@@ -121,6 +123,7 @@ impl DemoApp {
             animate_sun: false,
             animate_day: false,
             tour: None,
+            animation: setup.animation,
             day_exposure: 0.0,
             frame_ms: 16.0,
             gpu_budget_ms: 14.0,
@@ -136,6 +139,7 @@ impl DemoApp {
         self.camera = setup.camera;
         self.initial_camera = setup.camera;
         self.floor = setup.floor;
+        self.animation = setup.animation;
         self.sun_azimuth = setup.sun.0;
         self.sun_elevation = setup.sun.1;
         self.sun_intensity = setup.sun.2;
@@ -217,6 +221,12 @@ impl DemoApp {
                 self.renderer.reset_history();
             }
             "KeyN" => self.load_scene(self.kind.next(self.model.is_some())),
+            // Skeletal animation: next clip (crossfading); after the last one, pause.
+            "Minus" => {
+                if let Some(animation) = &mut self.animation {
+                    animation.cycle();
+                }
+            }
             // All letters are taken: 1 toggles the local lights' virtual shadow maps (off: their
             // distance-field shadows); 2–9 pick debug views.
             "Digit1" => s.local_light_shadow_maps = !s.local_light_shadow_maps,
@@ -292,6 +302,9 @@ impl DemoApp {
             self.day_azimuth = self.sun_azimuth - self.day_phase * 0.5;
         }
         self.sun_elevation = self.sun_elevation.clamp(-1.2, 1.5);
+        if let Some(animation) = &mut self.animation {
+            animation.update(&mut self.scene, dt);
+        }
         self.scene.set_time_of_day(self.sun_azimuth, self.sun_elevation, self.sun_intensity);
         // Night stays dark: exposure adapts, but not all the way to daylight brightness.
         self.renderer.settings.exposure_compensation = self.day_exposure - 1.6 * Scene::night_factor(self.sun_elevation);
@@ -395,6 +408,10 @@ impl DemoApp {
                 tex.upload_ms,
                 tex.peak_upload_ms,
             ));
+        }
+        if let Some(animation) = &self.animation {
+            text.push('\n');
+            text.push_str(&animation.status());
         }
         let timings = self.renderer.gpu_timings();
         if !timings.is_empty() {

@@ -92,6 +92,9 @@ mod native {
         pub gltf: Option<String>,
         /// Model scene: put a ground plane under the model.
         pub ground: bool,
+        /// Model scene: drop skins and joint weights (the bind pose as a static mesh, to compare
+        /// the cost of skinning).
+        pub no_skinning: bool,
         /// Write the scene's baked meshes into this directory and exit.
         pub bake_hvm: Option<String>,
         /// Build the scene from the meshes in this directory, streaming pages from disk.
@@ -112,7 +115,7 @@ mod native {
 
     impl Options {
         pub fn parse(args: &[String]) -> Self {
-            let mut o = Options { screenshot: None, size: (1600, 900), frames: 90, view: None, detail: Detail::High, scene: SceneKind::Valley, camera: None, eye: None, at: None, occlusion: true, sw_raster: true, rvt: true, svt: true, animate_sun: false, lod: None, fov: None, pool_mb: None, texture_pool_mb: None, texture_compression: true, switch_to: None, dump_dir: None, dump_count: 16, keys: Vec::new(), keys_at: None, hold: Vec::new(), gltf: None, ground: true, bake_hvm: None, stream_from: None, io_latency_ms: 0, sun: None, move_light: false, screen_percentage: None, gpu_budget_ms: None, local_exposure: Some(Default::default()) };
+            let mut o = Options { screenshot: None, size: (1600, 900), frames: 90, view: None, detail: Detail::High, scene: SceneKind::Valley, camera: None, eye: None, at: None, occlusion: true, sw_raster: true, rvt: true, svt: true, animate_sun: false, lod: None, fov: None, pool_mb: None, texture_pool_mb: None, texture_compression: true, switch_to: None, dump_dir: None, dump_count: 16, keys: Vec::new(), keys_at: None, hold: Vec::new(), gltf: None, ground: true, bake_hvm: None, stream_from: None, io_latency_ms: 0, sun: None, move_light: false, screen_percentage: None, gpu_budget_ms: None, local_exposure: Some(Default::default()), no_skinning: false };
             let mut scene_given = false;
             let mut it = args.iter().skip(1);
             while let Some(arg) = it.next() {
@@ -133,6 +136,7 @@ mod native {
                     }
                     "--gltf" => o.gltf = Some(value()),
                     "--no-ground" => o.ground = false,
+                    "--no-skinning" => o.no_skinning = true,
                     "--detail" => o.detail = if value() == "medium" { Detail::Medium } else { Detail::High },
                     "--camera" => {
                         let v: Vec<f32> = value().split(',').filter_map(|x| x.parse().ok()).collect();
@@ -197,11 +201,15 @@ mod native {
         fn load_model(&self) -> Option<Model> {
             let path = self.gltf.as_ref()?;
             let start = Instant::now();
-            let asset = helios_asset::load_gltf_file(path).unwrap_or_else(|e| {
+            let mut asset = helios_asset::load_gltf_file(path).unwrap_or_else(|e| {
                 log::error!("cannot load {path}: {e}");
                 std::process::exit(1);
             });
             log::info!("imported {path} in {:.2} s", start.elapsed().as_secs_f64());
+            if self.no_skinning {
+                asset.instances.iter_mut().for_each(|i| i.skin = None);
+                asset.meshes.iter_mut().for_each(|m| m.mesh.skin.clear());
+            }
             let name = std::path::Path::new(path).file_stem().map_or_else(|| path.clone(), |s| s.to_string_lossy().into_owned());
             let mut model = Model::new(name, asset);
             model.ground = self.ground;

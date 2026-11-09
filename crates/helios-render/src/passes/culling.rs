@@ -10,6 +10,7 @@ use crate::shader::create_module;
 use crate::stats::STATE_SIZE;
 use crate::targets::{FrameTargets, DEPTH_FORMAT, VISIBILITY_FORMAT};
 use crate::util::{self, bind, bind_group, bind_group_layout, compute_pipeline, storage_buffer, uniform_buffer};
+use crate::skin::{skin_entry, skin_resource};
 use crate::wind::{wind_entry, wind_resource};
 
 /// Byte offsets into a view's indirect argument buffer (see cull_args.wgsl).
@@ -128,6 +129,7 @@ impl Culling {
         cull_entries.extend((5..=8).map(|b| (b, bind::storage(false))));
         cull_entries.push((9, bind::texture(false)));
         cull_entries.push(wind_entry());
+        cull_entries.push(skin_entry());
         let cull_layout = bind_group_layout(device, "cull", c, &cull_entries);
         let args_layout =
             bind_group_layout(device, "cull args", c, &[(0, bind::uniform()), (1, bind::storage(false)), (2, bind::storage(false))]);
@@ -135,6 +137,7 @@ impl Culling {
         raster_entries.extend((1..=6).map(|b| (b, bind::storage(true))));
         raster_entries.extend(alpha_mask_entries());
         raster_entries.push(wind_entry());
+        raster_entries.push(skin_entry());
         let raster_layout = bind_group_layout(device, "raster", ShaderStages::VERTEX_FRAGMENT, &raster_entries);
         let mut sw_entries = raster_entries.clone();
         sw_entries.push((7, bind::storage(false)));
@@ -248,6 +251,7 @@ impl Culling {
                 (8, atomics.as_entire_binding()),
                 (9, TextureView(hzb.unwrap_or(&self.dummy_hzb))),
                 wind_resource(scene),
+                skin_resource(scene),
             ],
         );
         let args_group = bind_group(
@@ -300,6 +304,7 @@ impl Culling {
         ];
         entries.extend(alpha_mask_resources(scene));
         entries.push(wind_resource(scene));
+        entries.push(skin_resource(scene));
         entries
     }
 

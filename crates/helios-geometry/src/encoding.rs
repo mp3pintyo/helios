@@ -20,6 +20,11 @@
 //!   first, stored the same way, and RGBA8 vertex colours (RGB with a square-root curve, so
 //!   dark colours keep their precision; alpha linear), each channel an offset from the
 //!   cluster's minimum with just enough bits. Meshes without them encode exactly as before.
+//! * **Skin weights** (skeletal meshes, [`crate::skin`]): per vertex up to four joint indices,
+//!   stored as offsets from the cluster's smallest joint with just enough bits, and the
+//!   quantised 8-bit weights of all but the heaviest influence (each at most half the total, so
+//!   7 bits or fewer; the heaviest is the total minus the others). A cluster stores as many
+//!   influences as its most-influenced vertex has: rigid clusters store one joint and no weight.
 //! * **Triangles** are three cluster-local indices of `index_bits(vertex count)` bits each.
 //!
 //! ## Why it stays crack-free
@@ -40,17 +45,25 @@
 //! [6]    grid exponents: position (i8) | uv (i8) << 8
 //! only if extended, [7..11):
 //! [7]    uv1 widths u | v << 5, colour widths r << 10 | g << 14 | b << 18 | a << 22,
-//!        has uv1 << 26, has colour << 27
+//!        has uv1 << 26, has colour << 27, has skin << 28
 //! [8..10) uv1 minimum (i32 units of the uv grid)   [10] colour minimum (r | g << 8 | b << 16 | a << 24)
 //! [7..) or [11..)  vertex bit stream: every vertex's position offsets (x, y, z), then every
 //!        vertex's attributes (octahedral normal x | y << normal bits, u, v, then uv1 u, v and
 //!        colour r, g, b, a offsets where present)
+//! skin only, word aligned after the vertex stream:
+//!        [0] joint minimum | joint bits << 16 | weight bits << 21 | (influences - 1) << 25,
+//!        then per vertex: `influences` joint offsets, then the weights of influences 1.. (the
+//!        first is 255 minus their sum)
 //! ```
 //!
 //! followed (word aligned, at `GpuCluster::triangle_offset`) by the triangle bit stream.
-//! Positions come first so the position-only passes (rasterisers, shadows) touch only them.
+//! Positions come first so the position-only passes (rasterisers, shadows) touch only them;
+//! skinning passes read the skin section too, which leaves the vertex stream's layout as it is
+//! for static meshes.
 
 use glam::{IVec2, IVec3, UVec2, UVec3, UVec4, Vec2, Vec3, Vec4};
+
+use crate::skin::{SkinWeights, MAX_INFLUENCES, WEIGHT_TOTAL};
 
 /// Words of the per-cluster header in front of the vertex bit stream.
 pub const CLUSTER_HEADER_WORDS: u32 = 7;
@@ -58,6 +71,8 @@ pub const CLUSTER_HEADER_WORDS: u32 = 7;
 pub const CLUSTER_EXTENSION_WORDS: u32 = 4;
 /// Bit of header word 5 marking a cluster with the extension words.
 const EXTENDED_BIT: u32 = 1 << 30;
+/// Bit of extension word 7 marking a skinned cluster (a skin section follows the vertex stream).
+const SKIN_BIT: u32 = 1 << 28;
 /// Default bits per octahedral normal component.
 pub const NORMAL_BITS: u32 = 10;
 /// Default UV grid: 2^-15 (half a step is 1/32 texel of a 2048² texture).
@@ -108,11 +123,13 @@ pub struct VertexAttributes {
     pub uv1: bool,
     /// RGBA8 vertex colours ([`encode_color`]).
     pub color: bool,
+    /// Skin weights ([`SkinWeights`]).
+    pub skin: bool,
 }
 
 impl VertexAttributes {
     pub fn any(&self) -> bool {
-        self.uv1 || self.color
+        self.uv1 || self.color || self.skin
     }
 }
 
@@ -174,7 +191,8 @@ impl Quantization {
     }
 
     /// The encoder's input for one vertex (no optional attributes: second UV at the origin,
-    /// white; see [`QuantizedVertex::with_uv1`] / [`QuantizedVertex::with_color`]).
+    /// white, joint 0; see [`QuantizedVertex::with_uv1`], [`QuantizedVertex::with_color`],
+    /// [`QuantizedVertex::with_skin`]).
     pub fn vertex(&self, position: Vec3, normal: Vec3, uv: Vec2) -> QuantizedVertex {
         QuantizedVertex {
             position: self.quantize_position(position),
@@ -182,6 +200,7 @@ impl Quantization {
             uv: self.quantize_uv(uv),
             uv1: IVec2::ZERO,
             color: [255; 4],
+            skin: SkinWeights::default(),
         }
     }
 }
@@ -197,6 +216,8 @@ pub struct QuantizedVertex {
     pub uv1: IVec2,
     /// [`encode_color`] (encoded only if the mesh's [`VertexAttributes::color`]).
     pub color: [u8; 4],
+    /// Encoded only if the mesh's [`VertexAttributes::skin`].
+    pub skin: SkinWeights,
 }
 
 impl QuantizedVertex {
@@ -206,6 +227,79 @@ impl QuantizedVertex {
 
     pub fn with_color(self, color: Vec4) -> Self {
         Self { color: encode_color(color), ..self }
+    }
+
+    pub fn with_skin(self, skin: SkinWeights) -> Self {
+        Self { skin, ..self }
+    }
+}
+
+/// The skin section descriptor of a cluster: joints are stored as offsets from `joint_min`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SkinEncoding {
+    pub joint_min: u32,
+    pub joint_bits: u32,
+    pub weight_bits: u32,
+    /// Influences stored per vertex (1..=4).
+    pub influences: u32,
+}
+
+impl SkinEncoding {
+    fn fit(vertices: &[QuantizedVertex]) -> Self {
+        let used = || vertices.iter().flat_map(|v| v.skin.joints.iter().zip(&v.skin.weights)).filter(|p| *p.1 > 0).map(|p| *p.0 as u32);
+        let joint_min = used().min().unwrap_or(0);
+        let joint_max = used().max().unwrap_or(0);
+        let influences = vertices.iter().map(|v| v.skin.influences() as u32).max().unwrap_or(1).max(1);
+        let weight_max = vertices.iter().flat_map(|v| v.skin.weights[1..].iter()).map(|&w| w as u32).max().unwrap_or(0);
+        Self { joint_min, joint_bits: bits_for(joint_max - joint_min), weight_bits: bits_for(weight_max), influences }
+    }
+
+    fn to_word(self) -> u32 {
+        self.joint_min | (self.joint_bits << 16) | (self.weight_bits << 21) | ((self.influences - 1) << 25)
+    }
+
+    fn from_word(word: u32) -> Self {
+        Self { joint_min: word & 0xffff, joint_bits: (word >> 16) & 31, weight_bits: (word >> 21) & 15, influences: ((word >> 25) & 3) + 1 }
+    }
+
+    /// Bits per vertex.
+    pub fn stride(&self) -> u32 {
+        self.influences * self.joint_bits + (self.influences - 1) * self.weight_bits
+    }
+
+    fn write(&self, stream: &mut BitWriter, skin: &SkinWeights) {
+        for slot in 0..self.influences as usize {
+            let offset = if skin.weights[slot] > 0 { skin.joints[slot] as u32 - self.joint_min } else { 0 };
+            stream.write(offset, self.joint_bits);
+        }
+        for slot in 1..self.influences as usize {
+            stream.write(skin.weights[slot] as u32, self.weight_bits);
+        }
+    }
+
+    /// Vertex `index` of the skin bit stream `stream` (after the descriptor word).
+    fn read(&self, stream: &[u32], index: u32) -> SkinWeights {
+        let mut bit = index * self.stride();
+        let mut skin = SkinWeights { joints: [0; MAX_INFLUENCES], weights: [0; MAX_INFLUENCES] };
+        for slot in 0..self.influences as usize {
+            skin.joints[slot] = (self.joint_min + read_bits(stream, bit, self.joint_bits)) as u16;
+            bit += self.joint_bits;
+        }
+        let mut rest = 0;
+        for slot in 1..self.influences as usize {
+            let w = read_bits(stream, bit, self.weight_bits);
+            skin.weights[slot] = w as u8;
+            rest += w;
+            bit += self.weight_bits;
+        }
+        skin.weights[0] = (WEIGHT_TOTAL - rest) as u8;
+        // Unused slots decode to the canonical joint 0.
+        for slot in 0..MAX_INFLUENCES {
+            if skin.weights[slot] == 0 {
+                skin.joints[slot] = 0;
+            }
+        }
+        skin
     }
 }
 
@@ -395,6 +489,7 @@ impl ClusterEncoding {
         if self.attributes.any() {
             let c = self.color_bits;
             let flags = ((self.attributes.uv1 as u32) << 26) | ((self.attributes.color as u32) << 27);
+            let flags = flags | if self.attributes.skin { SKIN_BIT } else { 0 };
             let widths = self.uv1_bits.x | (self.uv1_bits.y << 5) | (c.x << 10) | (c.y << 14) | (c.z << 18) | (c.w << 22) | flags;
             words.extend([widths, self.uv1_min.x as u32, self.uv1_min.y as u32, u32::from_le_bytes(self.color_min)]);
         }
@@ -420,7 +515,7 @@ impl ClusterEncoding {
         };
         if words[5] & EXTENDED_BIT != 0 {
             let e = words[7];
-            encoding.attributes = VertexAttributes { uv1: (e >> 26) & 1 != 0, color: (e >> 27) & 1 != 0 };
+            encoding.attributes = VertexAttributes { uv1: (e >> 26) & 1 != 0, color: (e >> 27) & 1 != 0, skin: e & SKIN_BIT != 0 };
             encoding.uv1_bits = UVec2::new(e & 31, (e >> 5) & 31);
             encoding.color_bits = UVec4::new((e >> 10) & 15, (e >> 14) & 15, (e >> 18) & 15, (e >> 22) & 15);
             encoding.uv1_min = IVec2::new(words[8] as i32, words[9] as i32);
@@ -490,6 +585,18 @@ impl ClusterEncoding {
         }
         decode_color(color)
     }
+
+    /// The skin section's descriptor; `None` for clusters of meshes without skin.
+    pub fn skin_encoding(&self, stream: &[u32], vertex_count: u32) -> Option<SkinEncoding> {
+        self.attributes.skin.then(|| SkinEncoding::from_word(stream[self.vertex_stream_bits(vertex_count).div_ceil(32) as usize]))
+    }
+
+    /// Skin weights of vertex `index`; `None` for clusters of meshes without skin.
+    pub fn skin(&self, stream: &[u32], vertex_count: u32, index: u32) -> Option<SkinWeights> {
+        let skin = self.skin_encoding(stream, vertex_count)?;
+        let section = self.vertex_stream_bits(vertex_count).div_ceil(32) as usize + 1;
+        Some(skin.read(&stream[section..], index))
+    }
 }
 
 /// Appends the encoding of one cluster (header, vertex stream, triangle stream) to `out`.
@@ -521,6 +628,15 @@ pub fn encode_cluster(quantization: &Quantization, vertices: &[QuantizedVertex],
             for c in 0..4 {
                 stream.write((v.color[c] - encoding.color_min[c]) as u32, encoding.color_bits[c]);
             }
+        }
+    }
+
+    if encoding.attributes.skin {
+        let skin = SkinEncoding::fit(vertices);
+        out.push(skin.to_word());
+        let mut stream = BitWriter::new(out);
+        for v in vertices {
+            skin.write(&mut stream, &v.skin);
         }
     }
 
@@ -666,7 +782,7 @@ mod tests {
         assert_eq!(ClusterEncoding::from_words(&plain).header_words(), CLUSTER_HEADER_WORDS);
         assert_eq!(plain[5] & EXTENDED_BIT, 0);
 
-        let full = q.with_attributes(VertexAttributes { uv1: true, color: true });
+        let full = q.with_attributes(VertexAttributes { uv1: true, color: true, skin: false });
         let (words, triangle_offset) = encode(&full);
         let encoding = ClusterEncoding::from_words(&words);
         assert_eq!(encoding.attributes, full.attributes);
@@ -690,13 +806,61 @@ mod tests {
         }
 
         // Absent attributes decode to their defaults.
-        let only_uv1 = q.with_attributes(VertexAttributes { uv1: true, color: false });
+        let only_uv1 = q.with_attributes(VertexAttributes { uv1: true, color: false, skin: false });
         let (words, _) = encode(&only_uv1);
         let encoding = ClusterEncoding::from_words(&words);
         assert_eq!(encoding.color(&words[encoding.header_words() as usize..], 60, 3), Vec4::ONE);
         let stream = &plain[CLUSTER_HEADER_WORDS as usize..];
         let plain_encoding = ClusterEncoding::from_words(&plain);
         assert_eq!(plain_encoding.uv1(stream, 60, 7), plain_encoding.uv(stream, 60, 7));
+    }
+
+    #[test]
+    fn skin_weights_round_trip_with_just_enough_bits() {
+        let mut seed = 11;
+        let q = Quantization::new(None, 0.01, 2.0, 1.0);
+        let skins: Vec<SkinWeights> = (0..90)
+            .map(|i| {
+                let joints = [40 + (i % 9) as u16, 41 + (i % 5) as u16, 47, 50];
+                let weights = [lcg(&mut seed), lcg(&mut seed) * 0.5, if i % 3 == 0 { 0.2 } else { 0.0 }, if i % 10 == 0 { 0.1 } else { 0.0 }];
+                SkinWeights::new(joints, weights)
+            })
+            .collect();
+        let triangles: Vec<[u32; 3]> = (0..60).map(|i| [i, i + 1, i + 2]).collect();
+        let encode = |q: &Quantization, skins: &[SkinWeights]| {
+            let vertices: Vec<QuantizedVertex> = skins.iter().enumerate().map(|(i, &s)| q.vertex(Vec3::splat(i as f32 * 0.01), Vec3::Y, Vec2::ZERO).with_skin(s)).collect();
+            let mut words = Vec::new();
+            let triangle_offset = encode_cluster(q, &vertices, &triangles, &mut words);
+            (words, triangle_offset)
+        };
+        let skinned = q.with_attributes(VertexAttributes { skin: true, ..Default::default() });
+        let (words, triangle_offset) = encode(&skinned, &skins);
+        let encoding = ClusterEncoding::from_words(&words);
+        assert!(encoding.attributes.skin && encoding.header_words() == CLUSTER_HEADER_WORDS + CLUSTER_EXTENSION_WORDS);
+        let stream = &words[encoding.header_words() as usize..];
+        let descriptor = encoding.skin_encoding(stream, 90).unwrap();
+        // Joints 40..=50 need 4 bits; weights after the heaviest stay below 128.
+        assert_eq!((descriptor.joint_min, descriptor.joint_bits, descriptor.influences), (40, 4, 4));
+        assert!(descriptor.weight_bits <= 7);
+        for (i, skin) in skins.iter().enumerate() {
+            assert_eq!(encoding.skin(stream, 90, i as u32), Some(*skin));
+            assert!((encoding.position(stream, i as u32) - Vec3::splat(i as f32 * 0.01)).abs().max_element() <= q.position_step());
+        }
+        for (t, tri) in triangles.iter().enumerate() {
+            assert_eq!(decode_triangle(&words[triangle_offset as usize..], 90, t as u32), *tri);
+        }
+        // Rigid clusters store one joint index per vertex and no weights.
+        let rigid: Vec<SkinWeights> = (0..90).map(|i| SkinWeights::rigid(7 + (i % 2) as u16)).collect();
+        let (words, _) = encode(&skinned, &rigid);
+        let encoding = ClusterEncoding::from_words(&words);
+        let stream = &words[encoding.header_words() as usize..];
+        let descriptor = encoding.skin_encoding(stream, 90).unwrap();
+        assert_eq!((descriptor.influences, descriptor.stride()), (1, 1));
+        assert_eq!(encoding.skin(stream, 90, 3), Some(SkinWeights::rigid(8)));
+        // Without the attribute nothing is stored (the inputs are ignored).
+        let (plain, _) = encode(&q, &skins);
+        assert_eq!(ClusterEncoding::from_words(&plain).header_words(), CLUSTER_HEADER_WORDS);
+        assert_eq!(ClusterEncoding::from_words(&plain).skin(&plain[CLUSTER_HEADER_WORDS as usize..], 90, 0), None);
     }
 
     #[test]

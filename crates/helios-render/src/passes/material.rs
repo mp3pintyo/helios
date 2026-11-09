@@ -24,6 +24,7 @@ use crate::targets::FrameTargets;
 use crate::textures::TextureLibrary;
 use crate::util::{bind, bind_group, bind_group_layout, compute_pipeline, workgroups};
 use crate::water::BINDING_WATER;
+use crate::skin::{skin_entry, skin_resource};
 use crate::wind::{wind_entry, wind_resource};
 
 /// Shading models with a resolve pipeline (see `MATERIAL_*` in material.wgsl); 7 is the sky.
@@ -78,6 +79,7 @@ impl MaterialPass {
                 (49, bind::storage_texture(TextureFormat::R32Uint)),
                 (80, bind::texture(true)),
                 wind_entry(),
+                skin_entry(),
                 (BINDING_WATER, bind::uniform()),
             ],
         );
@@ -163,6 +165,7 @@ impl MaterialPass {
                 (49, TextureView(svt.feedback_view())),
                 (80, TextureView(&svt.material)),
                 wind_resource(scene),
+                skin_resource(scene),
                 (BINDING_WATER, water.as_entire_binding()),
             ],
         );

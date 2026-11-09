@@ -36,6 +36,7 @@ mod partition;
 pub mod primitives;
 mod sdf;
 mod simplify;
+pub mod skin;
 pub mod vegetation;
 
 pub use bounds::{Aabb, Sphere};
@@ -50,3 +51,4 @@ pub use mesh::{canonical_ids, Mesh, Vertex};
 pub use partition::{group_clusters, partition_graph, Graph};
 pub use sdf::{MeshSdf, SdfKind, SdfMode};
 pub use simplify::{simplify, NewVertex, SimplifyMesh, SimplifyOptions, SimplifyResult};
+pub use skin::SkinWeights;

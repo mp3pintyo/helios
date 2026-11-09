@@ -8,12 +8,14 @@
 // fs_masked; Nanite bins them the same way): only its fragment shader samples and discards, so
 // the opaque pipeline keeps a trivial fragment shader and full early depth testing. Culling
 // lists the masked clusters' slots after the visible cluster entries; the opaque draw skips them.
-// Vertices of instances in the wind are displaced (wind.wgsl) as in every other pass.
+// Vertices of instances in the wind are displaced (wind.wgsl) and skinned instances posed
+// (skinning.wgsl) as in every other pass.
 
 #include "common.wgsl"
 #include "geometry.wgsl"
 #include "alpha_mask.wgsl"
 #include "wind.wgsl"
+#include "skinning.wgsl"
 
 // Late-pass draws start after the clusters drawn by the early pass.
 override LATE: bool = false;
@@ -29,6 +31,7 @@ override LATE: bool = false;
 @group(0) @binding(41) var alpha_masks: texture_2d_array<f32>;
 @group(0) @binding(42) var alpha_mask_sampler: sampler;
 @group(0) @binding(65) var<uniform> wind: Wind;
+@group(0) @binding(66) var skin_palette: texture_2d<f32>;
 
 // Cull state words (CullState in cull.wgsl).
 const STATE_HW_EARLY: u32 = 4u;
@@ -63,7 +66,7 @@ fn corner(entry: vec4<u32>, cluster: Cluster, vertex_index: u32) -> Corner {
     let base = cluster_base(cluster);
     c.index = cluster_triangle(cluster, base, triangle)[vertex_index % 3u];
     let instance = instances[entry.x];
-    let world = wind_world_position(instance, wind_strength(instance), vertex_position(cluster, base, c.index));
+    let world = wind_world_position(instance, wind_strength(instance), skinned_vertex_position(instance, cluster, base, c.index));
     c.position = view.view_proj * vec4<f32>(world, 1.0);
     c.visible = true;
     return c;

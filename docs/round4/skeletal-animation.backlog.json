@@ -1,0 +1,46 @@
+[
+  {
+    "id": "skeletal-animation",
+    "title": "Csontvázas animáció virtuális geometrián (Nanite skinned mesh)",
+    "area": "Virtuális geometria",
+    "kind": "feature",
+    "summary": "A glTF-ből importált, csontokhoz kötött (skinned) hálók a virtuális geometria minden előnyével animálódnak: klaszterek, LOD-DAG, streaming, szoftveres raszterizálás, virtuális árnyéktérkép. A csúcsok bőrözése mind a négy raszterizálóban és a G-puffer feloldásban ugyanaz a tiszta függvény, így a LOD-vágások animáció közben is repedésmentesek.",
+    "details": "Minden csúcs legfeljebb 4 ízületi hatását egyszer, csúcsonként 8 bites, pontosan 255-re összegződő súlyokra kvantáljuk; ez a hegesztésen, klaszterezésen, egyszerűsítésen és a tömörített klaszterformátumon át változatlanul utazik (a klaszter csúcsfolyama mögött külön skin-szakasz: ízület-eltolás a klaszter legkisebb ízületétől és a legnehezebb kivételével a súlyok, épp annyi biten). A csúcs pozíciója a dekódolt nyugalmi pozíció, a súlyai és az ízületmátrixok (paletta) tiszta függvénye – nulla súlyok kihagyva, rögzített sorrendben –, ezért a közös csúcsok minden klaszterben és LOD-szinten bitre azonos helyre kerülnek (mint a szél WPO-jánál). A paletták egy Rgba32Float textúrában vannak (textureLoad; egyetlen shader-fázis sem kap új storage buffert), az instance a flags felső 20 bitjén éri el a sajátját. A normálok a kevert mátrix kofaktorával, a mozgásvektorok az előző képkocka palettájával számolódnak. Konzervatív kulling: CPU-n képkockánként ízületenkénti nyugalmi gömbökből pózolt gömb és maximális elmozdulás (spektrálnormával), ezzel bővülnek a klaszter-, lap- és instance-gömbök; a LOD a nyugalmi gömböket tartja (monoton hibák, repedésmentes vágás). Árnyék: a mozgó skin dinamikus vető a VSM statikus/dinamikus lapgyorsítótárában. Lumen: az UE-hez hasonlóan nincs távolságmező és kártya.",
+    "metrics": "BrainStem (61 e háromszög, 18 ízület), 1600×900, osztott RTX 3090, 4 váltott futás min.: fő nézet raszter változatlan (hw 0,02–0,03, sw 0,06–0,07 ms), anyagfeloldás 0,47 → 0,49 ms, kulling 0,20 → 0,30 ms, árnyéklap-raszter 0,02 → 0,31 ms (a mozgó vető lapjai minden képkockában), szüneteltetve 0,02 ms. Tömörített adat: +2,5 bájt/csúcs (Fox), +3,3 (CesiumMan), +0,3 (BrainStem). Skin nélküli jelenetek: kép és GPU-idő a futásonkénti zajon belül.",
+    "showcase": "Fox (?gltf=models/Fox.glb): a róka a Survey animációt játssza, árnyéka követi; a '-' billentyű átúsztat Walk, majd Run klipre, utána megáll. Előtte/utána: a 17-es debug nézet (ízületi súlyok színei) és a lit nézet egymás mellett; CesiumMan sétája TSR-rel, szellemkép nélkül.",
+    "modules": ["crates/helios-geometry/src/skin.rs", "crates/helios-geometry/src/encoding.rs", "crates/helios-geometry/src/dag.rs", "crates/helios-render/src/skin.rs", "crates/helios-render/src/shaders/skinning.wgsl", "crates/helios-render/src/shaders/skin_palette.wgsl", "crates/helios-render/src/shaders/gbuffer.wgsl", "crates/helios-render/src/shaders/cull.wgsl", "crates/helios-render/src/shaders/vsm_invalidate.wgsl", "crates/helios-demo/src/scenes/skeletal.rs"]
+  },
+  {
+    "id": "gltf-animation-import",
+    "title": "glTF skin- és animációimport, AnimationPlayer",
+    "area": "Platform és eszközök",
+    "kind": "feature",
+    "summary": "A glTF-importer beolvassa a csomóponthierarchiát, a skineket (ízületek, inverz kötési mátrixok, skeleton) és az animációs klipeket. Az AnimationPlayer klipet, időt, sebességet, ismétlést, szünetet és két klip közötti átúsztatást kezel.",
+    "details": "JOINTS_0/WEIGHTS_0 bármely komponenstípussal (u8/u16 ízületek, float vagy normalizált u8/u16 súlyok, ritka accessorok is), újranormálva. Csatornák: translation, rotation, scale; interpoláció STEP, LINEAR (forgatásnál legrövidebb ívű slerp), CUBICSPLINE (Hermite, glTF C függelék). A paletta inverse(mesh node) · ízület · inverz kötési mátrix, azaz a hálót elhelyező csomóponthoz viszonyított: így a nyugalmi korlátok és a LOD értelmesek maradnak, a node · paletta pedig pontosan a glTF póz. Morph targetek nincsenek (figyelmeztetés). Demó: --gltf / ?gltf= az első klipet játssza, a '-' billentyű klipet vált átúsztatással, majd megáll; a HUD mutatja a klipet és időt.",
+    "metrics": "Ellenőrizve: Fox (3 klip, 24 ízület), CesiumMan, BrainStem (59 háló, 1 skin), RiggedFigure, RiggedSimple, SimpleSkin – natívan és Chromiumban (WebGPU, WGSL-hiba nélkül). Egységtesztek: interpolációk, legrövidebb ív, hierarchia, átúsztatás, import beágyazott glTF-ből.",
+    "showcase": "Fox: a '-' gombbal Survey → Walk → Run átúsztatás, majd szünet; a HUD animációs sora.",
+    "modules": ["crates/helios-asset/src/animation.rs", "crates/helios-asset/src/import.rs", "crates/helios-asset/src/lib.rs", "crates/helios-demo/src/scenes/skeletal.rs", "crates/helios-demo/src/scenes/model.rs", "crates/helios-demo/src/app.rs"]
+  },
+  {
+    "id": "skin-weight-seam-simplification",
+    "title": "Súlyvarrat-tudatos egyszerűsítés skinned hálókhoz",
+    "area": "Virtuális geometria",
+    "kind": "feature",
+    "summary": "A QEM-egyszerűsítés költsége kiegészül a súlyeltéréssel: az az élösszevonás, amely a csúcs súlyát más ízületekre adná át, drága. Így az erős súlyvarratok (pl. alkar–felkar) utolsóként omlanak össze, és a durva LOD-ok is értelmesen deformálódnak.",
+    "details": "A költség (skin_weight · átlagos élhossz · d)², ahol d a két súlyeloszlás L1-távolságának fele (0: azonos, 1: diszjunkt ízületek). A félélű összevonás eredeti csúcsokat tart meg, így minden LOD-csúcs a saját eredeti súlyait viszi. A jelentett LOD-hiba geometriai marad (nyugalmi póz).",
+    "metrics": "Teszt (háromízületes végtag, 1,2 rad hajlítás, 3 LOD-távolság): a pózolt felület eltérése a nyugalmi eltérésen felül 0,0063 → 0,0032 (felére csökken).",
+    "showcase": "LOD-nézet (3) egy animált karakteren durva LOD-dal (--lod 12): a végtagok a hajlatoknál is épek.",
+    "modules": ["crates/helios-geometry/src/simplify.rs", "crates/helios-geometry/src/dag.rs"]
+  },
+  {
+    "id": "debug-view-skin-weights",
+    "title": "17-es debug nézet: ízületi súlyok",
+    "area": "Platform és eszközök",
+    "kind": "tool",
+    "summary": "Új debug nézet, amely minden ízületnek színt ad, és a csúcsonkénti súlyokkal keveri őket; a nem skinned felületek szürkék.",
+    "details": "A G-puffer feloldás a háromszög sarkainak dekódolt súlyaiból számolja a színt, csak ebben a nézetben. --view 17, heliosSetView(17); a DebugView::next a listabeli pozíció szerint lép (a hiányzó 16-os indextől függetlenül).",
+    "metrics": "Más nézetekben nincs költsége.",
+    "showcase": "Fox és CesiumMan a 17-es nézetben, lit nézettel egymás mellett.",
+    "modules": ["crates/helios-render/src/shaders/gbuffer.wgsl", "crates/helios-render/src/renderer.rs"]
+  }
+]

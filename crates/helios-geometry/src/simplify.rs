@@ -11,6 +11,10 @@
 //! * **Open borders** may only collapse along the border, guarded by boundary quadrics.
 //! * **Attributes** (normal, UV) add an area-weighted deviation cost that steers the collapse
 //!   order; the reported error stays purely geometric (an object-space length).
+//! * **Skin weights** add a cost for the weight a collapse moves to other joints: a vertex that
+//!   follows the forearm merging into one that follows the upper arm would make the coarse
+//!   level bend where the source doesn't. Strong weight seams therefore collapse last, like
+//!   attribute seams, and coarse LODs still deform sensibly.
 //! * **Aggregate geometry** (leaves, grass, twigs): when collapses run out, whole small
 //!   disconnected components are removed — smallest first — and the survivors are scaled up to
 //!   preserve total area (stochastic pruning). Their error is the size of what vanished.
@@ -22,6 +26,7 @@ use std::collections::BinaryHeap;
 use glam::{DVec3, Vec2, Vec3};
 
 use crate::hash::{edge_key, FxHashMap};
+use crate::SkinWeights;
 
 /// Symmetric 4×4 quadric plus the accumulated area weight.
 #[derive(Clone, Copy, Debug, Default)]
@@ -128,6 +133,8 @@ pub struct SimplifyMesh<'a> {
     pub normals: &'a [Vec3],
     pub uvs: &'a [Vec2],
     pub canonical: &'a [u32],
+    /// Skin weights (skeletal meshes), empty or one per vertex.
+    pub skin: &'a [SkinWeights],
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -146,11 +153,15 @@ pub struct SimplifyOptions {
     /// a tree keeps every leaf until each one is about a pixel: dense forests then draw
     /// several triangles per pixel. Lower values coarsen aggregates sooner.
     pub prune_error_scale: f32,
+    /// Skin weight deviation cost, in multiples of the mean edge length per unit of weight moved
+    /// to other joints ([`SkinWeights::distance`]): a collapse across a seam between two joints
+    /// costs like moving the surface this many edges.
+    pub skin_weight: f32,
 }
 
 impl Default for SimplifyOptions {
     fn default() -> Self {
-        Self { lock_borders: false, prune_components: true, attribute_weight: 0.5, prune_error_scale: 0.35 }
+        Self { lock_borders: false, prune_components: true, attribute_weight: 0.5, prune_error_scale: 0.35, skin_weight: 2.0 }
     }
 }
 
@@ -227,6 +238,9 @@ struct State {
     version: Vec<u32>,
     border_edges: crate::hash::FxHashSet<u64>,
     attribute_scale: f64,
+    /// Skin weights per wedge (empty without skin) and the cost scale of their deviation.
+    skin: Vec<SkinWeights>,
+    skin_scale: f64,
 }
 
 impl State {
@@ -303,7 +317,13 @@ impl State {
             weight += m.weight;
         }
         let attribute = if weight > 0.0 { attribute / weight } else { 0.0 };
-        (geometric, geometric + attribute * self.attribute_scale)
+        // The weight the moving wedges hand to other joints (V's skin replaces U's).
+        let skin = if self.skin.is_empty() {
+            0.0
+        } else {
+            mapping.iter().map(|&(uw, vw)| self.skin[uw as usize].distance(&self.skin[vw as usize]) as f64).fold(0.0, f64::max)
+        };
+        (geometric, geometric + attribute * self.attribute_scale + skin * skin * self.skin_scale)
     }
 
     fn push(&self, heap: &mut BinaryHeap<Collapse>, a: u32, b: u32) {
@@ -462,6 +482,8 @@ pub fn simplify(
         .collect();
     let mean_edge = edge_length_sum / (tris.len() * 3).max(1) as f64;
     let attribute_scale = (options.attribute_weight as f64 * mean_edge).powi(2);
+    let skin: Vec<SkinWeights> = if mesh.skin.is_empty() { Vec::new() } else { global.iter().map(|&g| mesh.skin[g as usize]).collect() };
+    let skin_scale = (options.skin_weight as f64 * mean_edge).powi(2);
 
     let mut s = State {
         pos,
@@ -480,6 +502,8 @@ pub fn simplify(
         version: vec![0; class_count],
         border_edges,
         attribute_scale,
+        skin,
+        skin_scale,
     };
 
     let mut heap: BinaryHeap<Collapse> = BinaryHeap::new();
@@ -799,7 +823,7 @@ mod tests {
         let uvs: Vec<Vec2> = mesh.vertices.iter().map(|v| Vec2::new(v.u, v.v)).collect();
         let tris: Vec<[u32; 3]> = mesh.triangles().collect();
         simplify(
-            SimplifyMesh { positions: &positions, normals: &normals, uvs: &uvs, canonical },
+            SimplifyMesh { positions: &positions, normals: &normals, uvs: &uvs, canonical, skin: &[] },
             &tris,
             locked,
             target,

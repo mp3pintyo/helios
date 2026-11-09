@@ -364,7 +364,7 @@ fn shade(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     // Debug views that only need simple shading.
     switch frame.debug_view {
-        case DEBUG_CLUSTERS, DEBUG_TRIANGLES, DEBUG_LOD, DEBUG_INSTANCES, DEBUG_ALBEDO, DEBUG_RASTER_PATH, DEBUG_MATERIALS: {
+        case DEBUG_CLUSTERS, DEBUG_TRIANGLES, DEBUG_LOD, DEBUG_INSTANCES, DEBUG_ALBEDO, DEBUG_RASTER_PATH, DEBUG_MATERIALS, DEBUG_SKIN_WEIGHTS: {
             let shade = 0.3 + 0.7 * n_dot_l * mix(0.4, 1.0, shadow);
             textureStore(output, pixel, vec4<f32>(albedo * shade, 1.0));
             return;

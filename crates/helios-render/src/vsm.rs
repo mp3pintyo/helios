@@ -52,6 +52,7 @@ use crate::shader::create_module;
 use crate::targets::FrameTargets;
 use crate::util::{bind, bind_group, bind_group_layout, compute_pipeline, pipeline_layout, storage_buffer, uniform_buffer, workgroups};
 use crate::vsm_local::{self, LocalCull, LocalFrame, LocalShadows};
+use crate::skin::{skin_entry, skin_resource};
 use crate::wind::{wind_entry, wind_resource};
 use crate::Camera;
 
@@ -169,8 +170,8 @@ pub struct VsmFrame<'a> {
     /// Streaming loaded or evicted geometry pages: only cached pages under the instances of
     /// the affected meshes are re-rendered.
     pub geometry_streamed: bool,
-    /// The wind moves shadow casters: cached pages under them re-render these (dynamic) casters
-    /// as they move.
+    /// The wind or skeletal animation moves shadow casters: cached pages under them re-render
+    /// these (dynamic) casters as they move.
     pub wind: bool,
     /// View depth up to which volumetric fog samples the shadow map (0 = no volumetrics):
     /// coarse pages are requested throughout that part of the frustum.
@@ -285,6 +286,7 @@ impl VirtualShadowMap {
         expand_entries.push((7, bind::storage(false)));
         expand_entries.push((8, bind::storage(true)));
         expand_entries.push(wind_entry());
+        expand_entries.push(skin_entry());
         expand_entries.push((60, bind::uniform()));
         let expand_layout = bind_group_layout(device, "vsm expand", c, &expand_entries);
         let draw_module = create_module(device, "vsm_draw.wgsl");
@@ -292,12 +294,14 @@ impl VirtualShadowMap {
         draw_entries.extend((1..=7).map(|b| (b, bind::storage(true))));
         draw_entries.extend(alpha_mask_entries());
         draw_entries.push(wind_entry());
+        draw_entries.push(skin_entry());
         draw_entries.push((60, bind::uniform()));
         let draw_layout = bind_group_layout(device, "vsm draw", ShaderStages::VERTEX_FRAGMENT, &draw_entries);
         let mut sw_entries = draw_entries[..6].to_vec();
         sw_entries.push((6, bind::storage(false)));
         sw_entries.extend(alpha_mask_entries());
         sw_entries.push(wind_entry());
+        sw_entries.push(skin_entry());
         sw_entries.push((60, bind::uniform()));
         let sw_layout = bind_group_layout(device, "vsm raster sw", c, &sw_entries);
         // Page quads are placed in the vertex stage; only the fragment stage may write storage.
@@ -654,7 +658,7 @@ impl VirtualShadowMap {
                 ]
                 .into_iter()
                 .chain(alpha_mask_resources(scene))
-                .chain([wind_resource(scene)])
+                .chain([wind_resource(scene), skin_resource(scene)])
                 .collect::<Vec<_>>(),
             )
         };
@@ -676,6 +680,7 @@ impl VirtualShadowMap {
                     (7, self.draws.as_entire_binding()),
                     (8, self.info.as_entire_binding()),
                     wind_resource(scene),
+                    skin_resource(scene),
                     (60, self.local.uniform.as_entire_binding()),
                 ],
             )
@@ -742,7 +747,7 @@ impl VirtualShadowMap {
             ]
             .into_iter()
             .chain(alpha_mask_resources(scene))
-            .chain([wind_resource(scene)])
+            .chain([wind_resource(scene), skin_resource(scene)])
             .collect::<Vec<_>>(),
         );
         {
@@ -860,6 +865,7 @@ impl PageInvalidation {
         let mut entries = vec![(0, bind::uniform()), (1, bind::storage(true)), (2, bind::storage(true))];
         entries.extend((3..=8).map(|b| (b, bind::storage(false))));
         entries.push(wind_entry());
+        entries.push(skin_entry());
         entries.push((60, bind::uniform()));
         let layout = bind_group_layout(device, "vsm invalidate", ShaderStages::COMPUTE, &entries);
         let pipeline = |entry: &str, residency: bool, abrupt: bool| {
@@ -914,6 +920,7 @@ impl PageInvalidation {
                 (7, self.dynamic_reach.as_entire_binding()),
                 (8, inputs.info.as_entire_binding()),
                 wind_resource(scene),
+                skin_resource(scene),
                 (60, inputs.local.as_entire_binding()),
             ],
         );
