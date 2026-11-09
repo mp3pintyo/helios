@@ -240,6 +240,11 @@ pub struct LocalFrame<'a> {
     pub enabled: bool,
     /// Geometry or instances changed: every cached local page is stale.
     pub scene_changed: bool,
+    /// Moving lights may take the slots static ones leave over. Off when MegaLights shades the
+    /// local lights: it traces every light's shadow anyway, and a moving light's shadow map
+    /// re-renders in full every frame (six candle lights of the swinging chandeliers near the
+    /// altar: 11 ms of page raster).
+    pub moving_shadow_maps: bool,
 }
 
 /// Per-frame culling parameters of the local lights' view.
@@ -285,9 +290,13 @@ impl LocalShadows {
 
     /// Chooses this frame's shadowed lights. Call before uploading the lights.
     pub fn assign(&mut self, f: &LocalFrame) {
-        let influence: Vec<f32> =
-            f.lights.iter().map(|l| if f.enabled { screen_influence(l, f.eye, &f.planes) } else { 0.0 }).collect();
         let moving = self.motion.update(f.lights);
+        let influence: Vec<f32> = f
+            .lights
+            .iter()
+            .zip(&moving)
+            .map(|(l, &moving)| if f.enabled && (f.moving_shadow_maps || !moving) { screen_influence(l, f.eye, &f.planes) } else { 0.0 })
+            .collect();
         let assignment = self.allocator.assign(f.lights, &influence, &moving, f.scene_changed);
         self.light_slots = assignment.light_slots;
         self.any_stale = assignment.stale.iter().any(|&s| s);

@@ -630,6 +630,10 @@ pub struct Scene {
     pub wind: Wind,
     /// Editor metadata: stable mesh and material names (see `scene_edit.rs`).
     pub(crate) names: crate::scene_edit::SceneNames,
+    /// Heterogeneous volumes: simulated smoke and fire, procedural mist (`volumes.rs`).
+    pub volumes: Vec<crate::volumes::VolumeEmitter>,
+    /// GPU particle emitters (`particles.rs`).
+    pub particles: Vec<crate::particles::ParticleEmitter>,
     pub(crate) geometry_version: u64,
     pub(crate) material_version: u64,
     /// Structural instance changes (instances added, shadow casting toggled): every consumer

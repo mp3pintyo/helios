@@ -26,6 +26,8 @@
 //     neighbours) the output pixel is locked for one jitter cycle: while the image is still and
 //     the history not disoccluded, its history is neither clipped nor luminance-weighted, so
 //     it converges to the feature's true coverage (FSR 2's "locks").
+//   * where particles or volumes cover the pixel (the reactive mask, FLAG_REACTIVE), keep little
+//     history with a tight clip and no lock: sparks and flames change without motion vectors.
 
 #include "common.wgsl"
 
@@ -59,6 +61,9 @@ const WIDE_KERNEL: f32 = 2.29;
 // (at 100 %; at lower percentages frames carry fewer samples each and history lasts longer).
 const MAX_WEIGHT_STILL: f32 = 11.5;
 const MAX_WEIGHT_MOVING: f32 = 3.0;
+// Fully reactive pixels (particles, flames: FLAG_REACTIVE) keep at most this much history, with
+// the tight clip box of a moving image and no lock: their content changes without motion vectors.
+const MAX_WEIGHT_REACTIVE: f32 = 1.5;
 
 fn rgb_to_ycocg(c: vec3<f32>) -> vec3<f32> {
     return vec3<f32>(
@@ -178,9 +183,14 @@ fn resolve(@builtin(global_invocation_id) gid: vec3<u32>) {
     var closest = nearest;
     var center_luma = 0.0;
     var neighbour_luma = 0.0;
+    let reactive_mask = has_flag(frame.flags, FLAG_REACTIVE);
+    var reactive = 0.0;
     for (var y = -1; y <= 1; y++) {
         for (var x = -1; x <= 1; x++) {
             let tap = clamp(nearest + vec2<i32>(x, y), vec2<i32>(0), in_size - 1);
+            if reactive_mask {
+                reactive = max(reactive, textureLoad(gbuffer_motion, tap, 0).z);
+            }
             let color = textureLoad(current_color, tap, 0).rgb;
             let c = rgb_to_ycocg(color);
             m1 += c;
@@ -218,7 +228,7 @@ fn resolve(@builtin(global_invocation_id) gid: vec3<u32>) {
     let motion_pixels = motion * tsr.output.xy;
     let speed = length(motion_pixels);
     let previous_uv = uv - motion;
-    let max_weight = mix(MAX_WEIGHT_STILL, MAX_WEIGHT_MOVING, saturate(speed / 8.0));
+    let max_weight = mix(mix(MAX_WEIGHT_STILL, MAX_WEIGHT_MOVING, saturate(speed / 8.0)), MAX_WEIGHT_REACTIVE, reactive);
 
     // Thin-feature lock: none at 100 % (every feature is sampled every frame), full from 75 %
     // down. A pixel showing a ridge now is locked whatever the motion (the feature is there);
@@ -230,7 +240,7 @@ fn resolve(@builtin(global_invocation_id) gid: vec3<u32>) {
     let lock_strength = saturate((1.0 - min_ratio) * 4.0);
     let ridge = center_luma > max(2.0 * neighbour_luma, neighbour_luma + 0.5);
     let lock_decay = max(min_ratio * min_ratio / 8.0, 1.0 / 64.0);
-    var lock = select(0.0, lock_strength, ridge);
+    var lock = select(0.0, lock_strength, ridge) * (1.0 - reactive);
 
     var history = vec3<f32>(0.0);
     var history_weight = 0.0;
@@ -240,7 +250,7 @@ fn resolve(@builtin(global_invocation_id) gid: vec3<u32>) {
         // Sub-pixel detail (leaves, needles, thin tracery) lands in a different set of pixels
         // with every jitter offset; a tight box treats each of those states as "new" and the
         // detail flickers instead of being averaged.
-        let gamma = mix(2.25, 1.0, saturate(speed / 1.5));
+        let gamma = mix(mix(2.25, 1.0, saturate(speed / 1.5)), 1.0, reactive);
         let clipped = ycocg_to_rgb(clip_to_box(rgb_to_ycocg(h.rgb), mean - gamma * sigma, mean + gamma * sigma));
         // Disocclusion: the history pixel was reprojected with a motion unlike this surface's,
         // so it showed something else (e.g. the background a foreground object uncovers).
@@ -248,7 +258,7 @@ fn resolve(@builtin(global_invocation_id) gid: vec3<u32>) {
         let previous = textureLoad(history_state, previous_pixel, 0);
         let disocclusion = saturate((length(motion_pixels - previous.xy) - 1.0) * 0.5);
         history_weight = min(h.a, max_weight) * (1.0 - disocclusion);
-        lock = max(lock, (previous.z - lock_decay) * (1.0 - disocclusion) * still);
+        lock = max(lock, (previous.z - lock_decay) * (1.0 - disocclusion) * still * (1.0 - reactive));
         history = mix(clipped, h.rgb, lock);
     }
 

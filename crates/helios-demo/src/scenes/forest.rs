@@ -10,7 +10,8 @@ use helios_geometry::noise::fbm;
 use helios_geometry::vegetation::{self, LeafShape, TreeParams};
 use helios_geometry::{primitives, BuildConfig, Mesh, SdfMode};
 use helios_render::{
-    Camera, Light, Material, MaterialHandle, MaterialKind, MeshHandle, Scene, Sun, TextureDesc, TextureMapping, TexturePattern, Wind, WindResponse,
+    Camera, Light, Material, MaterialHandle, MaterialKind, MeshHandle, ParticleEmitter, Scene, Sun, TextureDesc, TextureMapping, TexturePattern,
+    VolumeEmitter, Wind, WindResponse,
 };
 
 use super::{add_baked_with, smoothstep, Detail, Rng, SceneSetup};
@@ -260,11 +261,17 @@ fn build_scene(detail: Detail) -> Scene {
     }));
     scatter(detail.pick(2500, 5000), 120.0, Box::new(|scene, x, z, rng| {
         let fern = ferns[(rng.next() * 3.0) as usize % 3];
-        scene.add_instance(fern, fern_m, place(x, z, 0.02, Vec3::splat(rng.range(0.7, 1.5)), rng.range(0.0, 6.3)));
+        let xf = place(x, z, 0.02, Vec3::splat(rng.range(0.7, 1.5)), rng.range(0.0, 6.3));
+        if !in_campfire(x, z) {
+            scene.add_instance(fern, fern_m, xf);
+        }
     }));
     scatter(detail.pick(1500, 3000), 70.0, Box::new(|scene, x, z, rng| {
         let clump = grass[(rng.next() * 2.0) as usize % 2];
-        scene.add_instance(clump, grass_m, place(x, z, 0.0, Vec3::splat(rng.range(0.8, 1.4)), rng.range(0.0, 6.3)));
+        let xf = place(x, z, 0.0, Vec3::splat(rng.range(0.8, 1.4)), rng.range(0.0, 6.3));
+        if !in_campfire(x, z) {
+            scene.add_instance(clump, grass_m, xf);
+        }
     }));
     scatter(160, 250.0, Box::new(|scene, x, z, rng| {
         let rock = rocks[(rng.next() * 3.0) as usize % 3];
@@ -283,7 +290,59 @@ fn build_scene(detail: Detail) -> Scene {
     // A camp lantern near the start: a warm local light that bounces under the canopy.
     let lantern = Vec3::new(9.0, ground_height(9.0, -4.0) + 0.6, -4.0);
     scene.add_light(Light { source_radius: 0.1, ..Light::point(lantern, Vec3::new(1.0, 0.65, 0.3), 2.0, 12.0) });
+    // Built last, so pre-baked mesh libraries of the rest of the scene stay valid.
+    campfire(&mut scene, CAMPFIRE.x, CAMPFIRE.y);
     scene
+}
+
+/// Where the campfire burns, in the clearing in front of the initial view.
+const CAMPFIRE: Vec2 = Vec2::new(7.0, -1.0);
+
+/// Ferns and grass don't grow in the fire ring.
+fn in_campfire(x: f32, z: f32) -> bool {
+    Vec2::new(x, z).distance(CAMPFIRE) < 1.4
+}
+
+/// A campfire: a ring of stones around a teepee of charred logs over glowing coals, a simulated
+/// fire with its smoke column, sparks and embers, and a light the flames drive.
+fn campfire(scene: &mut Scene, x: f32, z: f32) {
+    let base = Vec3::new(x, ground_height(x, z), z);
+    let stone_m = scene.add_material(Material { kind: MaterialKind::Rock, base_color: Vec3::new(0.3, 0.29, 0.27), roughness: 0.85, detail_scale: 8.0, detail_strength: 0.3, ..Default::default() });
+    let charred = scene.add_material(Material::standard(Vec3::new(0.045, 0.035, 0.03), 0.9, 0.0));
+    let coals_m = scene.add_material(Material { base_color: Vec3::new(1.0, 0.32, 0.07), emissive: 1.2, roughness: 0.9, ..Default::default() });
+    let small = |sdf: bool| BuildConfig { sdf: if sdf { SdfMode::Volume { resolution: 24 } } else { SdfMode::None }, ..Default::default() };
+    let stone = add_baked_with(scene, "campfire stone", &primitives::rock(131, 4), small(true));
+    let coals = add_baked_with(scene, "campfire coals", &primitives::rock(137, 4), small(false));
+    let path: Vec<Vec3> = (0..=6).map(|i| Vec3::new(0.0, i as f32 * 0.15, 0.0)).collect();
+    let radii: Vec<f32> = (0..=6).map(|i| 0.06 - i as f32 * 0.004).collect();
+    let mut log_mesh = tube(&path, &radii, 10, true);
+    helios_geometry::modeling::displace(&mut log_mesh, 0.006, 12.0, 2, 9);
+    let log = add_baked_with(scene, "campfire log", &log_mesh, small(false));
+
+    let mut rng = Rng(0xF1E2);
+    for i in 0..11 {
+        let angle = i as f32 / 11.0 * std::f32::consts::TAU + rng.range(-0.1, 0.1);
+        let r = 0.68 + rng.range(-0.04, 0.04);
+        let (sx, sz) = (x + angle.cos() * r, z + angle.sin() * r);
+        let s = rng.range(0.13, 0.19);
+        let xf = Mat4::from_scale_rotation_translation(Vec3::new(s, s * 0.75, s), Quat::from_rotation_y(rng.range(0.0, 6.3)), Vec3::new(sx, ground_height(sx, sz) + s * 0.2, sz));
+        scene.add_instance(stone, stone_m, xf);
+    }
+    scene.add_instance(coals, coals_m, Mat4::from_scale_rotation_translation(Vec3::new(0.42, 0.06, 0.42), Quat::IDENTITY, base));
+    let apex = base + Vec3::new(0.0, 0.62, 0.0);
+    for i in 0..6 {
+        let angle = i as f32 / 6.0 * std::f32::consts::TAU + 0.3;
+        let foot = base + Vec3::new(angle.cos(), 0.0, angle.sin()) * 0.5 + Vec3::Y * 0.03;
+        let rotation = Quat::from_rotation_arc(Vec3::Y, (apex - foot).normalize());
+        scene.add_instance(log, charred, Mat4::from_rotation_translation(rotation, foot));
+    }
+
+    // In the flames just above the teepee: the logs below it stripe the clearing with shadows, the
+    // smoke above is lit without their shadow cone.
+    let light = scene.add_light(Light { source_radius: 0.25, ..Light::point(base + Vec3::Y * 0.8, Vec3::new(1.0, 0.48, 0.18), 4.0, 18.0) });
+    scene.volumes.push(VolumeEmitter { light: Some(light), ..VolumeEmitter::campfire(base) });
+    scene.particles.push(ParticleEmitter::sparks(base + Vec3::Y * 0.3));
+    scene.particles.push(ParticleEmitter::embers(base + Vec3::Y * 0.25));
 }
 
 fn initial_camera() -> Camera {

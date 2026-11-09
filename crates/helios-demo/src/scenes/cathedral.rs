@@ -13,8 +13,8 @@ use glam::{Mat4, Quat, Vec2, Vec3};
 use helios_geometry::modeling::{self, circle, cuboid, extrude, lathe, merge, pointed_arch, subdivide_to, sweep, tube};
 use helios_geometry::{primitives, BuildConfig, Mesh, SdfMode, Vertex};
 use helios_render::{
-    Camera, Image, ImageTexture, Light, Material, MaterialHandle, MaterialKind, MeshHandle, Scene, Sun, TextureDesc, TextureMapping,
-    TexturePattern,
+    Camera, Image, ImageTexture, Light, Material, MaterialHandle, MaterialKind, MeshHandle, ParticleEmitter, Scene, Sun, TextureDesc,
+    TextureMapping, TexturePattern, VolumeEmitter,
 };
 
 use super::candles::{self, Fixture};
@@ -962,6 +962,14 @@ fn build_scene(detail: Detail) -> (Scene, DemoMotion) {
         b.glass(small, clear, at(6.0, aisle + 0.9) * across * Mat4::from_rotation_y(angle));
     }
 
+    // Dust motes drifting through the nave, lit where the clerestory's sun shafts cross them,
+    // and incense rising from a censer before the altar.
+    let censer = b.mesh("censer", &censer());
+    let censer_at = Vec3::new(altar_x - 2.6, 0.0, 1.9);
+    b.place(censer, m.gold, at(censer_at.x, censer_at.z));
+    b.scene.particles.push(ParticleEmitter::dust_motes(Vec3::new(38.0, 7.0, 0.0), Vec3::new(32.0, 6.0, 6.0), 24000));
+    b.scene.volumes.push(VolumeEmitter::incense(censer_at + Vec3::Y * CENSER_HEIGHT));
+
     // Candle-lit variant: votive racks against the aisle walls of every bay, then a light per
     // flame (built last, like the screens); the chandeliers' candle lights swing with them.
     if let Some(count) = candle_lit {
@@ -975,6 +983,27 @@ fn build_scene(detail: Detail) -> (Scene, DemoMotion) {
         }
     }
     (scene, motion)
+}
+
+const CENSER_HEIGHT: f32 = 1.12;
+
+/// A standing censer: a round foot, a slender shaft and a bowl.
+fn censer() -> Mesh {
+    let h = CENSER_HEIGHT;
+    let profile = [
+        Vec2::new(0.0, 0.0),
+        Vec2::new(0.2, 0.0),
+        Vec2::new(0.2, 0.03),
+        Vec2::new(0.05, 0.08),
+        Vec2::new(0.025, 0.12),
+        Vec2::new(0.025, h - 0.2),
+        Vec2::new(0.05, h - 0.16),
+        Vec2::new(0.13, h - 0.08),
+        Vec2::new(0.15, h),
+        Vec2::new(0.13, h),
+        Vec2::new(0.0, h - 0.05),
+    ];
+    lathe(&profile, 20, &|_, _| 1.0, false)
 }
 
 fn initial_camera() -> Camera {

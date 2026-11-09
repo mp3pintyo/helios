@@ -700,6 +700,38 @@ impl Translucency {
         }
     }
 
+    /// Draws the depth of the nearest translucent surface in front of the opaque scene into
+    /// `target` (0 elsewhere): where particles and volumes are split into what the translucent
+    /// surfaces cover and what lies in front of them (`oit.rs`). The first peeling layer,
+    /// recorded on its own. Returns false (and leaves `target` alone) when no translucent
+    /// surface is drawn this frame.
+    pub fn record_nearest_depth(&self, rec: &mut Recorder, frame: &wgpu::Buffer, scene: &GpuScene, targets: &FrameTargets, target: &wgpu::TextureView) -> bool {
+        let (Some(color), Some(unbounded)) = (&self.scene_color, &self.unbounded) else { return false };
+        if self.draws.is_empty() {
+            return false;
+        }
+        let group = bind_group(
+            rec.device,
+            "translucency nearest depth",
+            &self.peel_layout,
+            &[(0, frame.as_entire_binding()), (1, scene.instances.as_entire_binding()), (4, TextureView(&targets.depth)), (108, TextureView(&unbounded.view))],
+        );
+        let mut pass = rec.render_pass(
+            "translucency nearest depth",
+            &[],
+            Some(wgpu::RenderPassDepthStencilAttachment {
+                view: target,
+                depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(0.0), store: wgpu::StoreOp::Store }),
+                stencil_ops: None,
+            }),
+        );
+        let size = internal_size(targets, color.size);
+        pass.set_viewport(0.0, 0.0, size.0 as f32, size.1 as f32, 0.0, 1.0);
+        pass.set_bind_group(0, &group, &[]);
+        self.draw_surfaces(&mut pass, &self.peel_pipelines);
+        true
+    }
+
     /// Copies the HDR image into the scene colour and blurs its mip chain: the corner the
     /// internal resolution covers (the copy is allocated for the largest one).
     fn copy_scene_color(&self, rec: &mut Recorder, inputs: &LightingInputs, color: &SceneColor) {

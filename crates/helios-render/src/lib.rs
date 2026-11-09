@@ -26,6 +26,9 @@
 //! * **Translucency** – a forward pass for glass, water and alpha-blended surfaces after the
 //!   deferred lighting: refraction of the lit scene, absorption, screen-space and distance-field
 //!   reflections, fog.
+//! * **Volumes and particles** – simulated smoke and fire or procedural mist in ray-marched
+//!   voxel boxes with a lighting cache; GPU particle emitters; both blended order-independently
+//!   around the translucent surfaces.
 //! * **Temporal super resolution** – the scene renders at a screen percentage of the output
 //!   (fixed, or picked per frame for a GPU time budget) and TSR reconstructs the output.
 //! * **Post** – depth of field, motion blur, eye adaptation, bloom and ACES filmic tone mapping;
@@ -40,17 +43,21 @@ mod clouds;
 mod fog;
 mod context;
 mod dynamic_debug;
+mod effects;
 mod gpu_scene;
 mod gpu_types;
 mod lights;
 mod lumen;
 mod lumen_dynamic;
 mod lumen_lite;
+mod media;
 mod megalights;
 mod motion;
 mod near_field;
+mod oit;
 mod page_cache;
 pub mod page_source;
+mod particles;
 mod passes;
 mod picking;
 mod profiler;
@@ -69,6 +76,7 @@ mod targets;
 mod textures;
 mod translucency;
 mod util;
+mod volumes;
 mod vsm;
 mod vsm_local;
 mod vsm_motion;
@@ -89,6 +97,8 @@ pub use scene::{
     UvTransform, Water, Wrap,
 };
 pub use page_source::{PageLocation, PageRead, PageSource, ReadCompletion};
+pub use particles::{Burst, Collision, ParticleEmitter, ParticleRender, SpawnShape, Sprite};
+pub use volumes::{FluidSimulation, ProceduralVolume, VolumeEmitter, VolumeSource};
 pub use scene_edit::transformed_bounds;
 pub use skin::SkinHandle;
 pub use stats::RenderStats;

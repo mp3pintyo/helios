@@ -171,6 +171,8 @@ pub mod flags {
     pub const UNDERWATER: u32 = 64;
     /// Local lights come from MegaLights (`megalights.rs`), not the clustered light loop.
     pub const MEGALIGHTS: u32 = 128;
+    /// The motion target's z holds TSR's reactive mask (particles and volumes, `oit.rs`).
+    pub const REACTIVE: u32 = 1024;
 }
 
 const _: () = {
