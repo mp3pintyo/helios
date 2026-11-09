@@ -11,7 +11,8 @@
 //! ([`GpuScene::uv_extensions`]): their code and registers would slow down every pixel otherwise.
 //! Likewise, skinning (posing corners, previous positions for motion vectors) is a `SKINNING`
 //! permutation used only while the scene has skinned instances: in the forest it would take the
-//! resolve from 0.39 to 0.74 ms although no pixel is skinned.
+//! resolve from 0.39 to 0.74 ms although no pixel is skinned. The displaced-surface resolve of
+//! tessellated pixels is a `TESSELLATION` permutation, for scenes with displaced instances.
 
 use wgpu::BindingResource::{Sampler, TextureView};
 use wgpu::{ShaderStages, TextureFormat};
@@ -28,6 +29,7 @@ use crate::textures::TextureLibrary;
 use crate::util::{bind, bind_group, bind_group_layout, compute_pipeline, workgroups};
 use crate::water::BINDING_WATER;
 use crate::skin::{skin_entry, skin_resource};
+use crate::tessellation::{tessellation_entry, tessellation_resource};
 use crate::wind::{wind_entry, wind_resource};
 
 /// The merged visibility depth (voxel_resolve.wgsl finds the voxel a pixel hit from it).
@@ -45,14 +47,15 @@ pub struct MaterialPass {
     prepare: wgpu::ComputePipeline,
     /// Resolve pipelines per shading model and permutation ([`permutation`]), compiled when first
     /// needed.
-    resolve: [Option<Vec<(u32, wgpu::ComputePipeline)>>; 4],
+    resolve: [Option<Vec<(u32, wgpu::ComputePipeline)>>; 8],
     /// The permutation in use.
     permutation: usize,
 }
 
-/// Index of a resolve permutation: `UV_EXTENSIONS` in bit 0, `SKINNING` in bit 1.
-fn permutation(uv_extensions: bool, skinning: bool) -> usize {
-    uv_extensions as usize | ((skinning as usize) << 1)
+/// Index of a resolve permutation: `UV_EXTENSIONS` in bit 0, `SKINNING` in bit 1, `TESSELLATION`
+/// in bit 2.
+fn permutation(uv_extensions: bool, skinning: bool, tessellation: bool) -> usize {
+    uv_extensions as usize | ((skinning as usize) << 1) | ((tessellation as usize) << 2)
 }
 
 impl MaterialPass {
@@ -94,9 +97,11 @@ impl MaterialPass {
                 skin_entry(),
                 (BINDING_WATER, bind::uniform()),
                 (BINDING_DEPTH, bind::texture(false)),
+                tessellation_entry(),
             ],
         );
-        let resolve = [Some(resolve_pipelines(device, &module, &layout, 0)), None, None, None];
+        let mut resolve: [Option<Vec<(u32, wgpu::ComputePipeline)>>; 8] = Default::default();
+        resolve[0] = Some(resolve_pipelines(device, &module, &layout, 0));
         let classify_module = create_module(device, "classify.wgsl");
         let classify_layout = bind_group_layout(
             device,
@@ -124,8 +129,8 @@ impl MaterialPass {
 
     /// Selects the resolve permutation the scene's materials and instances need, compiling it on
     /// first use.
-    pub fn sync(&mut self, device: &wgpu::Device, uv_extensions: bool, skinning: bool) {
-        self.permutation = permutation(uv_extensions, skinning);
+    pub fn sync(&mut self, device: &wgpu::Device, uv_extensions: bool, skinning: bool, tessellation: bool) {
+        self.permutation = permutation(uv_extensions, skinning, tessellation);
         let slot = &mut self.resolve[self.permutation];
         if slot.is_none() {
             *slot = Some(resolve_pipelines(device, &self.module, &self.layout, self.permutation));
@@ -182,6 +187,7 @@ impl MaterialPass {
                 skin_resource(scene),
                 (BINDING_WATER, water.as_entire_binding()),
                 (BINDING_DEPTH, TextureView(&targets.depth)),
+                tessellation_resource(scene),
             ],
         );
         let classify_group = bind_group(
@@ -218,7 +224,7 @@ fn resolve_pipelines(device: &wgpu::Device, module: &wgpu::ShaderModule, layout:
         .iter()
         .map(|&kind| {
             let flag = |bit: usize| ((permutation >> bit) & 1) as f64;
-            let constants = [("MATERIAL_KIND", kind as f64), ("UV_EXTENSIONS", flag(0)), ("SKINNING", flag(1))];
+            let constants = [("MATERIAL_KIND", kind as f64), ("UV_EXTENSIONS", flag(0)), ("SKINNING", flag(1)), ("TESSELLATION", flag(2))];
             (kind, compute_pipeline(device, "material resolve", module, "resolve", layout, &constants))
         })
         .collect()

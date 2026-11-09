@@ -156,6 +156,8 @@ pub enum TexturePattern {
     Plaster = 16,
     /// Ashlar with carved reliefs.
     CarvedStone = 17,
+    /// Rounded setts in sandy joints (`param`: joint width); its height suits displacement.
+    Cobblestone = 18,
 }
 
 /// A procedural texture recipe.
@@ -307,6 +309,63 @@ pub struct Material {
     pub alpha_cutoff: Option<f32>,
     /// How surfaces move in [`Scene::wind`] (World Position Offset); static by default.
     pub wind: WindResponse,
+    /// Moves the surface along its normal at render time (Nanite tessellation): opaque materials
+    /// only. `None`: undisplaced.
+    pub displacement: Option<Displacement>,
+}
+
+/// Displacement of a material's surface along its normal, applied at render time by Nanite
+/// tessellation (UE 5.4+, see `tessellation.rs`): triangles of the meshes using it are diced into
+/// micro-triangles about [`crate::RenderSettings::dice_rate`] pixels long and every vertex moves by
+/// `magnitude * (height - center)` object-space units. The height is a channel of a texture
+/// layer, sampled with the material's [`TextureMapping`] (mesh UVs through [`Material::uv`], or
+/// triplanar). Its bound, `magnitude * max(center, 1 - center)`, pads the culling bounds, so a
+/// tight `center` and `magnitude` keep culling efficient.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Displacement {
+    /// The layer holding the height; `None`: the material's own [`Material::texture`].
+    pub texture: Option<TextureHandle>,
+    /// Channel of the layer's data texel: 3 is a procedural texture's height ([`TexturePattern`]);
+    /// image layers hold normal x, y, roughness and metallic there (0..=3).
+    pub channel: u32,
+    /// Object-space distance between heights 0 and 1.
+    pub magnitude: f32,
+    /// Height that stays in place (0: displacement outwards only, 0.5: both ways).
+    pub center: f32,
+    /// Mesh UV units per object-space unit of the meshes using it, for [`TextureMapping::MeshUv`]:
+    /// picks the height's mip for the size of a dice segment (UE uses the mesh's UV density the
+    /// same way). [`Displacement::uv_density_of`] measures it.
+    pub uv_density: f32,
+}
+
+impl Displacement {
+    /// Displacement by the height of the material's own (procedural) texture.
+    pub fn height(magnitude: f32, center: f32) -> Self {
+        Self { texture: None, channel: 3, magnitude, center, uv_density: 1.0 }
+    }
+
+    /// Largest object-space distance a point moves (culling bounds grow by it).
+    pub fn bound(&self) -> f32 {
+        self.magnitude.abs() * self.center.max(1.0 - self.center)
+    }
+
+    /// Area-weighted mean UV units per object-space unit of `mesh`'s triangles (the square root of
+    /// the UV area over the surface area).
+    pub fn uv_density_of(mesh: &helios_geometry::Mesh) -> f32 {
+        let (mut uv_area, mut area) = (0.0f64, 0.0f64);
+        for t in mesh.indices.chunks_exact(3) {
+            let v = [t[0], t[1], t[2]].map(|i| &mesh.vertices[i as usize]);
+            let p = v.map(|v| Vec3::from(v.position));
+            let uv = v.map(|v| Vec2::new(v.u, v.v));
+            area += (p[1] - p[0]).cross(p[2] - p[0]).length() as f64;
+            uv_area += (uv[1] - uv[0]).perp_dot(uv[2] - uv[0]).abs() as f64;
+        }
+        if area > 0.0 {
+            (uv_area / area).sqrt() as f32
+        } else {
+            1.0
+        }
+    }
 }
 
 impl Default for Material {
@@ -334,6 +393,7 @@ impl Default for Material {
             layers: [None; 4],
             alpha_cutoff: None,
             wind: WindResponse::NONE,
+            displacement: None,
         }
     }
 }

@@ -1,0 +1,90 @@
+[
+  {
+    "id": "nanite-tessellation",
+    "title": "Nanite Tessellation: elmozdítás (displacement) renderidőben",
+    "area": "Virtuális geometria",
+    "kind": "feature",
+    "summary": "Az anyag magasságtextúrája renderidőben mozdítja el a felületet a normál mentén: a kijelölt klaszterek háromszögeit a GPU kb. 2 pixeles mikroháromszögekre bontja (UE 5.4+ Nanite Tessellation). A háló sima és kicsi marad, a macskakövek és sziklarepedések valódi geometriaként jelennek meg, repedésmentesen és pattogás nélkül.",
+    "details": "Minden elmozdított klaszter a szoftveres listára kerül, a befoglaló gömbök (példány, lap, klaszter; frustum, HZB, árnyéklapok) az anyag elmozdítási korlátjával bővülnek. Minden háromszög egy patch (fixpontos, 15 bites baricentrikus sarkok). Élenként a tesszellációs faktor az el nem mozdított él pixelre vetített hossza (mintha a kamera felé fordulna) osztva a dice rate-tel (alapból 2 px); az élek a végpontjaik pozíciója szerint kanonikusan irányítottak, így a két szomszéd háromszög ugyanazt számolja (klaszter- és LOD-határon is). A 8 fölötti élű patcheket pontosan azoknál az éleknél felezi (red-green: 2, 3 vagy 4 gyerek) egy globális, ping-pong sorban, rögzített számú indirekt split menetben (a WebGPU-ban nincs forward-progress garancia, ezért nincs perzisztens szál; a menetszám a legmélyebb vágáshoz igazodik). A maradék patchek 2^k-s rácsra kockázódnak (F = 1, 2, 4, 8), a ritkább élek csúcsai az él saját szegmenseire pattannak; az új csúcsok elmozdított térben morfolnak (geomorphing) a durvább szakasz felezőpontjából a helyükre. Az elmozdítás a normalizált interpolált normál mentén magnitude·(height − center), a magasság a dice-szegmens méretéhez szűrve, a 512²-es tömbrétegből. Raszterezés: a szoftveres raszterizáló szabályaival (mélység atomicMax, majd payload), compute-ban. A visibility payload változatlan (klaszter-slot << 7 | alapháromszög); a G-puffer resolve a mélységből iterált vetítéssel keresi meg az elmozdított pontot, a normált a magasság felületi gradiensével dönti meg.",
+    "metrics": "Völgy (high), 1600×900, RTX 3090 más ügynökökkel megosztva (3 váltott futás minimuma): ösvény-nézet 1,82 M mikroháromszög, GPU 4,17 → 5,87 ms (raster sw + merge 0,08 → 1,62 ms, resolve 0,46 → 0,53 ms, VSM tesszelláció 0,14 ms); súroló nézet 3,42 M mikroháromszög, 3,92 → 7,13 ms. 2560×1440: ösvény 4,19 M, 7,85 → 11,87 ms; súroló 7,76 M, 6,93 → 13,63 ms. Böngészőben (Chrome, WebGPU) is fut, WGSL-hiba nélkül.",
+    "showcase": "Völgy, kamera: --eye -27,1.2,41 --at -31,0.1,48 --sun 200,28 (macskaköves ösvény napfényben, elmozdított sziklák). Előtte/utána csúszka: PageDown (tesszelláció ki/be) — ki: lapos, normal mappes kövek; be: valódi, kiálló kövek, sziluett és árnyék. Debug nézet 25: tesszellációs mélység és mikroháromszögek.",
+    "modules": ["crates/helios-render/src/tessellation.rs", "crates/helios-render/src/shaders/tess_core.wgsl", "crates/helios-render/src/shaders/tess_queue.wgsl", "crates/helios-render/src/shaders/tess.wgsl", "crates/helios-render/src/shaders/tess_resolve.wgsl", "crates/helios-render/src/shaders/displacement.wgsl", "crates/helios-render/src/shaders/displacement_height.wgsl", "crates/helios-render/src/shaders/cull.wgsl", "crates/helios-render/src/shaders/gbuffer.wgsl", "crates/helios-render/src/passes/culling.rs", "crates/helios-render/src/gpu_scene.rs"]
+  },
+  {
+    "id": "displacement-material",
+    "title": "Material::displacement: magasságból elmozdítás az anyagban",
+    "area": "Anyagok és textúrák",
+    "kind": "feature",
+    "summary": "Új anyagmező: Displacement (magasság-forrás: textúraréteg csatornája — procedurális TexturePattern magasság vagy képréteg bármely csatornája —, magnitude, center, UV-sűrűség). A korlátot (magnitude·max(center, 1 − center)) a culling automatikusan használja.",
+    "details": "A magasság az anyag saját leképezésével mintavételez (mesh-UV a textúratranszformmal, vagy világ/objektum triplanár), a mip a dice-szegmens méretéből jön (a tesszellátornak nincs képernyő-deriváltja; UE is a háló UV-sűrűségéből választ), Displacement::uv_density_of méri a háló UV-sűrűségét. GPU-oldalon külön uniform tábla (Tessellation, binding 67, 8 KiB), így a Material uniform elrendezése változatlan — a materials ügynök node-gráfja később ebbe a struktúrába írhat. Alfa-maszkolt, áttetsző és csontozott anyagok nem tesszellálódnak.",
+    "metrics": "Uniform: 32 B fejléc + 256 × 32 B anyagonként; a Material uniform mérete nem nőtt.",
+    "showcase": "Kódrészlet a weboldalon: Material { displacement: Some(Displacement::height(0.085, 0.35)), ..Material::textured(...) }.",
+    "modules": ["crates/helios-render/src/scene.rs", "crates/helios-render/src/tessellation.rs", "crates/helios-render/src/shaders/displacement_height.wgsl"]
+  },
+  {
+    "id": "nanite-tessellation-shadows",
+    "title": "Elmozdított geometria a virtuális árnyéktérképekben",
+    "area": "Árnyékok",
+    "kind": "feature",
+    "summary": "Az elmozdított felület árnyékot is vet: a VSM lapjain ugyanaz az emit / split / dice fut, a lap texeleiben mért faktorokkal, a lapra vágva. A statikus/dinamikus lapcache-sel együttműködik.",
+    "details": "vsm_tess.wgsl a (klaszter, lap) szoftveres elemeken fut (a vsm_raster.wgsl átugorja őket): faktor a klipmap-szint vagy a lokális fény lap-mipjének texelméretével, patch-culling a lapra, mikroháromszögek 24.8 fixpontban, lapvágással, slope bias-szal az atlasz u32 tükrébe (scratch tile-ok is). A magasság a főnézetéé, így az árnyék a látott felületből esik. A mozgó elmozdított példány (dynamic world) dinamikus caster, a statikus réteg fölé renderelődik. A HW-tartalékutak (lokális fény közelsík, scratch nélküli dinamikus lap, split lap) elmozdítás nélkül rajzolnak.",
+    "metrics": "Ösvény-nézet 1600×900: VSM tesszelláció 0,14 ms (0,05 M mikroháromszög a frissített lapokon); statikus kamerával a lapok cache-ben maradnak.",
+    "showcase": "Völgy, --sun 200,28: a sziklák és kövek árnyéka az ösvényen; PageDown előtte/utána.",
+    "modules": ["crates/helios-render/src/shaders/vsm_tess.wgsl", "crates/helios-render/src/shaders/vsm_expand.wgsl", "crates/helios-render/src/shaders/vsm_raster.wgsl", "crates/helios-render/src/vsm.rs"]
+  },
+  {
+    "id": "tessellation-geomorphing",
+    "title": "Repedésmentes, morfoló tesszelláció (egységteszttel)",
+    "area": "Virtuális geometria",
+    "kind": "feature",
+    "summary": "A közös él két oldala bitre azonos csúcsokat tesz az élre, és az új csúcsok a durvább szakaszból nőnek ki, így a kamera mozgásakor nincs pattogás. Egy CPU-s tükör-implementáció teszteli mindkettőt.",
+    "details": "Élenkénti döntések (vágás, rácsszint, morf-súly) csak az él végpontjaitól függnek; a fixpontos felezőpontok egzaktak; az alapélen fekvő pontok az él kanonikus paraméterével számolódnak. A morf elmozdított térben történik (CDLOD-szerűen): a paramétertérbeli morf a magasságot végigcsúsztatta volna a felületen (úszás). Teszt: jitterelt rács, közeli és távoli szemek — a közös élek szegmensei (paraméter és elmozdított pozíció) bitre egyeznek és hézag nélkül fedik az élet; a szem 200 lépéses közelítése alatt minden élcsúcs az előző lépés elmozdított élpoligonján marad.",
+    "metrics": "Élcsúcs eltérése az előző lépés poligonjától: < 0,01 (morffal) vs. 0,031 morf nélkül (0,15 amplitúdójú elmozdításnál, egységnyi élekkel).",
+    "showcase": "Debug nézet 25 lassú kamerával: a mikroháromszögek folyamatosan sűrűsödnek, nincs ugrás; súroló szögű közelkép (--eye -27.5,0.35,41.5 --at -31,0.12,49) lyukak nélkül.",
+    "modules": ["crates/helios-render/src/tessellation/crack_tests.rs", "crates/helios-render/src/shaders/tess_core.wgsl"]
+  },
+  {
+    "id": "tessellation-debug-view",
+    "title": "25-ös debug nézet és HUD-statisztika a tesszellációhoz",
+    "area": "Platform és eszközök",
+    "kind": "tool",
+    "summary": "A 25-ös nézet az elmozdított felületeket tesszellációs mélység szerint színezi (kék → zöld → piros) és mikroháromszögenként árnyalja; a HUD mutatja a mikroháromszögeket, patcheket, a dice rate-et és a split menetek számát. PageDown kapcsol, --no-tessellation, --dice-rate, --speed kapcsolók.",
+    "details": "A resolve visszajátssza a főnézet split-döntéseit a pixel baricentrikus pontjára, megkeresi a patch-et és a rácscellát. A statisztika aszinkron visszaolvasásból jön (sosem állítja meg a GPU-t), és ugyanez visszacsatol: a split menetszám a legmélyebb vágást követi, túlcsorduláskor a dice rate nő.",
+    "metrics": "A debug ág csak a TESSELLATION resolve-permutációban van, ami csak elmozdított példányokkal fordul be.",
+    "showcase": "heliosSetView(25) az ösvény-kamerával; HUD sor: 'tessellation on (PageDown): … M micro-triangles'.",
+    "modules": ["crates/helios-render/src/shaders/tess_resolve.wgsl", "crates/helios-render/src/renderer.rs", "crates/helios-demo/src/app.rs", "crates/helios-demo/src/main.rs"]
+  },
+  {
+    "id": "cobblestone-path-demo",
+    "title": "Macskaköves ösvény és elmozdított sziklák a völgyben (Cobblestone minta)",
+    "area": "Jelenetek és demó",
+    "kind": "feature",
+    "summary": "A völgy kezdőnézete mögött egy terepkövető macskaköves ösvény és elmozdított sziklák állnak, az egyik lassan forog a talapzatán (mozgó, elmozdított példány). Új procedurális minta: TexturePattern::Cobblestone (kupolás kövek homokos fugákban).",
+    "details": "Az ösvény sima szalaghálója (szoknyával a talajba) a Cobblestone textúra magasságából kapja a köveket (8,5 cm magnitude, 0,35 center), a sziklák a Rock textúra triplanár magasságából (0,14 magnitude). A kezdőnézetet nem érinti (mögötte van).",
+    "metrics": "Ösvény: 5760 háromszög (high), sziklák 20480 háromszög; látható mikroháromszögek 1,8–7,8 M a nézettől és felbontástól függően.",
+    "showcase": "Völgy: --eye -27,1.2,41 --at -31,0.1,48 --sun 200,28; PageDown előtte/utána; súroló közelkép: --eye -27.5,0.35,41.5 --at -31,0.12,49.",
+    "modules": ["crates/helios-demo/src/scenes/stone_path.rs", "crates/helios-demo/src/scenes/valley.rs", "crates/helios-render/src/shaders/texgen.wgsl"]
+  },
+  {
+    "id": "tessellation-motion-vectors-fix",
+    "title": "Javítás: álló kamerán villogó elmozdított felület (mozgásvektorok)",
+    "area": "Kamera és utófeldolgozás",
+    "kind": "fix",
+    "summary": "A resolve által visszakeresett pont egy hajszálnyira eltér attól a mikroháromszögtől, amelyből a mélység jött; ez mozgásvektorként jelent meg, és a TSR meg a mozgási elmosás álló képen is villogott.",
+    "details": "Az előző képkocka pozíciója most a találati pont saját mozgását kapja: previous = hit + (prev(object) − current(object)), így a maradék eltérés kiesik.",
+    "metrics": "Álló kamera, 16 képkocka, > 24/255 változó pixelek: 0,45 % → 0,003 % (tesszelláció nélkül 0,000 %).",
+    "showcase": "Nem kell külön bemutatni (stabilitás).",
+    "modules": ["crates/helios-render/src/shaders/gbuffer.wgsl"]
+  },
+  {
+    "id": "tessellation-displaced-morph-fix",
+    "title": "Javítás: a geomorph elmozdított térben, nem paramétertérben",
+    "area": "Virtuális geometria",
+    "kind": "fix",
+    "summary": "Az első változat az új csúcsok baricentrikus paraméterét csúsztatta a durva szomszéd felé; ettől a magasság végigcsúszott a felületen (úszás). Most a csúcs a helyén marad, és az elmozdított pozíciója nő ki a durva szakasz felezőpontjából.",
+    "details": "Páratlan csúcsonként két további magasság-kiértékelés (a durva szakasz végpontjai); a crack-teszt a paramétereken túl az elmozdított pozíciókat is bitre összeveti.",
+    "metrics": "CPU-tükör: élcsúcs ugrása a szem közelítése alatt < 0,01 (morf nélkül 0,031).",
+    "showcase": "—",
+    "modules": ["crates/helios-render/src/shaders/tess_core.wgsl", "crates/helios-render/src/tessellation/crack_tests.rs"]
+  }
+]

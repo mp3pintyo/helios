@@ -11,6 +11,7 @@ use crate::stats::STATE_SIZE;
 use crate::targets::{FrameTargets, DEPTH_FORMAT, VISIBILITY_FORMAT};
 use crate::util::{self, bind, bind_group, bind_group_layout, compute_pipeline, storage_buffer, uniform_buffer};
 use crate::skin::{skin_entry, skin_resource};
+use crate::tessellation::{tessellation_entry, tessellation_resource, Tessellation};
 use crate::wind::{wind_entry, wind_resource};
 
 /// Byte offsets into a view's indirect argument buffer (see cull_args.wgsl).
@@ -124,6 +125,8 @@ pub struct Culling {
     voxel_raster: [wgpu::ComputePipeline; 4],
     merge: wgpu::ComputePipeline,
     dummy_hzb: wgpu::TextureView,
+    /// Nanite tessellation of displaced clusters, created when a scene first needs it.
+    pub(crate) tessellation: Option<Tessellation>,
 }
 
 impl Culling {
@@ -141,6 +144,7 @@ impl Culling {
         cull_entries.push((9, bind::texture(false)));
         cull_entries.push(wind_entry());
         cull_entries.push(skin_entry());
+        cull_entries.push(tessellation_entry());
         let cull_layout = bind_group_layout(device, "cull", c, &cull_entries);
         let args_layout =
             bind_group_layout(device, "cull args", c, &[(0, bind::uniform()), (1, bind::storage(false)), (2, bind::storage(false))]);
@@ -219,6 +223,7 @@ impl Culling {
             voxel_raster: [voxel_pipeline(0, false), voxel_pipeline(1, false), voxel_pipeline(0, true), voxel_pipeline(1, true)],
             merge: compute_pipeline(device, "visibility merge", &merge_module, "merge", &merge_layout, &[]),
             dummy_hzb,
+            tessellation: None,
             cull_layout,
             args_layout,
             raster_layout,
@@ -269,6 +274,7 @@ impl Culling {
                 (9, TextureView(hzb.unwrap_or(&self.dummy_hzb))),
                 wind_resource(scene),
                 skin_resource(scene),
+                tessellation_resource(scene),
             ],
         );
         let args_group = bind_group(
@@ -329,6 +335,19 @@ impl Culling {
         entries
     }
 
+    /// Creates the tessellator the first time a scene has displaced instances, and points it at
+    /// the material textures heights are read from.
+    pub fn prepare_tessellation(&mut self, device: &wgpu::Device, scene: &GpuScene, data: &wgpu::TextureView, sampler: &wgpu::Sampler) {
+        if scene.has_displacement() {
+            self.tessellation.get_or_insert_with(|| Tessellation::new(device)).set_textures(data, sampler);
+        }
+    }
+
+    /// The tessellator, if the scene has displaced instances.
+    pub fn tessellation(&self, scene: &GpuScene) -> Option<&Tessellation> {
+        self.tessellation.as_ref().filter(|_| scene.has_displacement())
+    }
+
     /// Rasterises the clusters selected by the early (`late = false`) or late pass: hardware
     /// clusters into the raster targets, software clusters into the atomic buffer, then merges
     /// both into the final visibility buffer and depth. The early pass clears everything.
@@ -338,6 +357,8 @@ impl Culling {
         let mut sw_entries = Self::raster_entries(view, scene);
         sw_entries.push((7, targets.sw_target.as_entire_binding()));
         let sw_group = bind_group(device, "sw raster", &self.sw_layout, &sw_entries);
+        let tessellation = self.tessellation(scene);
+        let tess_groups = tessellation.map(|t| t.main_groups(device, view, scene, &targets.sw_target));
 
         if !late {
             // Only the depth half needs clearing; payloads are read where depth matched.
@@ -388,12 +409,20 @@ impl Culling {
                 (5, view.uniform.as_entire_binding()),
             ],
         );
+        if let Some(t) = tessellation {
+            t.clear_main(&mut rec.encoder, !late);
+        }
         let mut pass = rec.compute_pass(if late { "raster sw + merge (late)" } else { "raster sw + merge" });
         let base = if late { 2 } else { 0 };
         let args = if late { ARGS_LATE_SW } else { ARGS_EARLY_SW };
-        pass.set_bind_group(0, &sw_group, &[]);
-        // The depth pass of all clusters (opaque, alpha-masked and voxels), then the payload pass.
+        // Displaced clusters' patches are split and diced before either raster pass.
+        if let (Some(t), Some(groups)) = (tessellation, &tess_groups) {
+            t.generate_main(&mut pass, groups, view, args, late);
+        }
+        // The depth pass of all clusters (opaque, alpha-masked, voxels and tessellated), then the
+        // payload pass.
         for stage in [base, base + 1] {
+            pass.set_bind_group(0, &sw_group, &[]);
             pass.set_pipeline(&self.sw_raster[stage]);
             pass.dispatch_workgroups_indirect(&view.args, args);
             if scene.masks.any() {
@@ -403,6 +432,9 @@ impl Culling {
             if scene.has_voxels() {
                 pass.set_pipeline(&self.voxel_raster[stage]);
                 pass.dispatch_workgroups_indirect(&view.args, args);
+            }
+            if let (Some(t), Some(groups)) = (tessellation, &tess_groups) {
+                t.raster_main(&mut pass, groups, stage - base);
             }
         }
         pass.set_pipeline(&self.merge);

@@ -54,6 +54,7 @@ const PATTERN_SNOW: u32 = 14u;
 const PATTERN_HAMMERED: u32 = 15u;
 const PATTERN_PLASTER: u32 = 16u;
 const PATTERN_CARVED_STONE: u32 = 17u;
+const PATTERN_COBBLESTONE: u32 = 18u;
 
 // ---- Periodic noise -----------------------------------------------------------------------------
 
@@ -428,6 +429,28 @@ fn plaster(uv: vec2<f32>) -> Texel {
     return t;
 }
 
+// Rounded setts in sandy joints (a jittered cell grid): domed stones, so displacement makes them
+// stand out of the joints. `param`: joint width.
+fn cobblestone(uv: vec2<f32>) -> Texel {
+    let cells = vec2<f32>(8.0) * recipe.scale;
+    let warp = vec2<f32>(pfbm(uv, vec2<f32>(4.0), 3u, recipe.seed + 21u), pfbm(uv, vec2<f32>(4.0), 3u, recipe.seed + 22u)) * 0.012;
+    let v = pvoronoi(uv + warp, cells, 0.7, recipe.seed);
+    let gap = 0.05 + 0.12 * recipe.params.x;
+    let border = v.f2 - v.f1;
+    let stone = smoothstep(gap * 0.4, gap * 1.6, border);
+    let dome = sqrt(saturate(1.0 - (v.f1 * v.f1 * 1.6)));
+    let chips = pfbm(uv, cells * 6.0, 4u, recipe.seed + 3u);
+    let sand = pfbm(uv, cells * 3.0, 4u, recipe.seed + 4u);
+    let tone = idf(v.id, 11u);
+    var t: Texel;
+    t.height = mix(0.12 + 0.1 * sand, 0.55 + 0.35 * dome * (0.8 + 0.2 * tone) + 0.05 * chips, stone);
+    let rock = mix(recipe.color_a.rgb, recipe.color_b.rgb, tone) * (0.8 + 0.35 * chips) * (0.85 + 0.2 * dome);
+    let joint = mix(recipe.color_b.rgb * 0.45, vec3<f32>(0.16, 0.17, 0.08), saturate(0.5 + sand));
+    t.albedo = mix(joint, rock, stone);
+    t.roughness = mix(0.95, recipe.color_a.w - 0.12 * dome, stone);
+    return t;
+}
+
 fn evaluate(uv: vec2<f32>) -> Texel {
     switch recipe.pattern {
         case PATTERN_ASHLAR: { return ashlar(uv, false); }
@@ -447,6 +470,7 @@ fn evaluate(uv: vec2<f32>) -> Texel {
         case PATTERN_ROCK: { return rock(uv); }
         case PATTERN_SNOW: { return snow(uv); }
         case PATTERN_HAMMERED: { return hammered(uv); }
+        case PATTERN_COBBLESTONE: { return cobblestone(uv); }
         default: { return plaster(uv); }
     }
 }

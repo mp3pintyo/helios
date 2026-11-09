@@ -91,6 +91,8 @@ mod native {
         pub keys_at: Option<u32>,
         /// Headless: keys held down for the whole run (e.g. `KeyW` flies forward).
         pub hold: Vec<String>,
+        /// Fly speed in m/s for held movement keys (e.g. a slow dolly with `--hold KeyW`).
+        pub speed: Option<f32>,
         /// glTF 2.0 file (`.gltf` or `.glb`) to build the model scene from.
         pub gltf: Option<String>,
         /// Model scene: put a ground plane under the model.
@@ -128,11 +130,15 @@ mod native {
         pub gi: Option<String>,
         /// MegaLights instead of the clustered light loop.
         pub megalights: bool,
+        /// Nanite tessellation of displaced materials (`--no-tessellation`: undisplaced).
+        pub tessellation: bool,
+        /// Micro-triangle edge length in pixels (`--dice-rate`).
+        pub dice_rate: Option<f32>,
     }
 
     impl Options {
         pub fn parse(args: &[String]) -> Self {
-            let mut o = Options { screenshot: None, size: (1600, 900), frames: 90, view: None, detail: Detail::High, scene: SceneKind::Valley, camera: None, eye: None, at: None, occlusion: true, sw_raster: true, rvt: true, svt: true, animate_sun: false, lod: None, fov: None, pool_mb: None, texture_pool_mb: None, texture_compression: true, switch_to: None, dump_dir: None, dump_count: 16, keys: Vec::new(), keys_at: None, hold: Vec::new(), gltf: None, ground: true, bake_hvm: None, stream_from: None, io_latency_ms: 0, sun: None, move_light: false, full_invalidation: false, movers: None, static_motion: false, screen_percentage: None, gpu_budget_ms: None, local_exposure: Some(Default::default()), scene_file: None, select: Vec::new(), no_skinning: false, gi: None, megalights: false };
+            let mut o = Options { screenshot: None, size: (1600, 900), frames: 90, view: None, detail: Detail::High, scene: SceneKind::Valley, camera: None, eye: None, at: None, occlusion: true, sw_raster: true, rvt: true, svt: true, animate_sun: false, lod: None, fov: None, pool_mb: None, texture_pool_mb: None, texture_compression: true, switch_to: None, dump_dir: None, dump_count: 16, keys: Vec::new(), keys_at: None, hold: Vec::new(), gltf: None, ground: true, bake_hvm: None, stream_from: None, io_latency_ms: 0, sun: None, move_light: false, full_invalidation: false, movers: None, static_motion: false, screen_percentage: None, gpu_budget_ms: None, local_exposure: Some(Default::default()), scene_file: None, select: Vec::new(), no_skinning: false, gi: None, megalights: false, tessellation: true, dice_rate: None, speed: None };
             let mut scene_given = false;
             let mut it = args.iter().skip(1);
             while let Some(arg) = it.next() {
@@ -187,6 +193,7 @@ mod native {
                     "--keys" => o.keys = value().split(',').map(str::to_string).collect(),
                     "--keys-at" => o.keys_at = value().parse().ok(),
                     "--hold" => o.hold = value().split(',').map(str::to_string).collect(),
+                    "--speed" => o.speed = value().parse().ok(),
                     "--eye" => o.eye = parse_vec3(&value()),
                     "--at" => o.at = parse_vec3(&value()),
                     "--bake-hvm" => o.bake_hvm = Some(value()),
@@ -199,6 +206,8 @@ mod native {
                     "--select" => o.select = value().split(',').filter_map(|x| x.parse().ok()).collect(),
                     "--gi" => o.gi = Some(value()),
                     "--megalights" => o.megalights = true,
+                    "--no-tessellation" => o.tessellation = false,
+                    "--dice-rate" => o.dice_rate = value().parse().ok(),
                     "--lights" => helios_demo::scenes::candles::set_candle_lights(value().parse().unwrap_or(0)),
                     // Highlight contrast, shadow contrast and optionally the blurred luminance blend.
                     "--local-exposure" => {
@@ -317,6 +326,13 @@ mod native {
                 app.motion.set_mobility(&mut app.scene, helios_render::Mobility::Static);
             }
             app.renderer.settings.mega_lights |= self.megalights;
+            app.renderer.settings.tessellation = self.tessellation;
+            if let Some(speed) = self.speed {
+                app.speed = speed;
+            }
+            if let Some(rate) = self.dice_rate {
+                app.renderer.settings.dice_rate = rate;
+            }
             if let Some(budget) = self.gpu_budget_ms {
                 app.gpu_budget_ms = budget;
                 let mut dynamic = helios_render::DynamicResolution::with_budget(budget);

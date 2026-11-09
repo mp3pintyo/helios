@@ -330,7 +330,8 @@ fn install_input(state: &Rc<RefCell<State>>, canvas: &HtmlCanvasElement) -> Resu
     let s = state.clone();
     listen(&keys, "keydown", move |e: web_sys::KeyboardEvent| {
         let code = e.code();
-        if code.starts_with("Arrow") || code == "Space" {
+        // PageDown toggles tessellation instead of scrolling the page.
+        if code.starts_with("Arrow") || code == "Space" || code == "PageDown" {
             e.prevent_default();
         }
         let mut st = s.borrow_mut();
