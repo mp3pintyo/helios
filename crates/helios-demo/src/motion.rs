@@ -85,6 +85,16 @@ impl DemoMotion {
         }
     }
 
+    /// Gives every moving instance `mobility` (`--static-motion` moves them as `Static` ones, the
+    /// path of one-off edits, for measurements).
+    pub fn set_mobility(&self, scene: &mut Scene, mobility: Mobility) {
+        for group in &self.groups {
+            for &(h, _) in &group.instances {
+                scene.set_mobility(h, mobility);
+            }
+        }
+    }
+
     /// Instances it moves.
     pub fn instance_count(&self) -> usize {
         self.groups.iter().map(|g| g.instances.len()).sum()

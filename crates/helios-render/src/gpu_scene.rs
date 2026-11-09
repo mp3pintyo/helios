@@ -510,4 +510,24 @@ mod tests {
         assert_eq!(wind(1), WindResponse::GRASS.to_vec4());
         assert_eq!(wind(2), Vec4::ZERO);
     }
+
+    #[test]
+    fn moved_shadow_casters_report_both_poses_and_their_mobility() {
+        let mut scene = Scene::new();
+        let mesh = scene.add_mesh(helios_geometry::VirtualMesh::default());
+        let material = scene.add_material(Material::default());
+        let caster = scene.add_instance(mesh, material, Mat4::IDENTITY);
+        let flame = scene.add_instance(mesh, material, Mat4::IDENTITY);
+        scene.set_cast_shadow(flame, false);
+        scene.set_mobility(caster, Mobility::Movable);
+        let record = |world: Mat4| GpuInstance { world, bounds: Vec4::new(0.0, 0.0, 0.0, 1.0), ..bytemuck::Zeroable::zeroed() };
+        // A turn about the bounds' centre leaves the bounding sphere as it was, but still moves
+        // the caster.
+        let (old, new) = (record(Mat4::IDENTITY), record(Mat4::from_rotation_y(0.3)));
+        let m = shadow_move(&scene, caster.0 as usize, &old, &new).expect("a move");
+        assert_eq!((m.old_world, m.new_world, m.movable), (old.world, new.world, true));
+        assert!(shadow_move(&scene, caster.0 as usize, &old, &old).is_none(), "at rest");
+        assert!(shadow_move(&scene, flame.0 as usize, &old, &new).is_none(), "casts no shadow");
+        assert_eq!(gpu_instance_flags(&scene, &scene.instances[caster.0 as usize], false), instance_flags::CAST_SHADOW | instance_flags::MOVABLE);
+    }
 }

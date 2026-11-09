@@ -196,9 +196,9 @@ fn raft(scene: &mut Scene, motion: &mut DemoMotion, detail: Detail) {
         parts.push(cuboid(Vec3::new(x - 0.09, radius * 0.8, -1.05), Vec3::new(x + 0.09, radius * 0.8 + 0.12, 1.05)));
     }
     let mesh = add_baked(scene, "raft", &helios_geometry::modeling::merge(&parts));
-    let wood = scene.add_texture(TextureDesc::new(TexturePattern::Wood, Vec3::new(0.36, 0.24, 0.14), Vec3::new(0.22, 0.14, 0.08)).roughness(0.8, 0.85).seed(16));
+    let wood = scene.add_texture(TextureDesc::new(TexturePattern::Wood, Vec3::new(0.3, 0.2, 0.12), Vec3::new(0.17, 0.11, 0.06)).roughness(0.8, 0.85).seed(16));
     let material = scene.add_material(Material::textured(MaterialKind::Standard, wood, TextureMapping::ObjectTriplanar, 0.8));
-    let center = Vec3::new(-7.5, WATER_LEVEL + 0.02, 22.5);
+    let center = Vec3::new(-7.5, WATER_LEVEL - 0.04, 22.5);
     let instance = scene.add_instance(mesh, material, Mat4::from_rotation_translation(Quat::from_rotation_y(0.5), center));
     motion.add(scene, Motion::Float { center, drift: 1.2, period: 70.0 }, &[instance], &[]);
 }
