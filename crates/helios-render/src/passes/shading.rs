@@ -94,6 +94,11 @@ pub struct LightingInputs<'a> {
     /// Resolved clouds of this frame (quarter resolution).
     pub cloud_texture: &'a wgpu::TextureView,
     pub fog: &'a crate::fog::VolumetricFog,
+    /// MegaLights' denoised local lighting, which replaces the clustered light loop; `None`:
+    /// the loop shades.
+    pub megalights: Option<&'a wgpu::TextureView>,
+    /// A 1×1 black texture for unused inputs.
+    pub black: &'a wgpu::TextureView,
 }
 
 impl LightingPass {
@@ -136,6 +141,7 @@ impl LightingPass {
                 (29, bind::texture_3d(true)),
                 (60, bind::uniform()),
                 (61, bind::storage(false)),
+                (62, bind::texture(false)),
             ],
         );
         Self {
@@ -185,9 +191,11 @@ impl LightingPass {
                 (29, TextureView(inputs.lumen.near_field().1)),
                 (60, inputs.vsm.local.uniform.as_entire_binding()),
                 (61, t.local_shadow_mask.as_entire_binding()),
+                (62, TextureView(inputs.megalights.unwrap_or(inputs.black))),
             ],
         );
-        if inputs.vsm.local.view().is_some() {
+        // MegaLights traces the shadows of every light itself.
+        if inputs.vsm.local.view().is_some() && inputs.megalights.is_none() {
             let mut pass = rec.compute_pass("local light shadows");
             pass.set_pipeline(&self.local_shadows);
             pass.set_bind_group(0, &group, &[]);

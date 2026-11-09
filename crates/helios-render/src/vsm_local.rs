@@ -55,6 +55,8 @@ const SHARP_SOURCE_RADIUS: f32 = 0.25;
 /// A light that holds a slot keeps it against newcomers up to this much more influential, so
 /// slots (and their cached pages) do not flip between lights of similar importance.
 const KEEP_BONUS: f32 = 1.5;
+/// A light that moved within this many frames counts as moving (see [`SlotAllocator::assign`]).
+const MOVING_FRAMES: u32 = 30;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
@@ -125,9 +127,14 @@ pub struct SlotAllocator {
 }
 
 impl SlotAllocator {
-    /// Gives slots to the most influential lights (`influence[i] > 0` wants one). Lights keep
-    /// their slot while selected; `invalidate_all` drops every cached page (scene change).
-    pub fn assign(&mut self, lights: &[Light], influence: &[f32], invalidate_all: bool) -> Assignment {
+    /// Gives slots to the most influential lights (`influence[i] > 0` wants one), static ones
+    /// before `moving` ones: a moving light's cached pages are stale every frame, so its shadow
+    /// map costs a full re-render per frame (hundreds of pages for a cube) where a static light's
+    /// costs nothing once cached. Moving lights get the slots left over (with few lights, all of
+    /// them); without one they keep their traced shadows (MegaLights, or distance fields in the
+    /// clustered loop). Lights keep their slot while selected; `invalidate_all` drops every
+    /// cached page (scene change).
+    pub fn assign(&mut self, lights: &[Light], influence: &[f32], moving: &[bool], invalidate_all: bool) -> Assignment {
         let held = |i: usize| self.slots.iter().flatten().any(|&(light, _)| light == i);
         let mut candidates: Vec<(usize, f32)> = influence
             .iter()
@@ -135,7 +142,8 @@ impl SlotAllocator {
             .filter(|&(_, &v)| v > 0.0)
             .map(|(i, &v)| (i, if held(i) { v * KEEP_BONUS } else { v }))
             .collect();
-        candidates.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+        let moves = |i: usize| moving.get(i).copied().unwrap_or(false);
+        candidates.sort_by(|a, b| moves(a.0).cmp(&moves(b.0)).then(b.1.total_cmp(&a.1)).then(a.0.cmp(&b.0)));
         candidates.truncate(LOCAL_SLOTS);
         let selected = |i: usize| candidates.iter().any(|&(c, _)| c == i);
 
@@ -168,6 +176,32 @@ impl SlotAllocator {
     /// Slots in use and their lights.
     pub fn occupied(&self) -> impl Iterator<Item = (usize, &Light)> {
         self.slots.iter().enumerate().filter_map(|(s, slot)| slot.as_ref().map(|(_, light)| (s, light)))
+    }
+}
+
+/// Which lights moved recently (light positions over the frames).
+#[derive(Debug, Default)]
+struct LightMotion {
+    /// Per light: its position last frame and the frames since it last moved.
+    last: Vec<(Vec3, u32)>,
+}
+
+impl LightMotion {
+    /// Per light of this frame: whether it moved in the last [`MOVING_FRAMES`] frames. A new
+    /// light list (another scene) starts at rest.
+    fn update(&mut self, lights: &[Light]) -> Vec<bool> {
+        if self.last.len() != lights.len() {
+            self.last = lights.iter().map(|l| (l.position, MOVING_FRAMES)).collect();
+        }
+        self.last
+            .iter_mut()
+            .zip(lights)
+            .map(|((position, since), light)| {
+                *since = if *position == light.position { since.saturating_add(1) } else { 0 };
+                *position = light.position;
+                *since < MOVING_FRAMES
+            })
+            .collect()
     }
 }
 
@@ -219,6 +253,7 @@ pub struct LocalCull {
 pub struct LocalShadows {
     pub uniform: wgpu::Buffer,
     allocator: SlotAllocator,
+    motion: LightMotion,
     gpu: Box<LocalVsmUniform>,
     /// The culling view of all local lights.
     view: CullView,
@@ -238,6 +273,7 @@ impl LocalShadows {
         Self {
             uniform: uniform_buffer(device, "local vsm", std::mem::size_of::<LocalVsmUniform>() as u64),
             allocator: SlotAllocator::default(),
+            motion: LightMotion::default(),
             gpu,
             view: CullView::new(device, "local vsm", capacity),
             light_slots: Vec::new(),
@@ -251,7 +287,8 @@ impl LocalShadows {
     pub fn assign(&mut self, f: &LocalFrame) {
         let influence: Vec<f32> =
             f.lights.iter().map(|l| if f.enabled { screen_influence(l, f.eye, &f.planes) } else { 0.0 }).collect();
-        let assignment = self.allocator.assign(f.lights, &influence, f.scene_changed);
+        let moving = self.motion.update(f.lights);
+        let assignment = self.allocator.assign(f.lights, &influence, &moving, f.scene_changed);
         self.light_slots = assignment.light_slots;
         self.any_stale = assignment.stale.iter().any(|&s| s);
         let gpu = &mut *self.gpu;
@@ -338,10 +375,10 @@ mod tests {
     fn keeps_slots_of_static_lights() {
         let lights = lights(4);
         let mut a = SlotAllocator::default();
-        let first = a.assign(&lights, &[1.0, 2.0, 0.0, 3.0], false);
+        let first = a.assign(&lights, &[1.0, 2.0, 0.0, 3.0], &[], false);
         assert_eq!(first.light_slots[2], u32::MAX);
         assert_eq!(first.stale.iter().filter(|&&s| s).count(), 3);
-        let second = a.assign(&lights, &[1.0, 2.0, 0.0, 3.0], false);
+        let second = a.assign(&lights, &[1.0, 2.0, 0.0, 3.0], &[], false);
         assert_eq!(second.light_slots, first.light_slots);
         assert!(second.stale.iter().all(|&s| !s), "static lights keep their pages");
     }
@@ -350,13 +387,13 @@ mod tests {
     fn moving_or_changed_lights_invalidate_only_their_slot() {
         let mut lights = lights(3);
         let mut a = SlotAllocator::default();
-        let first = a.assign(&lights, &[1.0; 3], false);
+        let first = a.assign(&lights, &[1.0; 3], &[], false);
         lights[1].position.y += 0.5;
         lights[2].intensity = 7.0; // brightness does not change the shadow
-        let second = a.assign(&lights, &[1.0; 3], false);
+        let second = a.assign(&lights, &[1.0; 3], &[], false);
         let stale: Vec<usize> = (0..LOCAL_SLOTS).filter(|&s| second.stale[s]).collect();
         assert_eq!(stale, vec![first.light_slots[1] as usize]);
-        let third = a.assign(&lights, &[1.0; 3], true);
+        let third = a.assign(&lights, &[1.0; 3], &[], true);
         assert_eq!(third.stale.iter().filter(|&&s| s).count(), 3, "scene changes drop every page");
     }
 
@@ -365,17 +402,17 @@ mod tests {
         let lights = lights(LOCAL_SLOTS + 2);
         let mut influence: Vec<f32> = (0..lights.len()).map(|i| 1.0 + i as f32 * 0.01).collect();
         let mut a = SlotAllocator::default();
-        let first = a.assign(&lights, &influence, false);
+        let first = a.assign(&lights, &influence, &[], false);
         assert_eq!(first.light_slots[0], u32::MAX);
         assert_eq!(first.light_slots[1], u32::MAX);
         assert_eq!(first.light_slots.iter().filter(|&&s| s != u32::MAX).count(), LOCAL_SLOTS);
         // Slightly more influential than a holder: not enough to take its slot.
         influence[0] = 1.2;
-        let second = a.assign(&lights, &influence, false);
+        let second = a.assign(&lights, &influence, &[], false);
         assert_eq!(second.light_slots[0], u32::MAX);
         // Much more influential: takes the slot of the least influential holder (light 2).
         influence[0] = 10.0;
-        let third = a.assign(&lights, &influence, false);
+        let third = a.assign(&lights, &influence, &[], false);
         assert_eq!(third.light_slots[0], first.light_slots[2]);
         assert_eq!(third.light_slots[2], u32::MAX);
         assert!(third.stale[third.light_slots[0] as usize]);
@@ -393,6 +430,35 @@ mod tests {
         assert!(screen_influence(&light, Vec3::ZERO, &planes) > 0.0);
         light.cast_shadows = false;
         assert_eq!(screen_influence(&light, Vec3::ZERO, &planes), 0.0);
+    }
+
+    #[test]
+    fn moving_lights_get_the_slots_left_over() {
+        let lights = lights(LOCAL_SLOTS + 1);
+        // The most influential light moves: every static one is served first.
+        let influence: Vec<f32> = (0..lights.len()).map(|i| if i == 0 { 100.0 } else { 1.0 }).collect();
+        let mut moving = vec![false; lights.len()];
+        moving[0] = true;
+        let mut a = SlotAllocator::default();
+        let crowded = a.assign(&lights, &influence, &moving, false);
+        assert_eq!(crowded.light_slots[0], u32::MAX);
+        // With a slot to spare it gets one.
+        let mut a = SlotAllocator::default();
+        let spare = a.assign(&lights[..LOCAL_SLOTS], &influence[..LOCAL_SLOTS], &moving, false);
+        assert_ne!(spare.light_slots[0], u32::MAX);
+    }
+
+    #[test]
+    fn lights_count_as_moving_until_they_rest_a_while() {
+        let mut lights = lights(2);
+        let mut motion = LightMotion::default();
+        assert_eq!(motion.update(&lights), vec![false, false], "a new scene starts at rest");
+        lights[1].position.x += 0.1;
+        assert_eq!(motion.update(&lights), vec![false, true]);
+        for _ in 1..MOVING_FRAMES {
+            assert_eq!(motion.update(&lights), vec![false, true]);
+        }
+        assert_eq!(motion.update(&lights), vec![false, false], "at rest again");
     }
 
     #[test]

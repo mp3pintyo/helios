@@ -1,7 +1,7 @@
 //! Browser platform layer: canvas surface, DOM input and a requestAnimationFrame loop.
 //!
 //! A page can embed the engine instead of using `index.html`'s full-window demo: it sets
-//! `globalThis.heliosConfig = { scene, screenPercentage, gpuBudgetMs, embedded }` before
+//! `globalThis.heliosConfig = { scene, screenPercentage, gpuBudgetMs, embedded, lights, megaLights }` before
 //! loading the module (query parameters still work and take part as fallbacks), and drives the
 //! running engine through the exported `helios*` functions (scene, camera, sun, hotkeys, HUD).
 //! `embedded: true` keeps keyboard input on the focused canvas and leaves the mouse wheel to
@@ -239,6 +239,10 @@ async fn run() -> Result<(), String> {
         }
         None => None,
     };
+    // `?lights=N`: the cathedral lit by N individual candles (see scenes/candles.rs).
+    if let Some(count) = option_string("lights", "lights").and_then(|v| v.parse().ok()) {
+        crate::scenes::candles::set_candle_lights(count);
+    }
     let mut app = match query_param("stream") {
         // `?stream=URL_BASE`: the scene of the mesh library at URL_BASE (written by
         // `helios --bake-hvm`), its geometry streamed with HTTP range requests.
@@ -271,6 +275,8 @@ async fn run() -> Result<(), String> {
     // `?gi=lumen|lite` (page config `gi`); by default Lumen Lite once dynamic resolution can't
     // keep the budget even at its minimum.
     app.choose_gi(option_string("gi", "gi").as_deref(), &ctx.adapter.get_info());
+    // `?megalights=1`: MegaLights instead of the clustered light loop (key `=` toggles).
+    app.renderer.settings.mega_lights = matches!(option_string("megaLights", "megalights").as_deref(), Some("1" | "true"));
     set_status("");
 
     let hud = document.get_element_by_id("hud").and_then(|e| e.dyn_into::<HtmlElement>().ok());

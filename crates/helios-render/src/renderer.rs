@@ -34,6 +34,7 @@ use crate::lumen::{CardInputs, Lumen};
 use crate::picking::{PickResult, Picker};
 use crate::lumen_lite::{GiMethod, LiteFallback, LiteInputs, LumenLite};
 use crate::motion::MotionTracker;
+use crate::megalights::{MegaLights, MegaLightsInputs};
 use crate::resolution::{self, DynamicResolution, ResolutionController};
 use crate::rvt::RuntimeVirtualTexture;
 use crate::scene::InstanceHandle;
@@ -87,13 +88,18 @@ pub enum DebugView {
     /// Joint weights of skinned meshes: each joint's colour, blended by its weight (grey:
     /// unskinned).
     SkinWeights = 17,
+    /// MegaLights: the light of each sample (one colour per light, dark where the shadow ray
+    /// was blocked), averaged over frames by TSR.
+    MegaLightsSamples = 18,
+    /// MegaLights' local lighting: this frame's samples (left) and denoised (right).
+    MegaLightsDenoising = 19,
     /// Lumen Lite's irradiance probes (spheres shaded with their irradiance; sleeping: blue,
     /// buried in geometry: red) over the irradiance they give each pixel. Runs Lumen Lite.
     LumenLiteProbes = 20,
 }
 
 impl DebugView {
-    pub const ALL: [DebugView; 19] = [
+    pub const ALL: [DebugView; 21] = [
         Self::Lit,
         Self::Clusters,
         Self::Triangles,
@@ -112,8 +118,15 @@ impl DebugView {
         Self::LocalShadowPages,
         Self::Invalidation,
         Self::SkinWeights,
+        Self::MegaLightsSamples,
+        Self::MegaLightsDenoising,
         Self::LumenLiteProbes,
     ];
+
+    /// The view with index `index` (its `--view` number), if any.
+    pub fn from_index(index: usize) -> Option<Self> {
+        Self::ALL.into_iter().find(|&v| v as usize == index)
+    }
 
     pub fn name(self) -> &'static str {
         match self {
@@ -135,6 +148,8 @@ impl DebugView {
             Self::LocalShadowPages => "Local light shadow pages (mips)",
             Self::Invalidation => "Invalidation (movable, re-rendered shadow pages, recomposed SDF bricks)",
             Self::SkinWeights => "Skin weights (joints)",
+            Self::MegaLightsSamples => "MegaLights samples (light per sample, dark = blocked)",
+            Self::MegaLightsDenoising => "MegaLights lighting: samples | denoised",
             Self::LumenLiteProbes => "Lumen Lite probes",
         }
     }
@@ -142,11 +157,6 @@ impl DebugView {
     pub fn next(self) -> Self {
         let position = Self::ALL.iter().position(|&v| v == self).unwrap_or(0);
         Self::ALL[(position + 1) % Self::ALL.len()]
-    }
-
-    /// The view with index `index` (its `--view` number; the indices have gaps).
-    pub fn from_index(index: usize) -> Option<Self> {
-        Self::ALL.into_iter().find(|&v| v as usize == index)
     }
 }
 
@@ -163,6 +173,11 @@ pub struct RenderSettings {
     /// Virtual shadow maps for the most important shadow-casting local lights (others, or all
     /// when off, get distance-field shadows).
     pub local_light_shadow_maps: bool,
+    /// MegaLights: stochastic, denoised direct lighting in which every local light casts soft
+    /// shadows, at a cost that barely grows with the light count (`megalights.rs`). Off: the
+    /// clustered light loop (shadow maps for the 32 most important lights, distance-field shadows
+    /// for four more per pixel).
+    pub mega_lights: bool,
     pub global_illumination: bool,
     /// Final gather of the diffuse GI: Lumen's screen probes or Lumen Lite's irradiance field.
     pub gi_method: GiMethod,
@@ -239,6 +254,7 @@ impl Default for RenderSettings {
             occlusion_culling: true,
             shadows: true,
             local_light_shadow_maps: true,
+            mega_lights: false,
             global_illumination: true,
             gi_method: GiMethod::ScreenProbes,
             gi_lite_fallback: false,
@@ -321,6 +337,7 @@ pub struct Renderer {
     black: wgpu::TextureView,
     gi: GiPass,
     lighting: LightingPass,
+    megalights: MegaLights,
     translucency: Translucency,
     tsr: TsrPass,
     post_fx: PostFxPass,
@@ -405,6 +422,7 @@ impl Renderer {
             .create_view(&Default::default()),
             gi: GiPass::new(device),
             lighting: LightingPass::new(device),
+            megalights: MegaLights::new(device, queue),
             translucency: Translucency::new(device),
             tsr: TsrPass::new(device),
             post_fx: PostFxPass::new(device),
@@ -632,6 +650,10 @@ impl Renderer {
         self.tsr.update(&self.queue, self.targets.output);
         self.hzb.update(&self.queue, &self.targets);
         self.fog.update(&self.device, &self.queue, &scene.fog, self.settings.volumetric_fog, self.time + delta_time, capacity);
+        // MegaLights' debug views sample even while the classic loop shades.
+        let megalights_debug = matches!(self.settings.debug_view, DebugView::MegaLightsSamples | DebugView::MegaLightsDenoising);
+        let megalights = (self.settings.mega_lights || megalights_debug) && self.lights.count > 0;
+        self.megalights.update(&self.device, capacity, megalights);
         if self.stats.poll(self.scene.instance_count) {
             self.update_lod_budget();
         }
@@ -721,6 +743,17 @@ impl Renderer {
             self.fog.record(&mut rec, &inputs, current);
         }
         let reflection = if self.settings.global_illumination { self.lumen.reflection(current).unwrap_or(&self.black) } else { &self.black };
+        let megalights_inputs = MegaLightsInputs {
+            frame: &self.frame_uniform,
+            targets: &self.targets,
+            lights: &self.lights,
+            vsm: &self.vsm,
+            lumen: &self.lumen,
+            samplers: &self.samplers,
+        };
+        if megalights {
+            self.megalights.record(&mut rec, &megalights_inputs, current);
+        }
         let lighting = LightingInputs {
             frame: &self.frame_uniform,
             targets: &self.targets,
@@ -734,8 +767,13 @@ impl Renderer {
             clouds: &self.clouds,
             cloud_texture: self.clouds.output(current),
             fog: &self.fog,
+            megalights: self.megalights.output(current).filter(|_| self.settings.mega_lights),
+            black: &self.black,
         };
         self.lighting.record(&mut rec, &lighting);
+        if megalights && megalights_debug {
+            self.megalights.record_debug(&mut rec, &megalights_inputs, current);
+        }
         if self.settings.debug_view == DebugView::SurfaceCards {
             self.lumen.record_debug(&mut rec, &self.frame_uniform, &self.targets, &self.samplers);
         }
@@ -821,6 +859,7 @@ impl Renderer {
             // Last frame's: the uniforms are written before translucency finds the camera's water
             // body this frame (exposure adapts over several frames anyway).
             (self.translucency.camera_in_water(), flags::UNDERWATER),
+            (s.mega_lights && self.lights.count > 0, flags::MEGALIGHTS),
         ] {
             if enabled {
                 frame_flags |= flag;

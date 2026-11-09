@@ -12,6 +12,7 @@
 #include "lumen_common.wgsl"
 #include "lumen_mesh_sdf.wgsl"
 #include "lights.wgsl"
+#include "brdf.wgsl"
 #include "clouds_common.wgsl"
 #include "fog_common.wgsl"
 #include "stars.wgsl"
@@ -49,6 +50,8 @@
 @group(0) @binding(60) var<uniform> local_vsm: LocalVsm;
 // Per pixel, the visibility (4 bits each) of its ShadowedLights::mapped lights (local_shadows).
 @group(0) @binding(61) var<storage, read_write> local_shadow_mask: array<u32>;
+// MegaLights (megalights.rs): the denoised direct light of every local light.
+@group(0) @binding(62) var megalights_lighting: texture_2d<f32>;
 
 // Volumetric fog between the camera and view depth `depth` (see fog.wgsl).
 fn apply_volumetric_fog(color: vec3<f32>, uv: vec2<f32>, depth: f32) -> vec3<f32> {
@@ -138,8 +141,6 @@ fn mask_visibility(mask: u32, k: u32) -> f32 {
     return f32((mask >> (4u * k)) & 0xfu) / 15.0;
 }
 
-// ---- BRDF ------------------------------------------------------------------------------------
-
 const MAX_SHADOWED_LIGHTS: u32 = 4u;
 // Shadow-mapped lights per pixel shadowed by local_shadows, and how many of them get
 // contact-hardening soft shadows.
@@ -148,33 +149,6 @@ const FILTERED_LIGHTS: u32 = 4u;
 const NO_LIGHT: u32 = 0xffffffffu;
 // Filter taps of local light shadow maps (plus a third as many blocker-search gathers).
 const LOCAL_SHADOW_TAPS: u32 = 8u;
-
-fn d_ggx(n_dot_h: f32, a: f32) -> f32 {
-    let a2 = a * a;
-    let d = n_dot_h * n_dot_h * (a2 - 1.0) + 1.0;
-    return a2 / (PI * d * d);
-}
-
-fn v_smith_ggx_correlated(n_dot_v: f32, n_dot_l: f32, a: f32) -> f32 {
-    let a2 = a * a;
-    let gv = n_dot_l * sqrt(n_dot_v * n_dot_v * (1.0 - a2) + a2);
-    let gl = n_dot_v * sqrt(n_dot_l * n_dot_l * (1.0 - a2) + a2);
-    return 0.5 / max(gv + gl, 1e-5);
-}
-
-fn f_schlick(f0: vec3<f32>, v_dot_h: f32) -> vec3<f32> {
-    return f0 + (vec3<f32>(1.0) - f0) * pow(1.0 - v_dot_h, 5.0);
-}
-
-// Karis' analytic approximation of the split-sum environment BRDF.
-fn env_brdf(f0: vec3<f32>, roughness: f32, n_dot_v: f32) -> vec3<f32> {
-    let c0 = vec4<f32>(-1.0, -0.0275, -0.572, 0.022);
-    let c1 = vec4<f32>(1.0, 0.0425, 1.04, -0.04);
-    let r = roughness * c0 + c1;
-    let a004 = min(r.x * r.x, exp2(-9.28 * n_dot_v)) * r.x + r.y;
-    let ab = vec2<f32>(-1.04, 1.04) * a004 + r.zw;
-    return f0 * ab.x + ab.y;
-}
 
 // Sun transmittance through the cloud layer (see `shadow` in clouds.wgsl).
 fn cloud_shadow(world_position: vec3<f32>) -> f32 {
@@ -397,8 +371,11 @@ fn shade(@builtin(global_invocation_id) gid: vec3<u32>) {
     var color = (diffuse + specular) * sun_light * n_dot_l * shadow;
     let surface_flags = surface_flags_of(motion.w);
 
-    // Local lights from the clustered grid, shadowed as select_shadowed_lights describes.
-    if frame.light_count > 0u {
+    // Local lights: MegaLights' stochastic, denoised lighting, or the clustered grid's lights
+    // shadowed as select_shadowed_lights describes.
+    if has_flag(frame.flags, FLAG_MEGALIGHTS) {
+        color += textureLoad(megalights_lighting, pixel, 0).rgb;
+    } else if frame.light_count > 0u {
         let base = cluster_index(uv, linear_depth) * CLUSTER_WORDS;
         let count = light_grid[base];
         let selected = select_shadowed_lights(base, world_position, n);
@@ -427,11 +404,8 @@ fn shade(@builtin(global_invocation_id) gid: vec3<u32>) {
             } else if listed_at(selected.traced, index) < MAX_SHADOWED_LIGHTS {
                 radiance *= local_light_shadow(world_position + n * 0.04, light.position_range.xyz, light.color.w);
             }
-            let hl = normalize(v + ls.l);
-            let f_l = f_schlick(f0, saturate(dot(v, hl)));
-            let spec_l = d_ggx(saturate(dot(n, hl)), a) * v_smith_ggx_correlated(n_dot_v, max(nl, 1e-4), a) * f_l;
-            let diff_l = diffuse_color / PI * (vec3<f32>(1.0) - f_l);
-            color += (diff_l * (nl + wrap * albedo) + spec_l * nl) * radiance;
+            let brdf = evaluate_brdf(n, v, ls.l, n_dot_v, f0, a);
+            color += (diffuse_color * brdf.diffuse * (nl + wrap * albedo) + brdf.specular * nl) * radiance;
         }
     }
     if surface_flags == 1u {

@@ -9,8 +9,10 @@ const CLUSTER_Y: u32 = 9u;
 const CLUSTER_Z: u32 = 24u;
 const CLUSTER_NEAR: f32 = 0.1;
 const CLUSTER_FAR: f32 = 2000.0;
-const LIGHTS_PER_CLUSTER: u32 = 63u;
-const CLUSTER_WORDS: u32 = 64u; // count + indices
+// Hundreds of lights can reach one froxel (a candle-lit nave): MegaLights samples any number of
+// them at a constant cost, the classic loop visits them all.
+const LIGHTS_PER_CLUSTER: u32 = 255u;
+const CLUSTER_WORDS: u32 = 256u; // count + indices
 const LIGHT_SPOT: f32 = 1.0;
 
 struct GpuLight {

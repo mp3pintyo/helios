@@ -1,0 +1,126 @@
+[
+  {
+    "id": "megalights",
+    "title": "MegaLights: sztochasztikus, árnyékolt közvetlen fény sok helyi fényforrásból",
+    "area": "Árnyékok",
+    "kind": "feature",
+    "summary": "Az UE 5.5 MegaLights megfelelője: a klasszikus, fürtözött fényciklus helyett pixelenként rögzített költségvetés, amelyben minden pont- és spotfény lágy árnyékot vet. Fénymintavétel, árnyéksugarak, demodulált árnyalás és zajszűrés; a költség alig nő a fények számával.",
+    "details": "RenderSettings::mega_lights (`=` billentyű). 2×2 blokkonként, egy képkockánként vándorló reprezentatív pixelen négy fényt választ a froxel fénylistájából a közös BRDF-fel (brdf.wgsl) számolt árnyék nélküli hozzájárulás arányában (szisztematikus újramintavétel legfeljebb 32 jelöltből; hosszabb listáknál torzítatlan, rétegzett részhalmaz). Láthatósági irányítás: 8×8-as csempénként bitmaszk a megcélzott és az elért fényekről; ahol az előző képkockában minden sugár akadályba ütközött, a fény súlya a tizedére csökken. Mintánként egy árnyéksugár a fény korongjának véletlen pontjára: 1 m képernyőtérbeli követés, majd a fény virtuális árnyéktérképe (SMRT-szerű árnyéktérkép-menetelés) vagy a Lumen távolságmezői. Az árnyalás demodulált (diffúz szín nélkül, spekuláris a környezeti BRDF-fel osztva), a zajszűrő SVGF-szerű: időbeli felhalmozás (24/12 képkocka, varianciavágás) és négy à-trous iteráció varianciavezérelt élmegőrzéssel; az utolsó iteráció visszamodulál egy textúrába, amit a világítási menet hozzáad.",
+    "metrics": "Katedrális éjjel, 1600×900, RTX 3090 (megosztott), 4 futás minimuma; direkt megvilágítás összesen (fénycsoportosítás + árnyékmaszk + világítás + MegaLights) klasszikus → MegaLights: 33 fény 1,03 → 1,84 ms, 100: 2,45 → 2,52, 300: 2,78 → 2,54, 1000: 3,53 → 2,74 ms (mellékhajó: 3,63 → 2,61) – a klasszikus út ebből pixelenként csak 36 fényt árnyékol. Teljes képkocka 1000 fénynél 10,55 → 9,75 ms. Kép a klasszikushoz képest 33 fénynél: 39,7 dB PSNR. Böngészőben (1280×720, 300 fény) 1,2 ms.",
+    "showcase": "Katedrális éjjel, gyertyafénnyel: ?scene=cathedral&lights=1000&megalights=1, nap 200°/-30°, kamera a déli mellékhajóban (eye 15,1.7,9 → at 35,0.8,12.5). Előtte/utána: `=` billentyű (klasszikus ↔ MegaLights) – a klasszikus úton a fogadalmi gyertyatartók polcai alatt átszűrődik a fény, MegaLights-szal árnyékot vetnek. Debug nézet 18 (minták) és 19 (nyers | zajszűrt).",
+    "modules": [
+      "crates/helios-render/src/megalights.rs",
+      "crates/helios-render/src/shaders/megalights_sample.wgsl",
+      "crates/helios-render/src/shaders/megalights_shade.wgsl",
+      "crates/helios-render/src/shaders/megalights_denoise.wgsl",
+      "crates/helios-render/src/shaders/megalights_common.wgsl",
+      "crates/helios-render/src/shaders/megalights_surface.wgsl",
+      "crates/helios-render/src/renderer.rs",
+      "crates/helios-render/src/passes/shading.rs",
+      "crates/helios-render/src/shaders/lighting.wgsl"
+    ]
+  },
+  {
+    "id": "megalights-light-sampling",
+    "title": "MegaLights fénymintavétel: újramintavétel és láthatósági irányítás",
+    "area": "Árnyékok",
+    "kind": "feature",
+    "summary": "2×2 blokkonként négy fény a froxel listájából, a BRDF-fel súlyozott, árnyék nélküli hozzájárulás arányában, állandó költséggel tetszőleges hosszú listán is. Az előző képkocka láthatósága terel: a teljesen takart fények kevesebb sugarat kapnak.",
+    "details": "megalights_sample.wgsl `generate`: a reprezentatív pixel képkockánként körbejár a blokk négy pixelén (blokkonként dekorrelálva). Legfeljebb 32 jelölt; hosszabb listánál rétegzett véletlen részhalmaz, ahol minden fény esélye 32/N, súlya N/32-szeres (Horvitz–Thompson), így a becslés torzítatlan. A négy választás szisztematikus újramintavétel a súlyok futó összegén (egymástól szétszórt fények), mindegyik a torzítatlan hozzájárulási súllyal (összsúly / saját súly). Súlypadló (a sugárzás 0,4%-a) a reprezentatív normálisa mögötti fényekre, mert a blokk többi pixelét még megvilágíthatják. Irányítás: 8×8-as csempénként 256 bites maszk (fényindex mod 256) a megcélzott és az elért fényekről; az előző képkocka visszavetített csempéjében mindenhol takart fény súlya ×0,1.",
+    "metrics": "Mintavételi menet 1600×900-on: 0,16 ms (33 fény) → 0,31 ms (100–1000 fény, legfeljebb 32 jelölt blokkonként: állandó).",
+    "showcase": "Debug nézet 18 (`--view 18`): minden minta fénye külön színárnyalattal, sötéten, ahol a sugár akadályba ütközött – a boltozatcellákban egy-egy csillárgyertya dominál, a gyertyatartó-polcok előtt sok fény keveredik.",
+    "modules": [
+      "crates/helios-render/src/shaders/megalights_sample.wgsl",
+      "crates/helios-render/src/shaders/megalights_common.wgsl"
+    ]
+  },
+  {
+    "id": "megalights-shadow-rays",
+    "title": "MegaLights árnyéksugarak: képernyő-követés, VSM-menetelés, távolságmezők",
+    "area": "Árnyékok",
+    "kind": "feature",
+    "summary": "Mintánként egy sugár a fény korongjának véletlen pontjára, így a forrás mérete adja a félárnyékot. Hardveres sugárkövetés nélkül: rövid képernyőtérbeli követés, utána a fény virtuális árnyéktérképe vagy a Lumen távolságmezői.",
+    "details": "megalights_sample.wgsl `trace`: 8 lépéses, 1 m-es lineáris menetelés a mélységpufferen (kontaktárnyékok, vastagság-feltevéssel). Ha a fénynek van VSM-slotja: árnyéktérkép-sugármenetelés (UE SMRT, 8 lépés) – az első lépés a fogadó klasszikus mélységtesztje, a későbbiek az oldalt álló takarókat látják, ahogy a sugár a fény pontjához tart, feltételezett vastagságon belül. Különben a Lumen-mezők a képernyő-követés végétől: mesh SDF-ek a két végtől 2 m-en belül, közte a globális mező, keskeny kúppal; a fény saját foglalatát (gyertyaszár) a forrás sugarával előbb megállva kerüli. A 32 árnyéktérképes fény korlátja így csak a módszert dönti el: minden fény árnyékot vet.",
+    "metrics": "Sugárkövetési menet 1600×900-on: 0,40 ms (33 fény, főleg VSM) → 0,84–0,89 ms (100–1000 fény, a távolságmezős sugarak aránya nő). Minden fény árnyékol, a klasszikus út 36-ot pixelenként.",
+    "showcase": "Közeli kép egy gyertyatartóról és a padokról éjjel (eye 11,1.7,0.3 → at 14.5,0.6,5.5), klasszikus PCSS ↔ MegaLights (`=`).",
+    "modules": [
+      "crates/helios-render/src/shaders/megalights_sample.wgsl"
+    ]
+  },
+  {
+    "id": "megalights-denoiser",
+    "title": "MegaLights zajszűrő: időbeli felhalmozás és varianciavezérelt à-trous szűrés",
+    "area": "Árnyékok",
+    "kind": "feature",
+    "summary": "SVGF-szerű zajszűrő demodulált diffúz és spekuláris fényen, így a textúrák élesek maradnak. Álló kamerával nem villog jobban, mint a klasszikus út.",
+    "details": "megalights_denoise.wgsl: `temporal` – visszavetítés a mozgásvektorokkal, mélységellenőrzött diszokklúzió (r32uint info: képkockaszám + lineáris mélység), 2,5σ varianciavágás a nyers minták szomszédságán, legfeljebb 24 (diffúz) / 12 (spekuláris) képkocka, luminancia második momentumával. `spatial` – négy à-trous iteráció (3×3 binomiális, lépésköz 1, 2, 4, 8): mélységsík (a reverse-Z mélység képernyőtérbeli meredeksége mentén), normális és a szórással skálázott luminancia élmegőrzés; a variancia a súlyok négyzetével terjed. Az utolsó iteráció visszamodulál (diffúz szín × diffúz + környezeti BRDF × spekuláris). A ping-pong a nyers és az előző képkocka history-textúráit használja újra: nincs külön átmeneti textúra.",
+    "metrics": "Időbeli 0,14 ms + térbeli 0,58 ms 1600×900-on (az első, 5×5-ös B3 változat 3 iterációval 1,13 ms volt). Villogás álló kamerával (>24/255-nél többet változó pixelek): hajó 0,0093 → 0,0091 %, közeli 0,0017 → 0,0009 %, 1000 fényes mellékhajó 0,0005 → 0,0007 % (klasszikus → MegaLights).",
+    "showcase": "Debug nézet 19 (`--view 19`): bal fele az aktuális képkocka nyers mintái, jobb fele a zajszűrt eredmény, köztük fehér vonal.",
+    "modules": [
+      "crates/helios-render/src/shaders/megalights_denoise.wgsl",
+      "crates/helios-render/src/shaders/megalights_shade.wgsl",
+      "crates/helios-render/src/megalights.rs"
+    ]
+  },
+  {
+    "id": "megalights-candlelit-cathedral",
+    "title": "Gyertyafényes katedrális: akár 1008 árnyékot vető gyertya",
+    "area": "Jelenetek és demó",
+    "kind": "feature",
+    "summary": "A `--lights N` / `?lights=N` kapcsolóval a katedrális minden gyertyalángja saját fényforrás, a mellékhajók falai mellett fogadalmi gyertyatartó-polcokkal. Alapértelmezésben a jelenet változatlan (33 fény).",
+    "details": "scenes/candles.rs: 60 gyertyatartó-, 88 csillár- és 2 oltárgyertya egyenként, plusz öblönként két háromszintes fogadalmi polc (3×13 mécses, összesen 858), legfeljebb 1008 fény; az első N ég (előbb a berendezés, aztán a polcok gyertyái minden polcon szétosztva). A polcok hálói minden más háló után jönnek, így a korábban sütött .hvm könyvtárak érvényesek maradnak. Böngészőben `heliosConfig.lights`; MegaLights: `--megalights`, `?megalights=1`, `heliosConfig.megaLights`.",
+    "metrics": "33 → 1008 fény; a jelenet felépítése ~6 s (közepes részletesség), a polcok 3 új hálót és 66 példányt adnak.",
+    "showcase": "?scene=cathedral&lights=1000&megalights=1 éjjel (heliosSetSun(200, -30)); kamera a mellékhajóban a polcok felé (heliosLookAt(15, 1.7, 9, 35, 0.8, 12.5)).",
+    "modules": [
+      "crates/helios-demo/src/scenes/candles.rs",
+      "crates/helios-demo/src/scenes/cathedral.rs",
+      "crates/helios-demo/src/main.rs",
+      "crates/helios-demo/src/web.rs",
+      "crates/helios-demo/src/app.rs"
+    ]
+  },
+  {
+    "id": "shared-brdf",
+    "title": "Közös BRDF WGSL-modul a direkt megvilágításhoz",
+    "area": "Anyagok és textúrák",
+    "kind": "fix",
+    "summary": "A GGX/Lambert BRDF függvényei eddig két shaderben (lighting, translucency) külön másolatban éltek. Most egyetlen brdf.wgsl adja őket, a klasszikus fényciklus és a MegaLights ugyanazt az evaluate_brdf függvényt hívja.",
+    "details": "brdf.wgsl: d_ggx, v_smith_ggx_correlated, f_schlick, env_brdf és az új evaluate_brdf (diffúz súly diffúz szín nélkül + GGX spekuláris, N·L előtt). A lighting.wgsl helyi fényciklusa és a MegaLights mintavétele/árnyalása ezt hívja, a translucency.wgsl a másolat helyett beemeli. Egy későbbi anyagmodell-csere (Substrate-szerű BRDF-ek) így egy helyen történik.",
+    "metrics": "A klasszikus kép a változás előttivel azonos zajszinten (katedrális, 1280×720: max 13/255, PSNR 59,7 dB – két futás az eredeti binárissal egymás közt 59,7 dB).",
+    "showcase": "Nincs látható különbség (refaktor).",
+    "modules": [
+      "crates/helios-render/src/shaders/brdf.wgsl",
+      "crates/helios-render/src/shaders/lighting.wgsl",
+      "crates/helios-render/src/shaders/translucency.wgsl"
+    ]
+  },
+  {
+    "id": "light-grid-capacity",
+    "title": "A froxelek fénylistája 63 helyett 255 fényt tart",
+    "area": "Árnyékok",
+    "kind": "fix",
+    "summary": "Száz és ezer fénynél egy froxelbe több mint 63 fény is ér; eddig a fölösleg csendben elveszett. Most 255 fér el, a MegaLights állandó költséggel mintavételez belőlük.",
+    "details": "lights.wgsl / lights.rs: LIGHTS_PER_CLUSTER 255, CLUSTER_WORDS 256 (a fényrács 0,9 → 3,5 MiB). A meglévő jelenetek (≤ 33 fény) bitre azonosan renderelnek.",
+    "metrics": "Fényrács 0,9 → 3,5 MiB; 33 fénynél változatlan költség.",
+    "showcase": "Gyertyafényes katedrális 1000 fénnyel: a polcok előtt egy froxelbe 100+ fény ér.",
+    "modules": [
+      "crates/helios-render/src/lights.rs",
+      "crates/helios-render/src/shaders/lights.wgsl"
+    ]
+  },
+  {
+    "id": "debug-view-index-lookup",
+    "title": "Debug nézetek index szerinti keresése (nem folytonos sorszámok)",
+    "area": "Platform és eszközök",
+    "kind": "fix",
+    "summary": "A `--view i`, a heliosSetView(i) és a `V` léptetés eddig feltételezte, hogy a debug nézetek sorszámai folytonosak. Mostantól az index szerint keresnek, így a 18-as és 19-es nézet (és a köztes, más ágakon kiosztott sorszámok) helyesen működik.",
+    "details": "DebugView::from_index és pozíció alapú next(); main.rs és web.rs ezt használja.",
+    "metrics": "—",
+    "showcase": "`--view 18`, `--view 19`.",
+    "modules": [
+      "crates/helios-render/src/renderer.rs",
+      "crates/helios-demo/src/main.rs",
+      "crates/helios-demo/src/web.rs"
+    ]
+  }
+]

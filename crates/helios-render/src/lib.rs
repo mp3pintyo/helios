@@ -46,6 +46,7 @@ mod lights;
 mod lumen;
 mod lumen_dynamic;
 mod lumen_lite;
+mod megalights;
 mod motion;
 mod near_field;
 mod page_cache;

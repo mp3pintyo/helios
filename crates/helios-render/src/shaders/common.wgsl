@@ -27,10 +27,12 @@ const DEBUG_SURFACE_CARDS: u32 = 14u;
 const DEBUG_LOCAL_SHADOW_PAGES: u32 = 15u;
 const DEBUG_INVALIDATION: u32 = 16u;
 const DEBUG_SKIN_WEIGHTS: u32 = 17u;
+const DEBUG_MEGALIGHTS_SAMPLES: u32 = 18u;
+const DEBUG_MEGALIGHTS_DENOISING: u32 = 19u;
 
 /// Debug views that show lit (exposed, tonemapped) radiance rather than raw attributes.
 fn is_lit_view(view: u32) -> bool {
-    return view == DEBUG_NONE || view == DEBUG_INDIRECT || view == DEBUG_REFLECTIONS;
+    return view == DEBUG_NONE || view == DEBUG_INDIRECT || view == DEBUG_REFLECTIONS || view == DEBUG_MEGALIGHTS_DENOISING;
 }
 
 // Frame flags.
@@ -41,6 +43,8 @@ const FLAG_AUTO_EXPOSURE: u32 = 8u;
 const FLAG_FOG: u32 = 16u;
 const FLAG_HISTORY_VALID: u32 = 32u;
 const FLAG_UNDERWATER: u32 = 64u;
+// Local lights are shaded by MegaLights (megalights.rs) instead of the clustered loop.
+const FLAG_MEGALIGHTS: u32 = 128u;
 
 const INVALID_PAGE: u32 = 0xffffffffu;
 const INSTANCE_CAST_SHADOW: u32 = 1u;

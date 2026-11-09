@@ -126,11 +126,13 @@ mod native {
         pub select: Vec<u32>,
         /// GI final gather: `lumen`, `lite` or `auto` (see `DemoApp::choose_gi`).
         pub gi: Option<String>,
+        /// MegaLights instead of the clustered light loop.
+        pub megalights: bool,
     }
 
     impl Options {
         pub fn parse(args: &[String]) -> Self {
-            let mut o = Options { screenshot: None, size: (1600, 900), frames: 90, view: None, detail: Detail::High, scene: SceneKind::Valley, camera: None, eye: None, at: None, occlusion: true, sw_raster: true, rvt: true, svt: true, animate_sun: false, lod: None, fov: None, pool_mb: None, texture_pool_mb: None, texture_compression: true, switch_to: None, dump_dir: None, dump_count: 16, keys: Vec::new(), keys_at: None, hold: Vec::new(), gltf: None, ground: true, bake_hvm: None, stream_from: None, io_latency_ms: 0, sun: None, move_light: false, full_invalidation: false, movers: None, static_motion: false, screen_percentage: None, gpu_budget_ms: None, local_exposure: Some(Default::default()), scene_file: None, select: Vec::new(), no_skinning: false, gi: None };
+            let mut o = Options { screenshot: None, size: (1600, 900), frames: 90, view: None, detail: Detail::High, scene: SceneKind::Valley, camera: None, eye: None, at: None, occlusion: true, sw_raster: true, rvt: true, svt: true, animate_sun: false, lod: None, fov: None, pool_mb: None, texture_pool_mb: None, texture_compression: true, switch_to: None, dump_dir: None, dump_count: 16, keys: Vec::new(), keys_at: None, hold: Vec::new(), gltf: None, ground: true, bake_hvm: None, stream_from: None, io_latency_ms: 0, sun: None, move_light: false, full_invalidation: false, movers: None, static_motion: false, screen_percentage: None, gpu_budget_ms: None, local_exposure: Some(Default::default()), scene_file: None, select: Vec::new(), no_skinning: false, gi: None, megalights: false };
             let mut scene_given = false;
             let mut it = args.iter().skip(1);
             while let Some(arg) = it.next() {
@@ -196,6 +198,8 @@ mod native {
                     "--scene-file" => o.scene_file = Some(value()),
                     "--select" => o.select = value().split(',').filter_map(|x| x.parse().ok()).collect(),
                     "--gi" => o.gi = Some(value()),
+                    "--megalights" => o.megalights = true,
+                    "--lights" => helios_demo::scenes::candles::set_candle_lights(value().parse().unwrap_or(0)),
                     // Highlight contrast, shadow contrast and optionally the blurred luminance blend.
                     "--local-exposure" => {
                         let v: Vec<f32> = value().split(',').filter_map(|x| x.parse().ok()).collect();
@@ -312,6 +316,7 @@ mod native {
             if self.static_motion {
                 app.motion.set_mobility(&mut app.scene, helios_render::Mobility::Static);
             }
+            app.renderer.settings.mega_lights |= self.megalights;
             if let Some(budget) = self.gpu_budget_ms {
                 app.gpu_budget_ms = budget;
                 let mut dynamic = helios_render::DynamicResolution::with_budget(budget);

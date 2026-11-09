@@ -63,16 +63,24 @@ impl Default for DemoMotion {
 
 impl DemoMotion {
     /// Moves `instances` (made [`Mobility::Movable`]) and `lights` by `motion` from their current
-    /// placement.
-    pub fn add(&mut self, scene: &mut Scene, motion: Motion, instances: &[InstanceHandle], lights: &[LightHandle]) {
+    /// placement. Returns the group's index (for [`DemoMotion::attach_lights`]).
+    pub fn add(&mut self, scene: &mut Scene, motion: Motion, instances: &[InstanceHandle], lights: &[LightHandle]) -> usize {
         for &h in instances {
             scene.set_mobility(h, Mobility::Movable);
         }
-        self.groups.push(Group {
-            motion,
-            instances: instances.iter().map(|&h| (h, scene.transform(h))).collect(),
-            lights: lights.iter().map(|&l| (l, scene.light_mut(l).position)).collect(),
-        });
+        self.groups.push(Group { motion, instances: instances.iter().map(|&h| (h, scene.transform(h))).collect(), lights: Vec::new() });
+        let group = self.groups.len() - 1;
+        self.attach_lights(scene, group, lights);
+        group
+    }
+
+    /// Adds `lights` to group `group`: they move with it from their current positions (lights
+    /// created after the group's instances, e.g. one per candle of a swinging chandelier).
+    pub fn attach_lights(&mut self, scene: &mut Scene, group: usize, lights: &[LightHandle]) {
+        let group = &mut self.groups[group];
+        // Rest positions: undo the motion so far (none before the first update).
+        let to_rest = group.motion.at(self.time).inverse();
+        group.lights.extend(lights.iter().map(|&l| (l, to_rest.transform_point3(scene.light_mut(l).position))));
     }
 
     /// Keeps the first `count` groups moving; the others stay where they are, static again
@@ -142,5 +150,24 @@ mod tests {
             assert!(pendulum.at(t).transform_point3(Vec3::new(1.0, 8.0, 0.0)).distance(Vec3::new(1.0, 8.0, 0.0)) <= 12.0 * 0.05 + 1e-3);
         }
         assert!(motions[1].at(0.0).abs_diff_eq(Mat4::IDENTITY, 1e-5) && motions[0].at(0.0).abs_diff_eq(Mat4::IDENTITY, 1e-5));
+    }
+
+    #[test]
+    fn lights_attached_later_move_with_their_group() {
+        let mut scene = Scene::new();
+        let light = |scene: &mut Scene| scene.add_light(helios_render::Light::point(Vec3::new(1.0, 8.0, 0.0), Vec3::ONE, 1.0, 5.0));
+        let first = light(&mut scene);
+        let mut motion = DemoMotion::default();
+        let pendulum = Motion::Pendulum { pivot: Vec3::new(1.0, 20.0, 0.0), axis: Vec3::Z, amplitude: 0.05, length: 12.0, phase: 0.3 };
+        let group = motion.add(&mut scene, pendulum, &[], &[first]);
+        motion.update(&mut scene, 1.1);
+        // Attached mid-swing at the first light's current position: they move as one.
+        let second = light(&mut scene);
+        let swung = scene.light_mut(first).position;
+        scene.light_mut(second).position = swung;
+        motion.attach_lights(&mut scene, group, &[second]);
+        motion.update(&mut scene, 0.7);
+        assert!(scene.light_mut(first).position.distance(scene.light_mut(second).position) < 1e-4);
+        assert!(scene.light_mut(first).position.distance(swung) > 1e-3, "still swinging");
     }
 }

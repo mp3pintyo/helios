@@ -11,7 +11,7 @@ use crate::util::{bind, bind_group, bind_group_layout, compute_pipeline, storage
 
 pub const MAX_LIGHTS: usize = 1024;
 const CLUSTERS: u32 = 16 * 9 * 24;
-const CLUSTER_WORDS: u32 = 64;
+const CLUSTER_WORDS: u32 = 256;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
