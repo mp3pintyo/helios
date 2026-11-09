@@ -25,6 +25,7 @@ const DEBUG_SDF: u32 = 12u;
 const DEBUG_REFLECTIONS: u32 = 13u;
 const DEBUG_SURFACE_CARDS: u32 = 14u;
 const DEBUG_LOCAL_SHADOW_PAGES: u32 = 15u;
+const DEBUG_INVALIDATION: u32 = 16u;
 const DEBUG_SKIN_WEIGHTS: u32 = 17u;
 
 /// Debug views that show lit (exposed, tonemapped) radiance rather than raw attributes.
@@ -44,8 +45,10 @@ const FLAG_UNDERWATER: u32 = 64u;
 const INVALID_PAGE: u32 = 0xffffffffu;
 const INSTANCE_CAST_SHADOW: u32 = 1u;
 const INSTANCE_ALPHA_MASKED: u32 = 2u;
-const INSTANCE_HIDDEN: u32 = 8u;        // hidden in an editor: culled for every view
 const INSTANCE_TRANSLUCENT: u32 = 4u;   // drawn by the forward translucency pass only
+const INSTANCE_HIDDEN: u32 = 8u;        // hidden in an editor: culled for every view
+const INSTANCE_MOVABLE: u32 = 16u;      // Mobility::Movable: a dynamic shadow caster
+// Bits 12..32: the skin palette index (INSTANCE_SKIN_SHIFT, skin_palette.wgsl).
 
 // Visible cluster entry flags (entry.z).
 const CLUSTER_SOFTWARE: u32 = 1u;

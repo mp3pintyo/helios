@@ -4,6 +4,7 @@ pub mod app;
 pub mod app_editor;
 pub mod editor;
 pub mod mesh_store;
+pub mod motion;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod native_editor;
 pub mod scenes;

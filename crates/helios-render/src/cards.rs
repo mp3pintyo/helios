@@ -215,6 +215,8 @@ struct Allocator {
     /// Frame each physical page was last scheduled in.
     scheduled: Vec<u32>,
     refresh_cursor: usize,
+    /// Moved instances whose pages are relit before the round-robin refresh.
+    relight: Vec<usize>,
     bias: u32,
     frame: u32,
 }
@@ -271,6 +273,20 @@ impl CardCache {
     /// Pages to light this frame (`light_cards` workgroups).
     pub fn update_count(&self) -> u32 {
         self.update_count as u32
+    }
+
+    /// Moves card instance `k` (a distance-field instance) to `world` with world `bounds`: its
+    /// cards move along (no recapture) and its pages are relit first in the next update, since
+    /// their lighting depends on where they are.
+    pub fn move_instance(&mut self, queue: &wgpu::Queue, k: usize, world: glam::Mat4, bounds: (Vec3, Vec3)) {
+        let Some(instance) = self.allocator.instances.get_mut(k) else { return };
+        instance.bounds = bounds;
+        let to_local = world.inverse();
+        let rows: [[u32; 4]; 6] = std::array::from_fn(|r| if r < 3 { to_local.row(r) } else { world.row(r - 3) }.to_array().map(f32::to_bits));
+        queue.write_buffer(&self.data, (k * INSTANCE_VEC4S * 16) as u64, bytemuck::cast_slice(&rows));
+        if instance.mesh.is_some() && !self.allocator.relight.contains(&k) {
+            self.allocator.relight.push(k);
+        }
     }
 
     /// Captures the meshes (when the geometry changed) and lays out the cards of
@@ -416,6 +432,7 @@ impl Allocator {
             owners: vec![[0, NONE, 0, 0]; PAGE_COUNT],
             scheduled: vec![u32::MAX; PAGE_COUNT],
             refresh_cursor: 0,
+            relight: Vec::new(),
             bias: 0,
             frame: 0,
         }
@@ -428,8 +445,28 @@ impl Allocator {
         let mut updates = Vec::new();
         self.choose_bias(camera);
         self.allocate(camera, &mut updates);
+        self.relight(&mut updates);
         self.refresh(&mut updates);
         updates
+    }
+
+    /// Schedules the pages of moved instances within half the frame's budget, so the refresh of
+    /// everything else keeps going while many instances move (the rest stay queued).
+    fn relight(&mut self, updates: &mut Vec<[u32; 4]>) {
+        let budget = (updates.len() + UPDATE_BUDGET / 2).min(UPDATE_BUDGET);
+        while let Some(&i) = self.relight.first() {
+            let pages = &self.instances[i].pages;
+            if updates.len() + pages.len() > budget && !updates.is_empty() {
+                break;
+            }
+            for &page in pages {
+                if self.scheduled[page as usize] != self.frame {
+                    self.scheduled[page as usize] = self.frame;
+                    updates.push(self.owners[page as usize]);
+                }
+            }
+            self.relight.remove(0);
+        }
     }
 
     fn distance(&self, i: usize, camera: Vec3) -> f32 {

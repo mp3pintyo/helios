@@ -294,6 +294,13 @@ impl SkinPalettes {
         );
         self.moving_shadows = scene.instances.iter().any(|i| i.cast_shadow && i.skin.is_some_and(|s| moving[s.0 as usize]));
     }
+
+    /// The largest reach of `skin` since the scene was loaded (object space, as of the last
+    /// [`SkinPalettes::sync`]): every pose a cached shadow page may still show lies within it
+    /// of the rest pose.
+    pub fn largest_reach(&self, skin: SkinHandle) -> f32 {
+        self.reach_max.get(skin.0 as usize).copied().unwrap_or(0.0)
+    }
 }
 
 #[cfg(test)]

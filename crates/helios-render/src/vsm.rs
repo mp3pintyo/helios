@@ -13,11 +13,12 @@
 //!    depth atlas, and the hardware clusters are then drawn on top.
 //!
 //! With a static sun almost nothing is re-rendered from frame to frame — the main win of
-//! virtual shadow maps besides their resolution. Geometry streaming and wind-animated vegetation
-//! invalidate only the cached pages under the instances concerned ([`PageInvalidation`]).
+//! virtual shadow maps besides their resolution. Geometry streaming, wind-animated vegetation
+//! and moved instances invalidate only the cached pages under the instances concerned
+//! ([`PageInvalidation`], `vsm_motion.rs`).
 //!
 //! **Static and dynamic casters** (UE5's "static separate" page caching). Casters the wind moves
-//! this frame are *dynamic*, all others *static*. A page that must be refreshed only because
+//! this frame and `Mobility::Movable` instances are *dynamic*, all others *static*. A page that must be refreshed only because
 //! dynamic casters moved keeps the depth of its static casters in a *static layer* — the page's
 //! tile of the software raster's u32 mirror, which is otherwise only scratch space between the
 //! software raster and the page clear, so the static layers cost no memory of their own. Such a
@@ -27,7 +28,7 @@
 //! the first time it needs such a refresh: it is rendered in full once more, its static casters
 //! first, whose depth is then copied into the mirror (`shaders/vsm_static.wgsl`), then its dynamic
 //! ones. Anything that changes static casters (the sun or a light moving, scene changes,
-//! streaming of static instances, the wind being switched on or off) frees the page, so it is
+//! streaming or moving static instances, the wind being switched on or off) frees the page, so it is
 //! rendered in full again; a caster fading into or out of the wind with the camera's distance
 //! only makes the static layers under it stale. The sampled atlas always holds the merged result.
 //!
@@ -53,6 +54,7 @@ use crate::targets::FrameTargets;
 use crate::util::{bind, bind_group, bind_group_layout, compute_pipeline, pipeline_layout, storage_buffer, uniform_buffer, workgroups};
 use crate::vsm_local::{self, LocalCull, LocalFrame, LocalShadows};
 use crate::skin::{skin_entry, skin_resource};
+use crate::vsm_motion::{self, ShadowMove};
 use crate::wind::{wind_entry, wind_resource};
 use crate::Camera;
 
@@ -173,6 +175,10 @@ pub struct VsmFrame<'a> {
     /// The wind or skeletal animation moves shadow casters: cached pages under them re-render
     /// these (dynamic) casters as they move.
     pub wind: bool,
+    /// Shadow casters moved this frame (only the pages under them are re-rendered).
+    pub moves: &'a [ShadowMove],
+    /// Some instance moved or changed mobility (casters may change layer).
+    pub instances_changed: bool,
     /// View depth up to which volumetric fog samples the shadow map (0 = no volumetrics):
     /// coarse pages are requested throughout that part of the frustum.
     pub volume_distance: f32,
@@ -226,6 +232,8 @@ pub struct VirtualShadowMap {
     residency_changed: bool,
     /// The wind moves shadow casters this frame.
     wind: bool,
+    /// Instances moved or changed mobility this frame: their footprints are in the list already.
+    instances_changed: bool,
     /// The wind moved shadow casters when the invalidation last ran: when it stops, the casters
     /// it moved return to the static layers once more.
     wind_collected: bool,
@@ -453,6 +461,7 @@ impl VirtualShadowMap {
             last_sun: Vec3::ZERO,
             residency_changed: true,
             wind: false,
+            instances_changed: false,
             wind_collected: false,
             enabled: false,
         }
@@ -505,6 +514,10 @@ impl VirtualShadowMap {
             draw_capacity: DRAW_CAPACITY,
             eye: f.camera.position.extend(f.volume_distance),
         };
+        self.instances_changed = f.instances_changed;
+        if f.instances_changed {
+            self.invalidation.write_moves(queue, &vsm_motion::footprints(f.moves, &light_view));
+        }
         let mut cache = self.cache.default_params(f.frame, RETAIN_FRAMES, 1);
         cache.level_pages = LEVEL_PAGES;
         cache.level_count = MAX_LEVELS as u32;
@@ -624,9 +637,10 @@ impl VirtualShadowMap {
             }
         }
         let residency_changed = std::mem::take(&mut self.residency_changed);
-        if residency_changed || self.wind || self.wind_collected {
+        if residency_changed || self.wind || self.wind_collected || self.instances_changed {
             let inputs = InvalidationInputs { uniform: &self.uniform, local: &self.local.uniform, cache: &self.cache, info: &self.info };
-            self.invalidation.record(rec, &inputs, scene, residency_changed, self.wind != self.wind_collected);
+            let switched = self.wind != self.wind_collected;
+            self.invalidation.record(rec, &inputs, scene, residency_changed, switched, self.instances_changed);
             self.wind_collected = self.wind;
         }
         self.cache.record(rec);
@@ -835,9 +849,9 @@ struct InvalidationInputs<'a> {
 }
 
 /// Invalidates cached shadow pages under instances whose geometry changed (see
-/// `shaders/vsm_invalidate.wgsl`): their streamed pages changed residency, or the wind moves
-/// them. Only those pages are re-rendered instead of the whole cache, and only their dynamic
-/// casters where the static ones did not change.
+/// `shaders/vsm_invalidate.wgsl`): their streamed pages changed residency, the wind moves them
+/// or they were moved ([`vsm_motion`]). Only those pages are re-rendered instead of the whole
+/// cache, and only their dynamic casters where the static ones did not change.
 struct PageInvalidation {
     layout: wgpu::BindGroupLayout,
     /// Indexed by [residency changed][wind switched on or off]: the first also collects
@@ -860,7 +874,7 @@ impl PageInvalidation {
     /// shadow casters within the wind's disable distance.
     const CAPACITY: u64 = 16383;
     /// `struct Footprints` in vsm_invalidate.wgsl: the count, then 16-byte aligned items of
-    /// `struct Footprint` (vec4, vec2, 3 × f32: 36 bytes, padded to 48).
+    /// `struct Footprint` (vec4, vec2, 3 × f32, vec2 at 40: 48 bytes).
     const FOOTPRINTS_HEADER: u64 = 16;
     const FOOTPRINT_BYTES: u64 = 48;
 
@@ -893,10 +907,32 @@ impl PageInvalidation {
         }
     }
 
+    /// Starts the frame's footprint list with the moves' (`record` then appends to it).
+    fn write_moves(&self, queue: &wgpu::Queue, footprints: &[vsm_motion::Footprint]) {
+        // Beyond the capacity the count alone overflows the list: every page is freed.
+        let count = footprints.len().min(Self::CAPACITY as usize + 1);
+        let mut header = [0u32; Self::FOOTPRINTS_HEADER as usize / 4];
+        header[0] = count as u32;
+        queue.write_buffer(&self.footprints, 0, bytemuck::cast_slice(&header));
+        let items = &footprints[..count.min(Self::CAPACITY as usize)];
+        if !items.is_empty() {
+            queue.write_buffer(&self.footprints, Self::FOOTPRINTS_HEADER, bytemuck::cast_slice(items));
+        }
+    }
+
     /// Records the passes; must precede the page cache update. `residency_changed`: streaming
-    /// loaded or evicted pages since the last call (otherwise only the wind invalidates);
-    /// `wind_switched`: the wind was switched on or off since the last call.
-    fn record(&mut self, rec: &mut Recorder, inputs: &InvalidationInputs, scene: &GpuScene, residency_changed: bool, wind_switched: bool) {
+    /// loaded or evicted pages since the last call (otherwise only the wind and moves
+    /// invalidate); `wind_switched`: the wind was switched on or off since the last call;
+    /// `moves_written`: the list starts with this frame's moves (`write_moves`).
+    fn record(
+        &mut self,
+        rec: &mut Recorder,
+        inputs: &InvalidationInputs,
+        scene: &GpuScene,
+        residency_changed: bool,
+        wind_switched: bool,
+        moves_written: bool,
+    ) {
         let device = rec.device;
         if self.previous_page_table.size() != scene.page_table.size() {
             // New geometry also invalidates every page globally, so the contents do not matter.
@@ -928,7 +964,9 @@ impl PageInvalidation {
                 (60, inputs.local.as_entire_binding()),
             ],
         );
-        rec.encoder.clear_buffer(&self.footprints, 0, Some(Self::FOOTPRINTS_HEADER));
+        if !moves_written {
+            rec.encoder.clear_buffer(&self.footprints, 0, Some(Self::FOOTPRINTS_HEADER));
+        }
         let mut pass = rec.compute_pass("vsm invalidate");
         pass.set_bind_group(0, &group, &[]);
         pass.set_pipeline(&self.collect[residency_changed as usize][wind_switched as usize]);

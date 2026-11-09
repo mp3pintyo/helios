@@ -108,6 +108,12 @@ mod native {
         pub sun: Option<(f32, f32)>,
         /// Headless: the shadow-casting light nearest the camera circles every frame.
         pub move_light: bool,
+        /// Every move invalidates everything (as structural changes do), for comparisons.
+        pub full_invalidation: bool,
+        /// Moving prop groups kept moving (the rest stand still), for measurements.
+        pub movers: Option<usize>,
+        /// The props move as `Mobility::Static` instances (one-off edits), for measurements.
+        pub static_motion: bool,
         /// Internal resolution in percent of the output (TSR upscales).
         pub screen_percentage: Option<f32>,
         /// Dynamic resolution: keep the GPU frame time under this many milliseconds.
@@ -124,7 +130,7 @@ mod native {
 
     impl Options {
         pub fn parse(args: &[String]) -> Self {
-            let mut o = Options { screenshot: None, size: (1600, 900), frames: 90, view: None, detail: Detail::High, scene: SceneKind::Valley, camera: None, eye: None, at: None, occlusion: true, sw_raster: true, rvt: true, svt: true, animate_sun: false, lod: None, fov: None, pool_mb: None, texture_pool_mb: None, texture_compression: true, switch_to: None, dump_dir: None, dump_count: 16, keys: Vec::new(), keys_at: None, hold: Vec::new(), gltf: None, ground: true, bake_hvm: None, stream_from: None, io_latency_ms: 0, sun: None, move_light: false, screen_percentage: None, gpu_budget_ms: None, local_exposure: Some(Default::default()), scene_file: None, select: Vec::new(), no_skinning: false, gi: None };
+            let mut o = Options { screenshot: None, size: (1600, 900), frames: 90, view: None, detail: Detail::High, scene: SceneKind::Valley, camera: None, eye: None, at: None, occlusion: true, sw_raster: true, rvt: true, svt: true, animate_sun: false, lod: None, fov: None, pool_mb: None, texture_pool_mb: None, texture_compression: true, switch_to: None, dump_dir: None, dump_count: 16, keys: Vec::new(), keys_at: None, hold: Vec::new(), gltf: None, ground: true, bake_hvm: None, stream_from: None, io_latency_ms: 0, sun: None, move_light: false, full_invalidation: false, movers: None, static_motion: false, screen_percentage: None, gpu_budget_ms: None, local_exposure: Some(Default::default()), scene_file: None, select: Vec::new(), no_skinning: false, gi: None };
             let mut scene_given = false;
             let mut it = args.iter().skip(1);
             while let Some(arg) = it.next() {
@@ -160,6 +166,9 @@ mod native {
                     "--no-texture-compression" => o.texture_compression = false,
                     "--animate-sun" => o.animate_sun = true,
                     "--move-light" => o.move_light = true,
+                    "--full-invalidation" => o.full_invalidation = true,
+                    "--movers" => o.movers = value().parse().ok(),
+                    "--static-motion" => o.static_motion = true,
                     "--lod" => o.lod = value().parse().ok(),
                     "--fov" => o.fov = value().parse().ok(),
                     "--sun" => {
@@ -296,6 +305,13 @@ mod native {
                 app.renderer.settings.screen_percentage = percentage;
             }
             app.renderer.settings.local_exposure = self.local_exposure;
+            app.renderer.settings.per_instance_invalidation = !self.full_invalidation;
+            if let Some(count) = self.movers {
+                app.motion.limit(&mut app.scene, count);
+            }
+            if self.static_motion {
+                app.motion.set_mobility(&mut app.scene, helios_render::Mobility::Static);
+            }
             if let Some(budget) = self.gpu_budget_ms {
                 app.gpu_budget_ms = budget;
                 let mut dynamic = helios_render::DynamicResolution::with_budget(budget);

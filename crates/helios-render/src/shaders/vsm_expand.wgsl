@@ -106,7 +106,7 @@ fn expand(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups
     // Padded like in culling: the cluster reaches every page its wind-displaced or posed
     // triangles touch.
     let strength = wind_strength(instance);
-    let dynamic = dynamic_caster(strength) || skin_dynamic(instance);
+    let dynamic = dynamic_caster(instance, strength);
     let sphere = skin_padded(instance, wind_padded(instance, strength, transform_sphere(instance.world, clusters[item.y].bounds, instance.max_scale)));
     let level = u32(view.vsm.x);
     let page_world = vsm.level_info[level].x;
@@ -165,7 +165,7 @@ fn expand_local(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_work
     // Padded like in culling: the cluster reaches every page its wind-displaced or posed
     // triangles touch.
     let strength = wind_strength(instance);
-    let dynamic = dynamic_caster(strength) || skin_dynamic(instance);
+    let dynamic = dynamic_caster(instance, strength);
     let sphere = skin_padded(instance, wind_padded(instance, strength, transform_sphere(instance.world, clusters[item.y].bounds, instance.max_scale)));
     var visited = 0;
     for (var slot = 0u; slot < LOCAL_SLOTS; slot++) {

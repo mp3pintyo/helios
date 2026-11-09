@@ -2,7 +2,8 @@
 //!
 //! * **Global distance field** — 4 clipmap levels of 128³ (0.25 m … 2 m voxels) around the
 //!   camera, composited on the GPU from every instance's mesh SDF (heightfields for terrain).
-//!   A level is rebuilt when the camera crosses a brick boundary or the scene changes.
+//!   A level is rebuilt when the camera crosses a brick boundary or the scene changes; moved
+//!   instances only recompose the bricks under them (`lumen_dynamic.rs`).
 //! * **Surface cache** — a 64³-per-level voxel lighting volume: each voxel near a surface is
 //!   lit by the sun (distance-field soft shadows), the sky (distance-field occlusion), emissive
 //!   surfaces and one bounce from the radiance cache; refreshed a quarter per frame.
@@ -24,11 +25,13 @@
 use std::collections::HashMap;
 
 use bytemuck::{Pod, Zeroable};
-use glam::{Mat4, Vec3, Vec4};
+use glam::{Vec3, Vec4};
 use wgpu::BindingResource::{Sampler, TextureView};
 use wgpu::{BindingType, ShaderStages, TextureFormat as F, TextureUsages as U};
 
 use crate::cards::{CardCache, CardUniform};
+use crate::lumen_dynamic::{ComposeParams, DynamicField, DynamicFieldStats, FieldBindings, LevelPlacement, SdfInstance};
+use crate::motion::SceneChanges;
 use crate::near_field::{NearField, NearFieldUniform};
 use crate::profiler::Recorder;
 use crate::scene::{Instance, Scene};
@@ -75,29 +78,6 @@ struct LumenUniform {
     _pad: u32,
     near_field: NearFieldUniform,
     cards: CardUniform,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Pod, Zeroable)]
-struct ComposeParams {
-    origin: Vec4,
-    level: u32,
-    candidate_count: u32,
-    level_count: u32,
-    _pad: u32,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Pod, Zeroable)]
-struct SdfInstance {
-    inv_world: Mat4,
-    world_min: Vec4,
-    world_max: Vec4,
-    material: u32,
-    mesh: u32,
-    /// 1 if the instance has mesh cards (a volume field): candidates for the instance index.
-    has_cards: u32,
-    _pad: u32,
 }
 
 #[repr(C)]
@@ -172,6 +152,8 @@ pub struct Lumen {
     bricks: wgpu::Buffer,
     near_field: NearField,
     cards: CardCache,
+    /// Incremental updates for moved instances.
+    dynamic: DynamicField,
     levels: Vec<Level>,
     instance_bounds: Vec<(Vec3, Vec3)>,
     /// Per distance-field instance: whether it is composed into the global field (alpha-masked
@@ -263,6 +245,7 @@ impl Lumen {
             bricks: storage_buffer(device, "sdf bricks", 4096 * 64 * 4, wgpu::BufferUsages::empty()),
             near_field: NearField::new(device),
             cards: CardCache::new(device),
+            dynamic: DynamicField::new(device, &sdf_module, SDF_LEVELS),
             levels: level_list,
             instance_bounds: Vec::new(),
             in_global_field: Vec::new(),
@@ -431,12 +414,22 @@ impl Lumen {
         self.gather.as_ref().map(|g| &g.reflection[current])
     }
 
-    /// Uploads mesh SDFs and instances when the scene changes, places the clipmaps around the
-    /// camera and writes the uniforms.
-    pub fn update(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, scene: &Scene, camera_position: Vec3, frame: u32, targets: &FrameTargets) {
+    /// Uploads mesh SDFs and instances when the scene changes (moved instances incrementally,
+    /// see `lumen_dynamic.rs`), places the clipmaps around the camera and writes the uniforms.
+    #[allow(clippy::too_many_arguments)]
+    pub fn update(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        scene: &Scene,
+        changes: &SceneChanges,
+        camera_position: Vec3,
+        frame: u32,
+        targets: &FrameTargets,
+    ) {
         self.frame = frame;
         let versions = (scene.geometry_version, scene.instance_version, scene.material_version, scene.texture_version);
-        if versions != self.versions {
+        if versions != self.versions || changes.structural {
             self.versions = versions;
             let (sdf_instances, coverage) = self.upload_scene(device, queue, scene);
             // Every scene instance's index among the distance-field instances (= card instance).
@@ -448,6 +441,13 @@ impl Lumen {
             self.cards.upload(device, queue, scene, &sdf_instances, &self.instance_bounds);
             for level in &mut self.levels {
                 level.dirty = true;
+            }
+        } else if !changes.moved.is_empty() {
+            let placements: Vec<LevelPlacement> = self.placements();
+            let moved = self.dynamic.apply(queue, scene, changes, &self.sdf_instances, &mut self.instance_bounds, &self.in_global_field, &placements);
+            self.near_field.move_instances(queue, scene, moved.iter().map(|&(i, _)| i));
+            for (i, k) in moved {
+                self.cards.move_instance(queue, k, scene.instances[i].transform, self.instance_bounds[k]);
             }
         }
 
@@ -486,11 +486,14 @@ impl Lumen {
                 level: i as u32,
                 candidate_count: level.candidate_count,
                 level_count: SDF_LEVELS as u32,
-                _pad: 0,
+                brick_count: 0,
             };
             queue.write_buffer(&level.params, 0, bytemuck::bytes_of(&params));
             level.compose_now = true;
         }
+        let placements = self.placements();
+        self.dynamic.stats.levels = self.levels.iter().filter(|l| l.compose_now).count() as u32;
+        self.dynamic.schedule(queue, device, &placements, &self.instance_bounds, &self.in_global_field);
 
         let mut probe_levels = [Vec4::ZERO; 2];
         for (i, spacing) in PROBE_SPACING.iter().enumerate() {
@@ -523,6 +526,22 @@ impl Lumen {
         if self.gather.as_ref().is_none_or(|g| g.size != size) {
             self.gather = Some(GatherTargets::new(device, size));
         }
+    }
+
+    /// The clipmap levels as the incremental updates see them.
+    fn placements(&self) -> Vec<LevelPlacement> {
+        self.levels.iter().map(|l| LevelPlacement { origin: l.origin, voxel: l.voxel, rebuilding: l.dirty || l.compose_now }).collect()
+    }
+
+    /// Statistics of the incremental distance-field updates in the latest frame.
+    pub fn dynamic_stats(&self) -> DynamicFieldStats {
+        self.dynamic.stats
+    }
+
+    /// Per level and brick of the global field: whether it was recomposed this frame (for the
+    /// invalidation debug view).
+    pub fn brick_stamps(&self) -> &wgpu::Buffer {
+        &self.dynamic.stamps
     }
 
     /// Uploads the distance-field instances; returns their scene instance indices and every scene
@@ -565,19 +584,7 @@ impl Lumen {
                 continue;
             }
             let world = instance.transform;
-            let (mut lo, mut hi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
-            for k in 0..8 {
-                let c = Vec3::new(
-                    if k & 1 == 0 { mesh.aabb.min.x } else { mesh.aabb.max.x },
-                    if k & 2 == 0 { mesh.aabb.min.y } else { mesh.aabb.max.y },
-                    if k & 4 == 0 { mesh.aabb.min.z } else { mesh.aabb.max.z },
-                );
-                let p = world.transform_point3(c);
-                lo = lo.min(p);
-                hi = hi.max(p);
-            }
             let linear = glam::Mat3::from_mat4(world);
-            let min_scale = linear.x_axis.length().min(linear.y_axis.length()).min(linear.z_axis.length());
             let max_scale = linear.x_axis.length().max(linear.y_axis.length()).max(linear.z_axis.length());
             if let Some(sdf) = mesh.sdf.as_ref().filter(|s| s.two_sided) {
                 let shell = 0.5 * sdf.voxel_size * max_scale;
@@ -589,16 +596,14 @@ impl Lumen {
                     );
                 }
             }
-            instances.push(SdfInstance {
-                inv_world: world.inverse(),
-                world_min: lo.extend(min_scale),
-                world_max: hi.extend(0.0),
+            let mut record = SdfInstance {
                 material: instance.material.0,
                 mesh: desc,
                 has_cards: mesh.sdf.as_ref().is_some_and(|s| s.kind == helios_geometry::SdfKind::Volume) as u32,
-                _pad: 0,
-            });
-            self.instance_bounds.push((lo, hi));
+                ..Zeroable::zeroed()
+            };
+            self.instance_bounds.push(record.place(&mesh.aabb, world));
+            instances.push(record);
             self.in_global_field.push(coverage[index] >= 1.0);
             indices.push(index);
         }
@@ -613,6 +618,7 @@ impl Lumen {
             descs.len(),
             words.len() as f64 * 4.0 / 1048576.0
         );
+        self.dynamic.reset(instances, &indices, scene.instances.len());
         (indices, coverage)
     }
 
@@ -659,6 +665,19 @@ impl Lumen {
                 level.dirty = false;
                 level.compose_now = false;
             }
+        }
+        if self.has_sdf {
+            let field = FieldBindings {
+                sdf_instances: &self.sdf_instances,
+                descs: &self.sdf_descs,
+                words: &self.sdf_words,
+                materials,
+                albedo: &textures.albedo,
+                sampler: &samplers.material,
+                sdf: &self.global_sdf_storage,
+                instance_ids: &self.instance_ids,
+            };
+            self.dynamic.record(rec, &field);
         }
     }
 

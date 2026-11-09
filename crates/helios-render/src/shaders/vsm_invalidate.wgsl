@@ -1,14 +1,18 @@
-// Local invalidation of cached shadow pages: geometry streaming, wind and skeletal animation.
+// Local invalidation of cached shadow pages: geometry streaming, wind, skeletal animation and
+// moving instances.
 //
-// Cached pages assume static geometry. Three things change it, but only inside the light-space
+// Cached pages assume static geometry. Four things change it, but only inside the light-space
 // footprint of the instances concerned, so only the cached pages there are re-rendered instead of
 // the whole cache:
 //  * streaming a page in or out changes the cluster cut of every instance of that mesh;
 //  * the wind (wind.wgsl) moves vegetation every frame, up to its disable distance;
-//  * animated skeletal meshes (skinning.wgsl) move whenever their pose changes.
+//  * animated skeletal meshes (skinning.wgsl) move whenever their pose changes;
+//  * Scene::set_transform moves an instance: vsm_motion.rs writes footprints covering its old and
+//    new bounds before the collect pass appends the others (the buffer then starts non-empty).
 // Pages keep their static casters in a static layer (vsm_common.wgsl): a footprint of a dynamic
-// caster (one the wind moves this frame) only requests a refresh of its dynamic casters, while a
-// footprint of a static caster that changed frees the page, so it is rendered again in full.
+// caster (one the wind or its skeleton moves this frame, or a Mobility::Movable one) only
+// requests a refresh of its dynamic casters, while a footprint of a static caster that changed (or moved) frees the
+// page, so it is rendered again in full.
 // A caster that starts or stops moving changes layer. Where it fades into or out of the wind
 // (the camera approaching or leaving it) it is at rest, so the cached depth stays right and only
 // the static layer of the pages under it is dropped: the next refresh renders them in full. When
@@ -61,12 +65,16 @@ const FOOTPRINT_STATIC: f32 = 2.0;
 struct Footprint {
     // World-space centre (local light pages), w: FOOTPRINT_* kind.
     world: vec4<f32>,
-    // Sun light-space centre (x, -y) and radius in world units.
+    // Sun light-space centre (x, -y) and radius in world units: the footprint is the circle
+    // (and for local lights the world sphere) of that radius.
     center: vec2<f32>,
     radius: f32,
     // Bound of how far the geometry can move overall, and per frame.
     change: f32,
     per_frame: f32,
+    // Moves (vsm_motion.rs): the half extent of a tighter light-space rectangle around `center`,
+    // which replaces the circle in the sun's clipmap (0: the circle).
+    rect: vec2<f32>,
 }
 
 struct Footprints {
@@ -109,12 +117,15 @@ fn collect(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (instance.flags & INSTANCE_CAST_SHADOW) == 0u {
         return;
     }
-    var f = Footprint(vec4<f32>(instance.bounds.xyz, FOOTPRINT_DYNAMIC), vec2<f32>(0.0), instance.bounds.w, 0.0, 0.0);
+    var f = Footprint(vec4<f32>(instance.bounds.xyz, FOOTPRINT_DYNAMIC), vec2<f32>(0.0), instance.bounds.w, 0.0, 0.0, vec2<f32>(0.0));
     let strength = wind_strength(instance);
     var reach = 0.0;
-    if dynamic_caster(strength) {
-        reach = max(wind_reach(instance, strength, instance.bounds), 1e-6);
-        f.change = 2.0 * reach;
+    if dynamic_caster(instance, strength) {
+        // Movable instances out of the wind have no wind reach: their moves come from the CPU
+        // (a moving skin adds its own below).
+        let wind_bound = wind_reach(instance, strength, instance.bounds);
+        reach = max(wind_bound, 1e-6);
+        f.change = 2.0 * wind_bound;
         f.per_frame = wind_speed(instance, strength, instance.bounds) * max(wind.time.x - wind.time.y, 0.0);
     }
     if skin_dynamic(instance) {
@@ -215,9 +226,12 @@ fn invalidate_pages(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invoca
         for (var i = lid; i < min(count, CAPACITY) && hits < HIT_STATIC; i += 64u) {
             let f = footprints.items[i];
             if min(f.change, f.per_frame * max(age, 1.0)) >= threshold {
-                // Footprint in page units vs. the page square [page, page + 1).
+                // Footprint in page units (a circle, or a rectangle) vs. the page square
+                // [page, page + 1).
                 let v = f.center / page_world;
-                if distance(clamp(v, page, page + 1.0), v) <= f.radius / page_world {
+                let rect = any(f.rect > vec2<f32>(0.0));
+                let gap = max(abs(v - (page + 0.5)) - ((f.rect / page_world) + 0.5), vec2<f32>(0.0));
+                if length(gap) <= select(f.radius / page_world, 0.0, rect) {
                     hits |= hit_bits(f);
                 }
             }

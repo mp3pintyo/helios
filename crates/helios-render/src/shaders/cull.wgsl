@@ -211,7 +211,7 @@ fn cull_instances(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
     let strength = wind_strength(instance);
     let bounds = skin_padded(instance, wind_padded(instance, strength, instance.bounds));
-    if !sphere_in_frustum(bounds) || !vsm_overlaps(bounds, dynamic_caster(strength) || skin_dynamic(instance)) {
+    if !sphere_in_frustum(bounds) || !vsm_overlaps(bounds, dynamic_caster(instance, strength)) {
         return;
     }
     let batches = (instance.page_count + PAGES_PER_BATCH - 1u) / PAGES_PER_BATCH;
@@ -256,7 +256,7 @@ fn cull_pages(
             let scale = instance.max_scale;
             let strength = wind_strength(instance);
             let bounds = skin_padded(instance, wind_padded(instance, strength, transform_sphere(instance.world, page.bounds, scale)));
-            if page_table[page_id] != INVALID_ID && sphere_in_frustum(bounds) && vsm_overlaps(bounds, dynamic_caster(strength) || skin_dynamic(instance)) {
+            if page_table[page_id] != INVALID_ID && sphere_in_frustum(bounds) && vsm_overlaps(bounds, dynamic_caster(instance, strength)) {
                 // If even the coarsest parent in the page is fine enough, every cluster in it
                 // would be rejected by the LOD test: skip the page entirely.
                 let parent = transform_sphere(instance.world, page.parent_lod_bounds, scale);
@@ -351,7 +351,7 @@ fn test_cluster(instance_id: u32, cluster_id: u32) -> ClusterResult {
     let strength = wind_strength(instance);
     let padded = skin_padded(instance, wind_padded(instance, strength, bounds));
     let own_ok = own <= view.lod_threshold;
-    let candidate = parent > view.lod_threshold && sphere_in_frustum(padded) && vsm_overlaps(padded, dynamic_caster(strength) || skin_dynamic(instance));
+    let candidate = parent > view.lod_threshold && sphere_in_frustum(padded) && vsm_overlaps(padded, dynamic_caster(instance, strength));
     // Streaming feedback (main view): this cluster is on the cut but wants finer children.
     if candidate && !own_ok && cluster.child_page != INVALID_PAGE && CULL_MODE != 2u && view.kind == VIEW_MAIN {
         atomicMax(&atomics[cluster.child_page], view.frame_index);

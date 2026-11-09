@@ -139,6 +139,10 @@ pub mod instance_flags {
     pub const TRANSLUCENT: u32 = 4;
     /// Hidden (deleted in an editor): culled for every view.
     pub const HIDDEN: u32 = 8;
+    /// [`crate::Mobility::Movable`]: a dynamic shadow caster, kept out of the shadow pages'
+    /// static layers (`dynamic_caster` in wind.wgsl).
+    pub const MOVABLE: u32 = 16;
+    // Bits 12..32: the skin palette index (`skin::INSTANCE_SKIN_SHIFT`).
 }
 
 /// Bit flags in [`GpuMaterial::flags`].

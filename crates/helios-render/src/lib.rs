@@ -39,11 +39,14 @@ mod cards;
 mod clouds;
 mod fog;
 mod context;
+mod dynamic_debug;
 mod gpu_scene;
 mod gpu_types;
 mod lights;
 mod lumen;
+mod lumen_dynamic;
 mod lumen_lite;
+mod motion;
 mod near_field;
 mod page_cache;
 pub mod page_source;
@@ -67,6 +70,7 @@ mod translucency;
 mod util;
 mod vsm;
 mod vsm_local;
+mod vsm_motion;
 mod water;
 mod wind;
 
@@ -75,12 +79,12 @@ pub use context::{GpuContext, ContextError};
 pub use passes::local_exposure::LocalExposure;
 pub use passes::post_fx::DepthOfField;
 pub use picking::PickResult;
-pub use renderer::{DebugView, RenderSettings, Renderer, RendererConfig};
+pub use renderer::{DebugView, DynamicStats, RenderSettings, Renderer, RendererConfig};
 pub use lumen_lite::{GiMethod, LiteFallback};
 pub use resolution::{DynamicResolution, MAX_SCREEN_PERCENTAGE, MIN_SCREEN_PERCENTAGE};
 pub use scene::{
     CloudLayer, FogVolume, Image, ImageTexture, InstanceHandle, Light, LightHandle, LightKind, Material, MaterialHandle, MaterialKind,
-    MeshHandle, Scene, Sun, TextureDesc, TextureHandle, TextureMapping, TexturePattern, TextureSource,
+    MeshHandle, Mobility, Scene, Sun, TextureDesc, TextureHandle, TextureMapping, TexturePattern, TextureSource,
     UvTransform, Water, Wrap,
 };
 pub use page_source::{PageLocation, PageRead, PageSource, ReadCompletion};

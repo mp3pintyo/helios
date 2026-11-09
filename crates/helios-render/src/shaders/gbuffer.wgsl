@@ -403,6 +403,8 @@ fn resolve(
             surface.albedo = path * (0.6 + 0.4 * hash_color(entry.y).x);
         }
         case DEBUG_MATERIALS: { surface.albedo = hash_color(MATERIAL_KIND * 31u + 7u); }
+        // Movable instances in orange, the rest grey (dynamic_debug.wgsl adds the invalidation).
+        case DEBUG_INVALIDATION: { surface.albedo = select(vec3<f32>(0.2 + 0.6 * luminance(surface.albedo)), vec3<f32>(1.0, 0.45, 0.08), (instance.flags & INSTANCE_MOVABLE) != 0u); }
         case DEBUG_SKIN_WEIGHTS: { surface.albedo = skin_weight_color(instance, cluster, base, corners, b.lambda); }
         default: {}
     }

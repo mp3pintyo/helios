@@ -8,6 +8,7 @@ use helios_geometry::{noise, primitives, BuildConfig, SdfMode};
 use helios_render::{Camera, Material, MaterialKind, Scene, Sun, TextureDesc, TextureMapping, TexturePattern};
 
 use super::{add_baked, add_baked_with, smoothstep, Detail, Rng, SceneSetup};
+use crate::motion::{DemoMotion, Motion};
 
 pub const TERRAIN_SIZE: f32 = 900.0;
 pub const TERRAIN_HEIGHT: f32 = 110.0;
@@ -48,8 +49,9 @@ fn camera_floor(x: f32, z: f32) -> f32 {
     ground_height(x, z)
 }
 
-fn build_scene(detail: Detail) -> Scene {
+fn build_scene(detail: Detail) -> (Scene, DemoMotion) {
     let mut scene = Scene::new();
+    let mut motion = DemoMotion::default();
     scene.sun = Sun::from_angles(SUN.0, SUN.1, SUN.2);
     scene.ground_albedo = Vec3::new(0.18, 0.17, 0.13);
     scene.clouds = helios_render::CloudLayer::cumulus(0.5);
@@ -145,11 +147,10 @@ fn build_scene(detail: Detail) -> Scene {
         rock_materials[1],
         Mat4::from_scale_rotation_translation(Vec3::new(5.0, 3.0, 5.0), Quat::from_rotation_y(0.4), Vec3::new(0.0, plinth_height + 0.6, 0.0)),
     );
-    scene.add_instance(
-        knot,
-        gold,
-        Mat4::from_scale_rotation_translation(Vec3::splat(3.2), Quat::from_rotation_x(0.25), Vec3::new(0.0, plinth_height + 6.6, 0.0)),
-    );
+    let sculpture_center = Vec3::new(0.0, plinth_height + 6.6, 0.0);
+    let sculpture = scene.add_instance(knot, gold, Mat4::from_scale_rotation_translation(Vec3::splat(3.2), Quat::from_rotation_x(0.25), sculpture_center));
+    // The sculpture slowly turns on its plinth.
+    motion.add(&mut scene, Motion::Spin { center: sculpture_center, period: 45.0 }, &[sculpture], &[]);
 
     // Boulders in the lake, some breaking its surface.
     for (i, (x, z, size)) in [(-8.0, 15.5, 1.7), (-2.5, 26.0, 1.2), (-7.0, 31.0, 2.1), (-3.5, 19.0, 0.9), (-1.0, 12.5, 1.4)].into_iter().enumerate() {
@@ -185,7 +186,26 @@ fn build_scene(detail: Detail) -> Scene {
 
     // (Added last, so pre-baked mesh libraries of the rest of the scene stay valid.)
     translucency_corner(&mut scene);
-    scene
+    raft(&mut scene, &mut motion, detail);
+    (scene, motion)
+}
+
+/// A log raft drifting on the lake, in front of the initial view: it bobs, rolls and turns on a
+/// slow loop (a movable instance with a distance field and a shadow).
+fn raft(scene: &mut Scene, motion: &mut DemoMotion, detail: Detail) {
+    let (length, radius) = (3.2, 0.14);
+    let log = primitives::cylinder(detail.pick(16, 24), 4, radius, length, true);
+    let along_x = Mat4::from_rotation_z(-std::f32::consts::FRAC_PI_2) * Mat4::from_translation(Vec3::new(0.0, -length * 0.5, 0.0));
+    let mut parts: Vec<_> = (0..7).map(|i| log.transformed(Mat4::from_translation(Vec3::new(0.0, 0.0, (i as f32 - 3.0) * 2.05 * radius)) * along_x)).collect();
+    for x in [-1.15, 1.15] {
+        parts.push(cuboid(Vec3::new(x - 0.09, radius * 0.8, -1.05), Vec3::new(x + 0.09, radius * 0.8 + 0.12, 1.05)));
+    }
+    let mesh = add_baked(scene, "raft", &helios_geometry::modeling::merge(&parts));
+    let wood = scene.add_texture(TextureDesc::new(TexturePattern::Wood, Vec3::new(0.3, 0.2, 0.12), Vec3::new(0.17, 0.11, 0.06)).roughness(0.8, 0.85).seed(16));
+    let material = scene.add_material(Material::textured(MaterialKind::Standard, wood, TextureMapping::ObjectTriplanar, 0.8));
+    let center = Vec3::new(-7.5, WATER_LEVEL - 0.04, 22.5);
+    let instance = scene.add_instance(mesh, material, Mat4::from_rotation_translation(Quat::from_rotation_y(0.5), center));
+    motion.add(scene, Motion::Float { center, drift: 1.2, period: 70.0 }, &[instance], &[]);
 }
 
 /// Layered translucency test content at the lake's north end, outside the initial view (see
@@ -219,5 +239,6 @@ fn initial_camera() -> Camera {
 }
 
 pub fn build(detail: Detail) -> SceneSetup {
-    SceneSetup { scene: build_scene(detail), camera: initial_camera(), sun: SUN, floor: camera_floor, animation: None }
+    let (scene, motion) = build_scene(detail);
+    SceneSetup { scene, camera: initial_camera(), sun: SUN, floor: camera_floor, animation: None, motion }
 }
