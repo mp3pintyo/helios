@@ -5,6 +5,9 @@ A Rust + WebGPU (wgpu) rendering library that implements the core ideas behind U
 **Lumen** (software ray-traced global illumination and reflections) and its material / lighting
 stack, running natively and in the browser.
 
+**Live showcase:** https://mp3pintyo.github.io/helios/ (needs a WebGPU browser, e.g. recent Chrome or Edge).
+Redeploy with `python site/build.py` then `python site/deploy_pages.py`.
+
 ```
 crates/
   helios-geometry   pure Rust, no GPU: clustering, METIS-style grouping, seam-aware QEM simplification,
