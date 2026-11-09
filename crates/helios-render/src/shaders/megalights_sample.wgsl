@@ -3,17 +3,18 @@
 // generate: per 2x2 block, picks ML_SAMPLES lights at the block's representative pixel by
 //   resampling the froxel's light list: up to ML_CANDIDATES candidates, each weighted by its
 //   unshadowed contribution (the shared BRDF times the light's radiance, plus a small floor so a
-//   light reaching the block is never impossible to pick), divided by the weight of lights whose
-//   rays were all blocked in this tile last frame (visibility guiding). Longer lists are thinned to
-//   a stratified random subset, each light with the same chance of being a candidate, whose
-//   weights are scaled by the inverse of that chance: the result stays unbiased and the cost per
-//   pixel stays constant whatever the number of lights. The four picks are made by systematic
-//   resampling over the candidates' running sum, so they are spread over the lights.
+//   light reaching the block is never impossible to pick); lights whose rays were all blocked in
+//   this tile last frame keep a tenth of it (visibility guiding). Longer lists are thinned to a
+//   stratified random subset, each light with the same chance of being a candidate, whose weights
+//   are scaled by the inverse of that chance: the result stays unbiased and the cost per pixel
+//   stays constant whatever the number of lights. The four picks are made by systematic
+//   resampling over the candidates' running sum, so they are spread over the lights (each pick
+//   alone is confined to a quarter of the sum; their average is unbiased).
 // trace: one thread per sample. The ray ends on a random point of the light's disk (soft shadows
-//   from the source radius) and runs through a short screen trace against the depth buffer, then
-//   either the light's virtual shadow map (shadow-map ray marching where it has one) or the
-//   distance fields - mesh SDFs within the near-field distance of either end, the global field
-//   between - as the classic path traces the lights beyond its shadow-map budget.
+//   from the source radius): a short screen trace against the depth buffer for contact shadows,
+//   and over the whole ray either the light's virtual shadow map (shadow-map ray marching where it
+//   has one) or the distance fields - mesh SDFs within the near-field distance of either end, the
+//   global field between - as the classic path traces the lights beyond its shadow-map budget.
 
 #include "common.wgsl"
 #include "brdf.wgsl"
@@ -61,9 +62,11 @@ const ML_HIDDEN_WEIGHT: f32 = 0.1;
 // representative pixel's normal may still light the other pixels of its block.
 const ML_WEIGHT_FLOOR: f32 = 0.004;
 
-// Screen trace: steps and maximum length (world units) of the stretch next to the receiver.
+// Screen trace: steps and maximum length (world units) of the stretch next to the receiver, and
+// the assumed thickness of what the depth buffer shows (grown by 10 % per metre of depth).
 const ML_SCREEN_STEPS: u32 = 8u;
 const ML_SCREEN_DISTANCE: f32 = 1.0;
+const CONTACT_THICKNESS: f32 = 0.03;
 // Shadow-map ray marching steps.
 const ML_VSM_STEPS: u32 = 8u;
 // Distance-field cones: narrow, as each ray goes to one point of the light (the source radius
@@ -176,47 +179,40 @@ fn generate(@builtin(global_invocation_id) gid: vec3<u32>) {
 
 // ---- Shadow rays -----------------------------------------------------------------------------------
 
-// Whether the ray from `origin` along `dir` passes behind the depth buffer within `max_distance`
-// (contact shadows the fields are too coarse for), and how far the trace got: the rest of the
-// ray continues in the distance fields from there.
-struct ScreenTrace {
-    hit: bool,
-    t: f32,
-}
-
-fn screen_trace(origin: vec3<f32>, dir: vec3<f32>, max_distance: f32, jitter: f32) -> ScreenTrace {
-    var r: ScreenTrace;
-    r.hit = false;
-    r.t = 0.0;
+// Whether the ray from `origin` along `dir` passes through a surface of the depth buffer within
+// `max_distance`: contact shadows of details the shadow maps and fields are too coarse for. Only
+// the depth buffer's front faces are known, so surfaces count as CONTACT_THICKNESS-thin shells:
+// a ray passing behind thicker geometry is left to the shadow map or the fields, which trace the
+// whole ray (a thicker shell would shadow walls behind any object in front of them).
+fn screen_trace(origin: vec3<f32>, dir: vec3<f32>, max_distance: f32, jitter: f32) -> bool {
     let size = frame.viewport.xy;
     let origin_clip = frame.view_proj * vec4<f32>(origin, 1.0);
     // Start a couple of pixels out, where the receiver's own depth no longer masks the ray.
     let t0 = max(0.01, origin_clip.w * frame.viewport.w * 2.0);
     if max_distance <= t0 {
-        return r;
+        return false;
     }
     for (var i = 0u; i < ML_SCREEN_STEPS; i++) {
         let f = (f32(i) + jitter) / f32(ML_SCREEN_STEPS);
         let t = t0 + (max_distance - t0) * f * f;
         let clip = frame.view_proj * vec4<f32>(origin + dir * t, 1.0);
         if clip.w <= frame.camera_position.w {
-            return r;
+            return false;
         }
         let uv = vec2<f32>(clip.x, -clip.y) / clip.w * 0.5 + 0.5;
         if any(uv <= vec2<f32>(0.0)) || any(uv >= vec2<f32>(1.0)) {
-            return r;
+            return false;
         }
-        let scene = frame.camera_position.w / max(textureLoad(depth_texture, vec2<u32>(uv * size), 0).r, 1e-9);
-        // Surfaces are assumed this thick: a ray passing further behind one is not blocked.
-        let thickness = 0.03 + 0.02 * scene + 0.1 * t;
-        if clip.w > scene + 0.002 * scene && clip.w - scene < thickness {
-            r.hit = true;
-            return r;
+        let pixel = vec2<u32>(uv * size);
+        let scene = frame.camera_position.w / max(textureLoad(depth_texture, pixel, 0).r, 1e-9);
+        let behind = clip.w - scene;
+        // Emissive surfaces are the lights' own visible shapes (candle flames, which cast no
+        // shadows): the depth buffer holds them, but they must not block their own light.
+        if behind > 0.002 * scene && behind < CONTACT_THICKNESS * (1.0 + 0.1 * scene) && textureLoad(gbuffer_motion, pixel, 0).z <= 0.0 {
+            return true;
         }
-        r.t = t;
     }
-    r.t = max_distance;
-    return r;
+    return false;
 }
 
 // Shadow-map ray marching (UE's SMRT, one ray): steps from the receiver towards the light sample
@@ -250,28 +246,25 @@ fn vsm_ray(slot: u32, world: vec3<f32>, n: vec3<f32>, point: vec3<f32>, stop: f3
 }
 
 // Distance-field visibility of the light sample `point` (centre `center`, source radius
-// `radius`) from `origin`, from `t_start` on (local_light_shadow's scheme with a narrow cone).
-fn sdf_ray(origin: vec3<f32>, point: vec3<f32>, center: vec3<f32>, radius: f32, t_start: f32) -> f32 {
+// `radius`) from `origin` (local_light_shadow's scheme with a narrow cone).
+fn sdf_ray(origin: vec3<f32>, point: vec3<f32>, center: vec3<f32>, radius: f32) -> f32 {
     let to_point = point - origin;
     let distance = length(to_point);
     let dir = to_point / max(distance, 1e-6);
     if !mesh_sdf_covers(origin) || !mesh_sdf_covers(center) {
         let level = sdf_finest_level(origin);
         let skip = lumen.sdf_levels[min(level, lumen.level_count - 1u)].w * 1.5;
-        return sdf_soft_shadow_span(origin, dir, max(t_start, skip), light_shadow_distance(center, distance, radius), ML_GLOBAL_SDF_CONE);
+        return sdf_soft_shadow_span(origin, dir, skip, light_shadow_distance(center, distance, radius), ML_GLOBAL_SDF_CONE);
     }
     let near = lumen.mesh_sdf_trace.x;
     // Stop short of the light's own fixture (a candle under its flame).
     let end = max(distance - radius, 0.0);
-    var visibility = 1.0;
-    if t_start < min(end, near) {
-        visibility = mesh_sdf_soft_shadow(origin, origin, dir, t_start, min(end, near), ML_MESH_SDF_CONE, true);
-    }
+    var visibility = mesh_sdf_soft_shadow(origin, origin, dir, 0.0, min(end, near), ML_MESH_SDF_CONE, true);
     if distance > 2.0 * near && visibility > 0.01 {
-        visibility = min(visibility, sdf_soft_shadow_span(origin, dir, max(near, t_start), distance - near, ML_GLOBAL_SDF_CONE));
+        visibility = min(visibility, sdf_soft_shadow_span(origin, dir, near, distance - near, ML_GLOBAL_SDF_CONE));
     }
     if end > near && visibility > 0.01 {
-        visibility = min(visibility, mesh_sdf_soft_shadow(center, origin, dir, max(max(near, distance - near), t_start), end, ML_MESH_SDF_CONE, false));
+        visibility = min(visibility, mesh_sdf_soft_shadow(center, origin, dir, max(near, distance - near), end, ML_MESH_SDF_CONE, false));
     }
     return visibility;
 }
@@ -307,15 +300,14 @@ fn trace(@builtin(global_invocation_id) gid: vec3<u32>) {
         let origin = s.world + s.n * (0.01 + 0.002 * s.linear_depth);
         let dir = normalize(point - origin);
         let jitter = ml_next(&rng);
-        let screen = screen_trace(origin, dir, min(ML_SCREEN_DISTANCE, max(distance(point, origin) - radius, 0.0)), jitter);
-        if screen.hit {
+        if screen_trace(origin, dir, min(ML_SCREEN_DISTANCE, max(distance(point, origin) - radius, 0.0)), jitter) {
             visibility = 0.0;
         } else {
             let slot = light_shadow_slot(light);
             if slot != INVALID_ID {
                 visibility = vsm_ray(slot, s.world, s.n, point, radius, jitter);
             } else if lumen.sdf_enabled != 0u {
-                visibility = sdf_ray(origin, point, center, radius, screen.t);
+                visibility = sdf_ray(origin, point, center, radius);
             }
         }
     }

@@ -12,10 +12,11 @@
 //!    were all blocked in the same screen tile last frame get a tenth of their weight (visibility
 //!    guiding), so the rays go where light arrives.
 //! 2. **Trace** (`trace`): one shadow ray per sample, to a random point of the light's disk (soft
-//!    shadows from the source radius): a short screen trace against the depth buffer, then the
-//!    light's virtual shadow map where it has one (shadow-map ray marching), otherwise Lumen's
-//!    distance fields (mesh SDFs within 2 m of either end, the global field between). Every
-//!    light casts shadows; the 32-light shadow-map budget only decides which method.
+//!    shadows from the source radius): a short screen trace against the depth buffer for contact
+//!    shadows, and over the whole ray the light's virtual shadow map where it has one (shadow-map
+//!    ray marching), otherwise Lumen's distance fields (mesh SDFs within 2 m of either end, the
+//!    global field between). Every light casts shadows; the 32-light shadow-map budget only
+//!    decides which method.
 //! 3. **Shade** (`megalights_shade.wgsl`): every pixel evaluates the BRDF of its block's four
 //!    samples and writes its direct light *demodulated* — diffuse without the diffuse colour,
 //!    specular divided by the environment BRDF — so denoising never blurs texture detail.
@@ -24,9 +25,12 @@
 //!    (SVGF), on diffuse and specular separately.
 //!
 //! The last iteration modulates the result back (`diffuse colour × diffuse + environment BRDF ×
-//! specular`), which the lighting pass adds instead of running its light loop. Cost: about one ray and four BRDF evaluations per pixel for sampling and
-//! shading, plus the denoiser; it does not grow with the light count beyond the light culling.
-//! The textures (about 56 bytes per internal pixel) and buffers exist only while the mode is on.
+//! specular`), which the lighting pass adds instead of running its light loop.
+//!
+//! Cost: one ray and four BRDF evaluations per pixel for tracing and shading, at most 32 per 2×2
+//! block for sampling, plus the denoiser. Only the share of rays that need the distance fields
+//! (lights without a shadow map) grows with the light count. The textures (56 bytes per internal
+//! pixel) and buffers exist only while the mode is on.
 
 use wgpu::BindingResource::{Sampler, TextureView};
 use wgpu::{ShaderStages, TextureFormat as F, TextureUsages as U};
@@ -345,7 +349,7 @@ impl MegaLights {
 /// Where spatial iteration `i` writes: alternately the previous frame's accumulation textures
 /// (free once the temporal pass has read them) and the raw textures (free once it has too).
 fn spatial_target(t: &Targets, current: usize, i: usize) -> [&wgpu::TextureView; 2] {
-    if i % 2 == 0 {
+    if i.is_multiple_of(2) {
         [&t.history[1 - current][0], &t.history[1 - current][1]]
     } else {
         [&t.raw[0], &t.raw[1]]

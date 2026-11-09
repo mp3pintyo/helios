@@ -55,7 +55,7 @@ const MIN_MOMENT_FRAMES: f32 = 4.0;
 // Half precision holds the moments of radiance up to ~250.
 const MAX_MOMENT: f32 = 60000.0;
 const LUMINANCE_SIGMA: f32 = 4.0;
-const NORMAL_POWER: f32 = 64.0;
+const NORMAL_POWER: f32 = 128.0;
 // How far a tap may lie off the centre's surface plane, relative to the depth.
 const PLANE_TOLERANCE: f32 = 0.015;
 
@@ -165,10 +165,12 @@ fn temporal(@builtin(global_invocation_id) gid: vec3<u32>) {
     textureStore(out_info, pixel, vec4<u32>(pack2x16float(vec2<f32>(min(count, MAX_DIFFUSE_FRAMES), z)), 0u, 0u, 0u));
 }
 
-// The first iteration's luminance variance at `pixel`: from the accumulated moments - or, while
-// the history is short, from the spread of the 3x3 neighbourhood if that is larger - blurred over
-// 3x3 (SVGF's prefilter: one pixel's estimate is noisy). Later iterations read the variance the
-// previous one filtered along.
+// The first iteration's luminance variance at `pixel`: that of the accumulated mean, i.e. the
+// moments' per-frame variance (blurred over 3x3: SVGF's prefilter, one pixel's estimate is noisy)
+// over the frames accumulated - or, while the history is short, the spread of the 3x3
+// neighbourhood if that is larger. Converged pixels thus keep the lighting's own detail (normal
+// maps lit at grazing angles) instead of being blurred as if each frame stood alone. Later
+// iterations read the variance the previous one filtered along.
 fn first_variance(pixel: vec2<u32>, size: vec2<u32>, frames: f32) -> vec2<f32> {
     var m1 = vec2<f32>(0.0);
     var m2 = vec2<f32>(0.0);
@@ -185,7 +187,8 @@ fn first_variance(pixel: vec2<u32>, size: vec2<u32>, frames: f32) -> vec2<f32> {
         }
     }
     let spatial = max(m2 / 9.0 - (m1 / 9.0) * (m1 / 9.0), vec2<f32>(0.0));
-    return select(blurred, max(blurred, spatial), frames < MIN_MOMENT_FRAMES);
+    let mean = blurred / max(frames, 1.0);
+    return select(mean, max(mean, spatial), frames < MIN_MOMENT_FRAMES);
 }
 
 // Binomial (1 2 1) / 4 weight of tap offset `i` (-1..1).
