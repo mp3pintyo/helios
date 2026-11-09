@@ -598,6 +598,10 @@ pub struct Scene {
     pub water: Water,
     /// Air flow that animates materials with a [`Material::wind`] response (calm by default).
     pub wind: Wind,
+    /// Heterogeneous volumes: simulated smoke and fire, procedural mist (`volumes.rs`).
+    pub volumes: Vec<crate::volumes::VolumeEmitter>,
+    /// GPU particle emitters (`particles.rs`).
+    pub particles: Vec<crate::particles::ParticleEmitter>,
     pub(crate) geometry_version: u64,
     pub(crate) material_version: u64,
     pub(crate) instance_version: u64,

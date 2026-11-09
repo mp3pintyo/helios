@@ -163,6 +163,8 @@ pub mod flags {
     pub const HISTORY_VALID: u32 = 32;
     /// The camera is inside a water body (exposure metering keeps Snell's window).
     pub const UNDERWATER: u32 = 64;
+    /// The motion target's z holds TSR's reactive mask (particles and volumes, `oit.rs`).
+    pub const REACTIVE: u32 = 1024;
 }
 
 const _: () = {

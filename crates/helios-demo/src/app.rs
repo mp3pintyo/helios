@@ -58,7 +58,7 @@ pub struct DemoApp {
 const SCREEN_PERCENTAGES: [f32; 4] = [50.0, 67.0, 75.0, 100.0];
 
 pub const HELP: &str = "WASD/QE fly · drag to look · wheel speed · Shift fast\n\
-N next scene · V debug view · G GI · H shadows · 1 local light shadow maps · [ ] screen percentage (50/67/75/100 %) · \\ dynamic resolution · T TAA · O occlusion · K software raster · I texture streaming · F fog · C clouds · U translucency · / translucency layers · L wind · M motion blur · B depth of field · ` local exposure · Z/X zoom · , . LOD error · ←→↑↓ sun · P animate sun · J day/night cycle · Y camera tour · R reset";
+N next scene · V debug view · G GI · H shadows · 1 local light shadow maps · [ ] screen percentage (50/67/75/100 %) · \\ dynamic resolution · T TAA · O occlusion · K software raster · I texture streaming · F fog · C clouds · U translucency · / translucency layers · ' volumes + particles · L wind · M motion blur · B depth of field · ` local exposure · Z/X zoom · , . LOD error · ←→↑↓ sun · P animate sun · J day/night cycle · Y camera tour · R reset";
 
 impl DemoApp {
     pub fn new(
@@ -179,6 +179,11 @@ impl DemoApp {
             "KeyU" => s.translucency = !s.translucency,
             "Slash" => s.translucency_layers = !s.translucency_layers,
             "KeyL" => s.wind = !s.wind,
+            "Quote" => {
+                let on = !(s.volumes || s.particles);
+                s.volumes = on;
+                s.particles = on;
+            }
             "KeyM" => s.motion_blur = if s.motion_blur > 0.0 { 0.0 } else { 0.5 },
             "KeyB" => s.depth_of_field = if s.depth_of_field.is_some() { None } else { Some(helios_render::DepthOfField::default()) },
             "Backquote" => s.local_exposure = if s.local_exposure.is_some() { None } else { Some(helios_render::LocalExposure::default()) },
@@ -335,7 +340,7 @@ impl DemoApp {
             "{} · {:.1} ms ({:.0} fps){gpu} · {resolution} · {} · LOD error {} px{budget}\n\
              visible: {} clusters ({} software, {} alpha-masked), {:.2} M tris (early pass {}) · shadows: {:.2} M tris ({:.2} M software)\n\
              streaming: {}/{} pages, {:.0}/{:.0} MiB resident, {} pending, {} in flight · scene: {} instances, {:.0} M source tris\n\
-             GI {} · shadows {} · TAA {} · fog {} · SW raster {} · wind {} · local exposure {}",
+             GI {} · shadows {} · TAA {} · fog {} · SW raster {} · wind {} · local exposure {} · volumes + particles {}",
             self.scene_name(),
             self.frame_ms,
             1000.0 / self.frame_ms.max(0.01),
@@ -363,6 +368,7 @@ impl DemoApp {
             on(s.sw_raster_threshold > 0.0),
             on(s.wind && self.scene.wind.strength > 0.0),
             on(s.local_exposure.is_some()),
+            on(s.volumes || s.particles),
         );
         text.push_str(&format!(
             "\nshadow pages: {}/{} in use, {} rendered ({} dynamic casters only, {} split; {}/{} draws), {} unallocated · local lights with shadow maps: {}",

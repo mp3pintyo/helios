@@ -1,0 +1,68 @@
+[
+  {
+    "id": "heterogeneous-volumes",
+    "title": "Heterogén térfogatok: szimulált tűz és füst, procedurális köd",
+    "area": "Atmoszféra",
+    "kind": "feature",
+    "summary": "Az UE Heterogeneous Volumes megfelelője: voxelrácsos dobozokban élő füst, tűz és köd, saját megvilágítási gyorsítótárral, sugárkövetéssel (ray march) és időbeli szűréssel. A tábortűz lángját és füstjét a GPU-n futó folyadékszimuláció adja, a tó fölötti ködöt animált zaj; a tűz a jelenet egy fényforrását is vezérli, így a környezetén is lobog.",
+    "details": "VolumeEmitter (Scene::volumes): korom-sűrűség, hőmérséklet és üzemanyag 3D textúrákban. FluidSimulation minden képkockán: örvényesség (curl), erők (Boussinesq-felhajtóerő, örvénymegőrzés / vorticity confinement, zajjal lobogó forrásgömb, szél, csillapítás), divergencia, 12–16 vörös-fekete SOR iteráció a nyomás Poisson-egyenletére (előző képkockáról melegindítva; szilárd padló, nyitott oldalak és tető), projekció, szemi-Lagrange önadvekció és MacCormack-advekció a korlátozóval (éles füstrészletek túllövés nélkül), égés (üzemanyag → hő + korom), hűlés, disszipáció. ProceduralVolume: animált zajból töltött rács, szimuláció nélkül. Megvilágítási gyorsítótár fél felbontáson: a nap áteresztése (16 lépés a térfogaton át a nap felé × VSM × felhőárnyék), Lumen radiance cache környezeti fény a térfogat saját takarásával, legfeljebb 8 helyi fény árnyéktérképpel. Képpontonkénti march a látható dobozok képernyő-téglalapján (legfeljebb 4 doboz, képpontonként sorba rendezve): Henyey–Greenstein fázis, feketetest-sugárzás a hőmérsékletből (Planck-törvény 3 hullámhosszon), energiamegőrző integrálás, üres levegőben 4×-esre nyúló lépések, köd és légperspektíva a térfogat átlagos mélységében. Léptetési jitter + időbeli visszavetítés a térfogat mélységével, 3×3-as szomszédsági klippel. A sugár a legközelebbi áttetsző felületnél kettéválik (az üveg mögötti rész a translucency előtt kompozitálódik). A tűz fényforrása: a szimuláció összegzett emissziója (fixpontos atomikus összeg) és mozgó átlaga szabja a fény színét a fénykulling előtt — visszaolvasás nélkül.",
+    "metrics": "METRICS_VOLUMES",
+    "showcase": "Erdő, éjszaka: --sun 200,-30, kamera --eye 3.5,1.4,1.0 --at 7,1.0,-1: lobogó tábortűz, narancsos füstoszlop, a fahasábok csíkos árnyéka a tisztáson. Előtte/utána: ' (Quote) billentyű ki/be. Katedrális: tömjénfüst a füstölőtartó fölött (--eye 66.2,1.8,0.4 --at 68.4,2.4,1.9). Völgy: köd a tó fölött, a üvegtáblák mögött is. Debug nézet 21: a march lépésszáma (kék→cián).",
+    "modules": ["crates/helios-render/src/volumes.rs", "crates/helios-render/src/media.rs", "crates/helios-render/src/shaders/volume_sim.wgsl", "crates/helios-render/src/shaders/volume_render.wgsl", "crates/helios-render/src/shaders/media_common.wgsl", "crates/helios-render/src/shaders/blackbody.wgsl"]
+  },
+  {
+    "id": "gpu-particles",
+    "title": "GPU-részecskék (Niagara-lite): szikrák, parazsak, porszemcsék",
+    "area": "Atmoszféra",
+    "kind": "feature",
+    "summary": "Teljesen a GPU-n szimulált, megvilágított és rajzolt részecske-emitterek: születési ráta és sorozatok, élettartam, sebességkúp, gravitáció, légellenállás, curl-zaj turbulencia, ütközés a mélységpufferrel (pattanás vagy megtapadás), méret és szín az élettartam során. A tábortűz szikrái és parazsai, a katedrális fénynyalábjaiban lebegő porszemcsék.",
+    "details": "ParticleEmitter (Scene::particles): minden emitter fix slot-tartományt kap egy közös pufferben; a CPU csak a képkockánkénti születésszámot adja (rátából és sorozatokból, törtrész átvitellel), a halott slotok egy emitterenkénti atomikus számlálóval foglalják le a születéseket — nincs szabadlista, tömörítés vagy visszaolvasás; az első képkocka előmelegíti a tartós populációt véletlen életkorokkal. Szimuláció egy dispatch-ben: gravitáció, légellenállás, curl-zaj (3 komponensű gradient-zaj potenciál rotációja: divergenciamentes örvények), ütközés a látható mélységpufferrel (a felületre visszahelyezve, a G-buffer normálján pattanva visszapattanási és súrlódási tényezővel, vagy megtapadva). Megvilágítás részecskénként egyszer: nap a VSM-en és a felhőárnyékon át Henyey–Greenstein fázissal, Lumen radiance cache, klaszterezett helyi fények árnyéktérkép-mintával, emisszió (szín vagy lehűlő feketetest), majd a köd. Rajzolás: egyetlen instanced draw, kamera felé forduló vagy sebesség mentén nyújtott négyszögek, procedurális sprite-ok, lágy részecskék, bloom.",
+    "metrics": "METRICS_PARTICLES",
+    "showcase": "Erdő: szikrák nyújtott csíkokként szállnak fel a tűzből és visszapattannak, a kiugró parazsak a földön izzanak és kihűlnek (közeli kamera: --eye 4.3,1.3,0.6 --at 7,1.0,-1). Katedrális: porszemcsék a magas ablakok fénynyalábjaiban, a nap felé nézve csillognak (--eye 20,1.7,-4 --at 30,7,6). Debug nézet 21: részecske-átfedés (piros→sárga).",
+    "modules": ["crates/helios-render/src/particles.rs", "crates/helios-render/src/shaders/particles.wgsl"]
+  },
+  {
+    "id": "oit-compositing",
+    "title": "Sorrendfüggetlen átlátszóság (weighted blended OIT) és sorrend az áttetsző felületekkel",
+    "area": "Anyagok és textúrák",
+    "kind": "feature",
+    "summary": "A részecskék súlyozott keverésű, sorrendfüggetlen átlátszósággal (McGuire–Bavoil) kerülnek a képre, rendezés nélkül, akárhány rétegben. A legközelebbi áttetsző felület (üveg, víz) mélységénél minden kettéválik: ami mögötte van, a translucency előtt kompozitálódik (az üveg színezi, a víz megtöri), ami előtte, utána.",
+    "details": "A részecske-fragmensek rgba16f akkumulációs (előszorzott szín × mélységsúly) és r16f revealage (×(1 − átlátszatlanság)) célpontokba írnak, elöl és hátul külön párba; egy teljes képernyős pass átlagszín × lefedettség alakban teszi a jelenetre (One, OneMinusSrcAlpha). Ha áttetsző felület látszik, a translucency modul első peeling-rétege külön kirajzolja a legközelebbi áttetsző mélységet; a térfogat-march ugyanott vágja a sugarat. Kosaranként a részecskék a térfogat fölé, a térfogat a jelenet fölé kerül. Az elülső kompozit TSR reaktív maszkot ír (lásd tsr-reactive-mask).",
+    "metrics": "METRICS_OIT",
+    "showcase": "Völgy, a tó északi vége (üvegtábla és színes panelek a vízben): a köd az üvegen át látszik, színezve. Katedrális főhajó: több ezer egymást átfedő porszemcse rendezés nélkül.",
+    "modules": ["crates/helios-render/src/oit.rs", "crates/helios-render/src/effects.rs", "crates/helios-render/src/shaders/oit.wgsl", "crates/helios-render/src/translucency.rs"]
+  },
+  {
+    "id": "tsr-reactive-mask",
+    "title": "TSR reaktív maszk részecskékhez és lángokhoz",
+    "area": "Kamera és utófeldolgozás",
+    "kind": "feature",
+    "summary": "Az UE \"responsive AA\" megfelelője: ahol részecskék vagy térfogatok fedik a képet, a TSR kevesebb előzményt tart meg, szűkebb színdobozzal és rögzítés (lock) nélkül, így a szikrák és lángok nem húznak csíkot.",
+    "details": "Az OIT elülső kompozitja a mozgásvektor-célpont z csatornájába írja a lefedettséget (a G-buffer emissziója addigra felhasználódott). flags::REACTIVE mellett a TSR a 3×3-as környezet maximumát olvassa: a maximális előzménysúly 1,5 képkockáig, a klipdoboz a mozgó kép szűk dobozáig, a vékony-elem lock nulláig keveredik. A térfogatok fél erősséggel reaktívak (saját időbeli szűrőjük van). Flag nélkül a TSR számítása bitre azonos a korábbival.",
+    "metrics": "METRICS_TSR",
+    "showcase": "Tábortűz közelről, mozgó kamerával: ' be/ki — a szikrák csík nélkül repülnek.",
+    "modules": ["crates/helios-render/src/shaders/tsr.wgsl", "crates/helios-render/src/shaders/oit.wgsl", "crates/helios-render/src/gpu_types.rs"]
+  },
+  {
+    "id": "campfire-incense-mist-demo",
+    "title": "Demó: tábortűz az erdőben, por és tömjénfüst a katedrálisban, köd a tavon",
+    "area": "Jelenetek és demó",
+    "kind": "feature",
+    "summary": "A térfogatok és részecskék bemutatója a három jelenetben: kőkörös, fahasáb-gúlás tábortűz parázságyon, szikrákkal, parazsakkal és lobogó fénnyel; porszemcsék a főhajóban és tömjénfüst egy álló füstölőből az oltár előtt; alacsony köd a völgy tava fölött.",
+    "details": "Erdő: a kezdőnézet előtti tisztáson (7, −1), 11 kő, 6 elszenesedett hasáb, izzó parázságy, VolumeEmitter::campfire + ParticleEmitter::sparks/embers + a tűz által vezérelt pontfény (a hasábok árnyékot vetnek); a páfrányok és fűcsomók nem nőnek a tűzrakóba. Katedrális: 24 000 porszemcse a főhajó légterében, VolumeEmitter::incense egy esztergált füstölőtartó tálja fölött. Völgy: VolumeEmitter::mist a tó befoglaló dobozában. Az új hálók a jelenetek végén épülnek, így a korábban sütött mesh-könyvtárak érvényesek maradnak.",
+    "metrics": "METRICS_DEMO",
+    "showcase": "Erdő éjjel a tábortűzzel (fő látványkép); katedrális fénynyalábok porral; völgy kezdőnézet köddel.",
+    "modules": ["crates/helios-demo/src/scenes/forest.rs", "crates/helios-demo/src/scenes/cathedral.rs", "crates/helios-demo/src/scenes/valley.rs", "crates/helios-demo/src/app.rs"]
+  },
+  {
+    "id": "debug-view-cycle-gaps",
+    "title": "Javítás: a debug nézetek léptetése hézagos sorszámozással",
+    "area": "Platform és eszközök",
+    "kind": "fix",
+    "summary": "A V billentyű (DebugView::next) a nézet sorszámával indexelte a listát, ami hézagos számozásnál (a 21-es nézet a 16–20 nélkül) rossz nézetre ugrott. Most a listabeli pozíció alapján lép.",
+    "details": "DebugView::next a DebugView::ALL-beli pozíciót keresi meg, nem a diszkriminánst használja indexként; így a párhuzamosan fejlesztett, nem folytonos sorszámú nézetek (16–21) bármilyen sorrendben összefésülhetők.",
+    "metrics": "Előtte: a 21-es nézetről V → az 5-ös nézet ((21 + 1) mod 17); utána: a lista következő eleme, körbe.",
+    "showcase": "Nincs külön látványelem.",
+    "modules": ["crates/helios-render/src/renderer.rs"]
+  }
+]

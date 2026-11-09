@@ -28,6 +28,7 @@ use crate::passes::post_fx::{DepthOfField, PostFxPass};
 use crate::passes::material::MaterialPass;
 use crate::passes::shading::{GiPass, LightingInputs, LightingPass};
 use crate::clouds::{CloudInputs, Clouds};
+use crate::effects::{Effects, EffectsFrame};
 use crate::fog::{FogInputs, VolumetricFog};
 use crate::lights::{LightCulling, MAX_LIGHTS};
 use crate::lumen::{CardInputs, Lumen};
@@ -76,10 +77,12 @@ pub enum DebugView {
     /// Virtual shadow map pages of the local light that contributes most at each pixel: mip
     /// and page grid, shaded by its shadow.
     LocalShadowPages = 15,
+    /// Particle overdraw (red to yellow) and heterogeneous volume march steps (blue to cyan).
+    VolumesParticles = 21,
 }
 
 impl DebugView {
-    pub const ALL: [DebugView; 16] = [
+    pub const ALL: [DebugView; 17] = [
         Self::Lit,
         Self::Clusters,
         Self::Triangles,
@@ -96,6 +99,7 @@ impl DebugView {
         Self::Reflections,
         Self::SurfaceCards,
         Self::LocalShadowPages,
+        Self::VolumesParticles,
     ];
 
     pub fn name(self) -> &'static str {
@@ -116,11 +120,14 @@ impl DebugView {
             Self::Reflections => "Reflections",
             Self::SurfaceCards => "Lumen surface cache (cards)",
             Self::LocalShadowPages => "Local light shadow pages (mips)",
+            Self::VolumesParticles => "Particle overdraw / volume march steps",
         }
     }
 
     pub fn next(self) -> Self {
-        Self::ALL[(self as usize + 1) % Self::ALL.len()]
+        // By position: the discriminants have gaps.
+        let index = Self::ALL.iter().position(|&v| v == self).unwrap_or(0);
+        Self::ALL[(index + 1) % Self::ALL.len()]
     }
 }
 
@@ -187,6 +194,10 @@ pub struct RenderSettings {
     pub depth_of_field: Option<DepthOfField>,
     /// Animate vegetation with the scene's wind ([`crate::Scene::wind`]).
     pub wind: bool,
+    /// Heterogeneous volumes ([`crate::Scene::volumes`]: smoke, fire, mist).
+    pub volumes: bool,
+    /// GPU particles ([`crate::Scene::particles`]).
+    pub particles: bool,
     /// Internal render resolution in percent of the output (UE's `r.ScreenPercentage`,
     /// 25–100); temporal super resolution reconstructs the output. Ignored while dynamic
     /// resolution is on.
@@ -227,6 +238,8 @@ impl Default for RenderSettings {
             motion_blur: 0.5,
             depth_of_field: None,
             wind: true,
+            volumes: true,
+            particles: true,
             screen_percentage: 100.0,
             dynamic_resolution: None,
         }
@@ -281,6 +294,7 @@ pub struct Renderer {
     gi: GiPass,
     lighting: LightingPass,
     translucency: Translucency,
+    effects: Effects,
     tsr: TsrPass,
     post_fx: PostFxPass,
     exposure: ExposurePass,
@@ -358,6 +372,7 @@ impl Renderer {
             gi: GiPass::new(device),
             lighting: LightingPass::new(device),
             translucency: Translucency::new(device),
+            effects: Effects::new(device),
             tsr: TsrPass::new(device),
             post_fx: PostFxPass::new(device),
             exposure: ExposurePass::new(device),
@@ -538,6 +553,22 @@ impl Renderer {
         if self.stats.poll(self.scene.instance_count) {
             self.update_lod_budget();
         }
+        // Volumes and particles are drawn over lit radiance and in their own debug view.
+        let effects = matches!(self.settings.debug_view, DebugView::Lit | DebugView::VolumesParticles);
+        self.effects.update(
+            &self.device,
+            &self.queue,
+            &EffectsFrame {
+                scene,
+                eye: camera.position,
+                view_proj: &view_proj,
+                volumes: effects && self.settings.volumes,
+                particles: effects && self.settings.particles,
+                delta_time,
+                internal: size,
+                capacity,
+            },
+        );
         self.time += delta_time;
 
         let current = (self.frame_index & 1) as usize;
@@ -550,6 +581,7 @@ impl Renderer {
         let device = self.device.clone();
         let mut rec = Recorder::new(&device, &mut self.profiler, "frame");
         self.sky.record(&mut rec, &self.frame_uniform, &self.samplers.linear, scene.ground_albedo);
+        self.effects.record_lights(&mut rec, &self.lights);
         self.lights.record(&mut rec, &self.frame_uniform);
 
         // Virtual geometry: two-pass occlusion culling into the visibility buffer.
@@ -634,7 +666,9 @@ impl Renderer {
         if self.settings.debug_view == DebugView::SurfaceCards {
             self.lumen.record_debug(&mut rec, &self.frame_uniform, &self.targets, &self.samplers);
         }
+        self.effects.record_before_translucency(&mut rec, &lighting, &self.scene, &self.translucency);
         self.translucency.record(&mut rec, &lighting, &self.scene, &self.textures);
+        self.effects.record_after_translucency(&mut rec, &lighting);
 
         // Post-processing, at output resolution from here on.
         self.tsr.record(&mut rec, &self.frame_uniform, &self.targets, &self.samplers, &self.exposure.buffer, current);
@@ -708,6 +742,7 @@ impl Renderer {
             // Last frame's: the uniforms are written before translucency finds the camera's water
             // body this frame (exposure adapts over several frames anyway).
             (self.translucency.camera_in_water(), flags::UNDERWATER),
+            (self.effects.active(), flags::REACTIVE),
         ] {
             if enabled {
                 frame_flags |= flag;

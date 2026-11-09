@@ -39,6 +39,8 @@ const FLAG_AUTO_EXPOSURE: u32 = 8u;
 const FLAG_FOG: u32 = 16u;
 const FLAG_HISTORY_VALID: u32 = 32u;
 const FLAG_UNDERWATER: u32 = 64u;
+// gbuffer_motion.z holds TSR's reactive mask (oit.wgsl; otherwise emission, consumed by then).
+const FLAG_REACTIVE: u32 = 1024u;
 
 const INVALID_PAGE: u32 = 0xffffffffu;
 const INSTANCE_CAST_SHADOW: u32 = 1u;

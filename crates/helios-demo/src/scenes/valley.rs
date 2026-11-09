@@ -5,7 +5,7 @@
 use glam::{Mat4, Quat, Vec2, Vec3};
 use helios_geometry::modeling::cuboid;
 use helios_geometry::{noise, primitives, BuildConfig, SdfMode};
-use helios_render::{Camera, Material, MaterialKind, Scene, Sun, TextureDesc, TextureMapping, TexturePattern};
+use helios_render::{Camera, Material, MaterialKind, Scene, Sun, TextureDesc, TextureMapping, TexturePattern, VolumeEmitter};
 
 use super::{add_baked, add_baked_with, smoothstep, Detail, Rng, SceneSetup};
 
@@ -180,6 +180,9 @@ fn build_scene(detail: Detail) -> Scene {
 
     // (Added last, so pre-baked mesh libraries of the rest of the scene stay valid.)
     translucency_corner(&mut scene);
+    // Mist drifting low over the lake (a procedural heterogeneous volume; behind the glass of
+    // the translucency corner it is seen through the panes).
+    scene.volumes.push(VolumeEmitter::mist(Vec3::new(LAKE_CENTER.x, WATER_LEVEL - 0.2, LAKE_CENTER.y), Vec3::new(22.0, 3.5, 32.0)));
     scene
 }
 
