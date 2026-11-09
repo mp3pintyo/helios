@@ -216,7 +216,7 @@ fn cull_instances(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
     let strength = wind_strength(instance);
-    let bounds = skin_padded(instance, wind_padded(instance, strength, instance.bounds));
+    let bounds = posed_bounds(instance, wind_padded(instance, strength, instance.bounds));
     if !sphere_in_frustum(bounds) || !vsm_overlaps(bounds, dynamic_caster(instance, strength)) {
         return;
     }
@@ -261,7 +261,7 @@ fn cull_pages(
             let page = pages[page_id];
             let scale = instance.max_scale;
             let strength = wind_strength(instance);
-            let bounds = skin_padded(instance, wind_padded(instance, strength, transform_sphere(instance.world, page.bounds, scale)));
+            let bounds = posed_bounds(instance, wind_padded(instance, strength, transform_sphere(instance.world, page.bounds, scale)));
             if page_table[page_id] != INVALID_ID && sphere_in_frustum(bounds) && vsm_overlaps(bounds, dynamic_caster(instance, strength)) {
                 // If even the coarsest parent in the page is fine enough, every cluster in it
                 // would be rejected by the LOD test: skip the page entirely.
@@ -359,7 +359,7 @@ fn test_cluster(instance_id: u32, cluster_id: u32) -> ClusterResult {
     let parent = projected_error(world_error(cluster.parent_error, scale), transform_sphere(instance.world, cluster.parent_lod_bounds, scale));
     let bounds = transform_sphere(instance.world, cluster.bounds, scale);
     let strength = wind_strength(instance);
-    let padded = skin_padded(instance, wind_padded(instance, strength, bounds));
+    let padded = posed_bounds(instance, wind_padded(instance, strength, bounds));
     let own_ok = own <= view.lod_threshold;
     let candidate = parent > view.lod_threshold && sphere_in_frustum(padded) && vsm_overlaps(padded, dynamic_caster(instance, strength));
     // Streaming feedback (main view): this cluster is on the cut but wants finer children.

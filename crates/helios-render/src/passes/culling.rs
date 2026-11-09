@@ -104,9 +104,9 @@ pub struct Culling {
     raster_layout: wgpu::BindGroupLayout,
     sw_layout: wgpu::BindGroupLayout,
     merge_layout: wgpu::BindGroupLayout,
-    instances: wgpu::ComputePipeline,
-    pages: wgpu::ComputePipeline,
-    clusters: [wgpu::ComputePipeline; 3],
+    /// The culling passes for scenes without and with skinned instances (`SKINNING` in
+    /// dynamic_caster.wgsl).
+    passes: [CullPasses; 2],
     prepare_pages: wgpu::ComputePipeline,
     prepare_clusters: wgpu::ComputePipeline,
     prepare_early_draw: wgpu::ComputePipeline,
@@ -124,6 +124,13 @@ pub struct Culling {
     voxel_raster: [wgpu::ComputePipeline; 4],
     merge: wgpu::ComputePipeline,
     dummy_hzb: wgpu::TextureView,
+}
+
+/// The pipelines of cull.wgsl's passes, specialised for one `SKINNING` value.
+struct CullPasses {
+    instances: wgpu::ComputePipeline,
+    pages: wgpu::ComputePipeline,
+    clusters: [wgpu::ComputePipeline; 3],
 }
 
 impl Culling {
@@ -167,8 +174,16 @@ impl Culling {
             ],
         );
 
-        let cluster_pipeline = |mode: CullMode| {
-            compute_pipeline(device, "cull clusters", &cull_module, "cull_clusters", &cull_layout, &[("CULL_MODE", mode as u32 as f64)])
+        let cull_passes = |skinning: bool| {
+            let skinning = ("SKINNING", if skinning { 1.0 } else { 0.0 });
+            let cluster_pipeline = |mode: CullMode| {
+                compute_pipeline(device, "cull clusters", &cull_module, "cull_clusters", &cull_layout, &[("CULL_MODE", mode as u32 as f64), skinning])
+            };
+            CullPasses {
+                instances: compute_pipeline(device, "cull instances", &cull_module, "cull_instances", &cull_layout, &[skinning]),
+                pages: compute_pipeline(device, "cull pages", &cull_module, "cull_pages", &cull_layout, &[skinning]),
+                clusters: [cluster_pipeline(CullMode::Single), cluster_pipeline(CullMode::Early), cluster_pipeline(CullMode::Late)],
+            }
         };
         let args_pipeline = |entry: &str| compute_pipeline(device, entry, &args_module, entry, &args_layout, &[]);
         let sw_pipeline = |pass: u32, late: bool, masked: bool| {
@@ -203,9 +218,7 @@ impl Culling {
         .create_view(&Default::default());
 
         Self {
-            instances: compute_pipeline(device, "cull instances", &cull_module, "cull_instances", &cull_layout, &[]),
-            pages: compute_pipeline(device, "cull pages", &cull_module, "cull_pages", &cull_layout, &[]),
-            clusters: [cluster_pipeline(CullMode::Single), cluster_pipeline(CullMode::Early), cluster_pipeline(CullMode::Late)],
+            passes: [cull_passes(false), cull_passes(true)],
             prepare_pages: args_pipeline("prepare_page_dispatch"),
             prepare_clusters: args_pipeline("prepare_cluster_dispatch"),
             prepare_early_draw: args_pipeline("prepare_early_draw"),
@@ -252,6 +265,7 @@ impl Culling {
         atomics: &wgpu::Buffer,
     ) {
         let device = rec.device;
+        let passes = &self.passes[scene.skins.skinned_instances as usize];
         let cull_group = bind_group(
             device,
             "cull",
@@ -284,7 +298,7 @@ impl Culling {
         let mut pass = rec.compute_pass(if mode == CullMode::Late { "cull (late)" } else { "cull" });
         if mode != CullMode::Late {
             pass.set_bind_group(0, &cull_group, &[]);
-            pass.set_pipeline(&self.instances);
+            pass.set_pipeline(&passes.instances);
             match scene.assemblies.cull_dispatch() {
                 // The scene's instances and the assemblies' part slots in use.
                 Some((args, offset)) => pass.dispatch_workgroups_indirect(args, offset),
@@ -295,7 +309,7 @@ impl Culling {
             pass.set_bind_group(0, &args_group, &[]);
             pass.dispatch_workgroups(1, 1, 1);
 
-            pass.set_pipeline(&self.pages);
+            pass.set_pipeline(&passes.pages);
             pass.set_bind_group(0, &cull_group, &[]);
             pass.dispatch_workgroups_indirect(&view.args, ARGS_PAGES);
 
@@ -304,7 +318,7 @@ impl Culling {
             pass.dispatch_workgroups(1, 1, 1);
         }
 
-        pass.set_pipeline(&self.clusters[mode as usize]);
+        pass.set_pipeline(&passes.clusters[mode as usize]);
         pass.set_bind_group(0, &cull_group, &[]);
         pass.dispatch_workgroups_indirect(&view.args, ARGS_CLUSTERS);
 
