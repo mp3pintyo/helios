@@ -1,0 +1,86 @@
+[
+ {
+  "id": "browser-shader-startup",
+  "title": "Első kép a böngészőben másodpercek alatt: fokozatos shaderfordítás, a funkciók egyenként kapcsolnak be",
+  "area": "Böngésző",
+  "kind": "fix",
+  "summary": "A böngészős indulás eddig minden csővezeték (pipeline) fordítását kivárta az első kép előtt: Firefoxban 27–58 s, friss Chromium-profilban 21–45 s. Mostantól az első képhez csak a mag-csővezetékek kellenek (egymenetes vágás, raszter, anyagfeloldás, nap- és égbolt-megvilágítás, TSR, tónusleképezés); minden további funkció (árnyékok, Lumen, felhők, köd, áttetszőség, tesszeláció, takarási szűrés, térfogatok) akkor kapcsol be, amikor a csővezetékei elkészültek, és a végső kép a natívval azonos beállításokkal készül – az Unreal aszinkron shaderfordítása tartalékokkal mintájára. Chromium a háttérben párhuzamosan fordít (aszinkron előmelegítés + a Dawn tartalom szerinti gyorsítótára), Firefox a magkészletet a jelenetsütés alatt, a többit képkockánként.",
+  "details": "Új modul: helios_render::pipelines. Minden csővezeték egy Group-hoz tartozik (Core, Shadows, Clouds, Fog, GlobalIllumination, Translucency, CameraEffects, Tessellation, OcclusionCulling, Effects), a létrehozó kód csoportjából (in_group szálhelyi érték; a Lazy konstruktora a saját csoportjában fut, így a beágyazott értékek öröklik). Lazy<T>: Lazy::background (minden util::compute_pipeline) natívan azonnal elkészül, böngészőben sorba áll; Lazy::new első használatkor készül, a prefetch sorba állítja, ha a jelenetben megvan a tartalom. A Renderer::render a beállításokból kikapcsolja azokat a funkciókat, amelyek csoportja még nem kész (a beállítások a kértet őrzik); natívan minden csoport mindig kész, a képkocka változatlan. A tartalomfüggő csővezetékeket (áttetsző modellek, térfogatok, részecskék, elmozdító anyag) a Renderer::prefetch_content jelenetverziónként a döntés előtt sorba állítja; a mag tartalmát (anyagfeloldás modelljei és permutációja, textúraminták, maszkolt/voxel/skinnelt raszter) az első képkocka szinkronja találja meg, és az első kép előtt a képkocka a szinkron után megáll, ha még fordul valami. A tesszelátor, a gráfok kockázó permutációi, a feloldás TESSELLATION permutációja és a kiterjesztett (gráf/slab) feloldás e permutációja a Tessellation csoportban várakozik, amíg a képek még elmozdítás nélkül készülnek. Böngészőréteg (pipelines::browser::install): a GPUDevice createComputePipeline/createRenderPipeline metódusait becsomagolja: számol (a firefox-freeze várakozásához), és előmelegítéskor az aszinkron változatot hívja, a visszakapott üres objektumot a wgpu eldobja; a Promise.all után a pump elkészíti a csővezetéket, Dawnban ez gyorsítótár-találat (0 ms, mérve), nem számít fordításnak. Kiválasztás user agent szerint (Chrome/), ?shaders=serial|parallel felülírja. Firefox: a mag egy csomagban a sütés előtt (yielddel: különben a fő szál 5 s-ra blokkolt, és a parancsok csak a feladat végén mennek a GPU-folyamatba), a többi bemutatott képkocka utáni saját képkockában, adaptív kötegekben (1–16, a várakozás hosszától függően); közvetlenül bemutatás után fordítva a lap következő rajzolása várt a fordításra. web.rs: a renderer a sütés előtt készül (DemoApp::build), a ciklus a magra vár, heliosFrames és heliosShaders exportok, a HUD-ban a háttérfordítás állása.",
+  "metrics": "Firefox 159 ablakos, friss profil; Chromium fej nélküli, friss profil; RTX 3090 + Ryzen 5 7600X három másik ügynökkel megosztva (a gép terheltebb volt, mint a firefox-freeze méréseinél), váltott alap/új futások, 3 célonként. Első kép (navigáció → első bemutatott képkocka), alap → új: Firefox völgy 44,8–49,7 → 10,8–11,7 s, katedrális 36,2–44,2 → 12,1–15,1 s, bemutatóoldal 45,0–48,4 → 11,9–13,0 s; Chromium völgy 31,6–33,5 → 8,4–9,4 s, katedrális 25,4–26,2 → 9,3–9,8 s, oldal 30,8–41,4 → 9,3–9,9 s. Teljes minőség (minden csővezeték kész): Chromium 9,3–12,4 s; Firefox völgy 46,8 / 51,0 s (ugyanazokban a párokban az alap első képe 45,3 / 51,5 s), katedrális 33,2–43,2 s, oldal 45,2 s. Leghosszabb lapszünet: Chromium 11,5–16,5 s → 4,8–6,2 s (a jelenetsütés), Firefoxban csak a sütés (4,2–6,8 s), a háttérfordítás alatt a lap 16,7 ms-mal rajzolt. Az első kép előtti csővezetékek: völgy 163 → 52, katedrális 60 (154-ből). Natív kép változatlan (2560×1440, 100 % és 67 %, mind a négy jelenet és a Fox: PSNR új/alap a zajon belül, pl. völgy 53,2 / 52,5 dB, katedrális 61,0 / 61,6 dB, erdő 41,1 / 41,3 dB); a GPU-idő zajon belül.",
+  "showcase": "Firefoxban vagy friss Chrome-profilban a https://mp3pintyo.github.io/helios/ megnyitása: a fátyol számolja az első kép shadereit (pl. 'GPU-shaderek fordítása a böngészőben… 31/52 · 4 s'), majd néhány másodperc múlva megjelenik a völgy árnyékok és GI nélkül, a bal felső sarokban 'Teljes minőség töltődik: 84/171 shader · még: árnyékok, globális megvilágítás, …', és a funkciók egymás után kapcsolnak be. A demóban (web/index.html?scene=valley) a HUD első sora mutatja ugyanezt; ?shaders=serial Chromiumban a Firefox-féle soros fordítást mutatja.",
+  "modules": [
+   "crates/helios-render/src/pipelines.rs",
+   "crates/helios-render/src/util.rs",
+   "crates/helios-render/src/renderer.rs",
+   "crates/helios-render/src/passes/culling.rs",
+   "crates/helios-render/src/passes/material.rs",
+   "crates/helios-render/src/textures.rs",
+   "crates/helios-render/src/translucency.rs",
+   "crates/helios-render/src/effects.rs",
+   "crates/helios-render/src/volumes.rs",
+   "crates/helios-render/src/particles.rs",
+   "crates/helios-render/src/gpu_scene.rs",
+   "crates/helios-render/src/lumen.rs",
+   "crates/helios-render/src/vsm.rs",
+   "crates/helios-demo/src/web.rs",
+   "crates/helios-demo/src/app.rs"
+  ]
+ },
+ {
+  "id": "workgroup-array-compile",
+  "title": "Az SH-vetítések egy együtthatót összegeznek egyszerre: Firefoxban 0,8–1 s helyett 0,1–0,2 s a fordítás",
+  "area": "Böngésző",
+  "kind": "fix",
+  "summary": "Három compute shader a fordítási idejének nagy részét a munkacsoport-memória nullázására fordította Firefoxban: a böngésző minden workgroup tömböt nulláz, a naga ezt egyetlen értékadásként írja HLSL-be, és a DXC elemenként kb. 1 ms-ot töltött vele. Az égbolt SH-vetítése (64 × 9 elem) és a Lumen próba-SH (64 × 10) most 64 elemű tömbön, együtthatónként összegez – ugyanaz a fa, ugyanazok az összeadások, bitre azonos eredmény.",
+  "details": "Egy labor-oldal egyedi csővezetékeket fordított (aszinkron, egyenként, egyedi modullal) összefésült WGSL-változatokból. Felezés: a redukció elhagyásával az égbolt-SH 872 ms-ról 44 ms-ra esett; a fa helyett soros összegzés, illetve lapos vec4-tömb nem segített; egy 64 elemű tömb igen (75 ms). sky.wgsl project_sky_sh, lumen_gather.wgsl probe_sh (a 9. együttható az égbolt-láthatóság), lumen_light.wgsl update_probes (4 × 32 → 32). A Chromium Tint-je ciklussal nulláz: ott nem volt lassú (0,04–0,16 s).",
+  "metrics": "Firefox 159, egy csővezeték: égbolt SH 0,76–1,33 s → 0,08–0,11 s; Lumen próba-SH 1,1–2,1 s → 0,19 s; sugárzás-cache próbák 0,45 → 0,32 s. Chromium változatlan (0,14 → 0,07; 0,16 → 0,16; 0,31 → 0,32 s). Natív kép zajon belül.",
+  "showcase": "Nem bemutatandó önmagában.",
+  "modules": [
+   "crates/helios-render/src/shaders/sky.wgsl",
+   "crates/helios-render/src/shaders/lumen_gather.wgsl",
+   "crates/helios-render/src/shaders/lumen_light.wgsl"
+  ]
+ },
+ {
+  "id": "texgen-per-pattern",
+  "title": "Textúraszintézis mintánként külön csővezetékkel: a jelenet csak a használt mintákat fordítja",
+  "area": "Böngésző",
+  "kind": "fix",
+  "summary": "A texgen.wgsl generate belépési pontja mind a 19 procedurális mintát egy switch mögött tartalmazta, állandó oktávszámú fBm-ciklusokkal, amelyeket a DXC kibont: Firefoxban 1,4–1,55 s, Chromiumban 2 s egyetlen fordítás. Egy PATTERN override mintánként külön csővezetéket ad (60–100 ms), és a jelenet csak a használt mintákat fordítja (a völgy 7-et, a katedrális 13-at).",
+  "details": "TextureLibrary::generate mintánként Lazy::new; a sync előbb sorba állítja a jelenet mintáit, és a böngészőben addig nem építi a tömböket, amíg azok nem készültek el (az első képkocka megvárja). A ciklusok nem-kibonthatóvá tétele (dinamikus oktávszám) csak 10 %-ot hozott. A kód ugyanaz, a recept mintája megegyezik a konstanssal: a kép azonos.",
+  "metrics": "Firefox 159: 1,55 s egy csővezeték → 0,06–0,10 s mintánként (fű 66, föld 62, szikla 83, moha 84, kéreg 104, levél 65 ms). Natív kép zajon belül.",
+  "showcase": "Nem bemutatandó önmagában.",
+  "modules": [
+   "crates/helios-render/src/shaders/texgen.wgsl",
+   "crates/helios-render/src/textures.rs"
+  ]
+ },
+ {
+  "id": "resolve-used-models",
+  "title": "Anyagfeloldás csak a jelenetben használt árnyalási modellekre",
+  "area": "Böngésző",
+  "kind": "fix",
+  "summary": "Az anyagfeloldás mind a hat árnyalási modellre (standard, szikla, terep, fém, növényzet, égbolt) fordított csővezetéket és indított dispatch-et, akkor is, ha a jelenet anyagai közt nincs olyan (az üres csempelista dispatch-e semmit nem csinál). Most csak a jelenet anyagainak modelljei kapnak csővezetéket és dispatch-et; egy-egy ilyen fordítás a böngészőben 0,6–1,2 s.",
+  "details": "GpuScene::resolve_kinds: a feltöltött anyagok resolve-slotjainak bitmaszkja; MaterialPass::sync ebből (és az égboltból) állítja össze a modelllistát, a csővezetékek (permutáció, modell) kulccsal HashMap-ben. A kép azonos (a kihagyott dispatch-ek csempelistája üres).",
+  "metrics": "Völgy: 6 → 5, katedrális 6 → 4 feloldó csővezeték az első kép előtt. Natív kép zajon belül.",
+  "showcase": "Nem bemutatandó önmagában.",
+  "modules": [
+   "crates/helios-render/src/passes/material.rs",
+   "crates/helios-render/src/gpu_scene.rs"
+  ]
+ },
+ {
+  "id": "site-shader-progress",
+  "title": "A bemutatóoldal mutatja a shaderfordítást: számláló a fátyolon, majd a még érkező funkciók listája",
+  "area": "Bemutatóoldal",
+  "kind": "feature",
+  "summary": "A bemutatóoldal fátyla eddig a jelenet felépülése után eltűnt, és a fordítás alatt üres színpad látszott. Most a fátyol az első képig számolja a mag shadereit (heliosBusy, 250 ms-onként), utána a színpad bal felső sarkában egy megjegyzés mutatja, hány shader van még hátra és mely funkciók érkeznek (heliosShaders), amíg minden el nem készül.",
+  "details": "site/index.html: startEngine a heliosScene után waitForShaders(true): a fátyol szövege a heliosBusy-ból ('Compiling GPU shaders… 4 s (31 / 52)' → magyar/angol), amíg heliosFrames() > 0; ezután watchShaders 500 ms-onként a heliosShaders JSON-ból írja a .shader-note elemet, a funkcióneveket fordítva. Jelenetváltás után (loadScene) a fátyol megvárja a heliosBusy kiürülését. Régi motorral (heliosFrames nélkül) a korábbi viselkedés.",
+  "metrics": "Firefoxban a fátyol az első képig valós fordítási számlálót mutat (a soros fordítónál minden mag-csővezeték mögé egy onSubmittedWorkDone visszahívás számol), pl. 41/53 · 4 s; utána a megjegyzés (pl. 68/171 shader) kb. 35–45 s-ig látszik, Chromiumban 2–3 s-ig. A lap a teljes betöltés alatt 16,7 ms-mal rajzol (a jelenetsütés kivételével).",
+  "showcase": "A bemutatóoldal megnyitása Firefoxban: fátyol a számlálóval, majd a völgy és a 'Teljes minőség töltődik: …' megjegyzés, amely a funkciók bekapcsolásával rövidül, végül eltűnik.",
+  "modules": [
+   "site/index.html",
+   "crates/helios-demo/src/web.rs"
+  ]
+ }
+]

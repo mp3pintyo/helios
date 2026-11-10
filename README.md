@@ -9,8 +9,8 @@ dynamic world of moving instances, with its material / lighting / post stack —
 browser, where a UE-style level editor with scene files and a PCG graph sits around the live viewport.
 
 **Live showcase:** https://mp3pintyo.github.io/helios/ (needs a WebGPU browser: recent Chrome, Edge or Firefox; the
-browser first compiles the renderer's GPU shaders, which takes Firefox about 30–40 s on every visit and Chrome as long on the
-first one — the page stays responsive meanwhile, see gap 15).
+browser compiles the renderer's GPU shaders on the way: the first image after ~9 s in Chrome and ~11–15 s in Firefox,
+shadows, Lumen and the rest joining as their shaders arrive — see gap 15).
 Redeploy with `python site/build.py` then `python site/deploy_pages.py`.
 Round 4's design notes, measurements and screenshots, one file per feature: [`docs/round4/`](docs/round4/).
 
@@ -46,6 +46,7 @@ rustup target add wasm32-unknown-unknown
 cargo install wasm-bindgen-cli --version 0.2.130
 ./build-web.ps1
 python -m http.server 8080 --directory web     # open http://localhost:8080/?scene=cathedral
+#   ?shaders=serial|parallel: how the browser's background shader compile is worked (default: by browser)
 
 # The level editor (browser): outliner, details, gizmos, content browser, PCG volumes, material graphs
 python serve.py 8080 web
@@ -182,8 +183,12 @@ the story of how Helios was built. It talks to the engine through the page API i
 before loading the module, then `heliosLoadScene`, `heliosLoadModel(url)` (fetch a glTF model and make it the scene;
 a promise), `heliosSetCandleLights(n)` (the cathedral's candle lights from its next build; 0: the 33 fixture lights),
 `heliosKey`, `heliosLookAt`, `heliosSetSun`, `heliosSetView`, `heliosSetPaused`, `heliosHud`, `heliosScene` and
-`heliosBusy` (what the engine waits for — `Compiling GPU shaders… 12 s` while the browser compiles the pipelines of
-the first frame, a new scene or a feature switched on, the canvas keeping its last frame — or empty while it renders).
+`heliosBusy` (what the engine waits for — `Compiling GPU shaders… 4 s (31 / 52)` while the browser compiles the
+core pipelines of the first image, `Compiling GPU shaders… 2 s` for a new scene's or a feature's that a frame needs at
+once, the canvas keeping its last frame — or empty while it renders), `heliosFrames` (frames presented; 0 until the
+first image) and `heliosShaders` (the background compile as JSON: pipelines compiled and in all, the features still
+waiting for theirs, the time to the first image and to full quality). The site shows `heliosBusy` on its veil until
+the first frame, then a note with the features still compiling.
 `embedded: true` keeps keyboard input on the focused canvas and leaves the mouse wheel to the page; `statusElement`
 names the element the engine writes its (English) progress and errors into instead of `#status`, so a page can show
 its own, translated text. The editor uses a second set of exports (`heliosEditor*`, `heliosMaterialNodes`; see
@@ -1557,7 +1562,7 @@ culling), gallery 8.0 / 5.0 → 8.1 / 5.0 ms, cathedral with 300 lights under Me
 | Read-write storage textures only for 32-bit single-channel formats | Subsurface diffusion adds its result to the rgba16f scene colour with a full-screen pass and additive blending instead of a compute read-modify-write |
 | No hardware ray tracing | MegaLights' shadow rays march the depth buffer, the lights' virtual shadow maps and Lumen's distance fields |
 | No derivatives in compute shaders (the material resolve is compute over the visibility buffer) | Analytic barycentric UV derivatives; material graphs carry screen derivatives through their math by forward-mode differentiation |
-| Browsers compile every pipeline in their GPU process before running what follows it (Firefox one at a time, on every visit); wgpu has no asynchronous pipeline creation | The browser frame loop renders into its own texture and presents only frames that queued no compile, waiting for `onSubmittedWorkDone` otherwise, so the page never stalls behind a compile; pipelines for content a scene may not have are compiled on first use (`util::Lazy`) |
+| Browsers compile every pipeline in their GPU process before running what follows it (Firefox one at a time, asynchronous or not, on every visit); wgpu calls only the synchronous `create*Pipeline` | Progressive start-up (`pipelines.rs`): every pipeline belongs to a feature group and is queued in the browser; the renderer turns a feature off until its group is compiled, so the first image needs only the core set. Chromium: each pipeline is warmed through `create*PipelineAsync` (Dawn compiles in parallel) and made when warm, a cache hit. Firefox: the core set compiles while the scene bakes, the rest one per frame. The frame loop renders into its own texture and presents only frames that queued no compile, so the page never stalls behind one; content pipelines (skinning, masks, a translucent model…) are made on first use or queued once the scene has the content (`Lazy`) |
 | No wasm threads without cross-origin isolation (`SharedArrayBuffer` needs COOP/COEP headers, which GitHub Pages cannot send) | Lumen's displaced-variant bakes run on Web Workers that each instantiate the page's compiled wasm module and exchange bytes with it (`bake_worker.js`); other start-up work (scene build, texture encoding) runs on the render thread |
 ## Status vs. Unreal Engine 5 — what is still simpler
 
@@ -1799,12 +1804,16 @@ Honest differences that remain:
     patch and micro-triangle); texture derivatives are the base plane's. Skinned, alpha-masked, translucent and
     voxel geometry is not tessellated; the wind does not
     rotate displaced normals.
-15. **Browser start-up** (round 6, `firefox-freeze`): the first frame waits until the browser has compiled every
-    pipeline it uses — about 160 for the valley, WGSL → HLSL → DXC in the GPU process on Windows: 27–58 s in Firefox on a Ryzen 5 7600X,
-    which compiles one pipeline at a time and keeps no cache between visits, and as long in Chrome on a first visit
-    (later visits hit its shader cache). UE ships precompiled shaders and a PSO cache. wgpu has no asynchronous
-    pipeline creation (Dawn compiles `create*PipelineAsync` calls in parallel: the valley's set in 5.4 s instead of
-    42 s), so the engine can only keep the page responsive — it presents no frame queued behind a compile and shows
-    the wait (`heliosBusy`) — and compile less: pipelines for content a scene may not have are made on first use,
-    and the frame that first needs one waits for it with the canvas holding its last frame (a debug view's material
-    permutation ≈ 10 s in Firefox). The scene bake still runs on the main thread (3–4 s for the valley).
+15. **Browser start-up** (round 6, `firefox-freeze`, `browser-startup`): the browser compiles every pipeline in its
+    GPU process (WGSL → HLSL → DXC on Windows) — Firefox one at a time on every visit, Chrome through wgpu's
+    synchronous calls one at a time too on a first visit. UE ships precompiled shaders and a PSO cache. Helios
+    compiles progressively instead, like UE's asynchronous compilation with fallbacks (`pipelines.rs`,
+    `docs/round6/browser-startup.md`): the first image needs only the core pipelines, and shadows, Lumen, clouds,
+    fog, translucency, tessellation and occlusion culling come on as theirs arrive; Chrome compiles them in parallel
+    (warmed through `create*PipelineAsync`, then made from Dawn's cache), Firefox the core set while the scene bakes
+    and the rest one batch per frame. The first image now takes ~9 s in a fresh Chrome profile (was 26–41 s) and
+    11–15 s in Firefox (was 36–50 s) on this shared Ryzen 5 7600X; the full set ~11 s in Chrome and 33–51 s in
+    Firefox, about when it used to show its first image (a slower CPU waits proportionally longer). Still simpler:
+    the core set itself is ~4 s of Firefox compiling (the material resolve 0.6–1.2 s per shading model), the scene's
+    content pipelines are found only after the bake, a new scene or a debug view compiles its new pipelines in the
+    frame that needs them (the canvas holding its last frame), and the scene bake (3–6 s) runs on the main thread.

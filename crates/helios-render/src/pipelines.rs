@@ -348,6 +348,12 @@ pub fn waiting() -> Vec<Group> {
 /// warm ones (no compile: the browser returns the pipeline it compiled). Serial: makes the queued
 /// core pipelines, all at once (the first image needs every one). Returns how many it made.
 pub fn pump() -> usize {
+    pump_and(|| {})
+}
+
+/// [`pump`], calling `made_core` after each core pipeline the serial compiler makes (a frame loop
+/// can queue a completion callback behind each compile, to count them).
+pub fn pump_and(mut made_core: impl FnMut()) -> usize {
     let mut made = 0;
     match compiler() {
         Compiler::Parallel => {
@@ -376,6 +382,7 @@ pub fn pump() -> usize {
                 }
                 for job in core {
                     job.make();
+                    made_core();
                     made += 1;
                 }
             }

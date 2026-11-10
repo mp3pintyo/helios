@@ -70,8 +70,10 @@ pub(crate) struct State {
     presented: u32,
     /// Serial compiles: the next rAF compiles the next background pipeline instead of rendering.
     compile_next: bool,
-    /// Background pipelines created per serial compile: doubled while the compiles are short,
-    /// halved when one takes long (fewer round trips, the page still updating often enough).
+    /// Background pipelines created per serial compile: doubled while a batch compiles in under
+    /// 0.3 s, halved over 1 s. Every batch costs a rendered frame and a round trip, which the GPU
+    /// process serves between compiles: one pipeline at a time made the full set ~15 % slower
+    /// than compiling it in one go; the canvas still updates about once a second.
     batch: u32,
 }
 
@@ -89,6 +91,8 @@ struct Compiling {
 static GPU_DRAINED: AtomicU32 = AtomicU32::new(0);
 /// Generation of the last wait asked for.
 static GPU_WAIT: AtomicU32 = AtomicU32::new(0);
+/// Core pipelines the serial compiler's GPU process has compiled (the first image's progress).
+static CORE_COMPILED: AtomicU32 = AtomicU32::new(0);
 
 thread_local! {
     /// The running engine, for the exported page API.
@@ -140,7 +144,17 @@ fn set_time(index: usize, at: f64) {
 fn compiling_text(now: f64) -> String {
     let since = TIMES.with(Cell::get)[0];
     let (made, total) = pipelines::group_progress(Group::Core);
-    format!("Compiling GPU shaders… {:.0} s ({made} / {total})", (now - since) / 1000.0)
+    // Serial: made means sent to the GPU process; count the compiles that finished.
+    let compiled = if pipelines::compiler() == Compiler::Serial { CORE_COMPILED.load(Ordering::Relaxed) as usize } else { made };
+    format!("Compiling GPU shaders… {:.0} s ({} / {total})", (now - since) / 1000.0, compiled.min(total))
+}
+
+/// Works the pipeline queue; with the serial compiler a completion callback queued behind each
+/// core pipeline counts its compile (`onSubmittedWorkDone` resolves after the compiles before it).
+fn pump(queue: &wgpu::Queue) {
+    pipelines::pump_and(|| queue.on_submitted_work_done(|| {
+        CORE_COMPILED.fetch_add(1, Ordering::Relaxed);
+    }));
 }
 
 fn now() -> f64 {
@@ -384,7 +398,7 @@ async fn run() -> Result<(), String> {
     // next turn of the event loop.
     next_tick().await;
     set_time(0, now());
-    pipelines::pump();
+    pump(&ctx.queue);
     browser::take_created_labels();
     let (_, queued) = pipelines::progress();
     log::info!("{queued} pipelines queued ({:?} compiles); {} core pipelines for the first image", pipelines::compiler(), pipelines::group_progress(Group::Core).1);
@@ -627,7 +641,7 @@ fn frame(st: &mut State, now: f64) {
             log::info!("a frame waited for compiles: {}", browser::take_created_labels().join(", "));
         }
         if wait.background {
-            st.batch = if seconds < 0.15 { (st.batch * 2).min(16) } else if seconds > 0.5 { (st.batch / 2).max(1) } else { st.batch };
+            st.batch = if seconds < 0.3 { (st.batch * 2).min(32) } else if seconds > 1.0 { (st.batch / 2).max(1) } else { st.batch };
         }
         st.compiling = None;
         set_busy("");
@@ -646,7 +660,7 @@ fn frame(st: &mut State, now: f64) {
     // Chromium: start warming newly queued pipelines, make the warm ones. Firefox: make the
     // queued core pipelines (the first image waits for all of them).
     let pipelines = pipelines_created();
-    pipelines::pump();
+    pump(&st.queue);
     if !pipelines::ready(Group::Core) || pipelines_created() != pipelines {
         if pipelines_created() != pipelines {
             st.compiling = Some(wait_for_gpu(&st.queue, false));
