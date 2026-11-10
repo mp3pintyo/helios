@@ -55,7 +55,7 @@ use crate::tessellation::{tessellation_entry, tessellation_resource, ShadowInput
 use crate::util::{bind, bind_group, bind_group_layout, compute_pipeline, pipeline_layout, storage_buffer, uniform_buffer, workgroups};
 use crate::vsm_local::{self, LocalCull, LocalFrame, LocalShadows};
 use crate::skin::{skin_entry, skin_resource};
-use crate::vsm_motion::{self, ShadowMove};
+use crate::vsm_motion::{self, MoveFootprints, ShadowMove};
 use crate::wind::{wind_entry, wind_resource};
 use crate::Camera;
 
@@ -233,11 +233,14 @@ pub struct VirtualShadowMap {
     clear_static: wgpu::ComputePipeline,
     capture_static: wgpu::ComputePipeline,
     invalidation: PageInvalidation,
+    /// Footprints of moved instances, with their recent speeds.
+    moves: MoveFootprints,
     /// Geometry residency changed since the last recorded frame.
     residency_changed: bool,
     /// The wind moves shadow casters this frame.
     wind: bool,
-    /// Instances moved or changed mobility this frame: their footprints are in the list already.
+    /// Instances moved, stopped or changed mobility this frame: their footprints are in the list
+    /// already.
     instances_changed: bool,
     /// The wind moved shadow casters when the invalidation last ran: when it stops, the casters
     /// it moved return to the static layers once more.
@@ -470,6 +473,7 @@ impl VirtualShadowMap {
             sw_layout,
             resolve_layout,
             invalidation: PageInvalidation::new(device),
+            moves: MoveFootprints::default(),
             cache,
             atlas,
             last_sun: Vec3::ZERO,
@@ -528,9 +532,13 @@ impl VirtualShadowMap {
             draw_capacity: DRAW_CAPACITY,
             eye: f.camera.position.extend(f.volume_distance),
         };
-        self.instances_changed = f.instances_changed;
-        if f.instances_changed {
-            self.invalidation.write_moves(queue, &vsm_motion::footprints(f.moves, &light_view));
+        if f.scene_changed {
+            self.moves.reset();
+        }
+        let footprints = self.moves.update(f.moves, &light_view);
+        self.instances_changed = f.instances_changed || !footprints.is_empty();
+        if self.instances_changed {
+            self.invalidation.write_moves(queue, &footprints);
         }
         let mut cache = self.cache.default_params(f.frame, RETAIN_FRAMES, 1);
         cache.level_pages = LEVEL_PAGES;

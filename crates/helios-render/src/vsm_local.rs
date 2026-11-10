@@ -12,7 +12,8 @@
 //! physical pages go wherever they are needed, between the sun and the lights.
 //!
 //! Each frame up to [`LOCAL_SLOTS`] shadow-casting lights are given a *slot*, prioritised by
-//! their influence on the screen; the others keep distance-field shadows. A light keeps its slot
+//! their influence on the screen; the others — and, by default, lights that are moving — keep
+//! distance-field shadows. A light keeps its slot
 //! (and its cached pages) while it stays selected; its pages are dropped when it moves or
 //! changes shape, when the scene changes, or when the slot passes to another light.
 //!
@@ -240,10 +241,12 @@ pub struct LocalFrame<'a> {
     pub enabled: bool,
     /// Geometry or instances changed: every cached local page is stale.
     pub scene_changed: bool,
-    /// Moving lights may take the slots static ones leave over. Off when MegaLights shades the
-    /// local lights: it traces every light's shadow anyway, and a moving light's shadow map
-    /// re-renders in full every frame (six candle lights of the swinging chandeliers near the
-    /// altar: 11 ms of page raster).
+    /// Moving lights may take the slots static ones leave over
+    /// (`RenderSettings::moving_light_shadow_maps`, off by default and under MegaLights). A
+    /// moving light's shadow map re-renders in full every frame (the cathedral's eleven swinging
+    /// chandelier lights: 3.5 ms at 1440p, the candle-lit variant's six candle lights near the
+    /// altar 11 ms), while its distance-field shadow costs no more than a mapped light's
+    /// filtering; its slot goes back to static lights.
     pub moving_shadow_maps: bool,
 }
 

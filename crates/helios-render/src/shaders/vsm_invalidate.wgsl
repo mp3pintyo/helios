@@ -31,7 +31,9 @@
 // A wind footprint bounds how far its geometry moved since the page was rendered by
 // min(2 · maximum displacement, speed bound · frames): pages of fine levels are refreshed every
 // frame, coarse levels (distant shadows, volumetric fog) every few frames, and levels whose texels
-// dwarf the displacement never — the cost stays bounded without visible lag.
+// dwarf the displacement never — the cost stays bounded without visible lag. A move's footprint
+// (vsm_motion.rs: per slice of a long caster) carries its recent speed the same way, and is padded
+// by the refresh distance, since the pages it skipped may show the caster that far off.
 // Local light pages (vsm_local.rs) apply the same rules in their light's terms: a footprint hits
 // a page if its world sphere lies within the light's range and projects onto the page in its
 // face and mip, once its geometry may have moved WIND_REFRESH_TEXELS of the page's texels at the
@@ -74,7 +76,7 @@ struct Footprint {
     change: f32,
     per_frame: f32,
     // Moves (vsm_motion.rs): the half extent of a tighter light-space rectangle around `center`,
-    // which replaces the circle in the sun's clipmap (0: the circle).
+    // which replaces the circle in the sun's clipmap (0: the circle, not a move).
     rect: vec2<f32>,
 }
 
@@ -184,10 +186,16 @@ fn hit_bits(f: Footprint) -> u32 {
 // texels since it was rendered `age` frames ago.
 fn local_page_hit(id: LocalPageId, f: Footprint, age: f32) -> bool {
     let light = local_vsm.slots[id.slot].position_range;
-    if distance(f.world.xyz, light.xyz) > f.radius + light.w {
+    let gap = distance(f.world.xyz, light.xyz);
+    if gap > f.radius + light.w {
         return false;
     }
-    let r = local_sphere_rect(id.slot, id.face, vec4<f32>(f.world.xyz, f.radius));
+    // A move's page may show its caster up to the refresh distance off (vsm_motion.rs).
+    var radius = f.radius;
+    if any(f.rect > vec2<f32>(0.0)) {
+        radius += local_texel(id.slot, gap + f.radius, id.mip) * WIND_REFRESH_TEXELS;
+    }
+    let r = local_sphere_rect(id.slot, id.face, vec4<f32>(f.world.xyz, radius));
     let depth = max(r.front, local_vsm.slots[id.slot].params.y);
     if !r.valid || min(f.change, f.per_frame * max(age, 1.0)) < local_texel(id.slot, depth, id.mip) * WIND_REFRESH_TEXELS {
         return false;
@@ -227,12 +235,12 @@ fn invalidate_pages(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invoca
         for (var i = lid; i < min(count, CAPACITY) && hits < HIT_STATIC; i += 64u) {
             let f = footprints.items[i];
             if min(f.change, f.per_frame * max(age, 1.0)) >= threshold {
-                // Footprint in page units (a circle, or a rectangle) vs. the page square
-                // [page, page + 1).
+                // Footprint in page units (a circle, or a move's rectangle padded by the
+                // refresh distance) vs. the page square [page, page + 1).
                 let v = f.center / page_world;
                 let rect = any(f.rect > vec2<f32>(0.0));
                 let gap = max(abs(v - (page + 0.5)) - ((f.rect / page_world) + 0.5), vec2<f32>(0.0));
-                if length(gap) <= select(f.radius / page_world, 0.0, rect) {
+                if length(gap) <= select(f.radius, threshold, rect) / page_world {
                     hits |= hit_bits(f);
                 }
             }

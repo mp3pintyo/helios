@@ -200,6 +200,12 @@ pub struct RenderSettings {
     /// Virtual shadow maps for the most important shadow-casting local lights (others, or all
     /// when off, get distance-field shadows).
     pub local_light_shadow_maps: bool,
+    /// Also give *moving* local lights virtual shadow maps (with slots to spare). A moving
+    /// light's map is stale every frame, so it is re-rendered in full every frame: the
+    /// cathedral's eleven swinging chandelier lights cost 3.5 ms of page rendering at 1440p.
+    /// Off (default), they keep distance-field shadows while they move, like the lights beyond
+    /// the shadow-map budget (MegaLights traces them in any case).
+    pub moving_light_shadow_maps: bool,
     /// MegaLights: stochastic, denoised direct lighting in which every local light casts soft
     /// shadows, at a cost that barely grows with the light count (`megalights.rs`). Off: the
     /// clustered light loop (shadow maps for the 32 most important lights, distance-field shadows
@@ -298,6 +304,7 @@ impl Default for RenderSettings {
             occlusion_culling: true,
             shadows: true,
             local_light_shadow_maps: true,
+            moving_light_shadow_maps: false,
             mega_lights: false,
             global_illumination: true,
             gi_method: GiMethod::ScreenProbes,
@@ -701,7 +708,8 @@ impl Renderer {
         let substrate = self.settings.substrate;
         self.extended.sync(&self.device, &self.queue, scene, &self.scene, substrate, self.targets.capacity);
         let tessellation = self.scene.has_displacement();
-        self.material.sync(&self.device, self.scene.uv_extensions, self.scene.skins.skinned_instances, tessellation, &self.extended, substrate);
+        let debug_views = self.settings.debug_view != DebugView::Lit;
+        self.material.sync(&self.device, self.scene.uv_extensions, self.scene.skins.skinned_instances, tessellation, debug_views, &self.extended, substrate);
         let slab_lighting = self.extended.lighting.then_some(&self.extended.lighting_layout);
         self.lighting.sync_substrate(&self.device, slab_lighting);
         self.megalights.sync_substrate(&self.device, self.extended.lighting.then_some(&self.extended.megalights_layout));
@@ -725,7 +733,7 @@ impl Renderer {
             planes: frustum_planes(&view_proj),
             enabled: self.settings.shadows && self.settings.local_light_shadow_maps,
             scene_changed: self.scene_changed,
-            moving_shadow_maps: !self.settings.mega_lights,
+            moving_shadow_maps: self.settings.moving_light_shadow_maps && !self.settings.mega_lights,
         });
         self.lights.upload(&self.queue, scene, self.vsm.local.light_slots());
         let clouds = self.settings.clouds.then_some(&scene.clouds);

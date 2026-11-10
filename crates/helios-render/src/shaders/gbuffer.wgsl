@@ -44,6 +44,10 @@ override SKINNING: bool = true;
 // The scene has displaced instances (tessellation.rs): without them the displaced-surface resolve
 // (tess_resolve.wgsl) is compiled out.
 override TESSELLATION: bool = true;
+// A debug view recolours the G-buffer (passes/material.rs): the lit view compiles the debug
+// colouring out, as keeping its inputs (cluster, triangle, instance, ...) alive across the material
+// evaluation costs registers — the resolve ran 1.4x slower with it (cathedral, 1440p: 0.3 ms).
+override DEBUG_VIEWS: bool = true;
 
 const RESOLVE_SLOTS: u32 = 16u;
 const TILE_LISTS: u32 = 80u;
@@ -432,36 +436,38 @@ fn resolve(
         surface = evaluate_kind(m, input);
     }
 
-    switch frame.debug_view {
-        case DEBUG_CLUSTERS: { surface.albedo = hash_color(entry.y * 7919u + entry.x * 104729u); }
-        case DEBUG_TRIANGLES: { surface.albedo = hash_color(entry.y * 128u + triangle + entry.x * 15485863u); }
-        case DEBUG_LOD: { surface.albedo = lod_color(cluster_lod_level(cluster)); }
-        case DEBUG_INSTANCES: { surface.albedo = hash_color(entry.x); }
-        case DEBUG_RASTER_PATH: {
-            // Green: hardware, red: software, blue: hardware alpha-masked.
-            var path = vec3<f32>(0.15, 0.6, 0.2);
-            if entry.z == CLUSTER_SOFTWARE {
-                path = vec3<f32>(0.9, 0.25, 0.15);
-            } else if entry.z == CLUSTER_MASKED {
-                path = vec3<f32>(0.2, 0.35, 0.95);
+    if DEBUG_VIEWS {
+        switch frame.debug_view {
+            case DEBUG_CLUSTERS: { surface.albedo = hash_color(entry.y * 7919u + entry.x * 104729u); }
+            case DEBUG_TRIANGLES: { surface.albedo = hash_color(entry.y * 128u + triangle + entry.x * 15485863u); }
+            case DEBUG_LOD: { surface.albedo = lod_color(cluster_lod_level(cluster)); }
+            case DEBUG_INSTANCES: { surface.albedo = hash_color(entry.x); }
+            case DEBUG_RASTER_PATH: {
+                // Green: hardware, red: software, blue: hardware alpha-masked.
+                var path = vec3<f32>(0.15, 0.6, 0.2);
+                if entry.z == CLUSTER_SOFTWARE {
+                    path = vec3<f32>(0.9, 0.25, 0.15);
+                } else if entry.z == CLUSTER_MASKED {
+                    path = vec3<f32>(0.2, 0.35, 0.95);
+                }
+                surface.albedo = path * (0.6 + 0.4 * hash_color(entry.y).x);
             }
-            surface.albedo = path * (0.6 + 0.4 * hash_color(entry.y).x);
-        }
-        case DEBUG_MATERIALS: { surface.albedo = hash_color(RESOLVE_SLOT * 31u + 7u); }
-        // Movable instances in orange, the rest grey (dynamic_debug.wgsl adds the invalidation).
-        case DEBUG_INVALIDATION: { surface.albedo = select(vec3<f32>(0.2 + 0.6 * luminance(surface.albedo)), vec3<f32>(1.0, 0.45, 0.08), (instance.flags & INSTANCE_MOVABLE) != 0u); }
-        case DEBUG_SKIN_WEIGHTS: { surface.albedo = skin_weight_color(instance, cluster, base, corners, b.lambda); }
-        // Triangles grey (voxel_resolve.wgsl colours voxel clusters).
-        case DEBUG_VOXELS: { surface.albedo = vec3<f32>(0.3 + 0.1 * hash_color(entry.y).x); }
-        case DEBUG_ASSEMBLY_PARTS: { surface.albedo = assembly_part_color(instance); }
-        // Tessellated surfaces coloured by depth and micro-triangle, the rest grey.
-        case DEBUG_TESSELLATION: {
-            surface.albedo = vec3<f32>(0.25 + 0.3 * luminance(surface.albedo));
-            if displaced {
-                surface.albedo = tessellation_debug_color(id, instance, b.lambda);
+            case DEBUG_MATERIALS: { surface.albedo = hash_color(RESOLVE_SLOT * 31u + 7u); }
+            // Movable instances in orange, the rest grey (dynamic_debug.wgsl adds the invalidation).
+            case DEBUG_INVALIDATION: { surface.albedo = select(vec3<f32>(0.2 + 0.6 * luminance(surface.albedo)), vec3<f32>(1.0, 0.45, 0.08), (instance.flags & INSTANCE_MOVABLE) != 0u); }
+            case DEBUG_SKIN_WEIGHTS: { surface.albedo = skin_weight_color(instance, cluster, base, corners, b.lambda); }
+            // Triangles grey (voxel_resolve.wgsl colours voxel clusters).
+            case DEBUG_VOXELS: { surface.albedo = vec3<f32>(0.3 + 0.1 * hash_color(entry.y).x); }
+            case DEBUG_ASSEMBLY_PARTS: { surface.albedo = assembly_part_color(instance); }
+            // Tessellated surfaces coloured by depth and micro-triangle, the rest grey.
+            case DEBUG_TESSELLATION: {
+                surface.albedo = vec3<f32>(0.25 + 0.3 * luminance(surface.albedo));
+                if displaced {
+                    surface.albedo = tessellation_debug_color(id, instance, b.lambda);
+                }
             }
+            default: {}
         }
-        default: {}
     }
 
     let motion = clip_to_uv(frame.unjittered_view_proj * vec4<f32>(input.world_position, 1.0))

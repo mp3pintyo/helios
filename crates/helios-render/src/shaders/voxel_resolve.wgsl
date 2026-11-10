@@ -119,16 +119,18 @@ fn resolve_voxel(pixel: vec2<u32>, id: u32) {
     } else {
         surface = evaluate_kind(m, input);
     }
-    switch frame.debug_view {
-        case DEBUG_CLUSTERS, DEBUG_VOXELS: { surface.albedo = hash_color(entry.y * 7919u + entry.x * 104729u); }
-        case DEBUG_TRIANGLES: { surface.albedo = hash_color(entry.y * 8192u + best + entry.x * 15485863u); }
-        case DEBUG_LOD: { surface.albedo = lod_color(cluster_lod_level(cluster)); }
-        case DEBUG_INSTANCES: { surface.albedo = hash_color(entry.x); }
-        // Voxels in yellow (red: software triangles, green: hardware, blue: alpha-masked).
-        case DEBUG_RASTER_PATH: { surface.albedo = vec3<f32>(0.95, 0.8, 0.15) * (0.6 + 0.4 * hash_color(entry.y).x); }
-        case DEBUG_MATERIALS: { surface.albedo = hash_color(RESOLVE_SLOT * 31u + 7u); }
-        case DEBUG_ASSEMBLY_PARTS: { surface.albedo = assembly_part_color(instance); }
-        default: {}
+    if DEBUG_VIEWS {
+        switch frame.debug_view {
+            case DEBUG_CLUSTERS, DEBUG_VOXELS: { surface.albedo = hash_color(entry.y * 7919u + entry.x * 104729u); }
+            case DEBUG_TRIANGLES: { surface.albedo = hash_color(entry.y * 8192u + best + entry.x * 15485863u); }
+            case DEBUG_LOD: { surface.albedo = lod_color(cluster_lod_level(cluster)); }
+            case DEBUG_INSTANCES: { surface.albedo = hash_color(entry.x); }
+            // Voxels in yellow (red: software triangles, green: hardware, blue: alpha-masked).
+            case DEBUG_RASTER_PATH: { surface.albedo = vec3<f32>(0.95, 0.8, 0.15) * (0.6 + 0.4 * hash_color(entry.y).x); }
+            case DEBUG_MATERIALS: { surface.albedo = hash_color(RESOLVE_SLOT * 31u + 7u); }
+            case DEBUG_ASSEMBLY_PARTS: { surface.albedo = assembly_part_color(instance); }
+            default: {}
+        }
     }
 
     let previous = wind_previous_world_position(instance, strength, best_center) + ((instance.prev_world * vec4<f32>(object_position - best_center, 0.0)).xyz);
