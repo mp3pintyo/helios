@@ -64,6 +64,9 @@ const INSTANCE_EXPANDED: u32 = 64u;     // the assembly is drawn as its parts th
 const INSTANCE_PART: u32 = 128u;        // an assembly part written by the expansion
 const INSTANCE_DISPLACED: u32 = 256u;   // its material displaces it: Nanite tessellation (tess.wgsl)
 const INSTANCE_ANIMATED: u32 = 512u;    // ... by a graph that reads the time: a dynamic shadow caster
+// An expanded assembly's parts as one culling record (assembly.wgsl): page_offset is its first
+// part's instance, cluster_offset the page stride, page_count parts × stride (part, page) lanes.
+const INSTANCE_PART_LIST: u32 = 2048u;
 // Bits 12..32: the skin palette index (INSTANCE_SKIN_SHIFT, skin_palette.wgsl).
 
 // Visible cluster entry flags (entry.z).

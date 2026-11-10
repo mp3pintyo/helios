@@ -25,6 +25,11 @@ pub struct GpuProfiler {
     results: Vec<(String, f32)>,
     /// The latest read-back frame: (sequence number, unsmoothed total in milliseconds).
     latest: Option<(u64, f32)>,
+    /// Per label, its minimum over the frames read back since [`GpuProfiler::reset_minima`];
+    /// then the minimum frame total and the number of frames.
+    minima: Vec<(String, f32)>,
+    frame_minimum: Option<f32>,
+    minima_frames: u32,
     pub enabled: bool,
 }
 
@@ -65,6 +70,9 @@ impl GpuProfiler {
             status: Arc::new(AtomicU32::new(IDLE)),
             results: Vec::new(),
             latest: None,
+            minima: Vec::new(),
+            frame_minimum: None,
+            minima_frames: 0,
             enabled: supported,
         }
     }
@@ -87,6 +95,20 @@ impl GpuProfiler {
     /// themselves (dynamic resolution).
     pub fn latest_frame(&self) -> Option<(u64, f32)> {
         self.latest
+    }
+
+    /// Per-pass minima (first-recorded order), the minimum frame total and the frame count since
+    /// [`GpuProfiler::reset_minima`]. On a GPU shared with other work a pass is sometimes
+    /// preempted or slowed; its minimum over many frames is its time on a quiet GPU (headless
+    /// measurements; the scene's motion varies the work a little from frame to frame).
+    pub fn minima(&self) -> (&[(String, f32)], Option<f32>, u32) {
+        (&self.minima, self.frame_minimum, self.minima_frames)
+    }
+
+    pub fn reset_minima(&mut self) {
+        self.minima.clear();
+        self.frame_minimum = None;
+        self.minima_frames = 0;
     }
 
     fn reserve(&mut self, label: &str) -> Option<u32> {
@@ -145,7 +167,16 @@ impl GpuProfiler {
         readback.unmap();
         self.status.store(IDLE, Ordering::Release);
         let sequence = self.latest.map_or(0, |(n, _)| n + 1);
-        self.latest = Some((sequence, frame.iter().map(|(_, ms)| ms).sum()));
+        let total: f32 = frame.iter().map(|(_, ms)| ms).sum();
+        self.latest = Some((sequence, total));
+        self.frame_minimum = Some(self.frame_minimum.map_or(total, |m| m.min(total)));
+        self.minima_frames += 1;
+        for (label, ms) in &frame {
+            match self.minima.iter_mut().find(|(l, _)| l == label) {
+                Some(entry) => entry.1 = entry.1.min(*ms),
+                None => self.minima.push((label.clone(), *ms)),
+            }
+        }
         // Exponential smoothing; labels that disappear fade out.
         for (label, ms) in &frame {
             match self.results.iter_mut().find(|(l, _)| l == label) {

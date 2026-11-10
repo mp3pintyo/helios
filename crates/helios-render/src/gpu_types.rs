@@ -156,9 +156,10 @@ pub mod instance_flags {
     /// [`crate::Mobility::Movable`]: a dynamic shadow caster, kept out of the shadow pages'
     /// static layers (`dynamic_caster.wgsl`).
     pub const MOVABLE: u32 = 16;
-    /// An instance of an assembly's base (assembly.rs). The GPU's expansion adds two more each
-    /// frame: 64 on assemblies drawn as their parts, 128 on the part instances it writes
-    /// (`INSTANCE_EXPANDED`, `INSTANCE_PART` in common.wgsl).
+    /// An instance of an assembly's base (assembly.rs). The GPU's expansion adds three more each
+    /// frame: 64 on assemblies drawn as their parts, 128 on the part instances it writes, 2048
+    /// on the culling records that stand for an assembly's parts (`INSTANCE_EXPANDED`,
+    /// `INSTANCE_PART`, `INSTANCE_PART_LIST` in common.wgsl).
     pub const ASSEMBLY: u32 = 32;
     /// The material displaces the surface and tessellation is on: its triangle clusters are
     /// tessellated (`tessellation.rs`) and its bounds padded by the displacement.

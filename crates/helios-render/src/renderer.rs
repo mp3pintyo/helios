@@ -614,6 +614,16 @@ impl Renderer {
         self.profiler.supported().then(|| self.profiler.total_ms())
     }
 
+    /// Per-pass and whole-frame GPU minima over the frames read back since
+    /// [`Renderer::reset_gpu_minima`] (see [`GpuProfiler::minima`]).
+    pub fn gpu_minima(&self) -> (&[(String, f32)], Option<f32>, u32) {
+        self.profiler.minima()
+    }
+
+    pub fn reset_gpu_minima(&mut self) {
+        self.profiler.reset_minima();
+    }
+
     /// Moving instances in the latest frame: instances moved, distance-field bricks recomposed
     /// and still queued.
     pub fn dynamic_stats(&self) -> DynamicStats {
@@ -660,8 +670,7 @@ impl Renderer {
     fn update_lod_budget(&mut self) {
         let st = self.stats.latest;
         let capacity = self.main_view.capacity;
-        let fill = (st.clusters as f32 / capacity.clusters as f32).max(st.pages as f32 / capacity.pages as f32);
-        if st.overflow > 0 || fill > 0.9 {
+        let fill = (st.clusters as f32 / capacity.clusters as f32).max(st.pages as f32 / capacity.pages as f32);        if st.overflow > 0 || fill > 0.9 {
             // Projected error scales with 1/distance, so cluster counts fall roughly with the
             // square of the threshold: step proportionally to the excess.
             let step = (fill / 0.8).sqrt().clamp(1.1, 2.0);
@@ -704,8 +713,9 @@ impl Renderer {
         if sync.geometry_changed {
             self.history_valid = false;
         }
-        // Assembly parts each take a page batch in every culling view.
-        let parts = self.scene.assemblies.part_capacity();
+        // Expanded assemblies' culling records take a page batch per 64 (part, page) lanes in
+        // every culling view.
+        let parts = self.scene.assemblies.batch_demand();
         self.main_view.reserve_batches(&self.device, MAIN_CAPACITY.batches + parts);
         self.vsm.reserve_batches(&self.device, parts);
         // New geometry or instances invalidate every cached shadow page, and so does switching
@@ -954,7 +964,7 @@ impl Renderer {
 
         let mut states = vec![&self.main_view.state];
         states.extend(self.vsm.level_states());
-        let assembly_parts = self.scene.assemblies.cull_dispatch().map(|(counter, _)| counter);
+        let assembly_parts = self.scene.assemblies.part_counter();
         let read_stats = self.stats.record(&mut rec.encoder, &states, [&self.vsm.cache.lists, self.vsm.draws()], assembly_parts);
         let read_feedback = self.scene.record_feedback(&mut rec.encoder, frame);
         let read_texture_feedback = self.svt.record_feedback(&mut rec.encoder, frame);

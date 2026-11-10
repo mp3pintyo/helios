@@ -119,7 +119,9 @@ cached default), `--moving-light-fields` (distance-field shadows while they move
 `--moving-light-renders N` (moving lights' shadow maps rendered in full per frame, default 1),
 `--movers N` (only the first N moving prop groups move), `--static-motion` (the props move as `Mobility::Static`
 instances: the one-off edit path), `--no-tessellation`, `--dice-rate N` (pixels per micro-triangle edge, default 2),
-`--speed N` (fly speed in m/s for held keys, e.g. a slow dolly: `--hold KeyW --speed 0.3`).
+`--speed N` (fly speed in m/s for held keys, e.g. a slow dolly: `--hold KeyW --speed 0.3`). Next to the HUD (whose
+per-pass times are smoothed), a headless run logs `GPU minima over N frames`: every pass's minimum, and the minimum
+frame total, over the last two thirds of the frames — on a GPU shared with other work, a pass's quiet time.
 
 **Streaming from files.** `--stream-from` / `?stream=` build the same procedural scene but substitute every baked
 mesh with its pre-baked counterpart: only the header (cluster and page records, dependencies, bounds, distance field)
@@ -284,8 +286,9 @@ run on decoded positions, including on a deliberately coarse grid.
 
 ```
 sky LUTs ─ fire-driven light colours (volume emission) ─ light culling (froxels, ≤ 255 lights each)
-assembly expansion: assembly bases too coarse for the main view → part instances (for every view)
-cull instances → page batches → pages (residency + LOD prune) → clusters (EARLY: visible last frame)
+assembly expansion: assembly bases too coarse for the main view → part instances + one culling record each (every view)
+cull instances (+ assembly records) → page batches → pages (residency + LOD prune) → clusters, small pages' one by one
+  (EARLY: visible last frame)
   → HW raster (big triangles; alpha-masked ones in a second bin) + SW raster (tiny triangles)
     + voxel raster (foliage voxel clusters, compute)
     + tessellation (displaced clusters: patches → split passes → dice → SW raster, compute) → merge → HZB
@@ -363,7 +366,11 @@ with 300 lights under MegaLights 15.3 / 9.2 ms. Round 5 ([`docs/round5/`](docs/r
   instances get mesh cards, so hits on leaves read their lighting, but stay out of the global distance field, whose
   ≥ 0.25 m voxels would merge leaves and chain links into solid blobs.
 * **Two-pass occlusion culling** (as in Nanite) with persistent visibility bits; hierarchical page culling skips whole
-  pages whose coarsest parent is already detailed enough.
+  pages whose coarsest parent is already detailed enough. Cluster culling takes a 64-lane workgroup per surviving
+  page, except for pages of at most 16 clusters (assembly parts, grass, small props), which list their clusters one by
+  one as *cluster candidates* after the page work items, 64 to a workgroup (round 6: the forest's needle sprays have
+  17 clusters over 6 pages, so their pages kept ~5 % of a workgroup's lanes busy); beyond the candidates' capacity a
+  page falls back to a work item. The sixteen shadow clipmap levels, culled one after another, share one work buffer.
 * **Materials** (`textures.rs`, `gbuffer.wgsl`). Textures are synthesised on the GPU (18 patterns: ashlar, marble
   tiles, wood, slate, stained glass, bark, leaves, moss, forest floor, …) into two texture arrays with full mip
   chains (no bindless in WebGPU); imported images are area-resampled into the same layout (base colour; normal, roughness,
@@ -732,8 +739,14 @@ with 300 lights under MegaLights 15.3 / 9.2 ms. Round 5 ([`docs/round5/`](docs/r
   error so they continue where the parts end — with the main view's LOD rule; where the base's finest level is too
   coarse, the instance writes one record per part into part slots after the scene's instances (its transform times
   the part's, the assembly's bounds and plant origin for the wind, and per-(assembly instance, part) visibility bits
-  for two-pass occlusion) and flags its base (`EXPANDED`) so culling skips it. Every view culls the same records (the
-  instance dispatch covers only the slots handed out), so shadows always match the view. Parts inherit `MOVABLE`,
+  for two-pass occlusion) and flags its base (`EXPANDED`) so culling skips it. Every view culls the same parts, so
+  shadows always match the view. Culling is hierarchical (round 6, [`foliage-culling.md`](docs/round6/foliage-culling.md)):
+  views never test the part records as instances; each assembly instance owns one more *culling record* between the
+  scene's instances and the part slots (`PART_LIST`), which the expansion fills with what its parts share (the
+  assembly's bounds, wind and plant origin, flags) and hides when the base is drawn. Instance culling tests that
+  record once per view, and its batches are its parts' pages — `stride` lanes per part, the most pages of any part —
+  each lane resolved to its part's page and tested with the part's transform, so a conifer's 176 sprays of 6 pages
+  are culled in 17 page workgroups instead of 176, and their small pages' clusters as cluster candidates. Parts inherit `MOVABLE`,
   hidden bases expand nothing, and part slots record their owning instance (`part_owner.wgsl`), so picking returns
   the tree and the selection outline covers its parts. Up to 32768 part slots: when the parts requested near them,
   the expansion's LOD threshold is raised just enough (CPU feedback with hysteresis, like the culling budget) so
@@ -744,7 +757,9 @@ with 300 lights under MegaLights 15.3 / 9.2 ms. Round 5 ([`docs/round5/`](docs/r
   voxels on / off (`Insert`) 10.09 / 9.40 ms: software raster + merge 1.47 → 1.99 ms, material resolve 0.38 →
   0.45 ms, shadow software raster 0.52 → 0.72 ms; the conifer assemblies (≈ 26 400 part instances) cost the rest,
   mostly culling (0.48 → 0.91 ms, late pass 0.06 → 0.12 ms; the non-skinning culling variant later took
-  0.02–0.05 ms per culling pass back) and the parts' finer triangles. Default view: 5.23 M triangles → 3.97 M triangles + 4.3 M voxels (shadows
+  0.02–0.05 ms per culling pass back; round 6's culling records and cluster candidates cut the parts' culling to
+  ≈ 0.1 ms: forest, 2560×1440, `cull` + `cull (late)` 1.19 → 0.56 ms at 100 %, 1.14 → 0.52 ms at 67 %, images
+  unchanged) and the parts' finer triangles. Default view: 5.23 M triangles → 3.97 M triangles + 4.3 M voxels (shadows
   4.46 M → 2.7 M triangles + 2.8 M voxels). Geometry 43.3 → 39.6 MiB in RAM and in `.hvm`; conifer needles 7.9 MiB as
   baked meshes with voxels → 1.1 MiB as assemblies, baked in 0.5 instead of 2.0 s (whole scene 6.9 → 8.2 s:
   voxelisation). Broadleaf trees as leaf-spray assemblies would save 6.6 → 2.9 MiB for the same ≈ 0.7 ms of GPU time
@@ -1615,9 +1630,10 @@ Honest differences that remain:
     the voxel budget allows (4 voxels per kept triangle: the forest's conifers and ferns from mid-distance, the
     broadleaf canopies near their roots). Assemblies are one level deep (no nested parts), their parts take the
     instance's material (wood and leaves are separate instances), and the base ↔ parts switch is per assembly
-    instance, not per part (UE resolves part instances inside the cluster hierarchy): an expanded tree culls every
-    part as an instance (part slot, page batch, cluster workgroups), which costs ≈ 0.4 ms of culling for the forest's
-    ≈ 26 k conifer parts, and parts are only as coarse as their own small DAG allows, so the expanded range draws more
+    instance, not per part (UE resolves part instances inside the cluster hierarchy): an expanded tree still writes
+    every part as an instance record each frame (≈ 0.03 ms for the forest's ≈ 26 k conifer parts) and is culled
+    through one record per tree whose lanes are its parts' pages (round 6: the parts' culling cost fell from ≈ 0.6 to
+    ≈ 0.1 ms), and parts are only as coarse as their own small DAG allows, so the expanded range draws more
     triangles and fewer voxels than one merged mesh would. When more parts are wanted than the 32768 slots, the
     expansion threshold rises, so trees near the edge of the expanded range draw their base up to ~1.5 px coarse.
     Parts are rigid copies (a needle spray follows its branch span, not each branch's own curve); part instances'

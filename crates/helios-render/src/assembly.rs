@@ -7,6 +7,11 @@
 //! once and the CPU never iterates parts; their persistent visibility bits (two-pass occlusion)
 //! are allocated per (assembly instance, part) after the scene's, so they stay valid whichever
 //! slot a part takes. Scenes without assemblies allocate nothing and run no pass.
+//!
+//! Culling is hierarchical: every assembly instance has one more instance record, between the
+//! scene's instances and the part slots, standing for all its parts (`INSTANCE_PART_LIST`). Views
+//! test that record instead of each part, and its "pages" are the (part, page) pairs of its
+//! parts, culled 64 to a workgroup (cull.wgsl).
 
 use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Vec4};
@@ -19,11 +24,9 @@ use crate::scene::Scene;
 use crate::shader::create_module;
 use crate::util::{bind, bind_group, bind_group_layout, compute_pipeline, storage_buffer, storage_buffer_init, uniform_buffer};
 
-/// Part instances a frame may expand (instance records after the scene's: 240 bytes each; every
-/// culling view reserves a page batch for each).
+/// Part instances a frame may expand (instance records after the scene's and the assembly
+/// instances' culling records: 240 bytes each).
 pub const PART_CAPACITY: u32 = 1 << 15;
-/// Byte offset of the instance culling dispatch arguments in the counter buffer.
-const CULL_DISPATCH: u64 = 16;
 
 /// `struct AssemblyParams` in assembly.wgsl.
 #[repr(C)]
@@ -44,6 +47,11 @@ struct GpuAssembly {
     visibility_bits: u32,
     transition_error: f32,
     lod_sphere: Vec4,
+    /// The most pages of any part: the culling record's (part, page) lanes per part.
+    page_stride: u32,
+    /// The largest scale of any part's transform (bounds the parts' instance scales).
+    part_scale: f32,
+    _pad: [u32; 2],
 }
 
 /// `struct AssemblyPart` in assembly.wgsl.
@@ -72,12 +80,11 @@ struct GpuAssemblyInstance {
 pub struct Assemblies {
     layout: wgpu::BindGroupLayout,
     expand: wgpu::ComputePipeline,
-    finish: wgpu::ComputePipeline,
     params_buffer: wgpu::Buffer,
     assemblies: wgpu::Buffer,
     parts: wgpu::Buffer,
     instances: wgpu::Buffer,
-    /// [0]: part slots handed out; from byte [`CULL_DISPATCH`]: the instance culling dispatch.
+    /// [0]: part slots handed out.
     counter: wgpu::Buffer,
     /// [0]: the scene's instance count, [1 + slot]: the scene instance owning part slot `slot`
     /// (`part_owners` in assembly.wgsl; read by the editor's picking and selection outline).
@@ -86,6 +93,10 @@ pub struct Assemblies {
     assembly_of_mesh: Vec<Option<u32>>,
     /// Per assembly: its visibility bits per instance.
     visibility_bits: Vec<u32>,
+    /// Per assembly: page batches its culling record takes in a view when expanded.
+    batches: Vec<u32>,
+    /// Page batches all assembly instances' records take in a view when all are expanded.
+    batch_demand: u32,
     params: Params,
     /// Multiplier on the expansion's LOD threshold that keeps the parts requested within the
     /// slots (see [`Assemblies::update_budget`]).
@@ -102,17 +113,18 @@ impl Assemblies {
         let empty = |label| storage_buffer(device, label, 16, wgpu::BufferUsages::empty());
         Self {
             expand: compute_pipeline(device, "assembly expand", &module, "expand", &layout, &[]),
-            finish: compute_pipeline(device, "assembly finish", &module, "finish", &layout, &[]),
             layout,
             params_buffer: uniform_buffer(device, "assembly params", std::mem::size_of::<Params>() as u64),
             assemblies: empty("assemblies"),
             parts: empty("assembly parts"),
             instances: empty("assembly instances"),
             // COPY_SRC: the part count is read back for statistics.
-            counter: storage_buffer(device, "assembly part counter", 32, wgpu::BufferUsages::INDIRECT | wgpu::BufferUsages::COPY_SRC),
+            counter: storage_buffer(device, "assembly part counter", 16, wgpu::BufferUsages::COPY_SRC),
             owners: no_owners(device),
             assembly_of_mesh: Vec::new(),
             visibility_bits: Vec::new(),
+            batches: Vec::new(),
+            batch_demand: 0,
             params: Params { static_count: 0, part_capacity: 0, instance_count: 0, threshold_scale: 1.0 },
             budget_scale: 1.0,
         }
@@ -123,13 +135,24 @@ impl Assemblies {
         !self.visibility_bits.is_empty()
     }
 
-    /// Part instance slots after the scene's instances.
+    /// Part instance slots after the culling records.
     pub fn part_capacity(&self) -> u32 {
         if self.any() {
             PART_CAPACITY
         } else {
             0
         }
+    }
+
+    /// Culling records after the scene's instances: one per assembly instance.
+    pub fn record_count(&self) -> u32 {
+        self.params.instance_count
+    }
+
+    /// Page batches the culling records take in a view when every assembly instance is
+    /// expanded (one per 64 (part, page) lanes).
+    pub fn batch_demand(&self) -> u32 {
+        self.batch_demand
     }
 
     /// Whether mesh `mesh` is an assembly's base.
@@ -141,13 +164,18 @@ impl Assemblies {
     pub fn upload_geometry(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, scene: &Scene, meshes: &[MeshRange]) {
         self.assembly_of_mesh = vec![None; scene.meshes.len()];
         self.visibility_bits.clear();
+        self.batches.clear();
         let mut assemblies = Vec::new();
         let mut parts = Vec::new();
         for (base, list) in &scene.assemblies {
             let mut visibility = 0;
             let first_part = parts.len() as u32;
+            let mut page_stride = 1;
+            let mut part_scale = 0.0f32;
             for part in list {
                 let range = meshes[part.mesh.0 as usize];
+                page_stride = page_stride.max(range.page_count);
+                part_scale = part_scale.max(helios_geometry::assembly::max_scale(&part.transform));
                 parts.push(GpuPart {
                     transform: part.transform,
                     page_offset: range.page_offset,
@@ -166,9 +194,13 @@ impl Assemblies {
                 visibility_bits: visibility,
                 transition_error: transition_error(&scene.meshes[base.0 as usize]),
                 lod_sphere: parts_bounds(&geometry).to_vec4(),
+                page_stride,
+                part_scale,
+                _pad: [0; 2],
             });
             self.assembly_of_mesh[base.0 as usize] = Some(self.visibility_bits.len() as u32);
             self.visibility_bits.push(visibility);
+            self.batches.push(record_batches(list.len() as u32, page_stride));
         }
         if !assemblies.is_empty() {
             let errors: Vec<String> = assemblies.iter().map(|a| format!("{:.3}", a.transition_error)).collect();
@@ -183,11 +215,16 @@ impl Assemblies {
     pub fn upload_instances(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, scene: &Scene, visibility_bits: u32) -> u32 {
         let mut bits = visibility_bits;
         let mut records = Vec::new();
+        self.batch_demand = 0;
         for (i, instance) in scene.instances.iter().enumerate() {
             if let Some(assembly) = self.assembly_of_mesh.get(instance.mesh.0 as usize).copied().flatten() {
                 records.push(GpuAssemblyInstance { instance: i as u32, assembly, visibility_base: bits, _pad: 0 });
                 bits += self.visibility_bits[assembly as usize];
+                self.batch_demand += self.batches[assembly as usize];
             }
+        }
+        if !records.is_empty() {
+            log::info!("{} assembly instances: culling records take up to {} page batches per view", records.len(), self.batch_demand);
         }
         self.params.static_count = scene.instances.len() as u32;
         self.params.part_capacity = self.part_capacity();
@@ -196,8 +233,9 @@ impl Assemblies {
         self.owners = if records.is_empty() {
             no_owners(device)
         } else {
+            // Part slots start after the culling records.
             let mut owners = vec![u32::MAX; 1 + PART_CAPACITY as usize];
-            owners[0] = self.params.static_count;
+            owners[0] = self.params.static_count + self.params.instance_count;
             crate::util::storage_buffer_init(device, queue, "assembly part owners", bytemuck::cast_slice(&owners))
         };
         bits
@@ -229,7 +267,8 @@ impl Assemblies {
         }
     }
 
-    /// Expands the assemblies the main `view` needs as parts into `instances`' part slots.
+    /// Expands the assemblies the main `view` needs as parts into `instances`' part slots and
+    /// writes their culling records.
     pub fn record(&self, rec: &mut Recorder, view: &CullView, instances: &wgpu::Buffer) {
         if self.params.instance_count == 0 {
             return;
@@ -256,15 +295,26 @@ impl Assemblies {
         // One workgroup per assembly instance, 2D beyond the dispatch limit.
         let groups = self.params.instance_count;
         pass.dispatch_workgroups(groups.min(65535), groups.div_ceil(65535), 1);
-        pass.set_pipeline(&self.finish);
-        pass.dispatch_workgroups(1, 1, 1);
     }
 
-    /// The instance culling dispatch over the scene's instances and the part slots in use
-    /// (written by [`Assemblies::record`]), if the scene has assemblies.
-    pub fn cull_dispatch(&self) -> Option<(&wgpu::Buffer, u64)> {
-        (self.params.instance_count > 0).then_some((&self.counter, CULL_DISPATCH))
+    /// The counter whose first word is the part slots requested this frame (statistics), if the
+    /// scene has assemblies.
+    pub fn part_counter(&self) -> Option<&wgpu::Buffer> {
+        (self.params.instance_count > 0).then_some(&self.counter)
     }
+}
+
+/// Page batches (64 lanes each) of an expanded assembly's culling record: `page_stride` lanes
+/// per part.
+fn record_batches(parts: u32, page_stride: u32) -> u32 {
+    (parts * page_stride).div_ceil(64)
+}
+
+/// The (part, page of the part) a culling record's lane stands for (cull.wgsl's `cull_pages`);
+/// lanes past a part's page count are idle.
+#[cfg(test)]
+fn record_lane(lane: u32, page_stride: u32) -> (u32, u32) {
+    (lane / page_stride, lane % page_stride)
 }
 
 /// The owner table of a scene without assemblies: no instance is a part.
@@ -284,8 +334,35 @@ mod tests {
     #[test]
     fn records_match_the_shader_layouts() {
         assert_eq!(std::mem::size_of::<Params>(), 16);
-        assert_eq!(std::mem::size_of::<GpuAssembly>(), 32);
+        assert_eq!(std::mem::size_of::<GpuAssembly>(), 48);
         assert_eq!(std::mem::size_of::<GpuPart>(), 96);
         assert_eq!(std::mem::size_of::<GpuAssemblyInstance>(), 16);
+    }
+
+    /// A culling record's batches visit every page of every part exactly once, whatever the
+    /// parts' page counts (the stride is the largest).
+    #[test]
+    fn record_lanes_cover_every_part_page_once() {
+        for page_counts in [vec![6; 176], vec![1, 7, 3, 64, 2], vec![65, 1], vec![1]] {
+            let stride = *page_counts.iter().max().unwrap();
+            let parts = page_counts.len() as u32;
+            let mut seen = vec![vec![0; stride as usize]; page_counts.len()];
+            let batches = record_batches(parts, stride);
+            for b in 0..batches {
+                // cull.wgsl: batch (start = 64 b, count = min(64, lanes - start)), lane start + lid.
+                let count = 64.min(parts * stride - b * 64);
+                for lid in 0..count {
+                    let (part, page) = record_lane(b * 64 + lid, stride);
+                    if page < page_counts[part as usize] {
+                        seen[part as usize][page as usize] += 1;
+                    }
+                }
+            }
+            for (part, pages) in page_counts.iter().enumerate() {
+                assert!(seen[part][..*pages as usize].iter().all(|&n| n == 1), "{page_counts:?}");
+            }
+        }
+        // The forest's conifers: 176 sprays of 6 pages fill 17 batches instead of 176.
+        assert_eq!(record_batches(176, 6), 17);
     }
 }

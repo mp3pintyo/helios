@@ -8,13 +8,21 @@
 // plant origin, so the wind moves the parts exactly as it would move one mesh of the whole
 // plant, and per-part persistent visibility bits, so two-pass occlusion works whichever slot a
 // part lands in.
+//
+// Culling is hierarchical: views never test the part records as instances. Each assembly
+// instance owns one more record, between the scene's instances and the part slots, that
+// stands for all its parts (INSTANCE_PART_LIST): the parts' shared bounds, wind and flags, and
+// as its "pages" the (part, page) pairs of its parts, `page_stride` per part. Instance culling
+// tests it once per view; the page pass resolves each of its lanes to a part's page
+// (cull.wgsl), so the parts' pages are culled 64 to a workgroup instead of one workgroup per
+// part. Non-expanded assemblies hide their record.
 
 #include "common.wgsl"
 
 struct AssemblyParams {
-    static_count: u32,   // instances of the scene; part slots follow
+    static_count: u32,   // instances of the scene; then one record per assembly instance
     part_capacity: u32,
-    instance_count: u32, // assembly instances
+    instance_count: u32, // assembly instances; part slots follow their records
     // Multiplies the LOD threshold of the expansion test, raised by the CPU while the parts
     // requested approach the slots (assembly.rs), so the nearest assemblies keep theirs.
     threshold_scale: f32,
@@ -26,6 +34,10 @@ struct Assembly {
     visibility_bits: u32,
     transition_error: f32,  // error of the base's finest level
     lod_sphere: vec4<f32>,  // bounds of the parts' full detail (assembly space)
+    page_stride: u32,       // the most pages of any of its parts
+    part_scale: f32,        // the largest scale of any part's transform
+    _pad0: u32,
+    _pad1: u32,
 }
 
 struct AssemblyPart {
@@ -53,8 +65,7 @@ struct AssemblyInstance {
 @group(0) @binding(3) var<storage, read> assembly_instances: array<AssemblyInstance>;
 @group(0) @binding(4) var<storage, read> assemblies: array<Assembly>;
 @group(0) @binding(5) var<storage, read> parts: array<AssemblyPart>;
-// [0]: part slots handed out this frame; [4..7): the instance culling dispatch (cull.wgsl's
-// cull_instances over the scene's instances and the part slots in use).
+// [0]: part slots handed out this frame (read back for the slot budget).
 @group(0) @binding(6) var<storage, read_write> counter: array<atomic<u32>>;
 // [0]: the scene's instance count; [1 + slot]: the scene instance a part slot belongs to (the
 // editor's picking and selection outline map parts to it, part_owner.wgsl).
@@ -78,6 +89,11 @@ fn expand(
     let a = assembly_instances[index];
     let assembly = assemblies[a.assembly];
     let base = instances[a.instance];
+    let record_index = params.static_count + index;
+    let part_base = params.static_count + params.instance_count;
+    let origin = vec3<f32>(base.normal_matrix_0.w, base.normal_matrix_1.w, base.normal_matrix_2.w);
+    // Movable (dynamic shadow casters) and displaced (tessellated) like the base.
+    let part_flags = (base.flags & (INSTANCE_CAST_SHADOW | INSTANCE_ALPHA_MASKED | INSTANCE_TRANSLUCENT | INSTANCE_MOVABLE | INSTANCE_DISPLACED | INSTANCE_ANIMATED)) | INSTANCE_PART;
     if lid == 0u {
         // The LOD test of the base's finest level (cull.wgsl's projected error for the main
         // view), at the parts' nearest point.
@@ -93,17 +109,27 @@ fn expand(
             expanded = first_slot + assembly.part_count <= params.part_capacity;
         }
         instances[a.instance].flags = select(base.flags & ~INSTANCE_EXPANDED, base.flags | INSTANCE_EXPANDED, expanded);
+        if expanded {
+            // The parts' culling record: what every part shares (bounds, wind, plant origin,
+            // flags), its parts' slots and page stride, and a scale bounding theirs (for the
+            // displacement padding).
+            var record = base;
+            record.page_offset = part_base + first_slot;
+            record.page_count = assembly.part_count * assembly.page_stride;
+            record.cluster_offset = assembly.page_stride;
+            record.cluster_count = 0u;
+            record.max_scale = base.max_scale * assembly.part_scale;
+            record.flags = part_flags | INSTANCE_PART_LIST;
+            instances[record_index] = record;
+        } else {
+            instances[record_index].flags = INSTANCE_HIDDEN;
+        }
     }
     workgroupBarrier();
     if !expanded {
-        // Slots it reserved but cannot fill draw nothing: culling visits every slot handed out,
-        // and they still hold an older frame's parts.
-        for (var p = lid; reserved && first_slot + p < params.part_capacity && p < assembly.part_count; p += 64u) {
-            instances[params.static_count + first_slot + p].page_count = 0u;
-        }
+        // Slots it reserved but cannot fill are never culled: only expanded records list theirs.
         return;
     }
-    let origin = vec3<f32>(base.normal_matrix_0.w, base.normal_matrix_1.w, base.normal_matrix_2.w);
     for (var p = lid; p < assembly.part_count; p += 64u) {
         let part = parts[assembly.first_part + p];
         var record = base;
@@ -127,18 +153,8 @@ fn expand(
         record.cluster_count = part.cluster_count;
         record.visibility_offset = a.visibility_base + part.visibility;
         record.max_scale = scale;
-        // Movable (dynamic shadow casters) and displaced (tessellated) like the base.
-        record.flags = (base.flags & (INSTANCE_CAST_SHADOW | INSTANCE_ALPHA_MASKED | INSTANCE_TRANSLUCENT | INSTANCE_MOVABLE | INSTANCE_DISPLACED | INSTANCE_ANIMATED)) | INSTANCE_PART;
-        instances[params.static_count + first_slot + p] = record;
+        record.flags = part_flags;
+        instances[part_base + first_slot + p] = record;
         part_owners[1u + first_slot + p] = a.instance;
     }
-}
-
-// Every view culls the scene's instances and only the part slots handed out.
-@compute @workgroup_size(1)
-fn finish() {
-    let count = params.static_count + min(atomicLoad(&counter[0]), params.part_capacity);
-    atomicStore(&counter[4], (count + 63u) / 64u);
-    atomicStore(&counter[5], 1u);
-    atomicStore(&counter[6], 1u);
 }
