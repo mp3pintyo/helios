@@ -53,7 +53,8 @@ rejected: a second wasm-bindgen output and build step for a module the page has 
   same glue, instantiates the module it is sent (`wasm_bindgen::module()`), and runs tasks. `start()` returns at once
   where there is no `window`, so a worker instance only bakes. Up to `hardwareConcurrency − 2` workers (1–4) start
   with the first task — a scene without displacement starts none — a task goes to an idle worker or the least busy
-  one, and a worker idle for 20 s is retired (a wasm instance keeps the memory its largest bake grew it to). Where
+  one (since the follow-up below: the page queues tasks and posts one only to an idle, ready worker), and a worker
+  idle for 20 s is retired (a wasm instance keeps the memory its largest bake grew it to). Where
   the page's origin differs from the script's (a sandboxed frame), the worker is started through a blob that imports
   the script. A worker that fails fails its tasks; the engine then runs them itself (`Task::Remote` keeps its `Work`
   for that). Tasks dropped unfinished (the scene was left) are cancelled, so their results are not kept.
@@ -161,6 +162,97 @@ patterns in `lumen_offload.rs` stop compiling until the field is carried; if `ba
 albedo), they go into `Work::Bake` and its encoding. `lumen_offload::tests::offloaded_work_is_bit_identical`
 checks the result end to end.
 
+## Follow-up: variants reported missing, and a watchdog (`web-bake-worker-fix`)
+
+**The report.** Another agent (`card-albedo`) loaded the gallery on a fresh page in headless Chromium and found
+that the workers had not delivered the beds' variants after 60–160 s, on this branch alone too, while
+`?bake-workers=0` delivered them.
+
+**What it was.** It did not reproduce. With a fresh browser profile and a fresh server for every load, the
+original build delivered every variant in all of: eight gallery loads with workers (`index.html?scene=gallery`, one
+of them on the `card-albedo` build), two loads of the showcase site as `site/build.py` lays it out
+(`preview.html`: the valley, then the gallery; one with the earlier agent's switch-away-and-back cancellation
+check), five gallery loads with `?bake-workers=0`, and pages opened one after another in one browser. The workers'
+console stayed empty, no `error` event fired, and early messages were not lost (see the handshake below).
+
+What every fresh load does have is a long stall at its start: Chromium's GPU process compiles the scene's
+pipelines (a fresh profile has no shader cache), and no `requestAnimationFrame` callback runs for **45–71 s** in
+the gallery and 31–47 s in the valley — with and without workers alike (the gallery's first variant came 50–76 s
+after navigation with workers, 40–75 s without; `card-albedo`'s build: 70.5 s without a frame). Variants are
+requested and taken in by frames, so none can arrive before the stall ends, by either path; within one browser a
+second page stalls again (50–62 s). A check that waits a fixed time on a fresh page therefore sees the variants or
+not depending on where the stall ends, which is the likeliest reading of the report.
+
+The pool did, however, have exactly the failure mode reported, even if it did not occur here: a task left it only
+through its worker's answer or an `error` event. A worker that never answered — an instantiation that hangs, a
+message lost on the way, a worker the browser stops without an error event, a stale cached `bake_worker.js` from
+before a deploy speaking another protocol — would have left its task pending and its variant missing for good,
+silently. So the fix makes that impossible instead of chasing one trigger.
+
+**The fix: nothing a worker does can leave a variant missing.** The pool (`bake_worker.js`) was rewritten around
+a handshake and a watchdog:
+
+* *Handshake.* A worker posts `hello` once its script has set its message handler; only then does the page send it
+  the compiled module, and the worker answers `ready` (or `ready: false` with the error) once its instance runs.
+  Before, the page posted the module right after `new Worker`, relying on the browser to hold that message until the
+  worker's script had run. Chromium does so for a script that sets its handler synchronously, also behind a static
+  import (the blob fallback), but drops early messages as soon as the script awaits anything first (measured with
+  a script served 2 s late: a module worker whose top level awaits an import or a timer never sees the messages
+  posted at construction). The old worker set its handler synchronously, so this was not the trigger; the
+  handshake removes the dependence on it.
+* *Tasks wait on the page, not in a worker.* A task is posted only to a worker that is ready and idle, so the
+  worker starts it at once and the time to its answer is the time of the task. Queued tasks wait in the page's
+  queue (cancelled ones are dropped there, without ever being sent).
+* *Watchdog.* A worker that does not report ready within 8 s, or does not answer its task within 10 s (a bed's
+  bake takes 0.5–4 s on this shared CPU), is terminated and its task failed; so is one that raises an `error` or
+  `messageerror` event or cannot instantiate the module. A failed task runs on the render thread (`Task::Remote`
+  keeps its `Work`), with that frame's hitch, but the variant arrives. A watchdog timer that fires late (the
+  page's thread was blocked, so the answer may be queued behind it) looks again 100 ms later before failing.
+  Replacement workers start for the queue; after three failures the pool stops starting workers and every later
+  task runs on the page.
+* *The engine's own backstop* (`lumen_displaced.rs`): a task still pending 60 s after it was handed over is run on
+  the render thread too (it cancels the remote one), in case the pool itself stopped answering; the limit allows
+  for tasks queued behind others in a pool of one worker.
+* *A read-back that fails to map* (status back to idle after its submission) no longer holds the GPU job forever:
+  its variants are displaced again. (Not seen; it was the other way a variant could stay missing for good.)
+
+**Verified** (headless Chromium 1248, a fresh profile and a fresh server per load, the same page-side frame
+trace as above; GPU and CPU shared with three other agents, whose load made frames sparser than in the first
+measurements):
+
+| Fresh loads with the fix | gallery (10 loads) | valley (10 loads) |
+|---|---|---|
+| loads with every variant | **10 / 10** (4 each) | **10 / 10** (2 each) |
+| watchdog warnings, errors | none | none |
+| worst frame while baking (ms) | 6.7 / 6.8 / 7.0 / 7.3 / 8.2 / 8.4 / 9.4 / 11 / 13.6 / 31 | 10.4 / 11.9 / 12.1 / 13.1 / 13.4 / 13.5 / 13.6 / 14.0 / 14.1 / 24.2 |
+| p95 (ms) | 3.5–5.6 | 3.9–5.7 |
+| frames > 20 ms | one frame in one load | one frame in one load |
+| frames without baking: median (ms) | 1.5–2.1 | 1.7–2.3 |
+| GPU-process stall at start, no frame (s) | 51–71 | 31–47 |
+
+Against the base build's 718–920 ms (gallery) and 789–881 ms (valley) worst frames the gain holds; the valley's
+≈ 13 ms is Lumen's re-upload, as before. "All variants in" now reads 1.7–12.6 s after the start-up stall, because
+the GPU process paused frames again for 0.4–2.2 s at a time while the variants were in flight; interleaved with
+the original pool on the same machine (3 + 3 gallery loads) it is the same: original 8.7 / 11.2 / 12.5 s, worst
+frame 6.3 / 6.9 / 7.6 ms; with the fix 6.8 / 9.2 / 10.0 s, 6.1 / 6.8 / 19.3 ms.
+
+**Editor** (`editor.html?scene=gallery`, the cloth's displacement magnitude dragged for 2 s, as above), interleaved
+with the original pool: every drag got its variants (two per drag: the content at a refinement's start and the
+final one). Worst frame from the drag until the last variant: original 25.6 / 32.0 / 34.5 ms, with the fix
+23.3 / 25.7 / 28.9 / 32.4 / 32.7 ms (base build 738–876 ms); last variant after the release: original
+2.5 / 2.5 / 5.4 s, with the fix 2.0 / 2.7 / 5.8 / 6.0 / 6.5 s. Both are bimodal with how sparse the frames were (the
+5–6.5 s drags drew 5–8 frames per second in their window, the 2–2.7 s ones 14–31; the GPU was shared): the pipeline takes one step per frame (a
+refinement's points, the GPU job, its read-back, the bake's result), and in an instrumented drag with steady frames
+the last variant came 1.25 s after the release, with every task posted to an idle worker within the frame it was
+submitted in.
+
+The showcase site (`site/build.py`, `preview.html`: the valley, then a click on the gallery): both loads got the
+valley's two and the gallery's four variants. **Fault injection** (copies of the build with a sabotaged
+`bake_worker.js`, gallery): a worker that never reports ready, one whose every task loops forever, one whose script
+throws while loading, one whose answers are lost and one whose every task traps — in each case all four variants
+arrived (from the render thread, with that path's hitches), with the watchdog's warning in the console; the tasks
+went to the render thread at once (error, trap), after 8 s (not ready) or after 10 s (no answer).
+
 ## Remaining limits
 
 * **The render thread still copies.** Taking in a bed's bake (9 MB of card triangles) costs up to ≈ 5 ms and a
@@ -172,8 +264,10 @@ checks the result end to end.
 * **The GPU process** compiles the displacement pipeline of a scene's displacing graphs on first use; the page draws
   no frame for ≈ 0.4 s (no main-thread work). The base build has the same stall, hidden among its bake hitches.
 * **Fallback.** Where no worker can run (no `Worker`, a worker that does not load, `?bake-workers=0`) the bakes run
-  on the render thread one per frame as before, with the same hitches. A worker that fails is not restarted; its
-  tasks and later ones run on the page.
+  on the render thread one per frame as before, with the same hitches. A worker that fails or times out is
+  replaced, its task runs on the page; after three failures every later task runs on the page. A bake that
+  legitimately takes longer than 10 s (a much slower device) is run again on the page, paying the hitch the
+  workers avoid.
 * **Memory.** Each worker holds its own wasm instance: the module's static data plus what its largest bake grew the
   heap to (tens of MB for a bed or the terrace), up to four workers, released 20 s after the last bake.
 * **Latency.** A worker refines once more (≈ 10 % of a bake) and the CPU is shared with the page, so a single

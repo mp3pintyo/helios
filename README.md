@@ -1030,7 +1030,9 @@ culling), gallery 8.0 / 5.0 → 8.1 / 5.0 ms, cathedral with 300 lights under Me
   render thread only hands over the inputs and takes in the results, one per frame, so a scene's variants no longer
   stall frames for 30–920 ms each (worst frame while the gallery's four variants bake 718–920 → 6–7 ms, against
   2–4 ms without baking, and all of them in after 1.5–1.6 instead of 2.3–3.3 s; `?bake-workers=0` runs them on the
-  render thread as before, as does a browser where a worker cannot start). An
+  render thread as before, as does a browser where a worker cannot start). A watchdog keeps a worker from ever
+  leaving a variant missing: a worker that does not report ready within 8 s, does not answer a task within 10 s or
+  raises an error is terminated and its task runs on the render thread. An
   animated displacement is represented by its mean surface (32 times in 8 s): the gallery's cloth moves at most
   3.6 cm RMS from it at 3.3 cm voxels, where a snapshot would be √2 times as far off and a re-bake could never keep
   up with the waves. Until a variant is ready (0.5–1.3 s of CPU per variant) instances keep their previous one;
