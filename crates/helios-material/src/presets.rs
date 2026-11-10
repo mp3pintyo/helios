@@ -1,9 +1,9 @@
 //! Example graphs (the gallery scene's and the editor's starting points).
 
-use crate::graph::{GraphBuilder, MaterialGraph, Op};
+use crate::graph::{GraphBuilder, MaterialGraph, Op, VectorSpace};
 
 /// Preset ids and labels, for editors.
-pub const PRESETS: [(&str, &str); 7] = [
+pub const PRESETS: [(&str, &str); 8] = [
     ("blank", "Blank (output only)"),
     ("lava", "Animated lava"),
     ("wet_stone", "Wet stone with puddles"),
@@ -11,6 +11,7 @@ pub const PRESETS: [(&str, &str); 7] = [
     ("brick_pavement", "Brick pavement (displaced)"),
     ("mushrooms", "Mushrooms (vector displacement)"),
     ("rippling_cloth", "Rippling cloth (animated displacement)"),
+    ("combed_tufts", "Combed tufts (tangent-space vector displacement)"),
 ];
 
 /// The preset graph `id`.
@@ -23,6 +24,7 @@ pub fn preset(id: &str) -> Option<MaterialGraph> {
         "brick_pavement" => Some(brick_pavement()),
         "mushrooms" => Some(mushrooms()),
         "rippling_cloth" => Some(rippling_cloth()),
+        "combed_tufts" => Some(combed_tufts()),
         _ => None,
     }
 }
@@ -691,5 +693,70 @@ pub fn rippling_cloth() -> MaterialGraph {
         .link(shade, "Out", base, "B")
         .link(base, "Out", output, "BaseColor")
         .link(height, "Out", output, "Displacement");
+    g.build()
+}
+
+/// Combed tufts: a field of pointed tufts in a grid of object-space cells, each bending over
+/// towards the surface's tangent (object X on a flat bed) by a "Lean" parameter. The vector is
+/// built in tangent space — up the normal, along the tangent — and turned into world space by a
+/// TransformVector node, so the tufts follow their instance: on a turning platform they turn with
+/// it, where a world-space vector from the same constants would keep leaning the same way. The
+/// tips are lighter than the roots. Its material's magnitude is the tufts' height.
+pub fn combed_tufts() -> MaterialGraph {
+    let mut g = GraphBuilder::new("Combed tufts");
+    let position = g.node(Op::ObjectPosition, [-1200.0, 0.0]);
+    let xz = g.node(Op::ComponentMask { channels: "xz".into() }, [-1030.0, 0.0]);
+    let density = g.node(Op::ScalarParameter { name: "Tuft Density".into(), default: 3.0, min: 1.0, max: 8.0 }, [-1030.0, 120.0]);
+    let scaled = g.node(Op::Multiply, [-860.0, 40.0]);
+    let cell = g.node(Op::Frac, [-690.0, 40.0]);
+    let centred = g.node(Op::Subtract, [-520.0, 40.0]);
+    let distance = g.node(Op::Length, [-350.0, 40.0]);
+    let falloff = g.node(Op::SmoothStep, [-180.0, 40.0]);
+    let profile = g.node(Op::OneMinus, [-10.0, 40.0]);
+    let height = g.node(Op::Multiply, [160.0, 40.0]);
+    // Up the normal; along the tangent by lean · height² (the tips bend furthest).
+    let lean = g.node(Op::ScalarParameter { name: "Lean".into(), default: 0.8, min: 0.0, max: 1.4 }, [160.0, 200.0]);
+    let bend = g.node(Op::Multiply, [330.0, 160.0]);
+    let along = g.node(Op::Multiply, [500.0, 160.0]);
+    let up = g.node(Op::Multiply, [500.0, 40.0]);
+    let tangent_plane = g.node(Op::Append, [670.0, 120.0]);
+    let tangent_vector = g.node(Op::Append, [840.0, 80.0]);
+    let turn = g.node(Op::TransformVector { source: VectorSpace::Tangent, destination: VectorSpace::World }, [1010.0, 80.0]);
+    // Lighter tips.
+    let roots = g.node(Op::VectorParameter { name: "Root Color".into(), default: [0.05, 0.09, 0.03, 1.0] }, [840.0, -220.0]);
+    let tips = g.node(Op::VectorParameter { name: "Tip Color".into(), default: [0.55, 0.5, 0.18, 1.0] }, [840.0, -120.0]);
+    let colors = g.node(Op::Lerp, [1010.0, -160.0]);
+    let rgb = g.node(Op::ComponentMask { channels: "rgb".into() }, [1100.0, -160.0]);
+    let output = g.node(Op::Output, [1250.0, 0.0]);
+    g.link(position, "Out", xz, "In")
+        .link(xz, "Out", scaled, "A")
+        .link(density, "Out", scaled, "B")
+        .link(scaled, "Out", cell, "In")
+        .link(cell, "Out", centred, "A")
+        .value(centred, "B", 0.5)
+        .link(centred, "Out", distance, "In")
+        .value(falloff, "Min", 0.0)
+        .value(falloff, "Max", 0.42)
+        .link(distance, "Out", falloff, "X")
+        .link(falloff, "Out", profile, "In")
+        .link(profile, "Out", height, "A")
+        .link(profile, "Out", height, "B")
+        .link(height, "Out", bend, "A")
+        .link(height, "Out", bend, "B")
+        .link(bend, "Out", along, "A")
+        .link(lean, "Out", along, "B")
+        .link(height, "Out", up, "A")
+        .value(up, "B", 0.7)
+        .link(along, "Out", tangent_plane, "A")
+        .value(tangent_plane, "B", 0.0)
+        .link(tangent_plane, "Out", tangent_vector, "A")
+        .link(up, "Out", tangent_vector, "B")
+        .link(tangent_vector, "Out", turn, "In")
+        .link(turn, "Out", output, "VectorDisplacement")
+        .link(roots, "Out", colors, "A")
+        .link(tips, "Out", colors, "B")
+        .link(height, "Out", colors, "Alpha")
+        .link(colors, "Out", rgb, "In")
+        .link(rgb, "Out", output, "BaseColor");
     g.build()
 }
