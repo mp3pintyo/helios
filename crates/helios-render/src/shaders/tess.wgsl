@@ -193,10 +193,18 @@ fn dice_patch(index: u32) {
     let p = tess_patch(record.x, b, instance, record.yzw);
     let d = tess_dice(p);
     let f = 1u << LEVEL;
-    var screen: array<vec4<f32>, 6>;
-    for (var v = 0u; v < ((f + 1u) * (f + 2u)) / 2u; v++) {
+    let vertices = ((f + 1u) * (f + 2u)) / 2u;
+    var own: array<vec3<f32>, 6>;
+    for (var v = 0u; v < vertices; v++) {
         let ij = tess_grid_vertex(v, f);
-        screen[v] = tess_project(instance, strength, tess_vertex_position(instance, tess_grid_vertex_points(b, p, d, ij.x, ij.y)));
+        own[v] = tess_displaced(instance, tess_grid_point(b, p, d, ij.x, ij.y));
+    }
+    var screen: array<vec4<f32>, 6>;
+    for (var v = 0u; v < vertices; v++) {
+        let ij = tess_grid_vertex(v, f);
+        let m = tess_grid_morph(p, d, ij.x, ij.y);
+        let position = tess_morphed(own[v], own[tess_grid_index(m.a.x, m.a.y, f)], own[tess_grid_index(m.c.x, m.c.y, f)], m.weight);
+        screen[v] = tess_project(instance, strength, position);
     }
     for (var t = 0u; t < f * f; t++) {
         let tri = tess_grid_triangle(t, f);
@@ -210,6 +218,7 @@ var<workgroup> wg_base: array<TessBase, MAX_PATCHES>;
 var<workgroup> wg_patch: array<TessPatch, MAX_PATCHES>;
 var<workgroup> wg_dice: array<TessDice, MAX_PATCHES>;
 var<workgroup> wg_item: array<u32, MAX_PATCHES>;
+var<workgroup> wg_displaced: array<vec3<f32>, 64>;
 var<workgroup> wg_screen: array<vec4<f32>, 64>;
 
 @compute @workgroup_size(64)
@@ -237,12 +246,21 @@ fn dice(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) groups: 
         wg_item[lid] = record.x;
     }
     workgroupBarrier();
+    // Every grid vertex displaced once, then morphed from its neighbours' displaced positions.
     let local_patch = lid / vertices;
-    if lid < patches_per_group * vertices && first + local_patch < count {
+    let in_patch = lid < patches_per_group * vertices && first + local_patch < count;
+    let ij = tess_grid_vertex(lid % vertices, f);
+    if in_patch {
         let instance = instances[wg_base[local_patch].instance];
-        let ij = tess_grid_vertex(lid % vertices, f);
-        let vertex = tess_grid_vertex_points(wg_base[local_patch], wg_patch[local_patch], wg_dice[local_patch], ij.x, ij.y);
-        wg_screen[lid] = tess_project(instance, wind_strength(instance), tess_vertex_position(instance, vertex));
+        wg_displaced[lid] = tess_displaced(instance, tess_grid_point(wg_base[local_patch], wg_patch[local_patch], wg_dice[local_patch], ij.x, ij.y));
+    }
+    workgroupBarrier();
+    if in_patch {
+        let instance = instances[wg_base[local_patch].instance];
+        let m = tess_grid_morph(wg_patch[local_patch], wg_dice[local_patch], ij.x, ij.y);
+        let base = local_patch * vertices;
+        let position = tess_morphed(wg_displaced[lid], wg_displaced[base + tess_grid_index(m.a.x, m.a.y, f)], wg_displaced[base + tess_grid_index(m.c.x, m.c.y, f)], m.weight);
+        wg_screen[lid] = tess_project(instance, wind_strength(instance), position);
     }
     workgroupBarrier();
     let triangle_patch = lid / (f * f);

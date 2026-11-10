@@ -415,6 +415,9 @@ pub struct Renderer {
     /// Voxel LODs and tessellation as the cached shadow pages were rendered.
     voxel_lods_cached: bool,
     tessellation_cached: bool,
+    /// The displaced surfaces' shape (displacement table, displacing graphs and their
+    /// parameters) the cached shadow pages were rendered with.
+    displacement_cached: (u64, u64),
     time: f32,
     /// Multiplier on `lod_threshold` that keeps the main view's visible work inside the GPU
     /// list capacities (see [`Renderer::lod_budget_scale`]).
@@ -502,6 +505,7 @@ impl Renderer {
             scene_changed: true,
             voxel_lods_cached: true,
             tessellation_cached: true,
+            displacement_cached: (0, 0),
             time: 0.0,
             lod_budget_scale: 1.0,
             percentage: 100.0,
@@ -697,9 +701,16 @@ impl Renderer {
         self.voxel_lods_cached = self.settings.voxel_lods;
         self.tessellation_cached = self.settings.tessellation;
         self.textures.sync(&self.device, &self.queue, scene);
-        self.culling.prepare_tessellation(&self.device, &self.scene, &self.textures.data, &self.samplers.material);
         let substrate = self.settings.substrate;
         self.extended.sync(&self.device, &self.queue, scene, &self.scene, substrate, self.targets.capacity);
+        self.culling.prepare_tessellation(&self.device, scene, &self.scene, &self.textures, &self.samplers.material, self.extended.parameter_buffer());
+        // Editing a displacement (magnitude, a displacing graph or its parameters) reshapes
+        // static surfaces: their cached shadow pages are stale.
+        let displacement = (self.scene.displacement_table_hash, self.extended.displacement_key);
+        if displacement != self.displacement_cached && self.scene.has_displacement() {
+            self.scene_changed = true;
+        }
+        self.displacement_cached = displacement;
         let tessellation = self.scene.has_displacement();
         self.material.sync(&self.device, self.scene.uv_extensions, self.scene.skins.skinned_instances, tessellation, &self.extended, substrate);
         let slab_lighting = self.extended.lighting.then_some(&self.extended.lighting_layout);

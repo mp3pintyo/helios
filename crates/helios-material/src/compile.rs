@@ -12,6 +12,22 @@
 //! `GraphOutput`, the parameter block and the helpers the generated code uses). Outputs left
 //! unconnected keep `defaults` — the material's own values.
 //!
+//! **Displacement.** The output's `Displacement` pin compiles to a function of its own, from the
+//! nodes it depends on (sharing the node code generation and the parameter slots),
+//!
+//! ```wgsl
+//! fn graph_displacement(m: Material, input: DisplacementSurface, params: u32) -> f32
+//! ```
+//!
+//! which Nanite tessellation calls per micro-triangle vertex — in the main view and the shadow
+//! pages — and the resolve where it finds the displaced point (`displacement_graph.wgsl`). The
+//! height must be a pure, static function of the undisplaced point, the same in every pass and
+//! on both sides of a shared edge, so in this context the compiler rejects what would break that:
+//! time (a displaced surface is static — cached shadow pages and the tessellator's geomorphing
+//! rely on it), the camera vector and fresnel (every view must displace a point alike), and the
+//! attributes the tessellator does not read (vertex colours, UV set 1, the tangent frame).
+//! Texture and noise filtering use the size of a dice segment instead of a pixel.
+//!
 //! **Derivatives.** The resolve runs in a compute shader over a visibility buffer: there are no
 //! hardware screen derivatives. Texture sampling and noise filtering need them, so every value
 //! that feeds a texture coordinate or a noise position carries its screen-space derivatives
@@ -30,7 +46,7 @@ use std::fmt::Write as _;
 use serde::Serialize;
 
 use crate::graph::{MaterialGraph, Node, Op};
-use crate::nodes::{spec, InputDefault, OUTPUT_PINS};
+use crate::nodes::{spec, InputDefault, DISPLACEMENT_PIN, OUTPUT_PINS};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -53,12 +69,30 @@ pub struct Parameter {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct CompiledGraph {
+    /// `graph_eval`, and `graph_displacement` if the Displacement output is connected.
     pub wgsl: String,
     pub parameters: Vec<Parameter>,
     /// Bits of the connected [`OUTPUT_PINS`].
     pub outputs: u32,
     /// FNV-1a of `wgsl`: identical graphs share a compiled pipeline.
     pub hash: u64,
+    /// The body of the displacement function, if the Displacement output is connected (see
+    /// [`CompiledGraph::displacement_function`]).
+    pub displacement: Option<String>,
+}
+
+impl CompiledGraph {
+    /// The displacement function under `name`: `fn name(m: Material, input: DisplacementSurface,
+    /// params: u32) -> f32`, returning the raw height (the renderer clamps it to 0..1).
+    pub fn displacement_function(&self, name: &str) -> Option<String> {
+        let body = self.displacement.as_ref()?;
+        Some(format!("fn {name}(m: Material, input: DisplacementSurface, params: u32) -> f32 {{\n{body}}}\n"))
+    }
+
+    /// FNV-1a of the displacement code: graphs that displace alike share it.
+    pub fn displacement_hash(&self) -> Option<u64> {
+        self.displacement.as_ref().map(|body| fnv1a(body.as_bytes()))
+    }
 }
 
 /// A problem that keeps a graph from compiling, with the node it concerns.
@@ -84,15 +118,28 @@ pub fn compile(graph: &MaterialGraph) -> Result<CompiledGraph, Vec<GraphError>> 
     if !c.errors.is_empty() {
         return Err(c.errors);
     }
-    let order = c.order();
+    let output = c.output;
+    let surface = c.order(output, Some(DISPLACEMENT_PIN));
+    let height = c.sources.get(&(output, DISPLACEMENT_PIN.to_string())).map(|s| s.0);
+    let displacement = height.map(|root| c.order(root, None));
     if !c.errors.is_empty() {
         return Err(c.errors);
     }
-    c.assign_parameters(&order);
-    c.mark_derivatives(&order);
-    for &id in &order {
-        c.emit_node(id);
-    }
+    let mut reachable: Vec<u32> = surface.iter().chain(displacement.iter().flatten()).copied().collect();
+    reachable.sort_unstable();
+    reachable.dedup();
+    c.assign_parameters(&reachable);
+    let eval = c.function(Context::Surface, &surface);
+    let displacement = displacement.map(|order| {
+        let mut body = c.function(Context::Displacement, &order);
+        let height = c.input(output, DISPLACEMENT_PIN);
+        if height.width != 1 {
+            c.error(Some(output), format!("Output: {DISPLACEMENT_PIN} takes a f32, not a {}", ty(height.width)));
+        }
+        let _ = writeln!(body, "    return {};", height.expr);
+        c.outputs |= crate::nodes::output_bit(DISPLACEMENT_PIN);
+        body
+    });
     if !c.errors.is_empty() {
         return Err(c.errors);
     }
@@ -102,11 +149,58 @@ pub fn compile(graph: &MaterialGraph) -> Result<CompiledGraph, Vec<GraphError>> 
     let _ = writeln!(wgsl, "const GRAPH_OUTPUTS: u32 = {}u;", c.outputs);
     wgsl.push_str("fn graph_eval(m: Material, input: SurfaceInput, params: u32, vertex_color: vec4<f32>, defaults: GraphOutput) -> GraphOutput {\n");
     wgsl.push_str("    var o = defaults;\n");
-    wgsl.push_str(&c.code);
+    wgsl.push_str(&eval);
     wgsl.push_str("    return o;\n}\n");
-    let hash = fnv1a(wgsl.as_bytes());
-    Ok(CompiledGraph { wgsl, parameters: c.params, outputs: c.outputs, hash })
+    let mut compiled = CompiledGraph { wgsl, parameters: c.params, outputs: c.outputs, hash: 0, displacement };
+    if let Some(function) = compiled.displacement_function("graph_displacement") {
+        compiled.wgsl.push_str(&function);
+    }
+    compiled.hash = fnv1a(compiled.wgsl.as_bytes());
+    Ok(compiled)
 }
+
+/// Where generated code runs, which decides the inputs and helpers it may use.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Context {
+    /// `graph_eval` in the G-buffer resolve: screen-space derivatives, every input.
+    Surface,
+    /// `graph_displacement` in the tessellator: a static function of the undisplaced point.
+    Displacement,
+}
+
+/// Helper functions of a context (material_graph.wgsl, displacement_graph.wgsl).
+struct Helpers {
+    texture: &'static str,
+    sample: &'static str,
+    triplanar: &'static str,
+    decode_normal: &'static str,
+    blend_normals: &'static str,
+}
+
+impl Context {
+    fn helpers(self) -> Helpers {
+        match self {
+            Context::Surface => Helpers {
+                texture: "graph_texture",
+                sample: "graph_sample",
+                triplanar: "graph_triplanar",
+                decode_normal: "decode_tangent_normal",
+                blend_normals: "graph_blend_normals",
+            },
+            Context::Displacement => Helpers {
+                texture: "displacement_graph_texture",
+                sample: "displacement_graph_sample",
+                triplanar: "displacement_graph_triplanar",
+                decode_normal: "displacement_decode_normal",
+                blend_normals: "displacement_blend_normals",
+            },
+        }
+    }
+}
+
+const STATIC_DISPLACEMENT: &str =
+    "the renderer's clock cannot drive Displacement: displaced surfaces are static (cached shadow pages and the tessellator's geomorphing rely on it)";
+const VIEW_DISPLACEMENT: &str = "depends on the camera, which cannot drive Displacement: every view and the shadow pages must displace a point alike";
 
 fn fnv1a(bytes: &[u8]) -> u64 {
     bytes.iter().fold(0xcbf29ce484222325u64, |h, &b| (h ^ b as u64).wrapping_mul(0x100000001b3))
@@ -119,15 +213,21 @@ struct Value {
     expr: String,
     width: u8,
     deriv: Option<(String, String)>,
+    /// Why the value cannot be used in this context (reported where it is linked).
+    unavailable: Option<&'static str>,
 }
 
 impl Value {
     fn plain(expr: impl Into<String>, width: u8) -> Self {
-        Self { expr: expr.into(), width, deriv: None }
+        Self { expr: expr.into(), width, deriv: None, unavailable: None }
     }
 
     fn with_deriv(expr: &str, width: u8, dx: &str, dy: &str) -> Self {
-        Self { expr: expr.into(), width, deriv: Some((dx.into(), dy.into())) }
+        Self { expr: expr.into(), width, deriv: Some((dx.into(), dy.into())), unavailable: None }
+    }
+
+    fn unavailable(width: u8, why: &'static str) -> Self {
+        Self { unavailable: Some(why), ..Self::plain(zero(width), width) }
     }
 }
 
@@ -183,6 +283,7 @@ struct Compiler<'g> {
     /// Nodes whose values carry derivatives.
     derivative: HashSet<u32>,
     outputs: u32,
+    context: Context,
 }
 
 impl<'g> Compiler<'g> {
@@ -198,6 +299,7 @@ impl<'g> Compiler<'g> {
             params: Vec::new(),
             derivative: HashSet::new(),
             outputs: 0,
+            context: Context::Surface,
         }
     }
 
@@ -241,8 +343,9 @@ impl<'g> Compiler<'g> {
         }
     }
 
-    /// Nodes the output depends on, each after its inputs; reports cycles.
-    fn order(&mut self) -> Vec<u32> {
+    /// Nodes `root` depends on (`root` last), each after its inputs, not following the root's
+    /// input `skip`; reports cycles.
+    fn order(&mut self, root: u32, skip: Option<&str>) -> Vec<u32> {
         #[derive(Clone, Copy, PartialEq)]
         enum Mark {
             Visiting,
@@ -251,12 +354,15 @@ impl<'g> Compiler<'g> {
         let mut marks: HashMap<u32, Mark> = HashMap::new();
         let mut order = Vec::new();
         // Iterative DFS: (node, next input index).
-        let mut stack = vec![(self.output, 0usize)];
-        marks.insert(self.output, Mark::Visiting);
+        let mut stack = vec![(root, 0usize)];
+        marks.insert(root, Mark::Visiting);
         while let Some(&mut (id, ref mut next)) = stack.last_mut() {
             let inputs = spec(&self.nodes[&id].op).inputs;
             if let Some(input) = inputs.get(*next) {
                 *next += 1;
+                if id == root && skip == Some(input.name) {
+                    continue;
+                }
                 let Some((source, _)) = self.sources.get(&(id, input.name.to_string())).cloned() else { continue };
                 match marks.get(&source) {
                     Some(Mark::Visiting) => {
@@ -332,6 +438,24 @@ impl<'g> Compiler<'g> {
 
     // ---- Emission ---------------------------------------------------------------------------
 
+    /// The code of `order`'s nodes in `context` (each function has values and derivatives of
+    /// its own).
+    fn function(&mut self, context: Context, order: &[u32]) -> String {
+        self.context = context;
+        self.code.clear();
+        self.values.clear();
+        self.derivative.clear();
+        self.mark_derivatives(order);
+        for &id in order {
+            self.emit_node(id);
+        }
+        std::mem::take(&mut self.code)
+    }
+
+    fn displacement(&self) -> bool {
+        self.context == Context::Displacement
+    }
+
     fn line(&mut self, text: String) {
         self.code.push_str("    ");
         self.code.push_str(&text);
@@ -347,7 +471,7 @@ impl<'g> Compiler<'g> {
             self.line(format!("let {name}_dy: {} = {dy};", ty(width)));
             (format!("{name}_dx"), format!("{name}_dy"))
         });
-        Value { expr: name, width, deriv }
+        Value { expr: name, width, deriv, unavailable: None }
     }
 
     fn literal(&mut self, id: u32, x: f32) -> String {
@@ -371,7 +495,11 @@ impl<'g> Compiler<'g> {
     /// The value at input `pin` of node `id`: its link's source, or the input's default.
     fn input(&mut self, id: u32, pin: &str) -> Value {
         if let Some(source) = self.sources.get(&(id, pin.to_string())).cloned() {
-            return self.values.get(&source).cloned().unwrap_or_else(|| Value::plain("0.0f", 1));
+            let value = self.values.get(&source).cloned().unwrap_or_else(|| Value::plain("0.0f", 1));
+            if let Some(why) = value.unavailable {
+                self.error(Some(source.0), format!("{} {why}", source.1));
+            }
+            return value;
         }
         let node = self.nodes[&id];
         let default = spec(&node.op).inputs.iter().find(|i| i.name == pin).map(|i| i.default).unwrap_or(InputDefault::Scalar(0.0));
@@ -384,6 +512,14 @@ impl<'g> Compiler<'g> {
             InputDefault::TexCoord => Value::with_deriv("input.uv", 2, "input.duv_dx", "input.duv_dy"),
             InputDefault::WorldPosition => Value::with_deriv("input.world_position", 3, "input.dpdx", "input.dpdy"),
             InputDefault::VertexNormal => Value::plain("input.normal", 3),
+            InputDefault::Time if self.displacement() => {
+                let message = format!(
+                    "{}: its {pin} input defaults to the renderer's clock, which cannot drive Displacement (displaced surfaces are static): connect a constant",
+                    node.op.type_name()
+                );
+                self.error(Some(id), message);
+                Value::plain("0.0f", 1)
+            }
             InputDefault::Time => Value::plain("frame.time", 1),
             InputDefault::Material => Value::plain("0.0f", 1),
         }
@@ -448,6 +584,7 @@ impl<'g> Compiler<'g> {
                 let t = self.vector_literal(id, tiling);
                 let (uv, dx, dy) = match set {
                     0 => ("input.uv", "input.duv_dx", "input.duv_dy"),
+                    1 if self.displacement() => return Err("UV set 1 is not available to Displacement (the tessellator reads UV set 0)".into()),
                     1 => ("input.uv1", "input.duv1_dx", "input.duv1_dy"),
                     s => return Err(format!("UV set {s} does not exist (0 or 1)")),
                 };
@@ -457,8 +594,13 @@ impl<'g> Compiler<'g> {
             Op::WorldPosition => out(Value::with_deriv("input.world_position", 3, "input.dpdx", "input.dpdy")),
             Op::ObjectPosition => out(Value::with_deriv("input.object_position", 3, "input.object_dpdx", "input.object_dpdy")),
             Op::VertexNormal => out(Value::plain("input.normal", 3)),
+            Op::VertexColor if self.displacement() => {
+                Err("vertex colours are not available to Displacement (the tessellator reads positions, normals and UV set 0)".into())
+            }
             Op::VertexColor => out(Value::plain("vertex_color", 4)),
+            Op::Time if self.displacement() => Err(STATIC_DISPLACEMENT.into()),
             Op::Time => out(Value::plain("frame.time", 1)),
+            Op::CameraVector | Op::Fresnel { .. } if self.displacement() => Err(VIEW_DISPLACEMENT.into()),
             Op::CameraVector => out(self.bind(id, 0, 3, "normalize(frame.camera_position.xyz - input.world_position)".into(), None)),
             Op::Add | Op::Subtract | Op::Multiply | Op::Divide | Op::Min | Op::Max => {
                 let (a, b) = (self.input(id, "A"), self.input(id, "B"));
@@ -670,7 +812,8 @@ impl<'g> Compiler<'g> {
                 if a.width != 3 || b.width != 3 {
                     return Err("Base and Detail must be float3 tangent-space normals".into());
                 }
-                out(self.bind(id, 0, 3, format!("graph_blend_normals({}, {})", a.expr, b.expr), None))
+                let blend = self.context.helpers().blend_normals;
+                out(self.bind(id, 0, 3, format!("{blend}({}, {})", a.expr, b.expr), None))
             }
             Op::TextureSample { parameter } => {
                 let uv = self.input(id, "UV");
@@ -680,7 +823,8 @@ impl<'g> Compiler<'g> {
                 let slot = self.slot(parameter);
                 let (dx, dy) = Self::d(&uv, 2);
                 let t = format!("t{id}");
-                self.line(format!("let {t} = graph_sample(graph_texture(m, params, {slot}u), {}, {dx}, {dy});", uv.expr));
+                let h = self.context.helpers();
+                self.line(format!("let {t} = {}({}(m, params, {slot}u), {}, {dx}, {dy});", h.sample, h.texture, uv.expr));
                 let field = |e: String, w: u8| Value::plain(e, w);
                 Ok(vec![
                     ("RGB", field(format!("{t}.albedo.rgb"), 3)),
@@ -689,9 +833,10 @@ impl<'g> Compiler<'g> {
                     ("B", field(format!("{t}.albedo.b"), 1)),
                     ("A", field(format!("{t}.albedo.a"), 1)),
                     ("RGBA", field(format!("{t}.albedo"), 4)),
-                    ("Normal", field(format!("decode_tangent_normal({t}.data, 1.0)"), 3)),
+                    ("Normal", field(format!("{}({t}.data, 1.0)", h.decode_normal), 3)),
                     ("Roughness", field(format!("{t}.data.z"), 1)),
                     ("Metallic", field(format!("{t}.data.w"), 1)),
+                    ("Height", field(format!("{t}.data.w"), 1)),
                 ])
             }
             Op::Triplanar { parameter, scale } => {
@@ -703,16 +848,23 @@ impl<'g> Compiler<'g> {
                 let s = self.literal(id, *scale);
                 let (px, py) = Self::d(&p, 3);
                 let t = format!("t{id}");
+                let h = self.context.helpers();
                 self.line(format!(
-                    "let {t} = graph_triplanar(graph_texture(m, params, {slot}u), {} * {s}, {px} * {s}, {py} * {s}, normalize({}));",
-                    p.expr, n.expr
+                    "let {t} = {}({}(m, params, {slot}u), {} * {s}, {px} * {s}, {py} * {s}, normalize({}));",
+                    h.triplanar, h.texture, p.expr, n.expr
                 ));
+                let tangent = if self.displacement() {
+                    Value::unavailable(3, "is not available to Displacement (the tessellator has no tangent frame)")
+                } else {
+                    Value::plain(format!("graph_to_tangent(input, {t}.normal)"), 3)
+                };
                 Ok(vec![
                     ("RGB", Value::plain(format!("{t}.albedo"), 3)),
                     ("A", Value::plain(format!("{t}.alpha"), 1)),
                     ("Normal", Value::plain(format!("{t}.normal"), 3)),
-                    ("TangentNormal", Value::plain(format!("graph_to_tangent(input, {t}.normal)"), 3)),
+                    ("TangentNormal", tangent),
                     ("Roughness", Value::plain(format!("{t}.roughness"), 1)),
+                    ("Height", Value::plain(format!("{t}.height"), 1)),
                 ])
             }
             Op::If => {
@@ -731,7 +883,7 @@ impl<'g> Compiler<'g> {
             }
             Op::Output => {
                 for (pin, field, width) in OUTPUT_PINS {
-                    if !self.sources.contains_key(&(id, pin.to_string())) {
+                    if pin == DISPLACEMENT_PIN || !self.sources.contains_key(&(id, pin.to_string())) {
                         continue;
                     }
                     let v = self.input(id, pin);

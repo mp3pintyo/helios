@@ -1,0 +1,98 @@
+[
+  {
+    "id": "graph-displacement",
+    "title": "Anyaggráf vezérli a Nanite elmozdítást",
+    "area": "Anyagok és textúrák",
+    "kind": "feature",
+    "summary": "Az anyaggráf Output csomópontja Displacement kimenetet kapott: ha be van kötve, a gráf skalár magassága (0..1 az anyag középértéke körül, a magnitúdóval skálázva) hajtja a Nanite tesszellációt egy textúracsatorna helyett, mint UE-ben. A gráf magassága mindenütt ugyanaz: a fő nézet kockázásában és geomorfingjában, az árnyéklapokon és a G-puffer resolve elmozdított-pont keresésében és normáldöntésében.",
+    "details": "A helios-material egy gráfból két függvényt fordít, közös csomópont-kódgenerátorral és paraméter-slotokkal: a resolve-nak a graph_eval-t és a tesszellátornak a graph_displacement(m, input: DisplacementSurface, params) -> f32-t, a Displacement láb függőségeiből (a csak egyik függvényt tápláló csomópontok a másikba nem kerülnek). A DisplacementSurface a SurfaceInput mezőneveit használja (uv, world_position, object_position, normal), így minden csomópont mindkét kontextusban ugyanazt a kódot adja; a 'deriváltak' itt egy dice-szegmens méretét hordozzák, így a textúra (512²-es tömbök, textureSampleGrad) és a zaj a mikroháromszögekhez szűrt. A tesszelláció egy dispatch-ben sok anyagot dolgoz fel, ezért a jelenet elmozdító gráfjainak halmaza a kockázó pipeline-ok egy permutációját adja: generált modul az összes gráf függvényével és egy switch-csel az anyag gráf-azonosítóján (TessMaterial.source.z, a paraméter-offset a .w), futásidőben fordítva és a halmaz hash-ével cache-elve (natívan és böngészőben); az emit/split pipeline-ok közösek. A resolve-ban a gráf a saját bővített pipeline-jában adja a magasságot (displacement_graph_resolve.wgsl). Az ExtendedMaterials csak azoknál az anyagoknál írja be a gráfforrást, amelyek gráfja kapott resolve-pipeline-t, így a tesszellátor és a resolve mindig egyezik. A magasság [0,1]-re vágott, így a magnitude·max(center, 1−center) korlát továbbra is érvényes.",
+    "metrics": "1600×900, RTX 3090 más ügynökökkel megosztva, 3 váltott futás minimuma; ugyanazok a mikroháromszögek, a terasz magassága gráfból vs. azonos magnitúdójú textúracsatornából (ideiglenes build): közeli nézet 2,91 M mikroháromszög, raster sw + merge 1,43 → 1,89 ms, resolve 0,51 → 0,95 ms, GPU-képkocka 5,70 → 6,62 ms (tesszelláció nélkül 3,88); súroló nézet 2,75 M, raster 1,29 → 1,73 ms, resolve 0,40 → 0,71 ms. Elmozdítás nélküli jelenetek és a textúraút képe és ideje zajon belül változatlan (erdő 8,73 → 8,67 ms, katedrális 9,05 → 9,04 ms). Álló kamera: képkockánként a pixelek 0,0011 %-a változik 24/255-nél többet (tesszelláció nélkül 0,0012 %).",
+    "showcase": "Galéria, téglaterasz: --scene gallery --eye 0.9,0.45,10.9 --at 0,0,9.2 (közeli) és --eye 3.6,0.12,10.0 --at -1,0.02,8.6 (súroló). Előtte/utána: PageDown (tesszelláció ki: lapos, csak színben rajzolt téglák; be: valódi fugák, sziluett, árnyék). Debug nézet 25. Szerkesztőben: Material Graph → Brick pavement, egy Noise csomópont bekötése a Displacement lábra élőben átrajzolja a felületet.",
+    "modules": [
+      "crates/helios-material/src/compile.rs",
+      "crates/helios-material/src/nodes.rs",
+      "crates/helios-render/src/tessellation/graphs.rs",
+      "crates/helios-render/src/tessellation.rs",
+      "crates/helios-render/src/shaders/displacement_graph.wgsl",
+      "crates/helios-render/src/shaders/displacement_graph_resolve.wgsl",
+      "crates/helios-render/src/shaders/displacement_graphs_off.wgsl",
+      "crates/helios-render/src/shaders/displacement_height.wgsl",
+      "crates/helios-render/src/substrate_gpu.rs",
+      "crates/helios-render/src/shader.rs"
+    ]
+  },
+  {
+    "id": "graph-displacement-static-rule",
+    "title": "Statikus elmozdítás: idő- és nézetfüggő csomópontok tiltása a Displacement ágon",
+    "area": "Anyagok és textúrák",
+    "kind": "feature",
+    "summary": "A Displacement ágon a fordító hibát ad a csomópontra, ha a magasság nem az el nem mozdított pont tiszta, statikus függvénye: Time (és az órán hagyott Panner), CameraVector, Fresnel, csúcsszín, 2. UV-készlet, triplanar tangens normál. Így a megosztott élek bitre azonosak maradnak, és a statikus árnyéklap-cache érvényes marad.",
+    "details": "Döntés: az animált elmozdítás tiltva, nem dinamikus árnyékvetőként kezelve. Indok: a VSM statikus lap-cache tartja az elmozdított példányok árnyékát, a geomorfing azt feltételezi, hogy a magasság csak a kamerával változik, a mozgásvektorok álló felületet feltételeznek. A hibaüzenet ezt meg is mondja ('displaced surfaces are static'). A szerkesztő a hibát a csomóponton jelöli.",
+    "metrics": "Egységtesztek: minden tiltott csomópont a saját csomópontján jelzett hibát ad; a 39 megengedett csomóponttípus mindegyike érvényes WGSL-t ad mindkét tesszellációs menetben (naga + Tint bitwise-ellenőrzés).",
+    "showcase": "Szerkesztő: Time csomópont bekötése a Displacement ágba → piros csomópont és a hibaüzenet a lista alján.",
+    "modules": [
+      "crates/helios-material/src/compile.rs",
+      "crates/helios-material/src/lib.rs"
+    ]
+  },
+  {
+    "id": "brick-pavement-demo",
+    "title": "Galéria: gráf által elmozdított téglaterasz és 'Brick pavement' preset",
+    "area": "Jelenetek és demó",
+    "kind": "feature",
+    "summary": "A galéria nedves kőterasza előtt 8 × 3 m-es téglaterasz kerül szegélykővel: futókötéses téglák csorbult, letört élekkel, téglánként eltérő magassággal és színnel, 2,8 cm mély fugákkal — tisztán procedurális gráfból, textúra nélkül, jól elkülönülve a völgy textúravezérelt macskaköveitől. A gráf 'Brick pavement (displaced)' néven presetként is elérhető.",
+    "details": "Világ-xz téglaegységekben, minden második sor fél téglával eltolva; az él távolsága smoothstep-pel letörve választja el a téglát a fugától ('Mortar Width'), durvább zaj csorbítja az éleket, a téglacellán vett zaj téglánkénti véletlen magasságot ('Brick Variation') és színt ad, finom zaj érdesíti. Anyag: magnitude 3,5 cm, center 0,9.",
+    "metrics": "A galéria kezdőnézete (a terasz közeli széle látszik): 3,76 → 4,58 ms GPU. Közeli nézet: 2,91 M mikroháromszög, 6,62 ms GPU-képkocka.",
+    "showcase": "--scene gallery --eye 0.9,0.45,10.9 --at 0,0,9.2; súroló: --eye 3.6,0.12,10.0 --at -1,0.02,8.6.",
+    "modules": [
+      "crates/helios-material/src/presets.rs",
+      "crates/helios-demo/src/scenes/gallery.rs"
+    ]
+  },
+  {
+    "id": "graph-displacement-editor",
+    "title": "Szerkesztő: Displacement láb és 'Driven by graph' a Details panelen",
+    "area": "Platform és eszközök",
+    "kind": "tool",
+    "summary": "A gráfszerkesztő Output csomópontja Displacement lábat kapott (a TextureSample és Triplanar csomópont Height kimenetet); a Details panel Displacement szekciója 'Driven by graph · név' gombot mutat a magasságcsatorna helyett, ha az anyag gráfja hajtja az elmozdítást, és figyelmeztet, ha nincs magnitúdó.",
+    "details": "A gráf linkjei a jelenetfájlban mentődnek, mint eddig; a paraméterek (pl. Mortar Width) az anyagpéldány-blokkban élnek, így módosításuk nem fordít újra, csak az árnyéklap-cache-t érvényteleníti. A szerkesztő állapotában az anyag displacement_graph mezőt kap.",
+    "metrics": "Böngésző (headless Chromium, WebGPU): Noise csomópont bekötése a Displacement lábra egérhúzással → a téglák eltűnnek, sima zajfelület; visszavonás → téglák vissza; Mortar Width 0,025 → szélesebb fugák újrafordítás nélkül; konzolban nincs WGSL/validációs hiba.",
+    "showcase": "editor.html?scene=gallery → Material Graph → Brick pavement; Noise húzása a Displacement lábra.",
+    "modules": [
+      "web/editor/details.js",
+      "crates/helios-demo/src/editor/describe.rs",
+      "crates/helios-demo/src/editor/tests.rs"
+    ]
+  },
+  {
+    "id": "tessellation-one-height-per-vertex",
+    "title": "Javítás: csúcsonként egyetlen magasság-kiértékelés a kockázásban",
+    "area": "Virtuális geometria",
+    "kind": "fix",
+    "summary": "A kockázó eddig egy rácscsúcsra akár három magasságot számolt (a sajátját és morfoláskor a durvább szakasz két végpontjáét). A végpontok ugyanannak a patchnek a rácscsúcsai, ezért most minden csúcs egyszer mozdul el (megosztott memóriába), a morfolás a szomszédok eredményéből keveredik. A textúravezérelt út is felére-harmadára gyorsult.",
+    "details": "tess_grid_morph a morfolás súlyát és a két végpont rácsindexét adja (élcsúcsnál a kanonikus élindex visszaképezve a rácsba, belső csúcsnál ±da); tess.wgsl és vsm_tess.wgsl mindkét útja (F ≤ 2 lokális tömb, F = 4/8 workgroup-memória két barrier-rel) így számol. A CPU-tükör ugyanígy, a megosztott-él (bitre azonos) és a folytonossági teszt továbbra is zöld.",
+    "metrics": "Völgy, textúravezérelt ösvény: raster sw + merge 1,62 → 1,04 ms (1,82 M mikroháromszög), súroló nézet 2,83 → 1,83 ms (3,43 M); gráfvezérelt téglaterasz 4,05 → 1,89 ms. Kép a futásonkénti zajon belül (PSNR 60,5 / 61,1 dB a régihez, régi vs régi 60,9 / 60,5 dB).",
+    "showcase": "Völgy: --eye -27.5,0.35,41.5 --at -31,0.12,49 (súroló macskakő) — azonos kép, kevesebb idő (HUD GPU-sor).",
+    "modules": [
+      "crates/helios-render/src/shaders/tess_core.wgsl",
+      "crates/helios-render/src/shaders/tess.wgsl",
+      "crates/helios-render/src/shaders/vsm_tess.wgsl",
+      "crates/helios-render/src/tessellation/crack_tests.rs"
+    ]
+  },
+  {
+    "id": "displacement-edit-shadow-invalidation-fix",
+    "title": "Javítás: az elmozdítás szerkesztése érvényteleníti a cache-elt árnyéklapokat",
+    "area": "Árnyékok",
+    "kind": "fix",
+    "summary": "Eddig egy textúravezérelt elmozdítás magnitúdójának szerkesztése elavult cache-elt árnyéklapokat hagyott (az anyagváltozás nem számított szerkezeti változásnak). Most a renderer hash-eli az elmozdítás-táblát és a gráfvezérelt anyagok kódját és paraméterértékeit, és változáskor érvényteleníti a cache-elt lapokat.",
+    "details": "GpuScene::displacement_table_hash (a feltöltött TessMaterial-tábla FNV-1a-ja) és ExtendedMaterials::displacement_key (anyag, gráf-elmozdítás hash, paraméterértékek); a renderer csak akkor jelöli scene_changed-nek, ha van elmozdított példány, így elmozdítás nélküli jelenetekben nincs hatása.",
+    "metrics": "Elmozdítás nélküli jelenetek képe és költsége változatlan (lásd a fő elemet).",
+    "showcase": "Szerkesztő: Mortar Width csúszka húzása — az árnyékok a fugákkal együtt frissülnek.",
+    "modules": [
+      "crates/helios-render/src/renderer.rs",
+      "crates/helios-render/src/gpu_scene.rs",
+      "crates/helios-render/src/substrate_gpu.rs"
+    ]
+  }
+]

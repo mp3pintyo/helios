@@ -1,9 +1,10 @@
 //! The material gallery: specimens of the extended material model on plinths in a paved
 //! courtyard at golden hour — Substrate slabs (clear-coat car paint, velvet, skin, candle wax,
 //! marble, backlit leaves, brushed metal, IOR and specular colour, an unlit sign) and material
-//! graphs (animated lava, wet stone with puddles, stylised water). `PageUp` switches the slabs
+//! graphs (animated lava, wet stone with puddles, stylised water, and a brick pavement whose
+//! graph displaces its mortar joints through Nanite tessellation). `PageUp` switches the slabs
 //! off for an A/B against the plain metallic-roughness base; debug view 24 shows each pixel's
-//! slab features.
+//! slab features, view 25 the tessellation.
 //!
 //! A low sun from the front left shows the skin's and the wax's soft terminators and the
 //! coats' reflections; a lamp behind the bush shines through its leaves, a candle burns on the
@@ -14,7 +15,8 @@ use helios_geometry::modeling::cuboid;
 use helios_geometry::{primitives, vegetation, BuildConfig, Mesh, SdfMode};
 use helios_render::material_graph::presets;
 use helios_render::{
-    Camera, Light, Material, MaterialHandle, MaterialKind, MeshHandle, ParameterValue, Scene, Slab, Sun, TextureDesc, TextureMapping, TexturePattern,
+    Camera, Displacement, Light, Material, MaterialHandle, MaterialKind, MeshHandle, ParameterValue, Scene, Slab, Sun, TextureDesc, TextureMapping,
+    TexturePattern,
 };
 
 use super::{add_baked, add_baked_with, Detail, SceneSetup};
@@ -23,6 +25,8 @@ pub const SUN: (f32, f32, f32) = (2.25, 0.42, 10.0);
 /// Plinths stand in a row along x, 2.7 m apart.
 const SPACING: f32 = 2.7;
 const PLINTH_HEIGHT: f32 = 1.0;
+/// Height of the brick terrace's undisplaced surface (its bricks' tops; mortar sinks below).
+const BRICK_LEVEL: f32 = 0.03;
 
 fn floor(_: f32, _: f32) -> f32 {
     0.0
@@ -87,6 +91,12 @@ fn build_scene(detail: Detail) -> Scene {
     let sign = add_baked_with(&mut scene, "gallery/sign", &cuboid(Vec3::new(-1.6, 0.0, -0.04), Vec3::new(1.6, 1.0, 0.04)), volume(16));
     let ring: Mesh = primitives::cylinder(64, 1, 1.1, 0.25, false);
     let ring = add_baked_with(&mut scene, "gallery/basin", &ring, BuildConfig { sdf: SdfMode::None, ..Default::default() });
+    // The brick terrace: 8 × 3 m in front of the wet stone, its bricks 3 cm above the courtyard
+    // (the mortar joints sink 2.8 cm), framed by a kerb.
+    let mut terrace = primitives::terrain(8.0, 32, 0.0, 4);
+    terrace.deform(|p| Vec3::new(p.x, BRICK_LEVEL, p.z * 0.375 + 9.0));
+    let terrace = add_baked_with(&mut scene, "gallery/brick terrace", &terrace, BuildConfig { sdf: SdfMode::None, ..Default::default() });
+    let kerb = add_baked_with(&mut scene, "gallery/kerb", &cuboid(Vec3::new(-0.5, 0.0, -0.5), Vec3::new(0.5, 1.0, 0.5)), volume(8));
     let mut pool = primitives::terrain(2.2, 24, 0.0, 3);
     pool.deform(|p| Vec3::new(p.x, 0.0, p.z));
     let pool = add_baked_with(&mut scene, "gallery/pool", &pool, BuildConfig { sdf: SdfMode::None, ..Default::default() });
@@ -195,6 +205,25 @@ fn build_scene(detail: Detail) -> Scene {
     let wet_graph = g.scene.add_material_graph(presets::wet_stone());
     let wet = g.material("wet stone", Material { graph: Some(wet_graph), ..Material::textured(MaterialKind::Standard, flagstone, TextureMapping::WorldTriplanar, 0.25) });
     g.scene.add_instance(puddles, wet, Mat4::IDENTITY);
+
+    // Graph — a brick pavement whose Displacement output carves the mortar joints (Nanite
+    // tessellation driven by the graph, not a texture): the terrace in front of the wet stone.
+    let brick_graph = g.scene.add_material_graph(presets::brick_pavement());
+    let bricks = g.material(
+        "brick pavement",
+        Material { graph: Some(brick_graph), displacement: Some(Displacement::height(0.035, 0.9)), ..Material::standard(Vec3::new(0.4, 0.16, 0.09), 0.85, 0.0) },
+    );
+    g.scene.add_instance(terrace, bricks, Mat4::IDENTITY);
+    let kerb_material = g.material("kerb", Material::textured(MaterialKind::Standard, marble, TextureMapping::WorldTriplanar, 0.8));
+    let kerb_height = BRICK_LEVEL + 0.015;
+    for (center, size) in [
+        (Vec3::new(0.0, 0.0, 7.45), Vec3::new(8.2, kerb_height, 0.1)),
+        (Vec3::new(0.0, 0.0, 10.55), Vec3::new(8.2, kerb_height, 0.1)),
+        (Vec3::new(-4.05, 0.0, 9.0), Vec3::new(0.1, kerb_height, 3.0)),
+        (Vec3::new(4.05, 0.0, 9.0), Vec3::new(0.1, kerb_height, 3.0)),
+    ] {
+        g.scene.add_instance(kerb, kerb_material, Mat4::from_scale_rotation_translation(size, Quat::IDENTITY, center));
+    }
 
     // An unlit sign behind the row (KHR_materials_unlit): the stained-glass pattern, unshaded.
     let unlit = g.material("unlit sign", Material { slab: Slab { unlit: true, ..Default::default() }, ..Material::textured(MaterialKind::Standard, glass, TextureMapping::MeshUv, 1.0) });

@@ -6,9 +6,11 @@ use wgpu::{BufferUsages, ShaderStages, TextureFormat};
 
 use crate::gpu_scene::GpuScene;
 use crate::profiler::Recorder;
+use crate::scene::Scene;
 use crate::shader::create_module;
 use crate::stats::STATE_SIZE;
 use crate::targets::{FrameTargets, DEPTH_FORMAT, VISIBILITY_FORMAT};
+use crate::textures::TextureLibrary;
 use crate::util::{self, bind, bind_group, bind_group_layout, compute_pipeline, storage_buffer, uniform_buffer};
 use crate::skin::{skin_entry, skin_resource};
 use crate::tessellation::{tessellation_entry, tessellation_resource, Tessellation};
@@ -349,11 +351,22 @@ impl Culling {
         entries
     }
 
-    /// Creates the tessellator the first time a scene has displaced instances, and points it at
-    /// the material textures heights are read from.
-    pub fn prepare_tessellation(&mut self, device: &wgpu::Device, scene: &GpuScene, data: &wgpu::TextureView, sampler: &wgpu::Sampler) {
-        if scene.has_displacement() {
-            self.tessellation.get_or_insert_with(|| Tessellation::new(device)).set_textures(data, sampler);
+    /// Creates the tessellator the first time a scene has displaced instances, points it at the
+    /// material textures and graph parameters heights are read from, and selects its dicing
+    /// permutation for the scene's displacing graphs.
+    pub fn prepare_tessellation(
+        &mut self,
+        device: &wgpu::Device,
+        scene: &Scene,
+        gpu: &GpuScene,
+        textures: &TextureLibrary,
+        sampler: &wgpu::Sampler,
+        graph_parameters: &wgpu::Buffer,
+    ) {
+        if gpu.has_displacement() {
+            let tessellation = self.tessellation.get_or_insert_with(|| Tessellation::new(device));
+            tessellation.set_textures(&textures.albedo, &textures.data, sampler, graph_parameters);
+            tessellation.sync_graphs(device, scene);
         }
     }
 

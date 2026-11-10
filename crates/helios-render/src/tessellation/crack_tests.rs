@@ -157,10 +157,28 @@ fn children(c: [[u32; 3]; 3], mask: u32) -> Vec<[[u32; 3]; 3]> {
     }
 }
 
-/// A synthetic displacement: a pure function of the undisplaced point, as the height is.
-fn displaced(point: &Point) -> Vec3 {
-    let q = point.position;
-    q + Vec3::Y * (0.15 * (5.0 * q.x).sin() * (4.0 * q.z).cos())
+/// A synthetic height: a pure function of the undisplaced point, as a texture's or a graph's is.
+type Height = fn(Vec3) -> f32;
+
+/// Smooth waves (a texture-like height).
+fn waves(q: Vec3) -> f32 {
+    0.15 * (5.0 * q.x).sin() * (4.0 * q.z).cos()
+}
+
+/// A material graph's kind of height: the brick pavement preset's running bond on world xz —
+/// floors, fractions and a steep bevelled step into the mortar, whose slope is discontinuous.
+fn bricks(q: Vec3) -> f32 {
+    let (x, z) = (q.x / 0.44, q.z / 0.22);
+    let row = z.floor();
+    let x = x + (row * 0.5).fract();
+    let edge = (x.fract().min(1.0 - x.fract()) * 0.44).min(z.fract().min(1.0 - z.fract()) * 0.22);
+    let t = ((edge - 0.02) / 0.03).clamp(0.0, 1.0);
+    let brick = t * t * (3.0 - 2.0 * t);
+    0.12 * (brick * (1.0 - 0.3 * ((x.floor() * 0.613 + row * 0.37).sin() * 0.5 + 0.5)) - 0.9)
+}
+
+fn displaced(point: &Point, height: Height) -> Vec3 {
+    point.position + Vec3::Y * height(point.position)
 }
 
 /// The grid point (i, j) of a diced patch, snapped to its edge's segments (tess_grid_point).
@@ -204,24 +222,28 @@ fn edge_grid_point(base: &[Vec3; 3], p: &Patch, e: usize, index: u32, edge_level
     patch_edge_point(base, lo, hi, index as f32 / (1 << edge_level) as f32)
 }
 
-/// The displaced position of grid vertex (i, j), morphed out of the coarser segment it splits
-/// (tess_grid_vertex_points, tess_vertex_position).
-fn grid_vertex(base: &[Vec3; 3], p: &Patch, i: u32, j: u32) -> (Point, Vec3) {
+/// The grid vertex at index k from the first corner of patch edge e (tess_edge_grid_vertex).
+fn edge_grid_vertex(e: usize, k: u32, f: u32) -> (u32, u32) {
+    match e {
+        2 => (k, 0),
+        1 => (0, f - k),
+        _ => (f - k, k),
+    }
+}
+
+/// The morph of grid vertex (i, j), if it is new at its level: its weight and the two grid
+/// vertices whose segment it splits (tess_grid_morph).
+fn grid_morph(p: &Patch, i: u32, j: u32) -> Option<(f32, (u32, u32), (u32, u32))> {
     let levels = p.factors.map(level);
     let finest = level(p.factors.iter().copied().fold(0.0, f32::max));
     let f = 1 << finest.0;
-    let point = grid_point(base, p, i, j);
-    let own = displaced(&point);
-    let morph = |weight: f32, a: Point, c: Point| (point, ((displaced(&a) + displaced(&c)) * 0.5).lerp(own, weight));
     match grid_edge(i, j, f) {
         Some((e, k)) if i < f && j < f => {
             let canonical = if p.flipped[e] { f - k } else { k };
-            let snapped = canonical >> (finest.0 - levels[e].0);
-            if snapped & 1 == 1 {
-                let level = levels[e].0;
-                return morph(levels[e].1, edge_grid_point(base, p, e, snapped - 1, level), edge_grid_point(base, p, e, snapped + 1, level));
-            }
-            (point, own)
+            let shift = finest.0 - levels[e].0;
+            let snapped = canonical >> shift;
+            let back = |c: u32| edge_grid_vertex(e, if p.flipped[e] { f - c } else { c }, f);
+            (snapped & 1 == 1).then(|| (levels[e].1, back((snapped - 1) << shift), back((snapped + 1) << shift)))
         }
         None if (i | j) & 1 == 1 => {
             let (di, dj): (i32, i32) = match (i & 1 == 1, j & 1 == 1) {
@@ -229,10 +251,10 @@ fn grid_vertex(base: &[Vec3; 3], p: &Patch, i: u32, j: u32) -> (Point, Vec3) {
                 (true, false) => (-1, 0),
                 _ => (0, -1),
             };
-            let at = |s: i32| grid_point(base, p, (i as i32 + s * di) as u32, (j as i32 + s * dj) as u32);
-            morph(finest.1, at(1), at(-1))
+            let at = |s: i32| ((i as i32 + s * di) as u32, (j as i32 + s * dj) as u32);
+            Some((finest.1, at(1), at(-1)))
         }
-        _ => (point, own),
+        _ => None,
     }
 }
 
@@ -240,7 +262,7 @@ fn grid_vertex(base: &[Vec3; 3], p: &Patch, i: u32, j: u32) -> (Point, Vec3) {
 type MicroVertex = (Point, Vec3);
 
 /// Every micro-triangle of a base triangle.
-fn tessellate(view: &View, base: &[Vec3; 3]) -> Vec<[MicroVertex; 3]> {
+fn tessellate(view: &View, base: &[Vec3; 3], height: Height) -> Vec<[MicroVertex; 3]> {
     let whole = [[ONE, 0, 0], [0, ONE, 0], [0, 0, ONE]];
     let mut queue = vec![whole];
     let mut triangles = Vec::new();
@@ -255,7 +277,17 @@ fn tessellate(view: &View, base: &[Vec3; 3]) -> Vec<[MicroVertex; 3]> {
             }
             let f = 1 << level(p.factors.iter().copied().fold(0.0, f32::max)).0;
             let index = |i: u32, j: u32| (j * (f + 1) - (j * j.saturating_sub(1)) / 2 + i) as usize;
-            let vertices: Vec<MicroVertex> = (0..=f).flat_map(|j| (0..=f - j).map(move |i| (i, j))).map(|(i, j)| grid_vertex(base, &p, i, j)).collect();
+            // Every grid vertex displaced once, then morphed from its neighbours' (tess.wgsl dice).
+            let grid: Vec<(u32, u32)> = (0..=f).flat_map(|j| (0..=f - j).map(move |i| (i, j))).collect();
+            let own: Vec<MicroVertex> = grid.iter().map(|&(i, j)| grid_point(base, &p, i, j)).map(|q| (q, displaced(&q, height))).collect();
+            let vertices: Vec<MicroVertex> = grid
+                .iter()
+                .zip(&own)
+                .map(|(&(i, j), &(q, position))| match grid_morph(&p, i, j) {
+                    Some((weight, a, c)) => (q, ((own[index(a.0, a.1)].1 + own[index(c.0, c.1)].1) * 0.5).lerp(position, weight)),
+                    None => (q, position),
+                })
+                .collect();
             for j in 0..f {
                 for i in 0..f - j {
                     triangles.push([vertices[index(i, j)], vertices[index(i + 1, j)], vertices[index(i, j + 1)]]);
@@ -343,11 +375,22 @@ fn view(eye: Vec3) -> View {
 
 #[test]
 fn shared_edges_get_identical_vertices() {
+    shared_edges_agree(waves);
+}
+
+/// A graph's height (non-smooth, cells and cliffs) keeps the edges closed alike: the tessellator
+/// needs the height to be a pure function of the point, not smooth.
+#[test]
+fn shared_edges_agree_under_a_graph_height() {
+    shared_edges_agree(bricks);
+}
+
+fn shared_edges_agree(height: Height) {
     let (triangles, shared) = grid();
     // Close to the surface (deep splits next to coarse dicing), far away, and in between.
     for eye in [Vec3::new(0.3, 0.4, 0.2), Vec3::new(1.6, 0.25, 1.2), Vec3::new(-3.0, 2.0, 6.0), Vec3::new(7.0, 3.0, -4.0)] {
         let v = view(eye);
-        let micro: Vec<_> = triangles.iter().map(|t| tessellate(&v, t)).collect();
+        let micro: Vec<_> = triangles.iter().map(|t| tessellate(&v, t, height)).collect();
         for &(a, ka, b, kb) in &shared {
             let (sa, sb) = (boundary(&micro[a], ka), boundary(&micro[b], kb));
             // The same vertices, bit for bit (parameters and displaced, morphed positions).
@@ -371,7 +414,7 @@ fn edge_vertices_move_continuously_with_the_camera() {
     let path = |s: f32| Vec3::new(1.4, 0.2, 1.2) + Vec3::new(3.0, 4.0, 2.5) * (1.0 - s);
     let polylines = |s: f32| {
         let v = view(path(s));
-        triangles.iter().map(|t| (0..3).map(|k| boundary(&tessellate(&v, t), k)).collect::<Vec<_>>()).collect::<Vec<_>>()
+        triangles.iter().map(|t| (0..3).map(|k| boundary(&tessellate(&v, t, waves), k)).collect::<Vec<_>>()).collect::<Vec<_>>()
     };
     let distance = |p: Vec3, (a, b): (Vec3, Vec3)| {
         let d = b - a;

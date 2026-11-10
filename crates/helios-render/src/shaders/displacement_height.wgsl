@@ -9,12 +9,20 @@
 // size of a dice segment at the point (UE picks the displacement mip from the mesh's UV density
 // too: the tessellator has no screen derivatives). Image layers are read from their 512² array
 // layer: the dice rate rarely asks for finer heights than that.
+//
+// A material whose graph drives the displacement (its Displacement output) instead evaluates the
+// graph's code (displacement_graphs_off.wgsl's stand-in, replaced where such graphs exist; the
+// same pure-function rule holds), clamped to [0, 1] so the culling bound stays a bound.
+
+#include "displacement_graphs_off.wgsl"
 
 // TextureMapping values (MAPPING_* in material.wgsl).
 const DISPLACEMENT_MAPPING_WORLD: u32 = 1u;
 const DISPLACEMENT_MAPPING_OBJECT: u32 = 2u;
 // Texels across a material texture array layer.
 const DISPLACEMENT_LAYER_TEXELS: f32 = 512.0;
+// TessMaterial.source.x of a material without a height layer (NO_TEXTURE in material.wgsl).
+const DISPLACEMENT_NO_LAYER: u32 = 0xffffffffu;
 
 // A point of a displaced surface before displacement.
 struct DisplacementInput {
@@ -29,12 +37,22 @@ fn displacement_texel(source: vec4<u32>, uv: vec2<f32>, lod: f32) -> f32 {
     return textureSampleLevel(material_data, material_sampler, uv, source.x, lod)[source.y];
 }
 
+// World size of a dice segment at a point (main view; every pass filters heights alike).
+fn displacement_segment(world: vec3<f32>) -> f32 {
+    return max(distance(world, tess.eye.xyz), tess.dice.z) * (tess.dice.x / tess.dice.y);
+}
+
 // Height in [0, 1] of instance material `material` (instance scale `max_scale`) at `p`.
 fn displacement_height(material: u32, max_scale: f32, p: DisplacementInput) -> f32 {
     let d = tess.materials[material];
+    if d.source.z != 0u {
+        return saturate(displacement_graph_height(d.source.z, material, d.source.w, max_scale, p));
+    }
+    if d.source.x == DISPLACEMENT_NO_LAYER {
+        return d.params.y;
+    }
     let m = materials[material];
-    // World size of a dice segment at the point.
-    let segment = max(distance(p.world, tess.eye.xyz), tess.dice.z) * (tess.dice.x / tess.dice.y);
+    let segment = displacement_segment(p.world);
     if m.mapping == DISPLACEMENT_MAPPING_WORLD || m.mapping == DISPLACEMENT_MAPPING_OBJECT {
         let world = m.mapping == DISPLACEMENT_MAPPING_WORLD;
         let q = select(p.object, p.world, world) * m.uv_scale;

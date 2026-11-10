@@ -132,7 +132,7 @@ honouring `Range`, e.g. a CDN) streams pages on demand. Imported glTF models are
 | `valley` | Mountain valley, 600 boulders, a gold sculpture (turning once in 45 s) and a small lake with a log raft that drifts, bobs and rolls on it, procedural (not simulated) mist over the water; terrain textured through a runtime virtual texture; at the lake's north end, out of the initial view, a glass pane and two crossing tinted panels standing in the water (layered translucency test); behind the initial view a cobblestone path and displaced boulders (Nanite tessellation; one turning slowly on its plinth: a movable displaced instance), e.g. `--eye -26,1.8,39 --at -33,0.2,53` | 613 instances, 50 M (medium) / 199 M (high) source triangles |
 | `cathedral` | Gothic basilica: 11-bay nave with clustered piers, triforium, stained-glass clerestory and aisles, quadripartite rib vaults, flying buttresses, polygonal apse with half dome, west front with rose window and twin spired towers; pews, altar, candelabra and eleven chandeliers swinging on their 12 m chains (7 s pendulums, 1–3°, their candle lights moving along), 33 candle lights in all; dust motes in the clerestory's light shafts and incense rising from a censer before the altar; alpha-tested wrought-iron choir screens; at the west end of the north aisle, behind the initial view, a stained-glass screen and two crossing tinted glass panes (layered translucency test). **Candle-lit** with `--lights N` / `?lights=N`: every candle flame its own shadow-casting light (60 candelabrum, 88 chandelier and 2 altar candles) plus votive racks of tea lights against the aisle walls (858), the first N lit, up to 1008 | 458 instances, 4 M (medium) / 18 M (high) |
 | `forest` | Mixed broadleaf / conifer forest with real leaf geometry, bushes, ferns, grass, mossy boulders, fallen logs and mushrooms at golden hour, swaying in a gusty breeze; conifers built from shared needle-spray assemblies, foliage with voxel LODs; a campfire in the clearing in front of the initial view (simulated fire and smoke, sparks that bounce, embers that settle and cool, a flickering fire light; best at night, `--sun 200,-30 --eye 3.5,1.4,1.0 --at 7,1.0,-1`) | 8 278 instances (≈ 26 400 assembly parts when expanded), 82 M (medium) source triangles |
-| `gallery` | The material gallery: a paved courtyard at golden hour with a row of plinths — clear-coat car paint, velvet with sheen, subsurface skin, a lit wax candle and a marble egg, a bush whose leaves let a lamp's light through, an anisotropic brushed-metal pot, dielectrics of IOR 1.33 / 2.4 and a tinted specular, an unlit sign — and three material graphs: animated lava (a pool and an egg), stylised water (two instances of one graph with different parameters) and a terrace of wet stone with puddles | 33 instances |
+| `gallery` | The material gallery: a paved courtyard at golden hour with a row of plinths — clear-coat car paint, velvet with sheen, subsurface skin, a lit wax candle and a marble egg, a bush whose leaves let a lamp's light through, an anisotropic brushed-metal pot, dielectrics of IOR 1.33 / 2.4 and a tinted specular, an unlit sign — and four material graphs: animated lava (a pool and an egg), stylised water (two instances of one graph with different parameters), a terrace of wet stone with puddles and, in front of it, a brick terrace whose graph displaces its mortar joints (Nanite tessellation driven by a material graph, e.g. `--eye 0.9,0.45,10.9 --at 0,0,9.2`) | 38 instances |
 
 These are procedural: meshes come from `helios_geometry::modeling` / `vegetation`, textures from GPU
 texture synthesis (`TexturePattern`). `0` pauses the moving props; `Y` tours each procedural scene, the gallery
@@ -442,8 +442,9 @@ are the reliable numbers. The per-feature notes in [`docs/round4/`](docs/round4/
   and colour, time, camera vector, math (add … divide, lerp, power, min, max, clamp, saturate, one-minus, abs,
   sine, cosine, frac, floor, step, smoothstep, dot, cross, normalize, length, append, component mask), footprint-
   filtered fractal **noise**, **fresnel**, **panner**, reoriented **normal blend**, **if**, and the output (base
-  colour, metallic, roughness, specular, tangent-space normal, emissive, ambient occlusion and the slab parameters:
-  clear coat and its roughness, sheen colour and roughness, subsurface, transmission, anisotropy). **Compilation**
+  colour, metallic, roughness, specular, tangent-space normal, emissive, ambient occlusion, the slab parameters:
+  clear coat and its roughness, sheen colour and roughness, subsurface, transmission, anisotropy — and the
+  **displacement** height, which drives Nanite tessellation: see there). **Compilation**
   (`helios_material::compile`): ids, links, pins, a single output and cycles are validated, value widths inferred
   (float to vec4, scalars broadcast) and every problem reported with its node ("node #4: Add: cannot combine a
   vec2<f32> with a vec3<f32>"); the result is one WGSL function `graph_eval(m, input, params, vertex_color,
@@ -460,8 +461,17 @@ are the reliable numbers. The per-feature notes in [`docs/round4/`](docs/round4/
   recompiles nothing (the gallery's two water spheres are one graph with different colours). Unset texture
   parameters sample the material's own texture, so a graph assigned to an imported material picks up its images.
   Unit tests compile every node type (on a texture-coordinate path, so its derivative code too) and every preset
-  into the extended resolve and validate it with naga and the Tint bitwise-precedence check. The node editor is part
-  of the browser editor (see *Material graph editor*).
+  into the extended resolve and validate it with naga and the Tint bitwise-precedence check. **Displacement**: the
+  output's Displacement pin compiles to a second function, `graph_displacement(m, input, params) -> f32`, from the
+  nodes it depends on (sharing the node code and the parameter slots; nodes feeding only one of the two functions
+  stay out of the other), which the tessellator calls per micro-triangle vertex. Its inputs (`DisplacementSurface`:
+  mesh UVs, world / object position, normal) carry the size of a dice segment as their "derivatives", so texture
+  samples (the 512² arrays, not streamed tiles) and noise are filtered for the micro-triangles; the compiler rejects,
+  with an error on the node, what would make the height anything but a static function of the point — `Time` (and a
+  panner left on the clock: displaced surfaces are static, cached shadow pages and the geomorphing rely on it),
+  `CameraVector` / `Fresnel` (every view must displace alike), vertex colours, UV set 1 and the triplanar tangent
+  normal (the tessellator does not read them). Texture sample and triplanar nodes gained a `Height` output (a
+  procedural texture's height). The node editor is part of the browser editor (see *Material graph editor*).
 * **Runtime virtual texture** (`rvt.rs`). The layered landscape material (height-blended texture layers driven by
   slope, altitude and noise) is rendered on demand into 128² pages of a 128k² virtual texture, cached in a 24×24-page
   atlas by a generic GPU **page cache** (request → keep/free → allocate → dirty list). It cut the valley's material
@@ -755,7 +765,9 @@ are the reliable numbers. The per-feature notes in [`docs/round4/`](docs/round4/
   array layer, a pure function of the vertex, so every pass and both sides of an edge agree. The wind applies
   after the displacement (WPO on the displaced position). **Raster**: patches are diced by grid level — one
   thread per patch for F ≤ 2, 16 or 64 threads per patch for F = 4, 8 (vertices displaced and projected into
-  shared memory, then one thread per micro-triangle) — and rasterised with the software rasteriser's rules into
+  shared memory, then one thread per micro-triangle; every grid vertex is displaced once and a morphing vertex
+  mixes its own result with its coarser segment's end vertices' — grid vertices of the same patch — instead of
+  evaluating three heights) — and rasterised with the software rasteriser's rules into
   its target and two passes (depth `atomicMax`, then payload), alongside the other software clusters. All
   micro-triangles go through compute, as in UE (whose patches never take the hardware path either): the dice
   rate keeps them at a few pixels; ones stretched over 4096 pixels by a cliff in the height are dropped, and ones
@@ -804,6 +816,37 @@ are the reliable numbers. The per-feature notes in [`docs/round4/`](docs/round4/
   CPU mirror's continuity test fails without it), not a visible difference in this view. A slow dolly (0.3 m/s)
   changes 2.8 % of the path's pixels per frame (0.6 % without displacement): the parallax of real micro-geometry,
   which TSR resolves like any other.
+  **Material graphs drive the displacement** (`tessellation/graphs.rs`, `displacement_graph.wgsl`,
+  `displacement_graph_resolve.wgsl`; UE: the material's Displacement output). When a material's graph links its
+  Output node's Displacement pin, the graph's height (0..1, clamped, so `Displacement::bound` still bounds it;
+  magnitude and centre stay the material's) replaces the texture channel everywhere a height is evaluated —
+  dicing and geomorphing, shadow pages, the resolve's hit search and normal tilt. Tessellation dices every
+  material in one dispatch, so the scene's *set* of displacing graphs makes one permutation of the dicing
+  pipelines: a generated module with every such graph's `graph_displacement` (named by graph id) and a `switch` on
+  the material's graph id (`TessMaterial::source.zw`: graph id, parameter offset), compiled at runtime — natively
+  and in the browser — and cached by the hash of the set (emit and split keep their pipelines; scenes without
+  displacing graphs keep the base ones; the texture path pays one uniform branch). The G-buffer resolve runs the
+  graph's own function in the graph's extended pipeline. `ExtendedMaterials` patches the graph id and parameter
+  offset only for materials whose graph has a resolve pipeline, so the tessellator and the resolve always agree
+  (a material that loses its pipeline stays flat rather than displacing differently in the two). Graph
+  parameters feeding the displacement live in the material instances' parameter block (bound to the dicing
+  passes): editing one recompiles nothing; a changed displacement — table, displacing code or parameter values —
+  invalidates the cached shadow pages (editing a texture-driven magnitude used to leave them stale). Crack-free:
+  the compiler only lets the height depend on the undisplaced point (object / world position, normal, UV set 0)
+  and per-frame constants, and the CPU mirror's shared-edge test also runs a brick-pattern height (floors,
+  fractions, a steep bevel). The gallery's brick terrace (preset *Brick pavement*: running bond, chipped bevelled
+  edges, per-brick heights and tints, mortar joints 2.8 cm deep) is displaced by its graph alone. Measured
+  (1600×900, RTX 3090 shared with other agents, minima of 3 interleaved runs; same micro-triangles, the terrace's
+  height from its graph vs a texture channel of the same magnitude in a temporary build): close-up
+  (`--scene gallery --eye 0.9,0.45,10.9 --at 0,0,9.2`, 2.91 M micro-triangles) software raster + merge 1.43 ms
+  (texture) → 1.89 ms (graph: three noise layers, five octaves per height), material resolve 0.51 → 0.95 ms, GPU
+  frame 5.70 → 6.62 ms (3.88 ms with tessellation off); grazing (`--eye 3.6,0.12,10.0 --at -1,0.02,8.6`, 2.75 M)
+  raster 1.29 → 1.73 ms, resolve 0.40 → 0.71 ms. Displacing each grid vertex once (above) took the texture-driven
+  valley path from 1.62 to 1.04 ms of raster (grazing 2.83 → 1.83 ms) and the graph-driven terrace from 4.05 to
+  1.89 ms, with images within run-to-run noise. Static camera: 0.0011 % of pixels change by > 24/255 per frame
+  (tessellation off 0.0012 %). Scenes without displacement and the texture path render as before (forest,
+  cathedral, valley: image differences and pass times within run-to-run noise); the gallery's initial view, which
+  now shows the terrace's near edge, went from 3.76 to 4.58 ms.
 * **Lumen-style GI** (`lumen.rs`). A 4-level global distance field (0.25–2 m voxels) is composited on the GPU from
   per-mesh SDFs; a voxel **surface cache** stores the radiance leaving nearby surfaces (sun with SDF soft shadows,
   sky with SDF occlusion, local lights, emission, one bounce from the **radiance cache** of world probes), so bounces
@@ -1279,12 +1322,13 @@ are the reliable numbers. The per-feature notes in [`docs/round4/`](docs/round4/
   viewport (toolbar *Material Graph*): pan (right / middle drag), zoom (wheel), drag nodes, drag pin to pin to link
   (an input takes one link), Alt+click unlinks, right-click or double-click opens a searchable palette built from the
   engine's catalog (`heliosMaterialNodes`), inline editors for constants, colours, parameter names and defaults, UV
-  sets, channels; *New from preset* (lava, wet stone, stylised water, blank), *Assign to material*; compile errors
+  sets, channels; *New from preset* (lava, wet stone, stylised water, brick pavement, blank), *Assign to material*; compile errors
   mark their nodes and list below. Every change is a scene-document edit (`{op: "graph"}`: undo / redo, saved in
   `.helios.json` under `graphs`, gestures merged into one undo step) and recompiles live. The Details panel shows a
   material's graph (assign / open), its parameters as sliders and colour pickers (material instance values, saved
-  per material) and its Substrate slab (clear coat, sheen, subsurface and radius, transmission, anisotropy, IOR,
-  specular, unlit).
+  per material), its Substrate slab (clear coat, sheen, subsurface and radius, transmission, anisotropy, IOR,
+  specular, unlit) and its displacement — magnitude, centre and the height channel, or *Driven by graph* (opening
+  it) while the graph's Displacement pin is linked; linking a node to that pin re-dices the surface live.
 
 ### WebGPU constraints that shaped the design
 
@@ -1364,8 +1408,8 @@ Honest differences that remain:
    of subsurface pixels is not diffused (MegaLights keeps diffuse light whole). Translucent materials (glass, water,
    `BLEND`) ignore slabs. Unlit colours are scaled to a white surface in full sun. Devices limited to WebGPU's default
    16 sampled textures per stage render slab materials as their plain base. **Material graphs** run in the G-buffer
-   resolve only: no graph-driven opacity mask, world position offset, displacement, translucent or decal materials
-   (raster and translucency shaders are fixed); at most 8 distinct (shading model, graph) pipelines per frame (further
+   resolve and, for their displacement height, in the tessellator: no graph-driven opacity mask, world position
+   offset, translucent or decal materials (raster and translucency shaders are fixed); at most 8 distinct (shading model, graph) pipelines per frame (further
    materials render without their graph, with a warning) and 1024 parameter slots in all; no custom HLSL/WGSL node,
    material functions, static switches, texture objects or per-node previews; noise and texture outputs carry no
    derivatives (a texture read at coordinates computed from another texture or from noise filters as if they were
@@ -1495,10 +1539,15 @@ Honest differences that remain:
     runs on the main thread (no partitioned / hierarchical generation, no runtime generation around the camera), and
     spawned instances are not individually editable. Native and wasm builds may differ in the last bits of `sin` /
     `cos`, so a point exactly at a filter threshold could flip between them; saved output sidesteps it.
-14. **Nanite Tessellation**: displacement is a height along the interpolated normal from one texture channel
-    through the material's mapping (UE: any material graph output, including vector displacement); the height is
-    read from the 512² texture array layer (streamed image tiles are not consulted) at a mip chosen from the dice
-    segment size, so heights finer than the layer's texels are lost. Dicing uses a uniform 2^k grid per patch with
+14. **Nanite Tessellation**: displacement is a scalar height along the interpolated normal — a texture channel
+    through the material's mapping, or a material graph's Displacement output (UE also has vector displacement);
+    textures are read from the 512² texture array layer (streamed image tiles are not consulted) at a mip chosen
+    from the dice segment size, so heights finer than the layer's texels are lost. Graph heights must be static
+    functions of the undisplaced point: time, the camera, vertex colours, UV set 1 and the tangent frame are compile
+    errors in the displacement (UE allows animated displacement at the cost of its shadow cache); a graph displaces
+    only while it has one of the 8 extended resolve pipelines (else its materials stay flat); every displacing
+    graph of the scene runs in one dicing permutation behind a switch on the material, compiled when the set
+    changes (a hitch while a graph is edited). Dicing uses a uniform 2^k grid per patch with
     snapped edges instead of UE's precomputed table of patterns for every factor triple (more micro-triangles for long
     thin patches; F is set by the finest edge), and splitting is binary at edge midpoints (UE splits with wider
     factors). Hard edges (split normals) and UV seams under a UV-mapped height crack, as in UE: the two sides
@@ -1511,5 +1560,4 @@ Honest differences that remain:
     the resolve finds the displaced point by an iterative projection, which is approximate where the displacement
     folds over itself, and texture derivatives are the base plane's. Lumen sees displaced surfaces only through
     screen traces. Skinned, alpha-masked, translucent and voxel geometry is not tessellated; the wind does not
-    rotate displaced normals. A material graph cannot drive the displacement (no displacement output: the
-    tessellation passes read one texture channel, not the G-buffer resolve's graph code).
+    rotate displaced normals.

@@ -4,7 +4,8 @@
 //! node sets a surface's attributes — base colour, metallic, roughness, specular, normal,
 //! emission, ambient occlusion and the Substrate slab parameters (clear coat, sheen,
 //! subsurface, transmission, anisotropy) — compiled to a WGSL function the renderer's G-buffer
-//! resolve calls per pixel.
+//! resolve calls per pixel, and a displacement height compiled to a second function that Nanite
+//! tessellation calls per micro-triangle vertex (UE: the material's Displacement output).
 //!
 //! ```text
 //! WorldPosition ─ ComponentMask(xz) ─ Panner ─ Append ─ Noise ─ SmoothStep ─┬─ Lerp ─ BaseColor
@@ -17,7 +18,9 @@
 //! * **Validation and code generation** ([`compile`]): ids, links, pins and cycles are
 //!   checked, value widths inferred (scalars broadcast), and every problem reported with the
 //!   node it concerns. The generated code carries screen-space derivatives through the values
-//!   that feed textures and noise (see [`compile`]'s module docs).
+//!   that feed textures and noise (see [`compile`]'s module docs); the displacement function
+//!   carries a dice segment's instead and rejects what is not a static function of the point
+//!   (time, the camera, attributes the tessellator does not read).
 //! * **Parameters** ([`Parameter`]): scalar, vector and texture parameters get slots in a
 //!   parameter block that material instances fill — changing one never recompiles.
 //! * **Catalog** ([`catalog`]): pin layouts and default properties of every node type, which an
@@ -30,7 +33,7 @@ pub mod presets;
 
 pub use compile::{compile, CompiledGraph, GraphError, Parameter, ParameterKind};
 pub use graph::{GraphBuilder, Link, MaterialGraph, Node, Op, PinRef};
-pub use nodes::{catalog, output_bit, spec, CatalogEntry, InputDefault, InputSpec, NodeSpec, OUTPUT_PINS};
+pub use nodes::{catalog, output_bit, spec, CatalogEntry, InputDefault, InputSpec, NodeSpec, DISPLACEMENT_PIN, OUTPUT_PINS};
 
 #[cfg(test)]
 mod tests {
@@ -168,6 +171,68 @@ mod tests {
         assert!(wgsl.contains(&format!("let v{uv}_0_dx: vec2<f32> = (input.duv_dx * vec2<f32>(4.0f, 4.0f));")), "{wgsl}");
         assert!(!wgsl.contains(&format!("v{rough}_0_dx")), "values that feed no texture carry no derivatives");
         assert_eq!(compiled.parameters[0].kind, ParameterKind::Texture);
+    }
+
+    #[test]
+    fn displacement_compiles_to_its_own_function() {
+        let bricks = compile(&presets::brick_pavement()).unwrap();
+        assert!(bricks.outputs & output_bit("Displacement") != 0);
+        assert!(bricks.wgsl.contains("fn graph_eval") && bricks.wgsl.contains("fn graph_displacement(m: Material, input: DisplacementSurface, params: u32) -> f32"));
+        let names: Vec<&str> = bricks.parameters.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["Mortar Width", "Brick Variation", "Brick Color"], "one slot table for both functions");
+        let body = bricks.displacement.as_deref().unwrap();
+        assert!(body.contains("graph_params[params + 0u].x") && body.contains("fbm("), "{body}");
+        // A pure function of the undisplaced point: no clock, view, vertex colour or screen
+        // derivatives — only its input, the parameter block and the displacement helpers.
+        for forbidden in ["frame.", "vertex_color", "graph_sample", "graph_texture", "input.uv1", "input.tangent"] {
+            assert!(!body.contains(forbidden), "{forbidden} in {body}");
+        }
+        // Noise is filtered by the dice segment the tessellator passes as derivatives.
+        assert!(body.contains("input.dpdx"), "{body}");
+        assert_eq!(bricks.displacement_function("f").unwrap().lines().next().unwrap(), "fn f(m: Material, input: DisplacementSurface, params: u32) -> f32 {");
+        // Nodes feeding only the displacement stay out of graph_eval.
+        let eval = &bricks.wgsl[..bricks.wgsl.find("fn graph_displacement").unwrap()];
+        assert!(!eval.contains("18.0f"), "the grain noise only displaces: {eval}");
+        assert!(compile(&presets::lava()).unwrap().displacement.is_none());
+        let mut moved = presets::brick_pavement();
+        for node in &mut moved.nodes {
+            if let Op::ScalarParameter { default, .. } = &mut node.op {
+                *default = 0.01;
+            }
+        }
+        let moved = compile(&moved).unwrap();
+        assert_eq!((moved.hash, moved.displacement_hash()), (bricks.hash, bricks.displacement_hash()), "parameter defaults are not code");
+    }
+
+    #[test]
+    fn displacement_rejects_what_is_not_static() {
+        let check = |op: Op, pin: &str, expected: &str| {
+            let (mut b, output) = simple();
+            let node = b.node(op, [0.0, 0.0]);
+            let length = b.node(Op::Length, [0.0, 0.0]);
+            b.link(node, pin, length, "In").link(length, "Out", output, "Displacement");
+            let errors = compile(&b.build()).unwrap_err();
+            assert!(errors.iter().any(|e| e.node == Some(node) && e.message.contains(expected)), "{errors:?}");
+        };
+        check(Op::Time, "Out", "displaced surfaces are static");
+        check(Op::Panner { speed: [0.1, 0.0] }, "Out", "its Time input defaults to the renderer's clock");
+        check(Op::CameraVector, "Out", "depends on the camera");
+        check(Op::Fresnel { exponent: 5.0, base_reflect: 0.04 }, "Out", "depends on the camera");
+        check(Op::VertexColor, "Out", "vertex colours are not available");
+        check(Op::TexCoord { set: 1, tiling: [1.0, 1.0] }, "Out", "UV set 1");
+        check(Op::Triplanar { parameter: "T".into(), scale: 1.0 }, "TangentNormal", "TangentNormal is not available to Displacement");
+        // The same nodes are fine for the surface, next to a static displacement.
+        let (mut b, output) = simple();
+        let time = b.node(Op::Time, [0.0, 0.0]);
+        let noise = b.node(Op::Noise { scale: 2.0, octaves: 2 }, [0.0, 0.0]);
+        b.link(time, "Out", output, "Roughness").link(noise, "Out", output, "Displacement");
+        assert!(compile(&b.build()).unwrap().displacement.is_some());
+        // A height is a float.
+        let (mut b, output) = simple();
+        let color = b.node(Op::Constant3 { value: [1.0, 0.0, 0.0] }, [0.0, 0.0]);
+        b.link(color, "Out", output, "Displacement");
+        let errors = compile(&b.build()).unwrap_err();
+        assert!(errors[0].message.contains("Displacement takes a f32, not a vec3<f32>"), "{errors:?}");
     }
 
     #[test]

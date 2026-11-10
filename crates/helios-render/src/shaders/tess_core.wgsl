@@ -381,41 +381,55 @@ fn tess_grid_point(b: TessBase, p: TessPatch, d: TessDice, i: u32, j: u32) -> Te
     return tess_interior_point(b, l);
 }
 
-// A grid vertex and, if it is new at its level, the two vertices of the coarser level whose
-// segment it splits and how far it has grown out of that segment (morph 1: in place).
-struct TessVertex {
-    point: TessPoint,
-    morph: f32,
-    a: TessPoint,
-    c: TessPoint,
+// The grid vertex (i, j) on patch edge e at index k from the edge's first corner e + 1 (the inverse
+// of tess_grid_edge).
+fn tess_edge_grid_vertex(e: u32, k: u32, f: u32) -> vec2<u32> {
+    if e == 2u {
+        return vec2<u32>(k, 0u);
+    }
+    if e == 1u {
+        return vec2<u32>(0u, f - k);
+    }
+    return vec2<u32>(f - k, k);
 }
 
-fn tess_grid_vertex_points(b: TessBase, p: TessPatch, d: TessDice, i: u32, j: u32) -> TessVertex {
+// If grid vertex (i, j) is new at its level: the two grid vertices of the coarser level whose
+// segment it splits and how far it has grown out of that segment (weight 1: in place). Both are
+// vertices of the same grid, so the dicer displaces every grid vertex once and morphs from the
+// results (a height is evaluated once per vertex, not three times).
+struct TessMorph {
+    weight: f32,
+    a: vec2<u32>,
+    c: vec2<u32>,
+}
+
+fn tess_grid_morph(p: TessPatch, d: TessDice, i: u32, j: u32) -> TessMorph {
     let f = 1u << d.level;
-    var v: TessVertex;
-    v.point = tess_grid_point(b, p, d, i, j);
-    v.morph = 1.0;
+    var m: TessMorph;
+    m.weight = 1.0;
     let edge = tess_grid_edge(i, j, f);
     if edge.x < 3u && i < f && j < f {
-        let canonical = select(edge.y, f - edge.y, p.flipped[edge.x]);
-        let edge_level = d.edges[edge.x];
-        let snapped = canonical >> (d.level - edge_level);
+        let flipped = p.flipped[edge.x];
+        let canonical = select(edge.y, f - edge.y, flipped);
+        let shift = d.level - d.edges[edge.x];
+        let snapped = canonical >> shift;
         if (snapped & 1u) == 1u {
-            v.morph = d.weights[edge.x];
-            v.a = tess_edge_grid_point(b, p, edge.x, snapped - 1u, edge_level);
-            v.c = tess_edge_grid_point(b, p, edge.x, snapped + 1u, edge_level);
+            // The edge's coarser segment ends, back in grid indices.
+            let a = (snapped - 1u) << shift;
+            let c = (snapped + 1u) << shift;
+            m.weight = d.weights[edge.x];
+            m.a = tess_edge_grid_vertex(edge.x, select(a, f - a, flipped), f);
+            m.c = tess_edge_grid_vertex(edge.x, select(c, f - c, flipped), f);
         }
     } else if edge.x == 3u && ((i | j) & 1u) == 1u {
         // The coarser grid's segment through it: along i, along j or the diagonal.
-        v.morph = d.weight;
+        m.weight = d.weight;
         let odd = vec2<bool>((i & 1u) == 1u, (j & 1u) == 1u);
         let da = select(vec2<i32>(0, -1), select(vec2<i32>(-1, 0), vec2<i32>(-1, 1), odd.y), odd.x);
-        let a = vec2<u32>(vec2<i32>(i32(i), i32(j)) + da);
-        let c = vec2<u32>(vec2<i32>(i32(i), i32(j)) - da);
-        v.a = tess_grid_point(b, p, d, a.x, a.y);
-        v.c = tess_grid_point(b, p, d, c.x, c.y);
+        m.a = vec2<u32>(vec2<i32>(i32(i), i32(j)) + da);
+        m.c = vec2<u32>(vec2<i32>(i32(i), i32(j)) - da);
     }
-    return v;
+    return m;
 }
 
 // ---- Displacement ---------------------------------------------------------------------------------
@@ -428,14 +442,14 @@ fn tess_displaced(instance: Instance, point: TessPoint) -> vec3<f32> {
     return point.object + (point.normal * displacement_offset(instance.material, height));
 }
 
-// The displaced object-space position of a grid vertex: a vertex new at its level grows out of the
+// The final object-space position of a grid vertex from the displaced positions of the vertex
+// (`own`) and of its morph ends (tess_grid_morph): a vertex new at its level grows out of the
 // coarser segment it splits, from the segment's midpoint to its displaced place as the morph weight
 // goes from 0 to 1 (geomorphing in displaced space, as CDLOD does for terrain: interpolating its
 // parameter instead would slide the displacement across the surface, a visible swim).
-fn tess_vertex_position(instance: Instance, v: TessVertex) -> vec3<f32> {
-    let own = tess_displaced(instance, v.point);
-    if v.morph >= 1.0 {
+fn tess_morphed(own: vec3<f32>, a: vec3<f32>, c: vec3<f32>, weight: f32) -> vec3<f32> {
+    if weight >= 1.0 {
         return own;
     }
-    return mix((tess_displaced(instance, v.a) + tess_displaced(instance, v.c)) * 0.5, own, v.morph);
+    return mix((a + c) * 0.5, own, weight);
 }

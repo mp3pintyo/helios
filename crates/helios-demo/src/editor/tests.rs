@@ -102,6 +102,33 @@ fn materials_get_and_lose_displacement() {
 }
 
 #[test]
+fn graphs_drive_displacement_and_are_saved() {
+    use helios_render::material_graph::{presets, MaterialGraph};
+    let mut f = Fixture::new();
+    let mut editor = f.editor();
+    let stone = f.scene.find_material("stone").unwrap();
+    let bricks = MaterialGraph { name: "Bricks".into(), ..presets::brick_pavement() };
+    op(&mut editor, &mut f, json!({ "op": "graph", "name": "Bricks", "graph": bricks }));
+    op(&mut editor, &mut f, json!({ "op": "material", "name": "stone", "params": { "graph": "Bricks", "displacement": { "magnitude": 0.03, "center": 0.9 } } }));
+    let graph = f.scene.material(stone).graph.expect("assigned");
+    assert!(f.scene.material_graph_displaces(graph));
+    let state = describe::state(&editor, &f.world());
+    let entry = state["materials"].as_array().unwrap().iter().find(|m| m["name"] == "stone").unwrap().clone();
+    assert_eq!(entry["displacement_graph"], true, "the Details panel shows the height as the graph's");
+    // Unlinking the Displacement pin hands the height back to the texture channel.
+    let mut unlinked = bricks.clone();
+    unlinked.links.retain(|l| l.to.pin != "Displacement");
+    op(&mut editor, &mut f, json!({ "op": "graph", "name": "Bricks", "graph": unlinked }));
+    assert!(!f.scene.material_graph_displaces(graph));
+    // Saved with the scene: the graph's Displacement link and the material's magnitude.
+    op(&mut editor, &mut f, json!({ "op": "graph", "name": "Bricks", "graph": bricks }));
+    let saved = editor.save(CameraDef { position: [0.0; 3], yaw_deg: 0.0, pitch_deg: 0.0, fov_deg: 60.0 });
+    let loaded = SceneDoc::parse(&saved.to_json()).unwrap();
+    assert!(loaded.graphs["Bricks"].links.iter().any(|l| l.to.pin == "Displacement"));
+    assert_eq!(loaded.materials["stone"].displacement.as_ref().and_then(|d| d.magnitude), Some(0.03));
+}
+
+#[test]
 fn transforms_undo_and_redo() {
     let mut f = Fixture::new();
     let mut editor = f.editor();

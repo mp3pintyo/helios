@@ -7,6 +7,10 @@
 //! also an *instance* of its graph: [`Scene::set_material_parameter`] overrides the graph's
 //! parameters for that material only. Parameter values live in a uniform block, so changing
 //! one never recompiles anything.
+//!
+//! A graph whose Displacement output is connected also gives the height of its displaced
+//! materials (Nanite tessellation: see `tessellation/graphs.rs`); its parameters update those
+//! surfaces the same way.
 
 use std::collections::BTreeMap;
 
@@ -47,6 +51,13 @@ pub(crate) struct GraphEntry {
     pub compiled: Result<CompiledGraph, Vec<GraphError>>,
 }
 
+impl GraphEntry {
+    /// The graph compiles with a Displacement output.
+    fn displaces(&self) -> bool {
+        self.compiled.as_ref().is_ok_and(|c| c.displacement.is_some())
+    }
+}
+
 /// The scene's graphs and its materials' parameter overrides.
 #[derive(Default)]
 pub(crate) struct GraphStore {
@@ -57,13 +68,18 @@ pub(crate) struct GraphStore {
     pub version: u64,
     /// Bumped when a parameter value changes (the parameter block is rewritten).
     pub parameter_version: u64,
+    /// Bumped when a graph starts or stops driving displacement (instances' displaced flags).
+    pub displacement_version: u64,
 }
 
 impl Scene {
     /// Adds a graph (compiling it; see [`Scene::material_graph_errors`]).
     pub fn add_material_graph(&mut self, graph: MaterialGraph) -> MaterialGraphHandle {
-        let compiled = helios_material::compile(&graph);
-        self.graphs.entries.push(GraphEntry { graph, compiled });
+        let entry = GraphEntry { compiled: helios_material::compile(&graph), graph };
+        if entry.displaces() {
+            self.graphs.displacement_version = next_version();
+        }
+        self.graphs.entries.push(entry);
         self.graphs.version = next_version();
         MaterialGraphHandle(self.graphs.entries.len() as u32 - 1)
     }
@@ -73,8 +89,12 @@ impl Scene {
     pub fn set_material_graph(&mut self, handle: MaterialGraphHandle, graph: MaterialGraph) {
         let entry = &mut self.graphs.entries[handle.0 as usize];
         if entry.graph != graph {
+            let displaced = entry.displaces();
             entry.compiled = helios_material::compile(&graph);
             entry.graph = graph;
+            if entry.displaces() != displaced {
+                self.graphs.displacement_version = next_version();
+            }
             self.graphs.version = next_version();
         }
     }
@@ -94,6 +114,13 @@ impl Scene {
             Ok(_) => &[],
             Err(errors) => errors,
         }
+    }
+
+    /// Whether the graph compiles with its Displacement output connected: it then gives the
+    /// height of its materials that displace ([`crate::Material::displacement`]: magnitude and
+    /// centre) instead of a texture channel.
+    pub fn material_graph_displaces(&self, handle: MaterialGraphHandle) -> bool {
+        self.graphs.entries.get(handle.0 as usize).is_some_and(GraphEntry::displaces)
     }
 
     pub fn material_graph_count(&self) -> usize {
@@ -157,6 +184,23 @@ mod tests {
         assert_eq!(scene.material_graph_errors(lava)[0].message, "the graph has no Output node");
         assert_ne!(scene.graphs.version, version);
         assert_eq!(scene.find_material_graph("broken"), Some(lava));
+    }
+
+    #[test]
+    fn gaining_or_losing_a_displacement_output_is_versioned() {
+        let mut scene = Scene::new();
+        let version = scene.graphs.displacement_version;
+        let lava = scene.add_material_graph(helios_material::presets::lava());
+        assert_eq!(scene.graphs.displacement_version, version, "lava does not displace");
+        scene.set_material_graph(lava, helios_material::presets::brick_pavement());
+        assert_ne!(scene.graphs.displacement_version, version, "bricks displace");
+        let version = scene.graphs.displacement_version;
+        let mut bricks = helios_material::presets::brick_pavement();
+        bricks.nodes[0].pos = [1.0, 2.0];
+        scene.set_material_graph(lava, bricks);
+        assert_eq!(scene.graphs.displacement_version, version, "still displacing");
+        scene.set_material_graph(lava, MaterialGraph { name: "broken".into(), ..Default::default() });
+        assert_ne!(scene.graphs.displacement_version, version, "a graph that stops compiling stops displacing");
     }
 
     #[test]

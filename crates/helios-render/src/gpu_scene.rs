@@ -52,6 +52,9 @@ pub struct GpuScene {
     /// The tessellation uniform: a per-frame header ([`GpuScene::write_tessellation_view`]) and the
     /// materials' displacement (`tessellation.rs`).
     pub tessellation: wgpu::Buffer,
+    /// FNV-1a of the uploaded displacement table: a change reshapes displaced surfaces (cached
+    /// shadow pages of them are stale).
+    pub displacement_table_hash: u64,
     /// Tessellate displaced materials (the renderer's setting; instances carry it as a flag).
     pub tessellation_enabled: bool,
     /// Alpha masks of alpha-tested materials, sampled by every rasteriser.
@@ -79,6 +82,8 @@ pub struct GpuScene {
     tessellation_uploaded: bool,
     /// Scene versions last uploaded: geometry, materials, instances, textures.
     versions: (u64, u64, u64, u64),
+    /// Which graphs drive displacement, as last uploaded (instances carry the displaced flag).
+    displacement_graphs_version: u64,
 }
 
 impl GpuScene {
@@ -97,6 +102,7 @@ impl GpuScene {
             material_uploads: 0,
             wind: crate::util::uniform_buffer(device, "wind", std::mem::size_of::<WindUniform>() as u64),
             tessellation: crate::util::uniform_buffer(device, "tessellation", tessellation::UNIFORM_SIZE),
+            displacement_table_hash: 0,
             tessellation_enabled: true,
             masks: AlphaMasks::new(device),
             skins: SkinPalettes::new(device),
@@ -113,6 +119,7 @@ impl GpuScene {
             displaced: false,
             tessellation_uploaded: true,
             versions: (u64::MAX, u64::MAX, u64::MAX, u64::MAX),
+            displacement_graphs_version: u64::MAX,
         }
     }
 
@@ -176,8 +183,12 @@ impl GpuScene {
             self.upload_geometry(device, queue, scene);
         }
         // Masks depend on materials and their textures; instances carry their material's
-        // alpha-masked flag for culling.
-        let materials_changed = geometry_changed || self.versions.1 != scene.material_version || self.versions.3 != scene.texture_version;
+        // alpha-masked and displaced flags for culling (a graph gaining or losing its
+        // Displacement output changes the latter).
+        let materials_changed = geometry_changed
+            || self.versions.1 != scene.material_version
+            || self.versions.3 != scene.texture_version
+            || self.displacement_graphs_version != scene.graphs.displacement_version;
         if materials_changed {
             self.masks.sync(device, queue, scene);
             self.upload_materials(queue, scene);
@@ -208,6 +219,7 @@ impl GpuScene {
             bounds_grew = self.update_instances(queue, scene, changes);
         }
         self.versions = (scene.geometry_version, scene.material_version, scene.instance_version, scene.texture_version);
+        self.displacement_graphs_version = scene.graphs.displacement_version;
 
         self.streamer.update(queue, &self.geometry, &scene.meshes, frame);
         self.streamer.upload_page_table(queue, &self.page_table);
@@ -313,7 +325,10 @@ impl GpuScene {
         queue.write_buffer(&self.materials, 0, bytemuck::cast_slice(&materials));
         self.material_uploads += 1;
         let header = std::mem::size_of::<tessellation::TessView>() as u64;
-        queue.write_buffer(&self.tessellation, header, bytemuck::cast_slice(&tessellation::material_table(scene)));
+        let table = tessellation::material_table(scene);
+        let bytes: &[u8] = bytemuck::cast_slice(&table);
+        self.displacement_table_hash = bytes.iter().fold(0xcbf29ce484222325u64, |h, &b| (h ^ b as u64).wrapping_mul(0x100000001b3));
+        queue.write_buffer(&self.tessellation, header, bytes);
     }
 
     /// How far (object space) the skin of `instance` may have moved any vertex from its rest pose
@@ -453,7 +468,7 @@ fn gpu_instance_flags(scene: &Scene, instance: &Instance, alpha_masked: bool) ->
 
 /// Whether the instance's material displaces it (skinned meshes are not tessellated).
 fn displaced(scene: &Scene, instance: &Instance) -> bool {
-    instance.skin.is_none() && scene.materials.get(instance.material.0 as usize).is_some_and(|m| tessellation::height_layer(m).is_some())
+    instance.skin.is_none() && scene.materials.get(instance.material.0 as usize).is_some_and(|m| tessellation::displacement_source(scene, m).is_some())
 }
 
 /// The instance's wind response; translucent instances are drawn by the forward pass, which

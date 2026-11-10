@@ -3,8 +3,13 @@
 use crate::graph::{GraphBuilder, MaterialGraph, Op};
 
 /// Preset ids and labels, for editors.
-pub const PRESETS: [(&str, &str); 4] =
-    [("blank", "Blank (output only)"), ("lava", "Animated lava"), ("wet_stone", "Wet stone with puddles"), ("stylized_water", "Stylised water")];
+pub const PRESETS: [(&str, &str); 5] = [
+    ("blank", "Blank (output only)"),
+    ("lava", "Animated lava"),
+    ("wet_stone", "Wet stone with puddles"),
+    ("stylized_water", "Stylised water"),
+    ("brick_pavement", "Brick pavement (displaced)"),
+];
 
 /// The preset graph `id`.
 pub fn preset(id: &str) -> Option<MaterialGraph> {
@@ -13,6 +18,7 @@ pub fn preset(id: &str) -> Option<MaterialGraph> {
         "lava" => Some(lava()),
         "wet_stone" => Some(wet_stone()),
         "stylized_water" => Some(stylized_water()),
+        "brick_pavement" => Some(brick_pavement()),
         _ => None,
     }
 }
@@ -203,5 +209,131 @@ pub fn stylized_water() -> MaterialGraph {
         .link(roughness, "Out", output, "Roughness")
         .link(normal, "Out", output, "Normal")
         .link(specular, "Out", output, "Specular");
+    g.build()
+}
+
+/// A brick pavement in running bond whose Displacement output carves the mortar joints out of
+/// the surface (Nanite tessellation): world xz in brick units, every other row shifted by half a
+/// brick; the distance to the brick's edge, bevelled by a smoothstep, separates brick from mortar
+/// ("Mortar Width"), coarser noise chips the bricks' edges, a per-brick random value (noise at the
+/// brick's cell) sets the bricks at slightly different heights ("Brick Variation") and tints them,
+/// and fine noise roughens both.
+/// Its material needs a displacement magnitude (the gallery uses 3.5 cm, centre 0.9).
+pub fn brick_pavement() -> MaterialGraph {
+    let mut g = GraphBuilder::new("Brick pavement");
+    let position = g.node(Op::WorldPosition, [-1600.0, 0.0]);
+    let xz = g.node(Op::ComponentMask { channels: "xz".into() }, [-1430.0, 0.0]);
+    let per_brick = g.node(Op::Constant2 { value: [1.0 / 0.22, 1.0 / 0.11] }, [-1430.0, 100.0]);
+    let bricks = g.node(Op::Multiply, [-1260.0, 0.0]);
+    let row = g.node(Op::ComponentMask { channels: "y".into() }, [-1090.0, 80.0]);
+    let row_index = g.node(Op::Floor, [-920.0, 80.0]);
+    let half_row = g.node(Op::Multiply, [-750.0, 80.0]);
+    let stagger = g.node(Op::Frac, [-580.0, 80.0]);
+    let column = g.node(Op::ComponentMask { channels: "x".into() }, [-1090.0, -40.0]);
+    let shifted_column = g.node(Op::Add, [-410.0, -40.0]);
+    let shifted = g.node(Op::Append, [-240.0, 0.0]);
+    let cell = g.node(Op::Floor, [-70.0, 160.0]);
+    let local = g.node(Op::Frac, [-70.0, 0.0]);
+    let far_side = g.node(Op::OneMinus, [100.0, 60.0]);
+    let nearest = g.node(Op::Min, [270.0, 0.0]);
+    let brick_size = g.node(Op::Constant2 { value: [0.22, 0.11] }, [270.0, 100.0]);
+    let edge_metres = g.node(Op::Multiply, [440.0, 0.0]);
+    let edge_x = g.node(Op::ComponentMask { channels: "x".into() }, [610.0, -40.0]);
+    let edge_y = g.node(Op::ComponentMask { channels: "y".into() }, [610.0, 40.0]);
+    let edge = g.node(Op::Min, [780.0, 0.0]);
+    let chips = g.node(Op::Noise { scale: 9.0, octaves: 2 }, [610.0, -140.0]);
+    let chip_depth = g.node(Op::Multiply, [780.0, -140.0]);
+    let chipped = g.node(Op::Add, [950.0, -60.0]);
+    let mortar_width = g.node(Op::ScalarParameter { name: "Mortar Width".into(), default: 0.01, min: 0.0, max: 0.03 }, [610.0, 160.0]);
+    let bevel_end = g.node(Op::Add, [780.0, 160.0]);
+    let brick = g.node(Op::SmoothStep, [950.0, 60.0]);
+    let seed = g.node(Op::Multiply, [100.0, 200.0]);
+    let noise = g.node(Op::Noise { scale: 1.0, octaves: 1 }, [270.0, 220.0]);
+    let random = g.node(Op::SmoothStep, [440.0, 200.0]);
+    let variation = g.node(Op::ScalarParameter { name: "Brick Variation".into(), default: 0.45, min: 0.0, max: 1.0 }, [440.0, 320.0]);
+    let sunk = g.node(Op::Multiply, [610.0, 260.0]);
+    let top = g.node(Op::Subtract, [780.0, 260.0]);
+    let grain = g.node(Op::Noise { scale: 18.0, octaves: 2 }, [610.0, 420.0]);
+    let grain_height = g.node(Op::Multiply, [780.0, 420.0]);
+    let rough_top = g.node(Op::Add, [950.0, 300.0]);
+    let joint = g.node(Op::Add, [950.0, 420.0]);
+    let height = g.node(Op::Lerp, [1120.0, 300.0]);
+    let brick_color = g.node(Op::VectorParameter { name: "Brick Color".into(), default: [0.42, 0.15, 0.08, 1.0] }, [610.0, -320.0]);
+    let brick_rgb = g.node(Op::ComponentMask { channels: "rgb".into() }, [780.0, -320.0]);
+    let tint = g.node(Op::Lerp, [780.0, -200.0]);
+    let tinted = g.node(Op::Multiply, [950.0, -260.0]);
+    let mortar_color = g.node(Op::Constant3 { value: [0.46, 0.44, 0.4] }, [950.0, -380.0]);
+    let base = g.node(Op::Lerp, [1120.0, -260.0]);
+    let roughness = g.node(Op::Lerp, [1120.0, -100.0]);
+    let output = g.node(Op::Output, [1320.0, 0.0]);
+    g.link(position, "Out", xz, "In")
+        .link(xz, "Out", bricks, "A")
+        .link(per_brick, "Out", bricks, "B")
+        .link(bricks, "Out", row, "In")
+        .link(row, "Out", row_index, "In")
+        .link(row_index, "Out", half_row, "A")
+        .value(half_row, "B", 0.5)
+        .link(half_row, "Out", stagger, "In")
+        .link(bricks, "Out", column, "In")
+        .link(column, "Out", shifted_column, "A")
+        .link(stagger, "Out", shifted_column, "B")
+        .link(shifted_column, "Out", shifted, "A")
+        .link(row, "Out", shifted, "B")
+        .link(shifted, "Out", cell, "In")
+        .link(shifted, "Out", local, "In")
+        .link(local, "Out", far_side, "In")
+        .link(local, "Out", nearest, "A")
+        .link(far_side, "Out", nearest, "B")
+        .link(nearest, "Out", edge_metres, "A")
+        .link(brick_size, "Out", edge_metres, "B")
+        .link(edge_metres, "Out", edge_x, "In")
+        .link(edge_metres, "Out", edge_y, "In")
+        .link(edge_x, "Out", edge, "A")
+        .link(edge_y, "Out", edge, "B")
+        .link(mortar_width, "Out", bevel_end, "A")
+        .value(bevel_end, "B", 0.014)
+        .link(mortar_width, "Out", brick, "Min")
+        .link(bevel_end, "Out", brick, "Max")
+        .link(position, "Out", chips, "Position")
+        .link(chips, "Out", chip_depth, "A")
+        .value(chip_depth, "B", 0.01)
+        .link(edge, "Out", chipped, "A")
+        .link(chip_depth, "Out", chipped, "B")
+        .link(chipped, "Out", brick, "X")
+        .link(cell, "Out", seed, "A")
+        .value(seed, "B", 0.613)
+        .link(seed, "Out", noise, "Position")
+        .value(random, "Min", 0.3)
+        .value(random, "Max", 0.7)
+        .link(noise, "Out", random, "X")
+        .link(random, "Out", sunk, "A")
+        .link(variation, "Out", sunk, "B")
+        .value(top, "A", 1.0)
+        .link(sunk, "Out", top, "B")
+        .link(position, "Out", grain, "Position")
+        .link(grain, "Out", grain_height, "A")
+        .value(grain_height, "B", 0.1)
+        .link(top, "Out", rough_top, "A")
+        .link(grain_height, "Out", rough_top, "B")
+        .link(grain_height, "Out", joint, "A")
+        .value(joint, "B", 0.05)
+        .link(joint, "Out", height, "A")
+        .link(rough_top, "Out", height, "B")
+        .link(brick, "Out", height, "Alpha")
+        .link(brick_color, "Out", brick_rgb, "In")
+        .value(tint, "A", 0.6)
+        .value(tint, "B", 1.35)
+        .link(random, "Out", tint, "Alpha")
+        .link(brick_rgb, "Out", tinted, "A")
+        .link(tint, "Out", tinted, "B")
+        .link(mortar_color, "Out", base, "A")
+        .link(tinted, "Out", base, "B")
+        .link(brick, "Out", base, "Alpha")
+        .value(roughness, "A", 0.95)
+        .value(roughness, "B", 0.78)
+        .link(brick, "Out", roughness, "Alpha")
+        .link(base, "Out", output, "BaseColor")
+        .link(roughness, "Out", output, "Roughness")
+        .link(height, "Out", output, "Displacement");
     g.build()
 }

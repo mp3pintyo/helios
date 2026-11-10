@@ -10,6 +10,9 @@
 //! * the **graph parameter block**: each graph material's parameter values (its instance
 //!   overrides, else the graph's defaults), one `vec4` per parameter (uniform, 16 KiB),
 //! * the materials' resolve slots, patched into the material uniform after `GpuScene` uploads it,
+//! * the graph source of materials whose graph drives their displacement (graph id and parameter
+//!   offset), patched into the tessellation uniform likewise: such a material displaces by its
+//!   graph only while the graph has a resolve pipeline, so the tessellator and the resolve agree,
 //!
 //! and owns the G-buffer's slab texels (rgba32uint, allocated only while some material is
 //! extended) and the subsurface light targets (only while some slab scatters beneath its
@@ -27,6 +30,8 @@ use crate::material_graphs::ParameterValue;
 use crate::passes::material::{EXTENDED_SLOTS, PLAIN_SLOTS, SKY_SLOT};
 use crate::scene::{MaterialHandle, Scene};
 use crate::substrate::{features, GpuSlab};
+use crate::tessellation::graphs::graph_id;
+use crate::tessellation::{displacement_source, write_graph_source, DisplacementSource};
 use crate::util::{bind, bind_group, bind_group_layout, texture, uniform_buffer, TextureSpec};
 use helios_material::{output_bit, CompiledGraph, ParameterKind};
 
@@ -45,6 +50,8 @@ pub struct ExtendedSlot {
     pub kind: u32,
     /// Hash and code of the graph (`None`: slab materials without one).
     pub graph: Option<(u64, String)>,
+    /// The graph's code drives its materials' displacement (`graph_displacement`).
+    pub displaces: bool,
 }
 
 struct Targets {
@@ -72,6 +79,11 @@ pub struct ExtendedMaterials {
     pub subsurface: bool,
     /// Materials whose resolve slot was patched (to restore when they turn plain).
     patched: BTreeSet<usize>,
+    /// Materials whose displacement graph source was patched (to clear when they lose it).
+    graph_displaced: BTreeSet<usize>,
+    /// Hash of what graph-driven displacement depends on here — each such material's graph code
+    /// and parameter values: a change reshapes the surfaces (cached shadow pages are stale).
+    pub displacement_key: u64,
     /// Scene versions, material uploads and the setting the current state was built from.
     key: Option<(u64, u64, u64, u64, bool)>,
     /// The device can bind what the extended pipelines need (a fifth storage texture in the
@@ -109,6 +121,8 @@ impl ExtendedMaterials {
             lighting: false,
             subsurface: false,
             patched: BTreeSet::new(),
+            graph_displaced: BTreeSet::new(),
+            displacement_key: 0,
             key: None,
             supported: device.limits().max_storage_textures_per_shader_stage >= 5 && device.limits().max_sampled_textures_per_shader_stage >= 17,
             warned: false,
@@ -145,6 +159,9 @@ impl ExtendedMaterials {
         let mut params: Vec<[u32; 4]> = Vec::new();
         let mut slots: Vec<ExtendedSlot> = Vec::new();
         let mut assigned: Vec<(usize, u32)> = Vec::new();
+        // (material, graph id, parameter offset) of graph-displaced materials.
+        let mut graph_sources: Vec<(usize, u32, u32)> = Vec::new();
+        let mut displacement_key = Fnv::default();
         let (mut lighting, mut subsurface) = (false, false);
         if !self.supported && scene.materials.iter().any(|m| m.graph.is_some() || m.slab.features() != 0) {
             self.warn("the device cannot bind the extended material pipelines: slabs and graphs are ignored");
@@ -174,7 +191,12 @@ impl ExtendedMaterials {
             let slot = match slots.iter().position(|s| s.kind == kind && s.graph.as_ref().map(|g| g.0) == hash) {
                 Some(slot) => slot,
                 None if slots.len() < EXTENDED_SLOTS as usize => {
-                    slots.push(ExtendedSlot { slot: PLAIN_SLOTS + slots.len() as u32, kind, graph: graph.map(|g| (g.hash, g.wgsl.clone())) });
+                    slots.push(ExtendedSlot {
+                        slot: PLAIN_SLOTS + slots.len() as u32,
+                        kind,
+                        graph: graph.map(|g| (g.hash, g.wgsl.clone())),
+                        displaces: graph.is_some_and(|g| g.displacement.is_some()),
+                    });
                     slots.len() - 1
                 }
                 None => {
@@ -183,6 +205,12 @@ impl ExtendedMaterials {
                 }
             };
             assigned.push((i, slots[slot].slot));
+            if let (Some(DisplacementSource::Graph(handle)), Some(g)) = (displacement_source(scene, m), graph) {
+                graph_sources.push((i, graph_id(handle), offset));
+                displacement_key.write(&(i as u64).to_le_bytes());
+                displacement_key.write(&g.displacement_hash().unwrap_or(0).to_le_bytes());
+                displacement_key.write(bytemuck::cast_slice(&params[offset as usize..]));
+            }
             lighting |= all != 0;
             subsurface |= all & features::SUBSURFACE != 0;
         }
@@ -204,9 +232,23 @@ impl ExtendedMaterials {
             queue.write_buffer(&gpu.materials, i as u64 * stride + offset, bytemuck::bytes_of(&slot));
         }
         self.patched = now;
+        let now: BTreeSet<usize> = graph_sources.iter().map(|s| s.0).collect();
+        for &i in self.graph_displaced.difference(&now) {
+            write_graph_source(queue, gpu, i, 0, 0);
+        }
+        for &(i, id, offset) in &graph_sources {
+            write_graph_source(queue, gpu, i, id, offset);
+        }
+        self.graph_displaced = now;
+        self.displacement_key = displacement_key.0;
         self.slots = slots;
         self.lighting = lighting;
         self.subsurface = subsurface;
+    }
+
+    /// The graph parameter block (the tessellation's displacing graphs read it too).
+    pub fn parameter_buffer(&self) -> &wgpu::Buffer {
+        &self.params
     }
 
     fn warn(&mut self, message: &str) {
@@ -250,6 +292,21 @@ impl ExtendedMaterials {
     pub fn subsurface_inputs(&self) -> Option<(&wgpu::Buffer, &wgpu::TextureView, &[wgpu::TextureView; 2])> {
         let t = self.targets.as_ref()?;
         Some((&self.slabs, &t.substrate, t.subsurface.as_ref()?))
+    }
+}
+
+/// FNV-1a over written bytes.
+struct Fnv(u64);
+
+impl Default for Fnv {
+    fn default() -> Self {
+        Self(0xcbf29ce484222325)
+    }
+}
+
+impl Fnv {
+    fn write(&mut self, bytes: &[u8]) {
+        self.0 = bytes.iter().fold(self.0, |h, &b| (h ^ b as u64).wrapping_mul(0x100000001b3));
     }
 }
 

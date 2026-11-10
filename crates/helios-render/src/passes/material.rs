@@ -172,7 +172,7 @@ impl MaterialPass {
             if !self.extended_pipelines.contains_key(&key) {
                 let module = self.extended_modules.entry(hash).or_insert_with(|| {
                     let code = s.graph.as_ref().map(|g| g.1.as_str());
-                    create_module_from(device, if code.is_some() { "graph material resolve" } else { "slab material resolve" }, extended_resolve(code))
+                    create_module_from(device, if code.is_some() { "graph material resolve" } else { "slab material resolve" }, extended_resolve(code, s.displaces))
                 });
                 let flag = |bit: usize| ((self.permutation >> bit) & 1) as f64;
                 let constants = [

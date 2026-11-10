@@ -35,8 +35,10 @@ pub struct NodeSpec {
     pub outputs: Vec<&'static str>,
 }
 
-/// Output pins of the [`Op::Output`] node: name, WGSL field of `GraphOutput`, components.
-pub const OUTPUT_PINS: [(&str, &str, u8); 14] = [
+/// Output pins of the [`Op::Output`] node: name, WGSL field of `GraphOutput`, components. The
+/// last, [`DISPLACEMENT_PIN`], is not a `GraphOutput` field: it compiles to a function of its own
+/// (see [`crate::CompiledGraph::displacement`]).
+pub const OUTPUT_PINS: [(&str, &str, u8); 15] = [
     ("BaseColor", "base_color", 3),
     ("Metallic", "metallic", 1),
     ("Roughness", "roughness", 1),
@@ -51,14 +53,21 @@ pub const OUTPUT_PINS: [(&str, &str, u8); 14] = [
     ("Subsurface", "subsurface", 1),
     ("Transmission", "transmission", 1),
     ("Anisotropy", "anisotropy", 1),
+    (DISPLACEMENT_PIN, "displacement", 1),
 ];
+
+/// The output pin whose height (0..1 around the material's displacement centre, scaled by its
+/// magnitude) displaces the surface through Nanite tessellation.
+pub const DISPLACEMENT_PIN: &str = "Displacement";
 
 /// Bit of [`OUTPUT_PINS`] entry `name` in [`crate::CompiledGraph::outputs`].
 pub fn output_bit(name: &str) -> u32 {
     OUTPUT_PINS.iter().position(|p| p.0 == name).map_or(0, |i| 1 << i)
 }
 
-const TEXTURE_OUTPUTS: [&str; 9] = ["RGB", "R", "G", "B", "A", "RGBA", "Normal", "Roughness", "Metallic"];
+/// "Height" and "Metallic" are the same channel: a procedural texture's height, an image layer's
+/// metallic.
+const TEXTURE_OUTPUTS: [&str; 10] = ["RGB", "R", "G", "B", "A", "RGBA", "Normal", "Roughness", "Metallic", "Height"];
 
 fn input(name: &'static str, default: InputDefault) -> InputSpec {
     InputSpec { name, default }
@@ -78,7 +87,7 @@ pub fn spec(op: &Op) -> NodeSpec {
         Op::Triplanar { .. } => (
             "Textures",
             vec![input("Position", WorldPosition), input("Normal", VertexNormal)],
-            vec!["RGB", "A", "Normal", "TangentNormal", "Roughness"],
+            vec!["RGB", "A", "Normal", "TangentNormal", "Roughness", "Height"],
         ),
         Op::TexCoord { .. }
         | Op::WorldPosition

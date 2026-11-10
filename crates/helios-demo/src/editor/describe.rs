@@ -53,6 +53,7 @@ pub fn state(editor: &Editor, world: &World) -> Value {
                 "parameters": parameters,
                 "slab": materials::slab_value(m),
                 "displacement": materials::displacement_value(m),
+                "displacement_graph": m.graph.is_some_and(|g| scene.material_graph_displaces(g)),
             })
         })
         .collect();

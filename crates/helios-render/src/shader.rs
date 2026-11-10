@@ -14,6 +14,9 @@ const SOURCES: &[(&str, &str)] = &[
     ("cull.wgsl", include_str!("shaders/cull.wgsl")),
     ("cull_args.wgsl", include_str!("shaders/cull_args.wgsl")),
     ("displacement.wgsl", include_str!("shaders/displacement.wgsl")),
+    ("displacement_graph.wgsl", include_str!("shaders/displacement_graph.wgsl")),
+    ("displacement_graph_resolve.wgsl", include_str!("shaders/displacement_graph_resolve.wgsl")),
+    ("displacement_graphs_off.wgsl", include_str!("shaders/displacement_graphs_off.wgsl")),
     ("displacement_height.wgsl", include_str!("shaders/displacement_height.wgsl")),
     ("dynamic_caster.wgsl", include_str!("shaders/dynamic_caster.wgsl")),
     ("dynamic_debug.wgsl", include_str!("shaders/dynamic_debug.wgsl")),
@@ -162,12 +165,16 @@ pub fn substrate_lighting() -> [(&'static str, &'static str); 2] {
 }
 
 /// The extended G-buffer resolve (resolve_extended.wgsl) with a material graph's code (`None`:
-/// slab materials without a graph).
-pub fn extended_resolve(graph: Option<&str>) -> String {
+/// slab materials without a graph). `displaces`: the code has `graph_displacement`, which then
+/// gives the graph's materials their displaced points' height (displacement_graph_resolve.wgsl).
+pub fn extended_resolve(graph: Option<&str>, displaces: bool) -> String {
     let graph = graph.map(|code| format!("const HAS_GRAPH: bool = true;\n{code}"));
     let mut replacements = vec![("resolve_extended_off.wgsl", source("resolve_extended.wgsl"))];
     if let Some(code) = &graph {
         replacements.push(("material_graph_off.wgsl", code.as_str()));
+        if displaces {
+            replacements.push(("displacement_graphs_off.wgsl", source("displacement_graph_resolve.wgsl")));
+        }
     }
     compose_variant("gbuffer.wgsl", &replacements)
 }
@@ -221,7 +228,7 @@ mod tests {
         for name in ["lighting.wgsl", "megalights_shade.wgsl"] {
             failures.extend(validate(name, &compose_variant(name, &substrate_lighting())).err());
         }
-        failures.extend(validate("extended resolve", &extended_resolve(None)).err());
+        failures.extend(validate("extended resolve", &extended_resolve(None, false)).err());
         assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 
@@ -257,11 +264,59 @@ mod tests {
         let mut failures = Vec::new();
         for graph in &graphs {
             match compile(graph) {
-                Ok(compiled) => failures.extend(validate(&graph.name, &extended_resolve(Some(&compiled.wgsl))).err()),
+                Ok(compiled) => failures.extend(validate(&graph.name, &extended_resolve(Some(&compiled.wgsl), compiled.displacement.is_some())).err()),
                 Err(errors) => failures.push(format!("{}: {errors:?}", graph.name)),
             }
         }
         assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    /// The dicing permutation of displacing graphs (tessellation/graphs.rs) validates in both
+    /// tessellation passes, with every node type the displacement context allows on a path to a
+    /// texture coordinate (so its filtering code is generated too); the others are rejected.
+    #[test]
+    fn displacement_graph_permutations_validate() {
+        use helios_material::{compile, presets, GraphBuilder, Op};
+        let mut graphs = vec![presets::brick_pavement()];
+        for op in Op::palette().into_iter().filter(|op| *op != Op::Output) {
+            let output_pin = helios_material::spec(&op).outputs[0];
+            let mut g = GraphBuilder::new(op.type_name());
+            let node = g.node(op, [0.0, 0.0]);
+            let length = g.node(Op::Length, [0.0, 0.0]);
+            let scale = g.node(Op::Multiply, [0.0, 0.0]);
+            let uv = g.node(Op::TexCoord { set: 0, tiling: [2.0, 2.0] }, [0.0, 0.0]);
+            let shifted = g.node(Op::Add, [0.0, 0.0]);
+            let sample = g.node(Op::TextureSample { parameter: "Height".into() }, [0.0, 0.0]);
+            let height = g.node(Op::Add, [0.0, 0.0]);
+            let output = g.node(Op::Output, [0.0, 0.0]);
+            g.link(node, output_pin, length, "In")
+                .link(length, "Out", scale, "A")
+                .value(scale, "B", 0.01)
+                .link(uv, "Out", shifted, "A")
+                .link(scale, "Out", shifted, "B")
+                .link(shifted, "Out", sample, "UV")
+                .link(sample, "Height", height, "A")
+                .link(scale, "Out", height, "B")
+                .link(height, "Out", output, "Displacement");
+            graphs.push(g.build());
+        }
+        let (mut functions, mut rejected) = (Vec::new(), Vec::new());
+        for (i, graph) in graphs.iter().enumerate() {
+            let id = i as u32 + 1;
+            match compile(graph) {
+                Ok(compiled) => functions.push((id, compiled.displacement_function(&format!("displacement_graph_{id}")).unwrap())),
+                Err(errors) => rejected.push((graph.name.clone(), errors[0].message.clone())),
+            }
+        }
+        let names: Vec<&str> = rejected.iter().map(|r| r.0.as_str()).collect();
+        assert_eq!(names, ["VertexColor", "Time", "CameraVector", "Fresnel", "Panner"], "{rejected:?}");
+        let code = crate::tessellation::graphs::dispatch_module(&functions);
+        let mut failures = Vec::new();
+        for name in ["tess.wgsl", "vsm_tess.wgsl"] {
+            failures.extend(validate(name, &compose_variant(name, &[("displacement_graphs_off.wgsl", &code)])).err());
+        }
+        assert!(failures.is_empty(), "{}", failures.join("
+"));
     }
 
     /// WGSL's grammar gives bitwise (`& | ^`) and shift (`<< >>`) operators no precedence

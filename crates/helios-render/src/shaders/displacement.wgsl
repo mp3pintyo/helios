@@ -10,7 +10,9 @@ struct TessMaterial {
     // x: magnitude (object units for heights 0..1), y: centre (the height left in place), z: bound
     // of |displacement| (object units), w: mesh UV units per object unit (picks the height's mip)
     params: vec4<f32>,
-    // x: texture layer holding the height, y: its channel in the layer's data texel
+    // x: texture layer holding the height, y: its channel in the layer's data texel; z: the
+    // material graph driving the height instead (graph index + 1, 0: none), w: its parameters'
+    // offset in the graph parameter block
     source: vec4<u32>,
 }
 
