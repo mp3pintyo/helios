@@ -283,6 +283,7 @@ impl Lumen {
                     (7, bind::texture_array(true)),
                     (8, bind::sampler()),
                     (9, bind::storage_texture_3d(F::Rgba8Snorm)),
+                    (12, ro()),
                     (70, bind::storage_texture_3d(F::R32Uint)),
                 ],
             ),
@@ -463,6 +464,11 @@ impl Lumen {
             let fields: Vec<_> = surfaces.iter().map(Surface::sdf).collect();
             self.near_field.upload(device, queue, scene, &fields, surface_of, &card_instances, &coverage);
             self.cards.upload(device, queue, scene, &surfaces, surface_of, &sdf_instances, &self.instance_bounds);
+            // The field's voxels take their card pair's captured mean (once captured).
+            for (record, pair) in self.dynamic.records.iter_mut().zip(self.cards.instance_pairs()) {
+                record.pair = pair;
+            }
+            queue.write_buffer(&self.sdf_instances, 0, bytemuck::cast_slice(&self.dynamic.records));
             drop(surfaces);
             self.displaced = variants;
             for level in &mut self.levels {
@@ -478,6 +484,13 @@ impl Lumen {
             }
         }
         self.cards.sync_materials(scene);
+        // Captures finished since: the field's voxels take the captured means (a full recompose,
+        // as after any scene change; once after loading, and after material edits).
+        if self.cards.take_albedo_changed() {
+            for level in &mut self.levels {
+                level.dirty = true;
+            }
+        }
 
         // Clipmap placement: snap to whole bricks so a moving camera rebuilds rarely.
         for level in &mut self.levels {
@@ -698,6 +711,7 @@ impl Lumen {
                         (7, TextureView(&textures.albedo)),
                         (8, Sampler(&samplers.material)),
                         (9, TextureView(&self.global_sdf_storage)),
+                        (12, self.cards.pair_sums.as_entire_binding()),
                         (70, TextureView(&self.instance_ids)),
                     ],
                 );
@@ -720,6 +734,7 @@ impl Lumen {
                 sampler: &samplers.material,
                 sdf: &self.global_sdf_storage,
                 instance_ids: &self.instance_ids,
+                pair_sums: &self.cards.pair_sums,
             };
             self.dynamic.record(rec, &field);
         }

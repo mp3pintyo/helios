@@ -34,7 +34,12 @@
 //! * **Sampling** (`lumen_cards.wgsl`): screen-probe and reflection hits are projected into the
 //!   hit instance's cards; the near field reports the instance it hit, the global distance
 //!   field stores the closest instance per voxel. Where no card matches, the voxel surface
-//!   cache stays in place.
+//!   cache stays in place. The bilinear filter over lit texels is depth-aware: each lit texel
+//!   stores the depth of the surface it was lit at, and only texels on the hit's tangent plane
+//!   contribute (no light bleeding across depth discontinuities).
+//! * **Voxel albedo**: the capture sums each pair's texels (`pair_sums`); the global distance
+//!   field stores the closest instance's pair mean per voxel (`lumen_sdf.wgsl`), which the voxel
+//!   surface cache reflects with. Lumen recomposes the field when captures finish.
 
 use bytemuck::{Pod, Zeroable};
 use glam::{Vec2, Vec3, Vec4};
@@ -91,6 +96,9 @@ const PLACED_BUDGET: usize = 1 << 20;
 const CAPTURE_TEXELS_PER_FRAME: usize = 1 << 20;
 /// Tile records of a capture dispatch start on 256-byte boundaries (storage buffer offsets).
 const TILE_ALIGN: usize = 16;
+/// u32 sums per pair of its captured texels: albedo rgb and emission (bytes), count
+/// (`PAIR_SUM_WORDS` in lumen_card_capture.wgsl and lumen_sdf.wgsl).
+const PAIR_SUM_WORDS: usize = 5;
 
 /// Mesh-card part of the Lumen uniform (`cards` in lumen_types.wgsl).
 #[repr(C)]
@@ -382,6 +390,10 @@ pub struct CardCache {
     capture_pipelines: Option<CapturePipelines>,
     /// Texels whose material was captured in the latest frame.
     pub captured_texels: usize,
+    /// Per pair, the sums of its captured texels (the global distance field's voxel albedo).
+    pub pair_sums: wgpu::Buffer,
+    /// Captures finished since [`CardCache::take_albedo_changed`] was last called.
+    albedo_changed: bool,
 }
 
 /// A surface's capture and its serial.
@@ -474,7 +486,20 @@ impl CardCache {
             graph_code: HashMap::new(),
             capture_pipelines: None,
             captured_texels: 0,
+            pair_sums: storage_buffer(device, "card pair sums", 16, wgpu::BufferUsages::COPY_SRC),
+            albedo_changed: false,
         }
+    }
+
+    /// Per card instance: 1 + its pair if the pair's material is captured (its sums then hold its
+    /// captured texels once done), else 0.
+    pub fn instance_pairs(&self) -> Vec<u32> {
+        self.allocator.instances.iter().map(|i| i.mesh.filter(|&p| !self.pairs[p].origins.is_empty()).map_or(0, |p| p as u32 + 1)).collect()
+    }
+
+    /// Whether captures finished (every pending pair captured) since the last call.
+    pub fn take_albedo_changed(&mut self) -> bool {
+        std::mem::take(&mut self.albedo_changed)
     }
 
     /// Pages to light this frame (`light_cards` workgroups).
@@ -631,17 +656,22 @@ impl CardCache {
         // Pairs whose material is unchanged keep their albedo: copied from the previous atlas.
         let previous: HashMap<PairKey, &AlbedoPair> = self.pairs.iter().filter(|p| p.captured.is_some()).map(|p| (p.key, p)).collect();
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("card albedo copies") });
+        let pair_sums = storage_buffer(device, "card pair sums", (pairs.len() * PAIR_SUM_WORDS * 4) as u64, wgpu::BufferUsages::COPY_SRC);
+        let sum_bytes = (PAIR_SUM_WORDS * 4) as u64;
+        let old_index: HashMap<PairKey, usize> = self.pairs.iter().enumerate().map(|(i, p)| (p.key, i)).collect();
         let mut copied = 0;
-        for pair in &mut pairs {
+        for (p, pair) in pairs.iter_mut().enumerate() {
             let Some(old) = previous.get(&pair.key).filter(|old| old.captured == Some(pair.content) && !pair.origins.is_empty()) else { continue };
             for ((card, from), to) in self.captures[&pair.surface].surface.cards.cards.iter().zip(&old.origins).zip(&pair.origins) {
                 let at = |texture, [x, y]: [u32; 2]| wgpu::TexelCopyTextureInfo { texture, mip_level: 0, origin: wgpu::Origin3d { x, y, z: 0 }, aspect: wgpu::TextureAspect::All };
                 let size = wgpu::Extent3d { width: card.resolution[0], height: card.resolution[1], depth_or_array_layers: 1 };
                 encoder.copy_texture_to_texture(at(&self.albedo_texture, *from), at(&albedo_texture, *to), size);
             }
+            encoder.copy_buffer_to_buffer(&self.pair_sums, old_index[&pair.key] as u64 * sum_bytes, &pair_sums, p as u64 * sum_bytes, Some(sum_bytes));
             pair.captured = Some(pair.content);
             copied += 1;
         }
+        self.pair_sums = pair_sums;
         queue.submit([encoder.finish()]);
         self.albedo = albedo_texture.create_view(&Default::default());
         self.albedo_texture = albedo_texture;
@@ -801,6 +831,10 @@ impl CardCache {
                         tiles.push([record, pair.representative, first, x | (y << 8) | (card.axis << 16)]);
                     }
                 }
+                if k == 0 {
+                    // Its sums start again (the capture adds every texel).
+                    queue.write_buffer(&self.pair_sums, (p * PAIR_SUM_WORDS * 4) as u64, &[0; PAIR_SUM_WORDS * 4]);
+                }
                 if pair.captured.is_none() {
                     // The record's albedo origin (read by the capture as its target, too).
                     let [ox, oy] = pair.origins[k];
@@ -818,6 +852,7 @@ impl CardCache {
         if groups.is_empty() {
             return;
         }
+        self.albedo_changed |= self.pending.is_empty();
 
         let device = rec.device;
         let capture = self.capture_pipelines.get_or_insert_with(|| CapturePipelines::new(device));
@@ -856,6 +891,7 @@ impl CardCache {
                         (7, attribute_buffer.as_entire_binding()),
                         (8, wgpu::BindingResource::Buffer(tile_range)),
                         (9, TextureView(&self.albedo)),
+                        (10, self.pair_sums.as_entire_binding()),
                     ],
                 );
                 (group, count as u32)
@@ -889,6 +925,7 @@ impl CapturePipelines {
                 (7, bind::storage(true)),
                 (8, bind::storage(true)),
                 (9, bind::storage_texture(F::Rgba8Unorm)),
+                (10, bind::storage(false)),
             ],
         );
         let graph_layout = bind_group_layout(device, "card capture graphs", c, &[(0, bind::uniform()), (1, bind::uniform())]);

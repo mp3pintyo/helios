@@ -19,6 +19,9 @@
 // w: tile x | tile y << 8 | card direction << 16 (x = 0xffffffff: padding).
 // Albedo texels: rgb = sqrt(albedo), a = emission e / (1 + e), e = the emitted radiance as a
 // multiple of the albedo (the G-buffer's emissive channel).
+// Each pair's captured texels are also summed (albedo rgb and the emission byte, 8 bits each, and
+// the texel count; PAIR_SUM_WORDS per pair): the global distance field gives its voxels the
+// pair's mean (lumen_sdf.wgsl), so the voxel surface cache reflects the captured colours too.
 
 #include "common.wgsl"
 #include "noise.wgsl"
@@ -42,11 +45,17 @@ override MATERIAL_KIND: u32 = 0u;
 @group(0) @binding(7) var<storage, read> attributes: array<vec4<u32>>;
 @group(0) @binding(8) var<storage, read> tiles: array<vec4<u32>>;
 @group(0) @binding(9) var albedo_out: texture_storage_2d<rgba8unorm, write>;
+@group(0) @binding(10) var<storage, read_write> pair_sums: array<atomic<u32>>;
 @group(1) @binding(0) var<uniform> slabs: array<MaterialSlab, MAX_MATERIALS>;
 @group(1) @binding(1) var<uniform> graph_params: array<vec4<f32>, GRAPH_PARAMETER_SLOTS>;
 
 const NONE: u32 = 0xffffffffu;
 const INSTANCE_VEC4S: u32 = 7u;
+const CARD_SLOTS: u32 = 18u;
+const PAIR_SUM_WORDS: u32 = 5u;
+
+// The workgroup's sums, added to the pair's once.
+var<workgroup> tile_sums: array<atomic<u32>, 5>;
 // A sloped surface's depth change per texel is clamped to this many texels (cards hold surfaces
 // within ~73 degrees of their direction: at most ~3.2).
 const MAX_SLOPE: f32 = 4.0;
@@ -80,24 +89,50 @@ fn evaluate_kind(m: Material, input: SurfaceInput) -> Surface {
 }
 
 @compute @workgroup_size(8, 8)
-fn capture_albedo(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>) {
+fn capture_albedo(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>, @builtin(local_invocation_index) li: u32) {
     let tile = tiles[wid.x];
+    if li < PAIR_SUM_WORDS {
+        atomicStore(&tile_sums[li], 0u);
+    }
+    workgroupBarrier();
+    let value = capture_texel(tile, lid.xy);
+    if value.a >= 0.0 {
+        let bytes = vec4<u32>(round(saturate(value) * 255.0));
+        atomicAdd(&tile_sums[0], bytes.r);
+        atomicAdd(&tile_sums[1], bytes.g);
+        atomicAdd(&tile_sums[2], bytes.b);
+        atomicAdd(&tile_sums[3], bytes.a);
+        atomicAdd(&tile_sums[4], 1u);
+    }
+    workgroupBarrier();
+    if li < PAIR_SUM_WORDS && tile.x != NONE {
+        // The capturing instance's records are its pair's.
+        let pair = card_data[tile.y * INSTANCE_VEC4S + 6u].x / CARD_SLOTS;
+        let sum = atomicLoad(&tile_sums[li]);
+        if sum > 0u {
+            atomicAdd(&pair_sums[pair * PAIR_SUM_WORDS + li], sum);
+        }
+    }
+}
+
+// Captures one texel of a tile; returns its linear albedo and emission byte (a < 0: no surface).
+fn capture_texel(tile: vec4<u32>, lid: vec2<u32>) -> vec4<f32> {
     if tile.x == NONE {
-        return;
+        return vec4<f32>(-1.0);
     }
     let card_frame = bitcast<vec4<f32>>(card_data[tile.x]);
     let card_depth = bitcast<vec4<f32>>(card_data[tile.x + 1u]);
     let card_texels = card_data[tile.x + 2u];
     let resolution = unpack16(card_texels.x);
-    let texel = vec2<u32>(tile.w & 0xffu, (tile.w >> 8u) & 0xffu) * 8u + lid.xy;
+    let texel = vec2<u32>(tile.w & 0xffu, (tile.w >> 8u) & 0xffu) * 8u + lid;
     if any(texel >= resolution) || card_texels.z == NONE {
-        return;
+        return vec4<f32>(-1.0);
     }
     let dst = unpack16(card_texels.z) + texel;
     let captured = textureLoad(card_capture, unpack16(card_texels.y) + texel, 0).r;
     if (captured & 0xffffu) == 0xffffu {
         textureStore(albedo_out, dst, vec4<f32>(0.0));
-        return;
+        return vec4<f32>(-1.0);
     }
 
     // The texel's surface point and normal in mesh space (card_texel_position).
@@ -178,5 +213,7 @@ fn capture_albedo(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocati
     // Glass keeps its coverage in `emissive` (translucency.wgsl): it does not glow.
     let e = select(max(s.emissive, 0.0), 0.0, MATERIAL_KIND == MATERIAL_GLASS);
     let albedo = select(s.albedo, vec3<f32>(0.0), any(s.albedo != s.albedo));
-    textureStore(albedo_out, dst, vec4<f32>(sqrt(saturate(albedo)), e / (1.0 + e)));
+    let emission = select(e / (1.0 + e), 0.0, e != e);
+    textureStore(albedo_out, dst, vec4<f32>(sqrt(saturate(albedo)), emission));
+    return vec4<f32>(saturate(albedo), emission);
 }
