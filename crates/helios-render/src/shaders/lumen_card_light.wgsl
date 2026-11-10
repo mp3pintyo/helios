@@ -250,7 +250,9 @@ fn light_cards(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_
     let p = card_point(q, inst.to_world);
     let n = card_normal(card_texel_normal(captured >> 16u), inst.to_local);
     let radiance = card_texel_radiance(p, n, inst.info.y, surface);
-    textureStore(card_lighting_out, out_texel, select(vec4<f32>(radiance, 1.0), vec4<f32>(0.0), any(radiance != radiance)));
+    // Alpha: the lit surface's depth, which card_sample checks its taps against.
+    let lit = vec4<f32>(radiance, 1.0 + f32(captured & 0xffffu) / CARD_DEPTH_STEPS);
+    textureStore(card_lighting_out, out_texel, select(lit, vec4<f32>(0.0), any(radiance != radiance)));
 }
 
 @compute @workgroup_size(8, 8)

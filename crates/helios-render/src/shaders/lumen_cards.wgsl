@@ -13,7 +13,8 @@
 //   card_data: array<vec4<u32>>       instance records, then card records (see below)
 //   card_pages: array<u32>            allocation word per instance card, then page tables
 //   card_capture: texture_2d<u32>     captured texels of every mesh card (depth16 | normal16)
-//   card_lighting: texture_2d<f32>    lit pages (rgb: exitant radiance, a: surface coverage)
+//   card_lighting: texture_2d<f32>    lit pages (rgb: exitant radiance, a: 0 without a surface, else
+//                                     1 + the lit surface's stored depth / CARD_DEPTH_STEPS)
 //   sdf_instance_ids: texture_3d<u32> closest instance per global-SDF voxel (2 x 16 bits)
 
 const CARD_INSTANCE_VEC4S: u32 = 7u;
@@ -135,7 +136,8 @@ fn card_sample(instance: u32, slot: u32, card: Card, direction: u32, q: vec3<f32
     // The hit must lie on the captured surface: within the hit's own uncertainty, the
     // distance field's (hits come from it) and the depth change across a sloped texel.
     let depth = card.depth.x + f32(captured & 0xffffu) * card.depth.y;
-    let gap = abs(sign * (card.frame.w - q[c]) - depth);
+    let hit_depth = sign * (card.frame.w - q[c]);
+    let gap = abs(hit_depth - depth);
     let range = tolerance + card.depth.z + 2.0 * card.frame.z;
     let agreement = saturate(dot(card_texel_normal(captured >> 16u), n) * 1.5 - 0.25);
     let confidence = saturate(1.0 - gap / range) * agreement;
@@ -151,22 +153,34 @@ fn card_sample(instance: u32, slot: u32, card: Card, direction: u32, q: vec3<f32
     let table = allocation >> 4u;
     let mip_resolution = card_mip_resolution(resolution, mip);
     let pages_x = (mip_resolution.x + CARD_PAGE_TEXELS - 1u) / CARD_PAGE_TEXELS;
-    // Bilinear over the lit texels, skipping texels without a surface.
-    let t = texel / f32(1u << mip) - 0.5;
+    // Bilinear over the lit texels, skipping texels without a surface and those whose surface
+    // is not the hit's: a texel's light belongs to the surface it was lit at (its stored depth),
+    // which must lie on the hit's tangent plane (extrapolated along the hit normal), so the light
+    // of a mushroom cap does not bleed onto the ground beside it, nor a wall's onto the floor.
+    let scale = f32(1u << mip);
+    let t = texel / scale - 0.5;
     let base = vec2<i32>(floor(t));
     let f = t - floor(t);
+    let slope = vec2<f32>(n[(c + 1u) % 3u], n[(c + 2u) % 3u]) / max(sign * n[c], 0.3);
+    let depth_range = tolerance + 0.5 * card.depth.z + 0.5 * card.frame.z * scale;
     var sum = vec4<f32>(0.0);
     for (var i = 0; i < 4; i++) {
         let o = vec2<i32>(i & 1, i >> 1);
         let tap = clamp(base + o, vec2<i32>(0), vec2<i32>(mip_resolution) - 1);
-        let w = select(1.0 - f.x, f.x, o.x == 1) * select(1.0 - f.y, f.y, o.y == 1);
         let lit = card_lighting_texel(table, pages_x, vec2<u32>(tap));
-        sum += vec4<f32>(lit.rgb * lit.a, lit.a) * w;
+        if lit.a <= 0.0 {
+            continue;
+        }
+        let tap_depth = card.depth.x + (lit.a - 1.0) * CARD_DEPTH_STEPS * card.depth.y;
+        let offset = ((vec2<f32>(tap) + 0.5) * scale - texel) * card.frame.z;
+        let expected = hit_depth + dot(clamp(slope, vec2<f32>(-4.0), vec2<f32>(4.0)), offset);
+        let w = select(1.0 - f.x, f.x, o.x == 1) * select(1.0 - f.y, f.y, o.y == 1) * saturate(1.0 - abs(tap_depth - expected) / depth_range);
+        sum += vec4<f32>(lit.rgb, 1.0) * w;
     }
     if sum.a < 1e-3 {
         return vec4<f32>(0.0);
     }
-    return vec4<f32>(sum.rgb / sum.a, confidence * saturate(sum.a * 2.0));
+    return vec4<f32>(sum.rgb / sum.a, confidence * saturate(sum.a * 4.0));
 }
 
 struct CardRadiance {
