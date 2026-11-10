@@ -38,7 +38,7 @@ use std::sync::Arc;
 
 use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Vec2, Vec3, Vec4};
-use helios_geometry::cards::CardVertex;
+use helios_geometry::cards::{CardVertex, MeshCards};
 use helios_geometry::{lod_cut_resident, Aabb, LodView, MeshSdf, SdfKind, VirtualMesh};
 use wgpu::BindingResource::{Sampler, TextureView};
 
@@ -96,6 +96,9 @@ pub(crate) struct DisplacedVariant {
     pub aabb: Aabb,
     /// The displaced surface (positions and normals), which the mesh cards capture.
     pub triangles: Vec<[CardVertex; 3]>,
+    /// Its cards, captured with the bake for the instances' largest scale at the default texel:
+    /// (scale, texel, cards). Lumen's upload captures again only if those differ.
+    pub cards: Option<(f32, f32, MeshCards)>,
     /// Unique per bake: identifies its cached card capture.
     pub serial: u64,
 }
@@ -111,13 +114,15 @@ struct Slot {
 }
 
 /// A variant some instance wants: its slot, content, the instance displacing the points on the
-/// GPU, the point spacing (mesh units) and whether the displacement is animated.
+/// GPU, the point spacing (mesh units), the largest scale the slot is instanced at (for its
+/// cards) and whether the displacement is animated.
 #[derive(Clone, Copy, Debug)]
 struct Request {
     slot: Slot,
     content: u64,
     instance: u32,
     spacing: f32,
+    card_scale: f32,
     animated: bool,
 }
 
@@ -247,7 +252,7 @@ fn mesh_corners(mesh: &VirtualMesh, error: f32) -> Vec<[Corner; 3]> {
 
 /// The baked variant of displaced `positions` over `refined`'s triangles, with `base`'s kind of
 /// distance field at its voxel size.
-fn bake(base: &MeshSdf, refined: &Refined, positions: &[Vec3], serial: u64) -> Option<DisplacedVariant> {
+fn bake(base: &MeshSdf, refined: &Refined, positions: &[Vec3], card_scale: f32, serial: u64) -> Option<DisplacedVariant> {
     let soup: Vec<[Vec3; 3]> = refined.triangles.iter().map(|t| t.map(|i| positions[i as usize])).collect();
     let aabb = Aabb::from_points(positions.iter().copied());
     let extent = aabb.extent();
@@ -264,7 +269,7 @@ fn bake(base: &MeshSdf, refined: &Refined, positions: &[Vec3], serial: u64) -> O
     };
     if sdf.kind == SdfKind::Heightfield {
         // Heightfields get no cards.
-        return Some(DisplacedVariant { sdf, aabb, triangles: Vec::new(), serial });
+        return Some(DisplacedVariant { sdf, aabb, triangles: Vec::new(), cards: None, serial });
     }
     // Area-weighted normals of the welded displaced surface for the cards.
     let mut normals = vec![Vec3::ZERO; positions.len()];
@@ -274,7 +279,7 @@ fn bake(base: &MeshSdf, refined: &Refined, positions: &[Vec3], serial: u64) -> O
             normals[i as usize] += n;
         }
     }
-    let triangles = refined
+    let triangles: Vec<[CardVertex; 3]> = refined
         .triangles
         .iter()
         .zip(&soup)
@@ -283,7 +288,10 @@ fn bake(base: &MeshSdf, refined: &Refined, positions: &[Vec3], serial: u64) -> O
             std::array::from_fn(|k| (p[k], normals[t[k] as usize].try_normalize().unwrap_or(face)))
         })
         .collect();
-    Some(DisplacedVariant { sdf, aabb, triangles, serial })
+    let texel = crate::cards::CARD_TEXEL;
+    let config = crate::cards::capture_config(sdf.two_sided, card_scale, texel);
+    let cards = Some((card_scale, texel, MeshCards::capture(&triangles, aabb, &config)));
+    Some(DisplacedVariant { sdf, aabb, triangles, cards, serial })
 }
 
 /// FNV-1a.
@@ -357,17 +365,18 @@ fn requests(scene: &Scene) -> Vec<Option<Request>> {
             // their texels are finer than the points, they see the displaced surface's facets.
             let spacing = SPACING * sdf.voxel_size;
             let placement = placed.then(|| instance.transform.to_cols_array().map(f32::to_bits));
-            Some(Request { slot: Slot { mesh: instance.mesh.0, material: instance.material.0, placement }, content, instance: index as u32, spacing, animated })
+            let slot = Slot { mesh: instance.mesh.0, material: instance.material.0, placement };
+            Some(Request { slot, content, instance: index as u32, spacing, card_scale: max_scale(instance.transform), animated })
         })
         .collect();
-    // Instances sharing a slot share its finest spacing.
-    let mut finest: HashMap<Slot, f32> = HashMap::new();
+    // Instances sharing a slot share its finest spacing and its largest scale.
+    let mut shared: HashMap<Slot, (f32, f32)> = HashMap::new();
     for r in out.iter().flatten() {
-        let s = finest.entry(r.slot).or_insert(f32::MAX);
-        *s = s.min(r.spacing);
+        let s = shared.entry(r.slot).or_insert((f32::MAX, 0.0));
+        *s = (s.0.min(r.spacing), s.1.max(r.card_scale));
     }
     for r in out.iter_mut().flatten() {
-        r.spacing = finest[&r.slot];
+        (r.spacing, r.card_scale) = shared[&r.slot];
     }
     out
 }
@@ -620,7 +629,7 @@ impl DisplacedSurfaces {
             let serial = self.serial;
             self.bakes.push(Task::spawn(move || {
                 let start = web_time::Instant::now();
-                let variant = bake(&pending.base, &pending.refined, &positions, serial);
+                let variant = bake(&pending.base, &pending.refined, &positions, pending.request.card_scale, serial);
                 (pending.request, variant, motion, start.elapsed().as_secs_f32() * 1000.0)
             }));
         }
@@ -888,7 +897,7 @@ mod tests {
                 q + Vec3::Y * (0.2 * (1.0 - (q.x * q.x + q.z * q.z) / 0.09).max(0.0))
             })
             .collect();
-        let variant = bake(&base, &refined, &positions, 1).unwrap();
+        let variant = bake(&base, &refined, &positions, 1.0, 1).unwrap();
         assert!((variant.aabb.max.y - 0.2).abs() < 1e-3);
         assert!(variant.sdf.voxel_size <= base.voxel_size * 1.01, "{} vs {}", variant.sdf.voxel_size, base.voxel_size);
         // The top of the bump: on the displaced surface (a sheet: a thin two-sided shell), far

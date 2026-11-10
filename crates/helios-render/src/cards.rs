@@ -657,21 +657,26 @@ fn capture_key(scene: &Scene, surfaces: &[Surface], m: usize) -> u64 {
     }
 }
 
-/// Captures `surface`, instanced at up to `scale`, at a target world `texel`.
+/// The capture settings of a mesh (`two_sided`: its distance field is a shell) instanced at up to
+/// `scale`, for a target world `texel`.
+pub(crate) fn capture_config(two_sided: bool, scale: f32, texel: f32) -> CardConfig {
+    CardConfig { texel_size: texel / scale, max_resolution: MAX_CARD_RESOLUTION, two_sided, ..Default::default() }
+}
+
+/// Captures `surface`, instanced at up to `scale`, at a target world `texel`. A displaced variant
+/// usually brings its capture along (made on the bake's worker thread for the default texel).
 fn capture_surface(surface: &Surface, scale: f32, texel: f32) -> MeshCards {
     let aabb = surface.aabb();
-    let config = CardConfig {
-        texel_size: texel / scale,
-        max_resolution: MAX_CARD_RESOLUTION,
-        two_sided: surface.sdf().is_some_and(|s| s.two_sided),
-        ..Default::default()
-    };
+    let config = capture_config(surface.sdf().is_some_and(|s| s.two_sided), scale, texel);
     match surface {
         Surface::Mesh(mesh) => {
             let size = capture_texel(aabb.extent(), scale, texel);
             MeshCards::capture(&mesh_triangles(mesh, size * 0.5), aabb, &config)
         }
-        Surface::Displaced(variant) => MeshCards::capture(&variant.triangles, aabb, &config),
+        Surface::Displaced(variant) => match &variant.cards {
+            Some((s, t, cards)) if *s == scale && *t == texel => cards.clone(),
+            _ => MeshCards::capture(&variant.triangles, aabb, &config),
+        },
     }
 }
 
