@@ -107,6 +107,13 @@ impl CullView {
             self.work = storage_buffer(device, "culling work", self.capacity.work_bytes(), BufferUsages::empty());
         }
     }
+
+    /// Uses `source`'s work buffer (and capacities). Views culled one after another may share
+    /// it: a view's work lists are dead once its clusters are culled (the shadow clipmap levels).
+    pub fn share_work(&mut self, source: &CullView) {
+        self.work = source.work.clone();
+        self.capacity = source.capacity;
+    }
 }
 
 pub struct Culling {

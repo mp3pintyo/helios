@@ -480,7 +480,7 @@ impl VirtualShadowMap {
             draws: storage_buffer(device, "vsm draws", SPLIT_DRAWS_OFFSET + SPLIT_DRAWS_SIZE, wgpu::BufferUsages::INDIRECT | wgpu::BufferUsages::COPY_SRC),
             sw_depth: storage_buffer(device, "vsm software depth", MIRROR_TEXELS * 4, wgpu::BufferUsages::empty()),
             wind_bounds: [0.0; 3],
-            levels: (0..MAX_LEVELS).map(|i| CullView::new(device, &format!("vsm level {i}"), LEVEL_CAPACITY)).collect(),
+            levels: share_level_work((0..MAX_LEVELS).map(|i| CullView::new(device, &format!("vsm level {i}"), LEVEL_CAPACITY)).collect()),
             level_count: 0,
             mark_layout,
             expand_layout,
@@ -629,11 +629,12 @@ impl VirtualShadowMap {
         self.local.update(queue, f.local_resolution_bias, &local);
     }
 
-    /// Makes room in every shadow culling view for `extra` more page batches: the part
-    /// instances of assemblies take one each.
+    /// Makes room in every shadow culling view for `extra` more page batches: the culling
+    /// records of expanded assemblies take one per 64 (part, page) lanes.
     pub fn reserve_batches(&mut self, device: &wgpu::Device, extra: u32) {
-        for view in &mut self.levels {
-            view.reserve_batches(device, LEVEL_CAPACITY.batches + extra);
+        if LEVEL_CAPACITY.batches + extra > self.levels[0].capacity.batches {
+            self.levels[0].reserve_batches(device, LEVEL_CAPACITY.batches + extra);
+            self.levels = share_level_work(std::mem::take(&mut self.levels));
         }
         self.local.reserve_batches(device, LOCAL_CAPACITY.batches, extra);
     }
@@ -910,6 +911,18 @@ impl VirtualShadowMap {
         let local = self.local.view().filter(|_| self.enabled);
         self.levels[..self.level_count as usize].iter().chain(local).map(|v| &v.state)
     }
+}
+
+/// The clipmap levels are culled one after another, each expanded to page draws before the
+/// next is culled: they share the first level's work buffer (page batches, page work items,
+/// cluster candidates) instead of holding sixteen.
+fn share_level_work(mut levels: Vec<CullView>) -> Vec<CullView> {
+    if let Some((first, rest)) = levels.split_first_mut() {
+        for view in rest {
+            view.share_work(first);
+        }
+    }
+    levels
 }
 
 /// The buffers [`PageInvalidation`] works on.
