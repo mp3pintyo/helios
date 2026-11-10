@@ -67,10 +67,18 @@ pub struct CullCapacity {
     pub masked: u32,
 }
 
+impl CullCapacity {
+    /// Size of the work buffer: page batches, page work items, then up to two cluster
+    /// candidates per page item slot (small pages, cull.wgsl), two per 16 bytes.
+    fn work_bytes(&self) -> u64 {
+        (self.batches + 2 * self.pages) as u64 * 16
+    }
+}
+
 /// GPU buffers owned by one culling view (main camera or a shadow view).
 pub struct CullView {
     pub uniform: wgpu::Buffer,
-    /// Page batches followed by page work items.
+    /// Page batches, page work items, then cluster candidates.
     pub work: wgpu::Buffer,
     pub visible_clusters: wgpu::Buffer,
     pub state: wgpu::Buffer,
@@ -82,7 +90,7 @@ impl CullView {
     pub fn new(device: &wgpu::Device, label: &str, capacity: CullCapacity) -> Self {
         Self {
             uniform: uniform_buffer(device, label, std::mem::size_of::<crate::gpu_types::CullViewUniform>() as u64),
-            work: storage_buffer(device, label, (capacity.batches + capacity.pages) as u64 * 16, BufferUsages::empty()),
+            work: storage_buffer(device, label, capacity.work_bytes(), BufferUsages::empty()),
             // Entries, then the masked draw list (4 slots per entry-sized vec4).
             visible_clusters: storage_buffer(device, label, (capacity.clusters + capacity.masked.div_ceil(4)) as u64 * 16, BufferUsages::empty()),
             state: storage_buffer(device, label, STATE_SIZE, BufferUsages::COPY_SRC),
@@ -92,11 +100,11 @@ impl CullView {
     }
 
     /// Makes room for at least `batches` page batches (an instance with up to 64 pages takes
-    /// one, so every assembly part does).
+    /// one, an expanded assembly's culling record one per 64 of its parts' pages).
     pub fn reserve_batches(&mut self, device: &wgpu::Device, batches: u32) {
         if batches > self.capacity.batches {
             self.capacity.batches = batches;
-            self.work = storage_buffer(device, "culling work", (self.capacity.batches + self.capacity.pages) as u64 * 16, BufferUsages::empty());
+            self.work = storage_buffer(device, "culling work", self.capacity.work_bytes(), BufferUsages::empty());
         }
     }
 }
@@ -307,11 +315,8 @@ impl Culling {
         if mode != CullMode::Late {
             pass.set_bind_group(0, &cull_group, &[]);
             pass.set_pipeline(&passes.instances);
-            match scene.assemblies.cull_dispatch() {
-                // The scene's instances and the assemblies' part slots in use.
-                Some((args, offset)) => pass.dispatch_workgroups_indirect(args, offset),
-                None => pass.dispatch_workgroups(util::workgroups(scene.instance_count, 64), 1, 1),
-            }
+            // The scene's instances and the assemblies' culling records.
+            pass.dispatch_workgroups(util::workgroups(scene.cull_instance_count(), 64), 1, 1);
 
             pass.set_pipeline(&self.prepare_pages);
             pass.set_bind_group(0, &args_group, &[]);

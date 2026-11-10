@@ -160,9 +160,10 @@ impl GpuScene {
         queue.write_buffer(&self.tessellation, 0, bytemuck::bytes_of(view));
     }
 
-    /// Instances culling visits: the scene's and the assemblies' part slots after them.
+    /// Instances culling visits: the scene's and the assembly instances' culling records after
+    /// them (their part slots are reached through the records).
     pub fn cull_instance_count(&self) -> u32 {
-        self.instance_count + self.assemblies.part_capacity()
+        self.instance_count + self.assemblies.record_count()
     }
 
     pub fn write_wind(&self, queue: &wgpu::Queue, wind: &WindUniform) {
@@ -409,8 +410,9 @@ impl GpuScene {
         self.bounds = if instances.is_empty() { (glam::Vec3::ZERO, glam::Vec3::ONE) } else { (lo, hi) };
         let visibility_bits = self.assemblies.upload_instances(device, queue, scene, visibility_bits);
         let bytes: &[u8] = bytemuck::cast_slice(&instances);
-        // Assemblies' part instances are written after the scene's by the GPU.
-        let size = bytes.len() as u64 + self.assemblies.part_capacity() as u64 * std::mem::size_of::<GpuInstance>() as u64;
+        // Assemblies' culling records and part instances are written after the scene's by the GPU.
+        let extra = self.assemblies.record_count() + self.assemblies.part_capacity();
+        let size = bytes.len() as u64 + extra as u64 * std::mem::size_of::<GpuInstance>() as u64;
         if self.instances.size() < size.max(16) || self.instance_count as usize != count {
             self.instances = storage_buffer(device, "instances", size, wgpu::BufferUsages::empty());
         }

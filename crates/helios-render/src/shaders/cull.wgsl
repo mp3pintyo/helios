@@ -1,9 +1,15 @@
 // GPU-driven hierarchical culling, LOD selection and streaming feedback.
 //
 //   cull_instances : instance frustum test -> batches of up to 64 pages
-//   cull_pages     : one thread per page: residency, frustum and LOD pruning -> page work items
+//   cull_pages     : one thread per page: residency, frustum and LOD pruning -> page work items,
+//                    or for small pages their clusters one by one (cluster candidates)
 //   cull_clusters  : one thread per cluster: LOD cut with residency, frustum, two-pass HZB
-//                    occlusion, streaming feedback and hardware/software raster binning
+//                    occlusion, streaming feedback and hardware/software raster binning; a
+//                    workgroup per page work item, then one per 64 cluster candidates
+//
+// Assembly parts are culled hierarchically (assembly.wgsl): instance culling visits each
+// expanded assembly's culling record (INSTANCE_PART_LIST) instead of its parts, and the
+// record's batches are its parts' pages, `stride` lanes per part.
 //
 // CULL_MODE selects the occlusion strategy:
 //   0 = single pass: draw everything that passes LOD + frustum
@@ -11,7 +17,8 @@
 //   2 = late pass: test against the HZB built from the early pass, draw newly visible
 //       clusters and update the persistent visibility bits
 //
-// The work buffer holds batches in [0, batch_capacity) and page items after them.
+// The work buffer holds batches in [0, batch_capacity), page items after them, then cluster
+// candidates (two per vec4, up to 2 * work_capacity).
 // The atomics buffer holds page feedback in [0, page_count) and visibility bits after it.
 // Visible clusters: hardware-raster entries grow from the front, software-raster entries
 // from the back, so both share one slot space for the visibility buffer. In the main view,
@@ -51,7 +58,8 @@ struct CullState {
     masked_count: atomic<u32>,
     masked_early: u32,
     voxel_count: atomic<u32>,
-    _pad: array<u32, 4>,
+    candidate_count: atomic<u32>,
+    _pad: array<u32, 3>,
 }
 
 @group(0) @binding(0) var<uniform> view: CullView;
@@ -216,7 +224,8 @@ fn cull_instances(@builtin(global_invocation_id) gid: vec3<u32>) {
     if view.kind == VIEW_MAIN && (instance.flags & INSTANCE_TRANSLUCENT) != 0u {
         return;
     }
-    // An assembly drawn as its parts this frame (assembly.wgsl): they replace its base.
+    // An assembly drawn as its parts this frame (assembly.wgsl): they replace its base, and its
+    // culling record after the scene's instances stands for them.
     if (instance.flags & INSTANCE_EXPANDED) != 0u {
         return;
     }
@@ -240,6 +249,34 @@ fn cull_instances(@builtin(global_invocation_id) gid: vec3<u32>) {
 
 var<workgroup> wg_count: atomic<u32>;
 var<workgroup> wg_base: u32;
+var<workgroup> wg_candidates: atomic<u32>;
+var<workgroup> wg_candidate_base: u32;
+
+// Pages of at most this many clusters list their clusters as candidates (one cluster-culling
+// lane each) instead of taking a whole 64-lane cluster workgroup: the forest's assembly parts
+// (17 clusters over 6 pages), grass and small props would leave most lanes idle.
+const SMALL_PAGE_CLUSTERS: u32 = 16u;
+
+// Cluster candidates, two (instance, cluster) pairs per vec4 after the page work items; up to
+// two per page item slot. INVALID_ID marks a reserved slot that is not used.
+fn candidate_capacity() -> u32 {
+    return view.work_capacity * 2u;
+}
+
+fn candidate_word(c: u32) -> u32 {
+    return view.batch_capacity + view.work_capacity + (c >> 1u);
+}
+
+fn write_candidate(c: u32, instance_id: u32, cluster_id: u32) {
+    let lane = (c & 1u) * 2u;
+    work[candidate_word(c)][lane] = instance_id;
+    work[candidate_word(c)][lane + 1u] = cluster_id;
+}
+
+fn read_candidate(c: u32) -> vec2<u32> {
+    let pair = work[candidate_word(c)];
+    return select(pair.xy, pair.zw, (c & 1u) != 0u);
+}
 
 @compute @workgroup_size(64)
 fn cull_pages(
@@ -249,6 +286,7 @@ fn cull_pages(
 ) {
     if lid == 0u {
         atomicStore(&wg_count, 0u);
+        atomicStore(&wg_candidates, 0u);
     }
     workgroupBarrier();
 
@@ -257,12 +295,24 @@ fn cull_pages(
     var emit = false;
     var instance_id = 0u;
     var page_id = 0u;
+    var first_cluster = 0u;
+    var cluster_count = 0u;
     if batch_index < batch_count {
         let batch = work[batch_index];
-        if lid < batch.z {
-            instance_id = batch.x;
+        var lane_page = batch.y + lid;
+        var valid = lid < batch.z;
+        instance_id = batch.x;
+        if valid && (instances[instance_id].flags & INSTANCE_PART_LIST) != 0u {
+            // An expanded assembly's record (assembly.wgsl): lane -> (part, page of the part).
+            let list = instances[instance_id];
+            let part = lane_page / list.cluster_offset;
+            lane_page -= part * list.cluster_offset;
+            instance_id = list.page_offset + part;
+            valid = lane_page < instances[instance_id].page_count;
+        }
+        if valid {
             let instance = instances[instance_id];
-            page_id = instance.page_offset + batch.y + lid;
+            page_id = instance.page_offset + lane_page;
             let page = pages[page_id];
             let scale = instance.max_scale;
             let strength = wind_strength(instance);
@@ -272,6 +322,39 @@ fn cull_pages(
                 // would be rejected by the LOD test: skip the page entirely.
                 let parent = transform_sphere(instance.world, page.parent_lod_bounds, scale);
                 emit = projected_error(world_error(page.max_parent_error, scale), parent) > view.lod_threshold;
+            }
+            first_cluster = page.cluster_offset;
+            cluster_count = page.cluster_count;
+        }
+    }
+
+    // Small pages: one global reservation of candidates per workgroup.
+    let small = emit && cluster_count <= SMALL_PAGE_CLUSTERS;
+    var candidate = 0u;
+    if small {
+        candidate = atomicAdd(&wg_candidates, cluster_count);
+    }
+    workgroupBarrier();
+    if lid == 0u {
+        let total = atomicLoad(&wg_candidates);
+        if total > 0u {
+            wg_candidate_base = atomicAdd(&state.candidate_count, total);
+        }
+    }
+    workgroupBarrier();
+    if small {
+        let first = wg_candidate_base + candidate;
+        let capacity = candidate_capacity();
+        if first + cluster_count <= capacity {
+            for (var c = 0u; c < cluster_count; c++) {
+                write_candidate(first + c, instance_id, first_cluster + c);
+            }
+            emit = false;
+        } else {
+            // Out of candidates: void what was reserved below the capacity and take a page
+            // work item as large pages do.
+            for (var c = first; c < min(first + cluster_count, capacity); c++) {
+                write_candidate(c, INVALID_ID, 0u);
             }
         }
     }
@@ -458,6 +541,17 @@ fn cull_clusters(
             instance_id = item.x;
             cluster_id = page.cluster_offset + lid;
             result = test_cluster(instance_id, cluster_id);
+        }
+    } else {
+        // The workgroups after the page items take 64 cluster candidates each.
+        let c = (item_index - item_count) * 64u + lid;
+        if c < min(atomicLoad(&state.candidate_count), candidate_capacity()) {
+            let pair = read_candidate(c);
+            if pair.x != INVALID_ID {
+                instance_id = pair.x;
+                cluster_id = pair.y;
+                result = test_cluster(instance_id, cluster_id);
+            }
         }
     }
 
