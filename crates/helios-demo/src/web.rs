@@ -3,7 +3,8 @@
 //! A page can embed the engine instead of using `index.html`'s full-window demo: it sets
 //! `globalThis.heliosConfig = { scene, screenPercentage, gpuBudgetMs, embedded, lights, megaLights }` before
 //! loading the module (query parameters still work and take part as fallbacks), and drives the
-//! running engine through the exported `helios*` functions (scene, camera, sun, hotkeys, HUD).
+//! running engine through the exported `helios*` functions (scene, glTF model, candle lights,
+//! camera, sun, hotkeys, HUD).
 //! `embedded: true` keeps keyboard input on the focused canvas and leaves the mouse wheel to
 //! the page, so the engine can sit inside a scrolling document.
 
@@ -529,4 +530,25 @@ pub fn helios_set_view(index: u32) {
     with_state(|st| {
         st.app.renderer.settings.debug_view = helios_render::DebugView::from_index(index as usize).unwrap_or_default();
     });
+}
+
+/// Sets how many candle flames light the cathedral from its next build (`heliosLoadScene`):
+/// every flame a shadow-casting light, up to 1008 (`heliosConfig.lights` at start); 0 restores
+/// the 33 fixture lights.
+#[wasm_bindgen(js_name = heliosSetCandleLights)]
+pub fn helios_set_candle_lights(count: u32) {
+    crate::scenes::candles::set_candle_lights(count as usize);
+}
+
+/// Fetches a glTF model (`.glb`, or `.gltf` with its files; relative to the page, as `?gltf=`)
+/// and rebuilds the engine with it as the scene; skinned models play their first clip. Resolves
+/// to whether the engine was running; rejects with the import error.
+#[wasm_bindgen(js_name = heliosLoadModel)]
+pub async fn helios_load_model(url: String) -> Result<bool, JsValue> {
+    let model = load_model(&url).await.map_err(|e| JsValue::from_str(&e))?;
+    Ok(with_state(|st| {
+        st.app.model = Some(model);
+        st.app.load_scene(SceneKind::Model);
+    })
+    .is_some())
 }

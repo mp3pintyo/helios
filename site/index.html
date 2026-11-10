@@ -146,7 +146,7 @@ figcaption { font-size: 13px; color: var(--muted); }
 .story p { font-size: 15px; color: var(--muted); }
 .delta { font: 500 15px/1.3 var(--mono); color: var(--good); font-variant-numeric: tabular-nums; }
 .process { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 14px; }
-.process div { border-top: 2px solid var(--sky); padding-top: 10px; display: grid; gap: 6px; }
+.process div { border-top: 2px solid var(--sky); padding-top: 10px; display: grid; gap: 6px; align-content: start; }
 .process h3 { font-size: 15px; }
 .process p { font-size: 14px; color: var(--muted); }
 .pipeline-wrap { overflow-x: auto; padding-bottom: 6px; }
@@ -160,7 +160,15 @@ figcaption { font-size: 13px; color: var(--muted); }
 .limits li::before { content: "–"; position: absolute; left: 0; color: var(--sun); }
 .limits b { color: var(--text); font-weight: 500; }
 .videos { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 14px; }
-.videos video { width: 100%; border-radius: 9px; border: 1px solid var(--line); display: block; aspect-ratio: 16/9; background: #05070b; }
+.videos video, .clip video { width: 100%; border-radius: 9px; border: 1px solid var(--line); display: block; aspect-ratio: 16/9; background: #05070b; }
+a.btn { text-decoration: none; }
+/* Round 4 opens with a band in the chapter column; live readouts sit inside chapters. */
+.era { padding-block: 40px 8px; display: grid; gap: 12px; scroll-margin-top: 70px; }
+.era h2 { font-size: clamp(26px, 3vw, 38px); }
+.era p { color: var(--muted); }
+.readout { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 10px; font: 13px/1.4 var(--mono); color: var(--muted); }
+.readout b { font: 500 17px/1.2 var(--mono); color: var(--sun); font-variant-numeric: tabular-nums; }
+.story .round-tag { font: 500 11px/1 var(--mono); letter-spacing: 0.1em; text-transform: uppercase; color: var(--sky); }
 footer { padding-block: 40px 56px; padding-left: var(--gutter-l); padding-right: var(--gutter-r); border-top: 1px solid var(--line); color: var(--muted); font-size: 14px; }
 footer .wide-inner { gap: 10px; }
 </style>
@@ -172,6 +180,8 @@ footer .wide-inner { gap: 10px; }
       <a href="#geometry" data-en="Geometry">Geometria</a>
       <a href="#light" data-en="Light">Fény</a>
       <a href="#world" data-en="World">Világ</a>
+      <a href="#round4" data-en="Round 4">4. kör</a>
+      <a href="#editor" data-en="Editor">Szerkesztő</a>
       <a href="#built" data-en="How it was built">Hogyan készült</a>
     </nav>
     <div class="lang" role="group" aria-label="Nyelv / Language">
@@ -186,16 +196,17 @@ footer .wide-inner { gap: 10px; }
     <section class="hero">
       <div class="eyebrow" data-en="Rust · WebGPU · runs live on this page">Rust · WebGPU · élőben fut ezen az oldalon</div>
       <h1 data-en="Unreal-class rendering, <em>in the browser</em>">Unreal-szintű grafika <em>a böngészőben</em></h1>
-      <p class="lede" data-en="Helios is a rendering engine written in Rust that recreates the core ideas of Unreal Engine 5 on WebGPU: Nanite-style virtual geometry, Lumen-style global illumination and virtual shadow maps. The image next to this text is not a video: your graphics card renders it right now.">A Helios egy Rustban írt grafikus motor, amely az Unreal Engine 5 alapötleteit valósítja meg WebGPU-n: Nanite-szerű virtuális geometria, Lumen-szerű globális megvilágítás és virtuális árnyéktérképek. A mellette látható kép nem videó: most, élőben a te videokártyád rajzolja ki.</p>
+      <p class="lede" data-en="Helios is a rendering engine written in Rust that recreates the core ideas of Unreal Engine 5 on WebGPU: Nanite-style virtual geometry, Lumen-style global illumination, virtual shadow maps, MegaLights, Substrate-style materials and a world that moves, with a level editor around it. The image next to this text is not a video: your graphics card renders it right now.">A Helios egy Rustban írt grafikus motor, amely az Unreal Engine 5 alapötleteit valósítja meg WebGPU-n: Nanite-szerű virtuális geometria, Lumen-szerű globális megvilágítás, virtuális árnyéktérképek, MegaLights, Substrate-szerű anyagok és mozgó világ, köré pedig szintszerkesztő épül. A mellette látható kép nem videó: most, élőben a te videokártyád rajzolja ki.</p>
       <div class="facts">
-        <div class="fact"><b class="mono">307 M</b><span data-en="source triangles in the forest">forrásháromszög az erdőben</span></div>
-        <div class="fact"><b class="mono">16 461</b><span data-en="instances, streamed on demand">példány, igény szerint streamelve</span></div>
-        <div class="fact"><b class="mono">0,03 %</b><span data-en="flickering pixels (was 0.54 %)">villogó pixel (korábban 0,54%)</span></div>
+        <div class="fact"><b class="mono">199 M</b><span data-en="source triangles in the valley">forrásháromszög a völgyben</span></div>
+        <div class="fact"><b class="mono">1 008</b><span data-en="candle flames, each casting a shadow">gyertyaláng, mindegyik árnyékot vet</span></div>
+        <div class="fact"><b class="mono">26 400</b><span data-en="conifer parts, expanded on the GPU">fenyőrész, a GPU-n kibontva</span></div>
       </div>
       <div class="controls" role="group" aria-label="Jelenet">
         <button class="btn" type="button" data-scene="valley" data-en="Valley">Völgy</button>
         <button class="btn" type="button" data-scene="cathedral" data-en="Cathedral">Katedrális</button>
         <button class="btn" type="button" data-scene="forest" data-en="Forest">Erdő</button>
+        <button class="btn" type="button" data-scene="gallery" data-en="Gallery">Galéria</button>
         <button class="btn" type="button" data-key="KeyY" data-en="Camera tour">Kameratúra</button>
       </div>
       <div class="slider-row">
@@ -234,7 +245,7 @@ footer .wide-inner { gap: 10px; }
       <p data-en="Lumen's approach, rebuilt for WebGPU: rays are traced in screen space first, then against per-mesh signed distance fields near the camera and a global distance field further away. Hits are shaded from a surface cache of mesh cards, so sunlight through a window lights the stone on the far side of the nave.">A Lumen megközelítése, WebGPU-ra újraépítve: a sugarak előbb képtérben haladnak, aztán a kamera közelében objektumonkénti, távolabb egy globális távolságmezőben. A találati pontokat egy objektumonkénti kártyákból álló felületi gyorsítótár árnyalja, így az ablakon beeső napfény a hajó túlsó oldalán is megvilágítja a követ.</p>
       <div class="controls">
         <button class="btn" type="button" data-preset="cathedral" data-en="Cathedral">Katedrális</button>
-        <button class="btn" type="button" data-toggle="KeyG" data-label="GI" data-en="Global illumination">Globális megvilágítás <span class="state"></span></button>
+        <button class="btn" type="button" data-toggle="KeyG" data-label="gi" data-en="Global illumination">Globális megvilágítás <span class="state"></span></button>
         <button class="btn" type="button" data-preset="gi-indirect" data-en="Indirect light only">Csak a közvetett fény</button>
         <button class="btn" type="button" data-preset="gi-cards" data-en="Surface cache (cards)">Felületi gyorsítótár</button>
         <button class="btn" type="button" data-preset="lit" data-en="Back to the image">Vissza a képhez</button>
@@ -261,7 +272,7 @@ footer .wide-inner { gap: 10px; }
       <p data-en="Virtual shadow maps give the sun a 16k clipmap and every candle and lantern its own cube of pages, but only the pages someone can see are rendered, and they stay cached until something moves. Static geometry and wind-blown foliage are cached in separate layers, so swaying leaves don't redraw the rocks below them.">A virtuális árnyéktérképek a napnak egymásba ágyazott, 16k texel széles szinteket (clipmap), minden gyertyának és lámpásnak pedig saját, lapokra osztott kockatérképet adnak, de csak a látható lapok renderelődnek, és addig a gyorsítótárban maradnak, amíg semmi sem mozdul. A statikus geometria és a szélben hajló növényzet külön rétegben tárolódik, így a ringó levelek nem rajzoltatják újra az alattuk lévő sziklákat.</p>
       <div class="controls">
         <button class="btn" type="button" data-preset="night" data-en="Cathedral at night">Katedrális éjjel</button>
-        <button class="btn" type="button" data-toggle="Digit1" data-label="local" data-en="Candle shadow maps">Gyertya-árnyéktérképek <span class="state"></span></button>
+        <button class="btn" type="button" data-toggle="Digit1" data-label="local lights" data-en="Candle shadow maps">Gyertya-árnyéktérképek <span class="state"></span></button>
         <button class="btn" type="button" data-preset="shadow-pages" data-en="Shadow pages">Árnyéklapok</button>
         <button class="btn" type="button" data-preset="lit" data-en="Back to the image">Vissza a képhez</button>
       </div>
@@ -308,7 +319,7 @@ footer .wide-inner { gap: 10px; }
 
     <section class="chapter">
       <div class="eyebrow" data-en="05 · Foliage">05 · Növényzet</div>
-      <h2 data-en="Sixteen thousand trees in the wind">Tizenhatezer fa a szélben</h2>
+      <h2 data-en="Eight thousand plants in the wind">Nyolcezer növény a szélben</h2>
       <p data-en="Trunks bend, branches sway and leaves flutter, with the same displacement in the visible image, the motion vectors and every shadow map. Leaves and fronds are alpha-tested cards; in global illumination they let through as much light as their texture has holes.">A törzsek hajlanak, az ágak ringanak, a levelek rezegnek, ugyanazzal az elmozdulással a látható képen, a mozgásvektorokban és minden árnyéktérképen. A levelek és a páfrányok alfamaszkos síklapok; a globális megvilágításban annyi fényt engednek át, amennyi lyuk van a textúrájukon.</p>
       <div class="controls">
         <button class="btn" type="button" data-preset="forest" data-en="Forest">Erdő</button>
@@ -353,6 +364,291 @@ footer .wide-inner { gap: 10px; }
         <div class="metric"><b>0,22 ms</b><span data-en="cost of the upscaling pass">a felskálázó menet költsége</span></div>
       </div>
     </section>
+
+    <div class="era" id="round4">
+      <div class="eyebrow" data-en="Round 4">4. kör</div>
+      <h2 data-en="A world that moves, a thousand lights, an editor">Mozgó világ, ezer fény, szerkesztő</h2>
+      <p data-en="Nine features built in parallel: moving and animated objects, MegaLights, a cheaper GI for weaker GPUs, fire and smoke, foliage that holds up in the distance, layered materials, and an editor with procedural generation. The buttons drive the live engine here too.">Kilenc, párhuzamosan készült funkció: mozgó és animált tárgyak, MegaLights, olcsóbb globális megvilágítás gyengébb GPU-knak, tűz és füst, távolban is sűrű lomb, rétegzett anyagok, valamint egy szerkesztő procedurális tartalomgenerálással. A gombok itt is az élő motort vezérlik.</p>
+    </div>
+
+    <section class="chapter" id="motion">
+      <div class="eyebrow" data-en="08 · Dynamic world">08 · Dinamikus világ</div>
+      <h2 data-en="What moves redraws only itself">Ami mozog, csak önmagát rajzoltatja újra</h2>
+      <p data-en="The cathedral's eleven chandeliers swing on their 12 m chains with their candle lights, the valley's gold sculpture turns once in 45 seconds and a log raft drifts and rocks on the lake. As with Unreal's Movable mobility, a moving instance invalidates only its own footprint: the GPU rewrites only its record, only the shadow pages under it redraw their moving casters over the cached static layer, and only the 8³ bricks around its old and new position are recomposed in the global distance field.">A katedrális tizenegy csillárja a gyertyafényeivel együtt leng a 12 méteres láncán, a völgy arany szobra 45 másodperc alatt fordul körbe, a tavon pedig egy rönktutaj sodródik és ringatózik. Az Unreal Movable mobilitásához hasonlóan minden mozgó példány csak a saját lenyomatát érvényteleníti: a GPU csak az ő rekordját írja újra, az árnyéktérképen csak az alatta lévő lapok rajzolják újra a mozgó árnyékvetőket a gyorsítótárazott statikus réteg fölé, a globális távolságmezőben pedig csak a régi és az új helye körüli 8³-as téglák számolódnak újra.</p>
+      <div class="controls">
+        <button class="btn" type="button" data-preset="cathedral" data-en="Cathedral">Katedrális</button>
+        <button class="btn" type="button" data-toggle="Digit0" data-label="motion" data-en="Motion">Mozgás <span class="state"></span></button>
+        <button class="btn" type="button" data-preset="dyn-view" data-en="Invalidation (16)">Érvénytelenítés (16)</button>
+        <button class="btn" type="button" data-preset="valley" data-en="Valley: sculpture and raft">Völgy: szobor és tutaj</button>
+        <button class="btn" type="button" data-preset="lit" data-en="Back to the image">Vissza a képhez</button>
+      </div>
+      <p class="dim" data-en="The 0 key or the Motion button pauses and resumes it. In the invalidation view moving instances are orange, shadow pages redrawn in this frame are hatched red and recomposed distance-field bricks are cyan.">A 0 billentyű vagy a Mozgás gomb megállítja és folytatja. Az érvénytelenítési nézetben a mozgó példányok narancssárgák, az ebben a képkockában újrarajzolt árnyéklapok pirosan sraffozottak, az újraszámolt távolságmező-téglák ciánkékek.</p>
+      <figure class="clip">
+        <video src="media/chandeliers_candles.mp4" poster="media/chandeliers_candles.webp" controls muted playsinline loop preload="none"></video>
+        <figcaption data-en="The candle-lit cathedral at night: 88 chandelier candles swing with their chandeliers, and so do their shadows.">A gyertyafényes katedrális éjjel: a 88 csillárgyertya a csillárokkal együtt leng, és velük lengenek az árnyékaik is.</figcaption>
+      </figure>
+      <div class="metrics">
+        <div class="metric"><b>8,03 → 6,04 ms</b><span data-en="GPU frame, 11 swinging chandeliers: full invalidation → per instance">GPU-idő képkockánként, 11 lengő csillár: teljes → példányonkénti érvénytelenítés</span></div>
+        <div class="metric"><b>0,92 → 0,02 ms</b><span data-en="shadow page rendering while they swing">árnyéklap-rajzolás lengés közben</span></div>
+        <div class="metric"><b>0,98 → 0,07 ms</b><span data-en="distance-field update per frame">a távolságmező frissítése képkockánként</span></div>
+      </div>
+      <div class="shots">
+        <img src="media/dyn_invalidation.webp" alt="" loading="lazy" data-alt-hu="Érvénytelenítési nézet a katedrálisban" data-alt-en="Invalidation view in the cathedral">
+        <img src="media/dyn_raft.webp" alt="" loading="lazy" data-alt-hu="A tutaj a völgy taván" data-alt-en="The raft on the valley's lake">
+      </div>
+    </section>
+
+    <section class="chapter" id="skeletal">
+      <div class="eyebrow" data-en="09 · Skeletal animation">09 · Csontvázas animáció</div>
+      <h2 data-en="Skeletons on virtual geometry">Csontváz a virtuális geometrián</h2>
+      <p data-en="Skinned meshes loaded from glTF are split into clusters, a LOD hierarchy and streamable pages just like rigid models. Skinning is the same pure function in all four rasterisers and in the G-buffer resolve, so the LOD cut stays watertight while the model moves, and the shadow and the motion vectors follow the limbs. The button below fetches a 160 KB glTF file and builds it in your browser.">A glTF-ből betöltött, csontokhoz kötött (skinned) hálók ugyanúgy klaszterekre, LOD-hierarchiára és streamelhető lapokra bomlanak, mint a merev modellek. A csúcsok bőrözése mind a négy raszterizálóban és a G-puffer-feloldásban ugyanaz a tiszta függvény, így a LOD-vágás mozgás közben sem nyílik szét, az árnyék és a mozgásvektorok pedig követik a végtagokat. A gomb egy 160 KB-os glTF-fájlt tölt le, és a böngésződben építi fel.</p>
+      <div class="controls">
+        <button class="btn" type="button" data-preset="fox" data-en="Load the fox">A róka betöltése</button>
+        <button class="btn" type="button" data-key="Minus" data-en="Next clip (−)">Következő klip (−)</button>
+        <button class="btn" type="button" data-preset="fox-weights" data-en="Joint weights (17)">Ízületi súlyok (17)</button>
+        <button class="btn" type="button" data-preset="lit" data-en="Back to the image">Vissza a képhez</button>
+      </div>
+      <p class="dim" data-en="The fox has three clips: survey, walk and run. The − key crossfades to the next one in 0.4 s and pauses after the last.">A rókának három klipje van: szemlélődés, séta és futás. A − billentyű 0,4 s alatt átúsztat a következőre, az utolsó után megáll.</p>
+      <figure>
+        <div class="compare" style="--cut:50%">
+          <img src="media/fox_lit.webp" alt="" data-alt-hu="A róka" data-alt-en="The fox">
+          <img class="after" src="media/fox_weights.webp" alt="" data-alt-hu="A róka ízületi súlyai" data-alt-en="The fox's joint weights">
+          <span class="handle" aria-hidden="true"></span>
+          <span class="tag l" data-en="Image">Kép</span><span class="tag r" data-en="Joint weights">Ízületi súlyok</span>
+          <input type="range" min="0" max="100" value="50" aria-label="Összehasonlítás">
+        </div>
+        <figcaption data-en="Every joint has a colour, blended by the vertices' weights: the shoulders and hips blend the most.">Minden ízületnek saját színe van, a csúcsok súlyai szerint keverve: a vállak és a csípő keverednek a legjobban.</figcaption>
+      </figure>
+      <figure class="clip">
+        <video src="media/fox_clips.mp4" poster="media/fox_clips.webp" controls muted playsinline loop preload="none"></video>
+        <figcaption data-en="The survey clip, then a 0.4 s crossfade into the walk; the shadow follows every limb.">A szemlélődő klip, majd 0,4 s-os átúsztatás a sétába; az árnyék minden végtagot követ.</figcaption>
+      </figure>
+      <div class="metrics">
+        <div class="metric"><b>4,16 → 4,41 ms</b><span data-en="GPU frame, BrainStem: static → animated">GPU-idő képkockánként, BrainStem: statikus → animált</span></div>
+        <div class="metric"><b>+2,5 B</b><span data-en="per vertex in the fox's compressed data">csúcsonként a róka tömörített adatában</span></div>
+        <div class="metric"><b>±0,02 ms</b><span data-en="every pass of a scene without skins">minden menet skin nélküli jelenetben</span></div>
+      </div>
+    </section>
+
+    <section class="chapter" id="megalights">
+      <div class="eyebrow" data-en="10 · MegaLights">10 · MegaLights</div>
+      <h2 data-en="A thousand candles, each casting a shadow">Ezer gyertya, mindegyik árnyékot vet</h2>
+      <p data-en="The classic light loop can shadow at most 36 lights per pixel; the rest shine through walls. MegaLights, as in UE 5.5, works from a fixed budget per pixel instead: for every 2×2 block it picks four lights in proportion to their contribution, traces one shadow ray towards each (in screen space, then through the light's virtual shadow map or Lumen's distance fields) and filters the noisy result in time and space. The cost barely grows with the number of lights.">A klasszikus fényciklus pixelenként legfeljebb 36 fénynek tud árnyékot adni; a többi átvilágít a falakon. A MegaLights, ahogy az UE 5.5-ben, ehelyett pixelenként rögzített keretből dolgozik: minden 2×2-es blokkhoz négy fényt választ a hozzájárulásuk arányában, mindegyik felé egy árnyéksugarat követ (előbb képtérben, aztán a fény virtuális árnyéktérképén vagy a Lumen távolságmezőiben), majd a zajos eredményt időben és térben szűri. A költség alig nő a fények számával.</p>
+      <div class="controls">
+        <button class="btn primary" type="button" data-preset="candles" data-en="Candle-lit cathedral (300 lights)">Gyertyafényes katedrális (300 fény)</button>
+        <button class="btn" type="button" data-toggle="Equal" data-label="megalights" data-en="MegaLights">MegaLights <span class="state"></span></button>
+        <button class="btn" type="button" data-preset="ml-samples" data-en="Samples (18)">Minták (18)</button>
+        <button class="btn" type="button" data-preset="ml-denoise" data-en="Raw | filtered (19)">Nyers | szűrt (19)</button>
+        <button class="btn" type="button" data-preset="candles-off" data-en="Back to 33 lights">Vissza a 33 fényhez</button>
+      </div>
+      <p class="dim" data-en="In the candle-lit cathedral every flame is a light of its own: the candelabra, the chandeliers and the votive racks in the aisles. Building it takes a few seconds. The telemetry under the image shows the direct lighting's GPU time; switch MegaLights off to compare.">A gyertyafényes katedrálisban minden láng külön fényforrás: a gyertyatartók, a csillárok és a mellékhajók fogadalmi gyertyái. Felépítése néhány másodperc. A közvetlen fény GPU-ideje lent látszik; kapcsold ki a MegaLights-ot az összehasonlításhoz.</p>
+      <div class="readout"><span data-en="Direct lighting right now">Közvetlen fény most</span><b id="t-direct">–</b></div>
+      <figure>
+        <div class="compare" style="--cut:50%">
+          <img src="media/megalights_off.webp" alt="" data-alt-hu="Klasszikus fényciklus 1000 gyertyával" data-alt-en="Classic light loop with 1000 candles">
+          <img class="after" src="media/megalights_on.webp" alt="" data-alt-hu="MegaLights 1000 gyertyával" data-alt-en="MegaLights with 1000 candles">
+          <span class="handle" aria-hidden="true"></span>
+          <span class="tag l" data-en="Classic">Klasszikus</span><span class="tag r">MegaLights</span>
+          <input type="range" min="0" max="100" value="50" aria-label="Összehasonlítás">
+        </div>
+        <figcaption data-en="1000 candles in the aisle: on the classic path the racks' candlelight pours onto the floor unhindered; with MegaLights the racks cast soft shadows beneath them.">1000 gyertya a mellékhajóban: a klasszikus úton a polcok gyertyáinak fénye akadálytalanul a padlóra ömlik, MegaLights-szal a polcok lágy árnyékot vetnek maguk alá.</figcaption>
+      </figure>
+      <div class="metrics">
+        <div class="metric"><b>3,53 → 2,74 ms</b><span data-en="direct lighting with 1000 lights, classic → MegaLights">közvetlen fény 1000 fénnyel, klasszikus → MegaLights</span></div>
+        <div class="metric"><b>1,95 ms</b><span data-en="all MegaLights passes, from 100 to 1000 lights">a MegaLights összes menete 100 és 1000 fény között</span></div>
+        <div class="metric"><b>1,2 ms</b><span data-en="in the browser with 300 lights (1280×720)">böngészőben 300 fénnyel (1280×720)</span></div>
+      </div>
+      <div class="shots">
+        <img src="media/megalights_samples.webp" alt="" loading="lazy" data-alt-hu="MegaLights-minták: minden fény saját színnel" data-alt-en="MegaLights samples: one hue per light">
+      </div>
+    </section>
+
+    <section class="chapter" id="lumen-lite">
+      <div class="eyebrow" data-en="11 · Lumen Lite">11 · Lumen Lite</div>
+      <h2 data-en="Global illumination for weaker GPUs">Globális megvilágítás gyengébb GPU-knak</h2>
+      <p data-en="Lumen's screen probes trace 64 rays from every 16×16-pixel tile in every frame. Lumen Lite, UE 5.8's cheaper final gather, takes diffuse light from a world-space probe grid around the camera instead: four nested levels of 16³ probes, of which 512 are refreshed per frame. Its cost does not depend on the resolution, and when dynamic resolution sits at its minimum, the engine switches to it by itself.">A Lumen képernyőpróbái minden képkockában 16×16 pixelenként 64 sugarat követnek. A Lumen Lite, az UE 5.8 olcsóbb végső gyűjtése, ehelyett a kamera körüli, világtérbeli próbarácsból veszi a diffúz fényt: négy egymásba ágyazott, 16³ próbás szintből, amelyekből képkockánként 512 frissül. Költsége független a felbontástól, és ha a dinamikus felbontás a minimumon ragad, a motor magától átvált rá.</p>
+      <div class="controls">
+        <button class="btn" type="button" data-preset="cathedral" data-en="Cathedral">Katedrális</button>
+        <button class="btn" type="button" data-toggle="Semicolon" data-label="lumen lite" data-en="Lumen Lite">Lumen Lite <span class="state"></span></button>
+        <button class="btn" type="button" data-preset="gi-indirect" data-en="Indirect light only">Csak a közvetett fény</button>
+        <button class="btn" type="button" data-preset="lite-probes" data-en="Probes (20)">Próbák (20)</button>
+        <button class="btn" type="button" data-preset="lit" data-en="Back to the image">Vissza a képhez</button>
+      </div>
+      <div class="readout"><span data-en="Final gather right now">Végső gyűjtés most</span><b id="t-gather">–</b></div>
+      <figure>
+        <div class="compare" style="--cut:50%">
+          <img src="media/gi_lumen_indirect.webp" alt="" data-alt-hu="Közvetett fény Lumennel" data-alt-en="Indirect light with Lumen">
+          <img class="after" src="media/gi_lite_indirect.webp" alt="" data-alt-hu="Közvetett fény Lumen Lite-tal" data-alt-en="Indirect light with Lumen Lite">
+          <span class="handle" aria-hidden="true"></span>
+          <span class="tag l">Lumen</span><span class="tag r">Lumen Lite</span>
+          <input type="range" min="0" max="100" value="50" aria-label="Összehasonlítás">
+        </div>
+        <figcaption data-en="Indirect light only: the probe grid is a little darker and softer, with more contrast under the pews, and it does not leak through the walls.">Csak a közvetett fény: a próbarács kissé sötétebb és lágyabb, a padok alatt kontrasztosabb, és nem szivárog át a falakon.</figcaption>
+      </figure>
+      <div class="metrics">
+        <div class="metric"><b>0,91 → 0,36 ms</b><span data-en="final gather in the cathedral">végső gyűjtés a katedrálisban</span></div>
+        <div class="metric"><b>1,62 → 1,04 ms</b><span data-en="all of GI (round 3: 2.72 ms)">a teljes GI (a 3. körben 2,72 ms)</span></div>
+        <div class="metric"><b>1,48 → 0,35 ms</b><span data-en="surface and radiance cache, a workgroup per probe (both modes)">felületi és radiance cache, próbánként egy munkacsoport (mindkét módban)</span></div>
+      </div>
+      <div class="shots">
+        <img src="media/lite_probes.webp" alt="" loading="lazy" data-alt-hu="Lumen Lite próbák a katedrálisban" data-alt-en="Lumen Lite probes in the cathedral">
+      </div>
+    </section>
+
+    <section class="chapter" id="volumes">
+      <div class="eyebrow" data-en="12 · Volumes and particles">12 · Térfogatok és részecskék</div>
+      <h2 data-en="Fire, smoke and dust">Tűz, füst és por</h2>
+      <p data-en="The campfire's flames and smoke are a fluid simulation on a 40×80×40 grid on the GPU: buoyancy, vorticity confinement, a pressure solve, combustion and cooling. The volume is ray-marched through its own lighting cache, its temperature glows as blackbody emission, and the fire drives one of the scene's lights, so the clearing flickers with it. Sparks, embers and dust motes are GPU particles that bounce off the depth buffer and are blended without sorting (order-independent transparency).">A tábortűz lángja és füstje egy 40×80×40-es rácson futó folyadékszimuláció a GPU-n: felhajtóerő, örvényerősítés, nyomásmegoldó, égés és hűlés. A térfogatot lépésenként haladó sugarak rajzolják ki, a fényt a saját megvilágítási gyorsítótárából véve, a hőmérséklete feketetest-sugárzásként izzik, a tűz pedig a jelenet egyik fényforrását is vezérli, így a tisztás vele együtt lobog. A szikrák, a parazsak és a porszemek GPU-részecskék, amelyek visszapattannak a mélységpufferről, és rendezés nélkül, sorrendfüggetlen átlátszósággal kerülnek a képre.</p>
+      <div class="controls">
+        <button class="btn primary" type="button" data-preset="campfire" data-en="Campfire at night">Tábortűz éjjel</button>
+        <button class="btn" type="button" data-toggle="Quote" data-label="volumes + particles" data-en="Volumes + particles">Térfogatok + részecskék <span class="state"></span></button>
+        <button class="btn" type="button" data-preset="incense" data-en="Incense in the cathedral">Tömjénfüst a katedrálisban</button>
+        <button class="btn" type="button" data-preset="dust" data-en="Dust in the light shafts">Por a fénynyalábokban</button>
+        <button class="btn" type="button" data-preset="vol-steps" data-en="Steps and overdraw (21)">Lépések és átfedés (21)</button>
+        <button class="btn" type="button" data-preset="lit" data-en="Back to the image">Vissza a képhez</button>
+      </div>
+      <div class="readout"><span data-en="Volumes and particles right now">Térfogatok és részecskék most</span><b id="t-fx">–</b></div>
+      <figure>
+        <div class="compare" style="--cut:50%">
+          <img src="media/campfire_off.webp" alt="" data-alt-hu="A tisztás tűz nélkül" data-alt-en="The clearing without the fire">
+          <img class="after" src="media/campfire_on.webp" alt="" data-alt-hu="A tábortűz éjjel" data-alt-en="The campfire at night">
+          <span class="handle" aria-hidden="true"></span>
+          <span class="tag l" data-en="Off">Kikapcsolva</span><span class="tag r" data-en="Fire, smoke, sparks">Tűz, füst, szikrák</span>
+          <input type="range" min="0" max="100" value="50" aria-label="Összehasonlítás">
+        </div>
+        <figcaption data-en="Without the volume only the fire's light remains; with it, flames, a smoke column and sparks streaking upwards.">A térfogat nélkül csak a tűz fénye marad meg; vele láng, füstoszlop és felfelé húzó szikrák.</figcaption>
+      </figure>
+      <figure class="clip">
+        <video src="media/campfire_night.mp4" poster="media/campfire_night.webp" controls muted playsinline loop preload="none"></video>
+        <figcaption data-en="The campfire in real time: the flicker, the smoke's eddies and the embers that settle on the ground and cool.">A tábortűz valós időben: a lobogás, a füst örvényei és a földre hulló, lassan kihűlő parazsak.</figcaption>
+      </figure>
+      <div class="metrics">
+        <div class="metric"><b>0,58 ms</b><span data-en="every pass of the campfire, close up (1600×900)">a tábortűz minden menete közelről (1600×900)</span></div>
+        <div class="metric"><b>0,10 ms</b><span data-en="the fluid simulation, independent of resolution">a folyadékszimuláció, felbontástól függetlenül</span></div>
+        <div class="metric"><b>24 000</b><span data-en="dust motes in the cathedral: 0.09 ms">porszem a katedrálisban: 0,09 ms</span></div>
+      </div>
+      <div class="shots">
+        <img src="media/incense.webp" alt="" loading="lazy" data-alt-hu="Tömjénfüst az oltár előtt" data-alt-en="Incense before the altar">
+        <img src="media/dust_shafts.webp" alt="" loading="lazy" data-alt-hu="Porszemek a fénynyalábokban" data-alt-en="Dust motes in the light shafts">
+        <img src="media/volume_steps.webp" alt="" loading="lazy" data-alt-hu="A sugármenetelés lépései" data-alt-en="Ray-march steps">
+      </div>
+    </section>
+
+    <section class="chapter" id="foliage">
+      <div class="eyebrow" data-en="13 · Nanite Foliage">13 · Nanite Foliage</div>
+      <h2 data-en="Foliage that stays dense in the distance">Lomb, amely a távolban sem ritkul</h2>
+      <p data-en="Foliage cannot be simplified as triangles without deleting leaves: the distant conifers turned into bare, reddish skeletons. As in UE 5.7's Nanite Foliage, wherever triangles would start deleting leaves the hierarchy switches to voxels that keep the canopy's coverage, orientation and average colour. The conifers are also assembled from shared needle sprays (assemblies), which the GPU expands into part instances every frame.">A lombot nem lehet háromszögként egyszerűsíteni anélkül, hogy levelek tűnnének el: a távoli fenyőkből csupasz, vöröses ágvázak maradtak. Az UE 5.7 Nanite Foliage-éhez hasonlóan ahol a háromszögek már leveleket törölnének, a hierarchia voxelekre vált, amelyek megőrzik a lombkorona fedését, irányát és átlagszínét. A fenyők ráadásul megosztott tűlevélágakból állnak össze (assembly), amelyeket a GPU képkockánként bont ki részpéldányokká.</p>
+      <div class="controls">
+        <button class="btn" type="button" data-preset="canopy" data-en="Distant canopy">Távoli lombkorona</button>
+        <button class="btn" type="button" data-toggle="Insert" data-label="voxel lods" data-en="Voxel LODs">Voxel LOD-ok <span class="state"></span></button>
+        <button class="btn" type="button" data-preset="voxel-clusters" data-en="Voxel clusters (22)">Voxelklaszterek (22)</button>
+        <button class="btn" type="button" data-preset="assembly-parts" data-en="Assembly parts (23)">Assembly-részek (23)</button>
+        <button class="btn" type="button" data-preset="lit" data-en="Back to the image">Vissza a képhez</button>
+      </div>
+      <figure>
+        <div class="compare" style="--cut:50%">
+          <img src="media/canopy_voxels_off.webp" alt="" data-alt-hu="Távoli fenyők csak háromszögekkel" data-alt-en="Distant conifers with triangles only">
+          <img class="after" src="media/canopy_voxels_on.webp" alt="" data-alt-hu="Távoli fenyők voxel LOD-okkal" data-alt-en="Distant conifers with voxel LODs">
+          <span class="handle" aria-hidden="true"></span>
+          <span class="tag l" data-en="Triangles only">Csak háromszögek</span><span class="tag r" data-en="With voxels">Voxelekkel</span>
+          <input type="range" min="0" max="100" value="50" aria-label="Összehasonlítás">
+        </div>
+        <figcaption data-en="The forest from 30 m up, through a long lens: with voxels the conifers 150–400 m away keep their needles.">Az erdő 30 m magasból, teleobjektívvel: voxelekkel a 150–400 m-re lévő fenyők megtartják a tűleveleiket.</figcaption>
+      </figure>
+      <div class="metrics">
+        <div class="metric"><b>7,9 → 1,1 MiB</b><span data-en="the conifers' needles as assemblies">a fenyők tűlevelei assemblyként</span></div>
+        <div class="metric"><b>+2,0 → −0,2 %</b><span data-en="colour error of the distant canopy (red)">a távoli lomb színhibája (vörös csatorna)</span></div>
+        <div class="metric"><b>3,97 M + 4,3 M</b><span data-en="triangles and voxels in the initial view (was 5.23 M triangles)">háromszög és voxel a kezdőnézetben (korábban 5,23 M háromszög)</span></div>
+      </div>
+      <div class="shots">
+        <img src="media/foliage_assemblies.webp" alt="" loading="lazy" data-alt-hu="Assembly-részek színezve" data-alt-en="Assembly parts coloured">
+      </div>
+    </section>
+
+    <section class="chapter" id="substrate">
+      <div class="eyebrow" data-en="14 · Substrate and material graphs">14 · Substrate és anyaggráfok</div>
+      <h2 data-en="Clear coat, velvet, wax and graphs compiled live">Lakk, bársony, viasz és élőben fordított gráfok</h2>
+      <p data-en="Beyond the metallic-roughness base, a material can take a Substrate-style slab, as in UE 5.7: an index of refraction, anisotropic highlights, a clear coat with its own roughness, velvet sheen, subsurface scattering and thin transmission. Material graphs are compiled to WGSL at run time, in the browser too; screen-space derivatives are carried through the maths by the chain rule, so textures are filtered correctly even in a compute shader.">Az anyagok a fém–érdesség alapon túl az UE 5.7 Substrate-jéhez hasonló réteget (slab) kaphatnak: törésmutatót, anizotróp csillanást, saját érdességű lakkréteget, bársonyfényt, felszín alatti szórást és vékony áteresztést. Az anyaggráfokat a motor futás közben fordítja WGSL-re, a böngészőben is; a képernyőtérbeli deriváltakat a láncszabály viszi végig a számításon, így a textúrák compute shaderben is helyesen szűrődnek.</p>
+      <div class="controls">
+        <button class="btn" type="button" data-preset="gallery" data-en="Material gallery">Anyaggaléria</button>
+        <button class="btn" type="button" data-toggle="PageUp" data-label="substrate" data-en="Substrate slabs">Substrate-rétegek <span class="state"></span></button>
+        <button class="btn" type="button" data-preset="gallery-paint" data-en="Car paint and velvet">Autólakk és bársony</button>
+        <button class="btn" type="button" data-preset="gallery-night" data-en="Wax and marble at night">Viasz és márvány éjjel</button>
+        <button class="btn" type="button" data-preset="gallery-features" data-en="Material features (24)">Anyagjellemzők (24)</button>
+        <button class="btn" type="button" data-preset="lit" data-en="Back to the image">Vissza a képhez</button>
+      </div>
+      <figure>
+        <div class="compare" style="--cut:50%">
+          <img src="media/substrate_off.webp" alt="" data-alt-hu="Autólakk és bársony Substrate nélkül" data-alt-en="Car paint and velvet without Substrate">
+          <img class="after" src="media/substrate_on.webp" alt="" data-alt-hu="Autólakk és bársony Substrate-tel" data-alt-en="Car paint and velvet with Substrate">
+          <span class="handle" aria-hidden="true"></span>
+          <span class="tag l" data-en="Base only">Csak az alapanyag</span><span class="tag r">Substrate</span>
+          <input type="range" min="0" max="100" value="50" aria-label="Összehasonlítás">
+        </div>
+        <figcaption data-en="Car paint with a clear coat that reflects the sky on top of the red base, and velvet whose rim catches the light.">Autófényezés, amelynek lakkrétege a vörös alap fölött tükrözi az eget, és bársony, amelynek a széle fényt fog.</figcaption>
+      </figure>
+      <div class="metrics">
+        <div class="metric"><b>0,41 + 0,42 ms</b><span data-en="material resolve and lighting in the gallery">anyagfeloldás és megvilágítás a galériában</span></div>
+        <div class="metric"><b>45</b><span data-en="node types, compiled to WGSL">csomóponttípus, WGSL-re fordítva</span></div>
+        <div class="metric"><b>0</b><span data-en="recompiles when a parameter changes (material instances)">újrafordítás paraméterváltáskor (anyagpéldányok)</span></div>
+      </div>
+      <div class="shots">
+        <img src="media/gallery.webp" alt="" loading="lazy" data-alt-hu="Az anyaggaléria" data-alt-en="The material gallery">
+        <img src="media/gallery_wax.webp" alt="" loading="lazy" data-alt-hu="Viaszgyertya és márványtojás éjjel" data-alt-en="Wax candle and marble egg at night">
+        <img src="media/gallery_features.webp" alt="" loading="lazy" data-alt-hu="Anyagjellemzők nézet" data-alt-en="Material features view">
+      </div>
+    </section>
+
+    <section class="chapter" id="editor">
+      <div class="eyebrow" data-en="15 · Editor and PCG">15 · Szerkesztő és PCG</div>
+      <h2 data-en="A level editor in the browser">Szintszerkesztő a böngészőben</h2>
+      <p data-en="A UE5-style level editor around the live viewport: content browser, World Outliner, Details panel, move, rotate and scale gizmos, selection outline, undo. Picking reads the visibility buffer, so it selects exactly what the pixel shows, a leaf in the wind included. Scenes are saved as .helios.json files, and the node-based material editor recompiles as you link the pins.">UE5-stílusú szintszerkesztő az élő nézetablak körül: tartalomböngésző, World Outliner, Details panel, mozgató, forgató és méretező gizmó, kijelölés körvonallal, visszavonás. A kijelölés a láthatósági pufferből olvas, így pontosan azt választja ki, ami a pixelen látszik, a szélben mozgó levelet is. A jelenet .helios.json fájlba menthető, a csomópontos anyagszerkesztő pedig a pinek összekötése közben fordít újra.</p>
+      <p data-en="PCG volumes, after UE 5.7's Procedural Content Generation, run a deterministic point graph: surface sampling, slope and noise filters, self-pruning and weighted prefab spawning. There are three presets, rocks on slopes, flowers in meadows and a forest edge, and dragging a node's parameter regenerates the volume live.">A PCG-kötetek az UE 5.7 Procedural Content Generation rendszerének mintájára determinisztikus pontgráfot futtatnak: felületi mintavétel, lejtő- és zajszűrők, önritkítás, végül előregyártott elemek (prefabok) súlyozott elhelyezése. Három előre beállított gráf van: sziklák a lejtőkön, virágos rét és erdőszél; egy csomópont paraméterének húzására a kötet élőben újragenerálódik.</p>
+      <div class="controls">
+        <a class="btn primary" href="editor.html?scene=valley" target="_blank" rel="noopener" data-en="Open the editor (valley)">A szerkesztő megnyitása (völgy)</a>
+        <a class="btn" href="editor.html?scene=gallery" target="_blank" rel="noopener" data-en="Material graphs (gallery)">Anyaggráfok (galéria)</a>
+      </div>
+      <p class="dim" data-en="The editor opens in a new tab and starts its own engine, so this page pauses meanwhile. It needs a desktop browser with a mouse; Material Graph in the toolbar opens the node editor.">A szerkesztő új lapon nyílik, és saját motort indít, ezért ez az oldal addig szünetel. Asztali böngésző és egér kell hozzá; az eszköztár Material Graph gombja nyitja a csomópontos szerkesztőt.</p>
+      <figure class="clip">
+        <video src="media/editor_tour.mp4" poster="media/editor_tour.webp" controls muted playsinline preload="none"></video>
+        <figcaption data-en="Selecting and moving the sculpture, a PCG meadow of flowers and the lava material graph, recorded in headless Chromium.">A szobor kijelölése és mozgatása, egy virágos rét PCG-vel és a láva anyaggráfja, headless Chromiumban felvéve.</figcaption>
+      </figure>
+      <div class="metrics">
+        <div class="metric"><b>3 170</b><span data-en="flowers in a 28×28 m volume, regenerated in 15–20 ms">virág egy 28×28 m-es kötetben, 15–20 ms alatt újragenerálva</span></div>
+        <div class="metric"><b>33,4 → 16,7 ms</b><span data-en="dragging a conifer in the forest, per frame">képkockánként egy fenyő húzásakor az erdőben</span></div>
+        <div class="metric"><b>0,05 ms</b><span data-en="the selection outline">a kijelölés körvonala</span></div>
+      </div>
+      <div class="shots">
+        <img src="media/editor_valley.webp" alt="" loading="lazy" data-alt-hu="A szerkesztő: kijelölt szobor gizmóval" data-alt-en="The editor: the sculpture selected, with the gizmo">
+        <img src="media/editor_pcg.webp" alt="" loading="lazy" data-alt-hu="PCG: virágos rét a tó mellett" data-alt-en="PCG: a meadow of flowers by the lake">
+        <img src="media/editor_graph.webp" alt="" loading="lazy" data-alt-hu="A láva anyaggráfja" data-alt-en="The lava material graph">
+        <img src="media/editor_forest.webp" alt="" loading="lazy" data-alt-hu="Kijelölt fenyő az erdőben" data-alt-en="A conifer selected in the forest">
+      </div>
+    </section>
+
+    <!-- PLACEHOLDER · 16 · Nanite tessellation and displacement (still being built on its own branch).
+         When it lands: PageDown toggles it, debug view 25 shows the patches; add presets, a before/after
+         pair (displacement off / on, captured by site/capture.py) and the measured cost, then uncomment.
+    <section class="chapter" id="tessellation">
+      <div class="eyebrow" data-en="16 · Nanite tessellation">16 · Nanite-tesszeláció</div>
+      <h2 data-en="Displacement on virtual geometry">Felületi elmozdítás virtuális geometrián</h2>
+      <p data-en="…">…</p>
+      <div class="controls">
+        <button class="btn" type="button" data-toggle="PageDown" data-label="tessellation" data-en="Tessellation">Tesszeláció <span class="state"></span></button>
+        <button class="btn" type="button" data-preset="tessellation-view" data-en="Patches (25)">Foltok (25)</button>
+        <button class="btn" type="button" data-preset="lit" data-en="Back to the image">Vissza a képhez</button>
+      </div>
+      <figure>
+        <div class="compare" style="--cut:50%">
+          <img src="media/tessellation_off.webp" alt="" data-alt-hu="Elmozdítás nélkül" data-alt-en="Without displacement">
+          <img class="after" src="media/tessellation_on.webp" alt="" data-alt-hu="Elmozdítással" data-alt-en="With displacement">
+          <span class="handle" aria-hidden="true"></span>
+          <span class="tag l" data-en="Flat">Sík</span><span class="tag r" data-en="Displaced">Elmozdítva</span>
+          <input type="range" min="0" max="100" value="50" aria-label="Összehasonlítás">
+        </div>
+      </figure>
+    </section>
+    -->
   </main>
 
   <aside class="stage" aria-label="Élő motor">
@@ -383,8 +679,9 @@ footer .wide-inner { gap: 10px; }
     <h2 data-en="Camera tours">Kameratúrák</h2>
     <div class="videos">
       <figure><video src="media/tour_valley.mp4" poster="media/tour_valley.webp" controls muted playsinline preload="none"></video><figcaption data-en="Valley: 199 million source triangles, clouds, lake">Völgy: 199 millió forrásháromszög, felhők, tó</figcaption></figure>
-      <figure><video src="media/tour_cathedral.mp4" poster="media/tour_cathedral.webp" controls muted playsinline preload="none"></video><figcaption data-en="Cathedral: stained glass, light shafts, 33 lights">Katedrális: ólomüveg, fénynyalábok, 33 fény</figcaption></figure>
-      <figure><video src="media/tour_forest.mp4" poster="media/tour_forest.webp" controls muted playsinline preload="none"></video><figcaption data-en="Forest: 16 461 instances, wind">Erdő: 16 461 példány, szél</figcaption></figure>
+      <figure><video src="media/tour_cathedral.mp4" poster="media/tour_cathedral.webp" controls muted playsinline preload="none"></video><figcaption data-en="Cathedral: stained glass, light shafts, swinging chandeliers">Katedrális: ólomüveg, fénynyalábok, lengő csillárok</figcaption></figure>
+      <figure><video src="media/tour_forest.mp4" poster="media/tour_forest.webp" controls muted playsinline preload="none"></video><figcaption data-en="Forest: 8 278 instances, wind, a campfire">Erdő: 8 278 példány, szél, tábortűz</figcaption></figure>
+      <figure><video src="media/tour_gallery.mp4" poster="media/tour_gallery.webp" controls muted playsinline preload="none"></video><figcaption data-en="Material gallery: Substrate slabs and three material graphs">Anyaggaléria: Substrate-rétegek és három anyaggráf</figcaption></figure>
     </div>
   </div>
 </section>
@@ -395,16 +692,20 @@ footer .wide-inner { gap: 10px; }
     <h2 data-en="One lead, a team of agents, and a flicker meter">Egy vezető, egy csapatnyi ügynök és egy villogásmérő</h2>
     <p data-en="Helios was written by Claude Code in a few days of conversation with its owner. The lead session planned the work, split it into features and handed each to a specialist agent working in its own copy of the repository. Nothing was merged on the agent's word: every merge had to pass the same gates.">A Heliost a Claude Code írta, néhány napnyi beszélgetésben a megrendelőjével. A vezető munkamenet tervezte meg a munkát, funkciókra bontotta, és mindegyiket egy szakosodott ügynök kapta meg, a tároló saját másolatán dolgozva. Semmi sem került be csak az ügynök szavára: minden összefésülésnek ugyanazokon a kapukon kellett átmennie.</p>
     <div class="process">
-      <div><h3 data-en="Isolated copies">Elszigetelt másolatok</h3><p data-en="Each agent gets a git copy tagged at the current main. Its work comes back as a patch and is merged three-way; when main has moved too far, the agent ports its own work.">Minden ügynök a mostani főág egy git-másolatát kapja. A munkája patchként tér vissza, és háromutas összefésüléssel kerül be; ha a főág közben túl messzire jutott, az ügynök maga ülteti át rá a változtatásait.</p></div>
-      <div><h3 data-en="Tests and two lints">Tesztek és statikus ellenőrzés</h3><p data-en="About 150 unit tests, clippy natively and for wasm32, and a test that checks every shader against Chrome's stricter WGSL compiler, not only naga.">Kb. 150 egységteszt, clippy natívan és wasm32-re, és egy teszt, amely minden shadert a Chrome szigorúbb WGSL-fordítójának szabályai szerint is ellenőriz, nem csak a wgpu saját fordítója (naga) szerint.</p></div>
+      <div><h3 data-en="Isolated copies">Elszigetelt másolatok</h3><p data-en="Each agent works in its own git copy of the repository (in round 4, a worktree with its own branch). Its work is merged three-way; when the target has moved too far meanwhile, the agent ports its own changes.">Minden ügynök a tároló saját git-másolatán dolgozik (a 4. körben saját worktree-ben és ágon). A munkája háromutas összefésüléssel kerül be; ha a cél közben túl messzire jutott, az ügynök maga ülteti át rá a változtatásait.</p></div>
+      <div><h3 data-en="Tests and two lints">Tesztek és statikus ellenőrzés</h3><p data-en="About 270 unit tests, clippy natively and for wasm32, and a test that checks every shader against Chrome's stricter WGSL compiler, not only naga.">Kb. 270 egységteszt, clippy natívan és wasm32-re, és egy teszt, amely minden shadert a Chrome szigorúbb WGSL-fordítójának szabályai szerint is ellenőriz, nem csak a wgpu saját fordítója (naga) szerint.</p></div>
       <div><h3 data-en="A number for 'it flickers'">Mérőszám a villogásra</h3><p data-en="A static camera, twelve dumped frames at 2560×1440, and the share of pixels that change by more than 24 levels. Every merge is measured on all three scenes.">Álló kamera, tizenkét mentett képkocka 2560×1440-ben, és azon pixelek aránya, amelyek 24 szintnél többet változnak. Minden összefésülés után mindhárom jelenetben mérve.</p></div>
       <div><h3 data-en="Look at the pictures">A képek megnézése</h3><p data-en="Numbers miss things. Every change was rendered, cropped and looked at, and checked in headless Chromium on the real GPU, where WebGPU actually runs.">A számok nem látnak mindent. Minden változtatást lerendereltünk és kinagyítva megnéztünk, és headless Chromiumban is ellenőriztük a valódi GPU-n, ahol a WebGPU ténylegesen fut.</p></div>
+      <div><h3 data-en="An integration branch">Integrációs ág</h3><p data-en="In round 4 finished branches went into a round4 integration branch, not into main. Merge agents looked for semantic conflicts too: two changes that are correct on their own and wrong together.">A 4. körben a kész ágak nem a főágra, hanem egy round4 integrációs ágra kerültek. Az összefésülést végző ügynökök a jelentésbeli ütközéseket is keresték: két változtatást, amely külön-külön helyes, együtt viszont hibás.</p></div>
     </div>
     <div class="timeline">
       <div class="round"><h3 data-en="Round 1 · The roadmap">1. kör · Az ütemterv</h3><p data-en="Virtual geometry with a cluster DAG, two-pass occlusion culling and a software rasteriser; virtual shadow maps; Lumen-style GI; a physically based sky; the valley, cathedral and forest scenes.">Virtuális geometria klaszter-DAG-gal, kétmenetes takarási eldobással és szoftveres raszterizálóval; virtuális árnyéktérképek; Lumen-szerű GI; fizikai alapú égbolt; a völgy, a katedrális és az erdő jelenet.</p></div>
       <div class="round"><h3 data-en="Round 2 · Hunting flicker">2. kör · Villogásvadászat</h3><p data-en="The forest flickered: 0.54 % of its pixels changed every frame. The cause was foliage clusters of four triangles that overflowed the culling list. Then clouds, volumetric fog, glTF import and real streaming from disk and HTTP.">Az erdő villogott: pixeleinek 0,54%-a változott minden képkockában. A hibát a négyháromszöges lombklaszterek okozták, amelyek túlcsordították a láthatósági listát. Utána felhők, volumetrikus köd, glTF-import és valódi streamelés lemezről és HTTP-n.</p></div>
       <div class="round"><h3 data-en="Round 3 · Parallel waves">3. kör · Párhuzamos hullámok</h3><p data-en="Up to four agents at once, each wave merged and measured before the next:">Egyszerre legfeljebb négy ügynök, minden hullám összefésülve és lemérve a következő előtt:</p>
         <div class="chips"><span class="chip" data-en="alpha masks">alfamaszkok</span><span class="chip" data-en="streaming textures">streamelt textúrák</span><span class="chip" data-en="glass &amp; water">üveg és víz</span><span class="chip" data-en="geometry compression">geometriatömörítés</span><span class="chip" data-en="depth of field">mélységélesség</span><span class="chip" data-en="day &amp; night">nappal és éjszaka</span><span class="chip" data-en="wind">szél</span><span class="chip" data-en="Lumen cards">Lumen-kártyák</span><span class="chip" data-en="local-light VSM">pontfény-VSM</span><span class="chip" data-en="TSR">TSR</span><span class="chip" data-en="BC7 / BC5">BC7 / BC5</span><span class="chip" data-en="adaptive probes">adaptív próbák</span><span class="chip" data-en="caustics">kausztika</span><span class="chip" data-en="depth peeling">depth peeling</span><span class="chip" data-en="glTF extensions">glTF-bővítmények</span><span class="chip" data-en="static shadow cache">statikus árnyék-gyorsítótár</span><span class="chip" data-en="local exposure">helyi expozíció</span></div>
+      </div>
+      <div class="round"><h3 data-en="Round 4 · Agents on parallel branches">4. kör · Ügynökök párhuzamos ágakon</h3><p data-en="Nine features in two waves. Each agent worked in its own git worktree and branch from the same brief: Chrome's WGSL rules, how to measure, which keys and debug views were taken, and to touch shared files only as much as needed. The seven branches of the first wave were merged one by one into the round4 integration branch; the second wave (Substrate and material graphs, Nanite tessellation, this page) built on it. Git flagged the textual conflicts; the merge agents found the semantic ones with tests, measurements and browser runs. Up to seven agents shared one RTX 3090, so every timing is the minimum or median of interleaved runs.">Kilenc funkció, két hullámban. Minden ügynök saját git worktree-ben és ágon dolgozott, ugyanabból a feladatleírásból: a Chrome WGSL-szabályai, a mérési módszer, a foglalt billentyűk és debug nézetek, és hogy a közös fájlokhoz csak a legszükségesebb mértékben nyúljon. Az első hullám hét ága egyenként került a round4 integrációs ágra; a második hullám (Substrate és anyaggráfok, Nanite-tesszeláció, ez az oldal) már erre épült. A szöveges ütközéseket a git jelezte, a jelentésbelieket az összefésülést végző ügynökök találták meg tesztekkel, mérésekkel és böngészős futtatással. Egyszerre legfeljebb hét ügynök osztozott egyetlen RTX 3090-en, ezért minden időmérés váltakozó futások minimuma vagy mediánja.</p>
+        <div class="chips"><span class="chip" data-en="dynamic world">dinamikus világ</span><span class="chip" data-en="skeletal animation">csontvázas animáció</span><span class="chip">MegaLights</span><span class="chip">Lumen Lite</span><span class="chip" data-en="volumes &amp; particles">térfogatok és részecskék</span><span class="chip" data-en="OIT">sorrendfüggetlen átlátszóság</span><span class="chip">Nanite Foliage</span><span class="chip" data-en="editor">szerkesztő</span><span class="chip">PCG</span><span class="chip" data-en="scene files">jelenetfájlok</span><span class="chip">Substrate</span><span class="chip" data-en="material graphs">anyaggráfok</span><span class="chip" data-en="glTF PBR extensions">glTF PBR-bővítmények</span></div>
       </div>
     </div>
   </div>
@@ -421,6 +722,11 @@ footer .wide-inner { gap: 10px; }
       <article class="story"><h3 data-en="A band without clouds">Egy sáv felhők nélkül</h3><p data-en="At 67 % resolution, a strip of sky lost its clouds. An integer division gave a block size of 1 instead of 2 whenever the image height was odd, 603 rows for example. One line, rounded up.">67%-os felbontásnál egy égboltsávból eltűntek a felhők. Egy egész osztás 2 helyett 1-es blokkméretet adott, valahányszor a kép magassága páratlan volt, például 603 sor. A javítás egyetlen sor: felfelé kerekítés.</p><div class="delta" data-en="52 → 0 broken blocks">52 → 0 hibás blokk</div></article>
       <article class="story"><h3 data-en="The star only Chrome rejected">A csillag, amelyet csak a Chrome nem fogadott el</h3><p data-en="The night sky worked natively and broke the whole lighting pass in Chrome: one hash mixed * and ^ without parentheses, which Chrome's WGSL compiler refuses. Since then a test tokenises every shader and fails on any such mix.">Az éjszakai égbolt natívan működött, Chrome-ban viszont az egész megvilágítási menetet elrontotta: egy hash-függvény zárójelek nélkül keverte a * és a ^ műveletet, amit a Chrome WGSL-fordítója elutasít. Azóta egy teszt minden shadert átvizsgál, és hibát jelez minden ilyen keverésnél.</p><div class="delta" data-en="1 test · every shader">1 teszt · minden shader</div></article>
       <article class="story"><h3 data-en="A glowing box around a candle">Izzó kocka egy gyertya körül</h3><p data-en="The volumetric fog evaluates each light at one point per cell, so a flame a few centimetres away lit the entire 16-pixel block. Averaging the inverse-square falloff over the cell turned the square glow back into a soft halo.">A volumetrikus köd minden fényt cellánként egy pontban értékel ki, így egy néhány centire lévő láng az egész 16 pixeles blokkot bevilágította. A négyzetes csillapítás cellára vett átlaga a szögletes fényt visszaalakította lágy fényudvarrá.</p><div class="delta">1/r² → 1/(r² + R²/3)</div></article>
+      <article class="story"><span class="round-tag" data-en="Round 4 · merge">4. kör · összefésülés</span><h3 data-en="One bit, two meanings">Egy bit, két jelentés</h3><p data-en="The dynamic-world branch claimed instance flag bit 8 for MOVABLE, the editor branch the same bit for HIDDEN. Git merged the shared shader without a conflict, so every swinging chandelier would have vanished. The merge agent compared the bit assignments, not the lines of text.">A dinamikus világ ága a példányflagek 8-as bitjét a mozgatható (MOVABLE), a szerkesztő ága ugyanezt a rejtett (HIDDEN) jelzésre foglalta le. A git ütközés nélkül egyesítette a közös shadert, így minden lengő csillár eltűnt volna. Az összefésülést végző ügynök a bitkiosztásokat vetette össze, nem a szövegsorokat.</p><div class="delta" data-en="33 moving instances · 0 vanished">33 mozgó példány · 0 eltűnt</div></article>
+      <article class="story"><span class="round-tag" data-en="Round 4 · merge">4. kör · összefésülés</span><h3 data-en="Candles that took the shadow slots">Gyertyák, amelyek elvitték az árnyéklapokat</h3><p data-en="Together, two correct features went wrong: in the candle-lit cathedral the swinging chandeliers' candles won the 32 shadow-map slots and, because they moved, redrew their whole cube maps every frame. Now static lights get slots first, and with MegaLights the moving ones are shadowed by traced rays.">Két helyes funkció együtt hibásan működött: a gyertyafényes katedrálisban a lengő csillárok gyertyái nyerték el a 32 árnyéktérkép-helyet, és mivel mozogtak, minden képkockában a teljes kockatérképüket újrarajzolták. Most az álló fények kapnak először helyet, a mozgók árnyékát MegaLights-szal a sugárkövetés adja.</p><div class="delta" data-en="18–22 → 6.5–7.9 ms per frame">18–22 → 6,5–7,9 ms képkockánként</div></article>
+      <article class="story"><span class="round-tag" data-en="Round 4 · merge">4. kör · összefésülés</span><h3 data-en="Code that never runs still costs">Kód, amely nem fut, mégis lassít</h3><p data-en="The skinning code slowed culling down even in scenes without a single skinned mesh, and the forest's 26 000 conifer parts multiplied the cost. The shaders are now built in two variants, and without skinned instances the leaner one runs.">A csontvázas animáció kódja a nem látható elemek kiszűrését (culling) akkor is lassította, ha a jelenetben egyetlen bőrözött háló sem volt, és az erdő 26 ezer fenyőrésze ezt megsokszorozta. A shaderek most két változatban készülnek, és bőrözött példány nélkül a karcsúbb fut.</p><div class="delta" data-en="culling 1.21 → 1.11 ms · resolve 0.74 → 0.41 ms">culling 1,21 → 1,11 ms · feloldás 0,74 → 0,41 ms</div></article>
+      <article class="story"><span class="round-tag" data-en="Round 4">4. kör</span><h3 data-en="Workgroups past the end of the list">Munkacsoportok a lista végén túl</h3><p data-en="Beyond 65 535 software-rasterised clusters the two-dimensional indirect dispatch overshot, and the extra workgroups drew stale entries that earlier frames had left past the end of the list. Every rasteriser now stops at the list's actual length.">65 535-nél több szoftveresen raszterizált klaszternél a kétdimenziós indirekt dispatch túlfutott, és a fölösleges munkacsoportok a lista végén túl maradt, korábbi képkockákból származó bejegyzéseket is kirajzolták. Most minden raszterizáló a lista tényleges hosszáig dolgozik.</p><div class="delta" data-en="2.47% → 0.012% changing pixels">2,47% → 0,012% változó pixel</div></article>
+      <article class="story"><span class="round-tag" data-en="Round 4">4. kör</span><h3 data-en="Thousands of threads, one ray at a time">Több ezer szál, egyesével</h3><p data-en="The radiance cache refresh traced one probe per thread, its 32 rays one after another: a few thousand long serial threads, with most of the GPU idle. Now a workgroup handles each probe, with a thread per ray and the result summed in shared memory.">A radiance cache frissítése szálanként egy próbát követett, mind a 32 sugarával egymás után: néhány ezer hosszú, soros szál, miközben a GPU nagy része tétlen volt. Most minden próbára egy munkacsoport jut, sugaranként egy szállal, az eredményt megosztott memóriában összegezve.</p><div class="delta" data-en="1.48 → 0.35 ms">1,48 → 0,35 ms</div></article>
     </div>
   </div>
 </section>
@@ -431,13 +737,13 @@ footer .wide-inner { gap: 10px; }
     <h2 data-en="What happens in 16 milliseconds">Mi történik 16 milliszekundum alatt</h2>
     <div class="pipeline-wrap">
       <div class="pipeline">
-        <div class="stage-box"><span class="cat" style="background:#8fb7e6"></span><h3 data-en="Culling">Láthatóság</h3><ul><li>instance → cluster</li><li>HZB, two passes</li><li>LOD cut &lt; 1 px</li></ul></div>
-        <div class="stage-box"><span class="cat" style="background:#8fb7e6"></span><h3 data-en="Rasterising">Raszterizálás</h3><ul><li>hardware</li><li>compute (tiny tris)</li><li>visibility buffer</li></ul></div>
-        <div class="stage-box"><span class="cat" style="background:#c7a6e8"></span><h3 data-en="Materials">Anyagok</h3><ul><li>classify &amp; resolve</li><li>BC7 tile streaming</li><li>terrain RVT</li></ul></div>
-        <div class="stage-box"><span class="cat" style="background:#e88c6f"></span><h3 data-en="Shadows">Árnyékok</h3><ul><li>mark pages</li><li>static / dynamic cache</li><li>sun + 32 lights</li></ul></div>
-        <div class="stage-box"><span class="cat" style="background:#f2b04a"></span><h3>Lumen</h3><ul><li>cards &amp; voxels</li><li>radiance cache</li><li>screen probes</li><li>reflections</li></ul></div>
-        <div class="stage-box"><span class="cat" style="background:#7fd1a3"></span><h3 data-en="Sky &amp; fog">Ég és köd</h3><ul><li>clouds</li><li>froxel fog</li><li>atmosphere</li></ul></div>
-        <div class="stage-box"><span class="cat" style="background:#ece6da"></span><h3 data-en="Lighting">Megvilágítás</h3><ul><li>deferred</li><li>clustered lights</li><li>glass, water, layers</li></ul></div>
+        <div class="stage-box"><span class="cat" style="background:#8fb7e6"></span><h3 data-en="Culling">Láthatóság</h3><ul><li>instance → cluster</li><li>assembly parts</li><li>HZB, two passes</li><li>LOD cut &lt; 1 px</li></ul></div>
+        <div class="stage-box"><span class="cat" style="background:#8fb7e6"></span><h3 data-en="Rasterising">Raszterizálás</h3><ul><li>hardware</li><li>compute (tiny tris)</li><li>voxels (foliage)</li><li>skinning</li><li>visibility buffer</li></ul></div>
+        <div class="stage-box"><span class="cat" style="background:#c7a6e8"></span><h3 data-en="Materials">Anyagok</h3><ul><li>classify &amp; resolve</li><li>Substrate slabs</li><li>material graphs</li><li>BC7 tile streaming</li></ul></div>
+        <div class="stage-box"><span class="cat" style="background:#e88c6f"></span><h3 data-en="Shadows">Árnyékok</h3><ul><li>mark pages</li><li>static / dynamic cache</li><li>movable casters</li><li>sun + 32 lights</li></ul></div>
+        <div class="stage-box"><span class="cat" style="background:#f2b04a"></span><h3>Lumen</h3><ul><li>cards &amp; voxels</li><li>radiance cache</li><li>screen probes or Lite probes</li><li>reflections</li></ul></div>
+        <div class="stage-box"><span class="cat" style="background:#7fd1a3"></span><h3 data-en="Sky, fog, volumes">Ég, köd, térfogatok</h3><ul><li>clouds</li><li>froxel fog</li><li>fluid volumes</li><li>particles (OIT)</li></ul></div>
+        <div class="stage-box"><span class="cat" style="background:#ece6da"></span><h3 data-en="Lighting">Megvilágítás</h3><ul><li>deferred</li><li>clustered lights or MegaLights</li><li>subsurface</li><li>glass, water, layers</li></ul></div>
         <div class="stage-box"><span class="cat" style="background:#9fa8ba"></span><h3 data-en="Image">Kép</h3><ul><li>TSR</li><li>DOF, motion blur</li><li>exposure, bloom</li><li>tonemap</li></ul></div>
       </div>
     </div>
@@ -453,8 +759,12 @@ footer .wide-inner { gap: 10px; }
       <li data-en="<b>Shadow pages</b> share a 1024-page pool, a quarter of UE's default.">Az <b>árnyéklapok</b> egy közös, 1024 lapos készletből jönnek, ami az UE alapértékének negyede.</li>
       <li data-en="<b>Water</b> is a flat sheet with per-pixel waves; under water there are no light shafts.">A <b>víz</b> lapos felület pixelenkénti hullámokkal; víz alatt nincsenek fénynyalábok.</li>
       <li data-en="<b>Mobile GPUs</b> get uncompressed texture tiles: there is no ASTC or ETC2 encoder yet.">A <b>mobil GPU-k</b> tömörítetlen textúracsempéket kapnak: ASTC- és ETC2-kódoló még nincs.</li>
-      <li data-en="<b>Translucency</b> is exact up to four layers; there is no blending for particle effects.">Az <b>átlátszóság</b> négy rétegig pontos; részecskeeffektusokhoz még nincs átlátszó keverés.</li>
+      <li data-en="<b>Translucency</b> is exact up to four layers; particles are blended order-independently, which only approximates the order of layers at similar depths.">Az <b>átlátszóság</b> négy rétegig pontos; a részecskék sorrendfüggetlen keverése a hasonló mélységű rétegek sorrendjét csak közelíti.</li>
       <li data-en="<b>Below 50 % resolution</b> thin wires break up under motion."><b>50% alatti felbontásnál</b> a vékony drótok mozgás közben szétesnek.</li>
+      <li data-en="<b>MegaLights</b> traces no hardware rays (WebGPU has none): beyond a 1 m screen trace, shadows come from shadow maps or coarse distance fields.">A <b>MegaLights</b> nem követ hardveres sugarakat (WebGPU-n nincs ilyen): az 1 m-es képtérbeli követésen túl az árnyékot árnyéktérképek vagy durva távolságmezők adják.</li>
+      <li data-en="<b>Volumes</b> cast no shadows on the scene and Lumen does not see them; only the fire's light reaches the surroundings.">A <b>térfogatok</b> nem vetnek árnyékot a jelenetre, és a Lumen sem látja őket; csak a tűz fénye jut el a környezetbe.</li>
+      <li data-en="<b>Substrate</b> has one slab per material; UE layers and mixes any number of them.">A <b>Substrate</b> anyagonként egyetlen réteget (slabot) kezel; az UE akárhányat egymásra rétegez és kever.</li>
+      <li data-en="<b>The editor</b> has no actors or hierarchy: a tree's trunk and foliage are two separate instances.">A <b>szerkesztőben</b> nincsenek aktorok és hierarchia: egy fa törzse és lombja két külön példány.</li>
     </ul>
   </div>
 </section>
@@ -462,7 +772,7 @@ footer .wide-inner { gap: 10px; }
 <footer>
   <div class="wide-inner">
     <p data-en="Helios · Rust, wgpu and WGSL · written with Claude Code, November 2026.">Helios · Rust, wgpu és WGSL · Claude Code-dal írva, 2026. november.</p>
-    <p data-en="Sponza and DamagedHelmet from the Khronos glTF Sample Assets (DamagedHelmet: CC BY 4.0, theblueturtle_). The valley, cathedral and forest are procedural.">A Sponza és a DamagedHelmet a Khronos glTF Sample Assets gyűjteményből (DamagedHelmet: CC BY 4.0, theblueturtle_). A völgy, a katedrális és az erdő procedurális.</p>
+    <p data-en="Sponza, DamagedHelmet and Fox from the Khronos glTF Sample Assets (DamagedHelmet: CC BY 4.0, theblueturtle_; Fox: model by PixelMannen, CC0, rigging and animation by tomkranis, CC BY 4.0, glTF conversion by AsoboStudio and scurest). The valley, cathedral, forest and material gallery are procedural.">A Sponza, a DamagedHelmet és a Fox a Khronos glTF Sample Assets gyűjteményből (DamagedHelmet: CC BY 4.0, theblueturtle_; Fox: modell PixelMannen, CC0, csontváz és animáció tomkranis, CC BY 4.0, glTF-átalakítás AsoboStudio és scurest). A völgy, a katedrális, az erdő és az anyaggaléria procedurális.</p>
   </div>
 </footer>
 
@@ -543,13 +853,28 @@ function setSun(deg) {
 }
 $("#sun").addEventListener("input", (e) => setSun(Number(e.target.value)));
 
-async function loadScene(name) {
+// Candle lights the cathedral was last built with (0: its 33 fixture lights).
+let candles = 0;
+const SCENE_NAMES = {
+  valley: ["A völgy", "valley"], cathedral: ["A katedrális", "cathedral"], forest: ["Az erdő", "forest"],
+  gallery: ["Az anyaggaléria", "material gallery"],
+};
+// Builds a procedural scene; `candleLights` (cathedral only) rebuilds it with that many candle
+// lights, undefined keeps the current lighting.
+async function loadScene(name, candleLights) {
   if (!engine || busy) return false;
-  if (engine.heliosScene() === name) return true;
+  const relight = name === "cathedral" && candleLights !== undefined && candleLights !== candles;
+  if (engine.heliosScene() === name && !relight) return true;
   busy = true;
-  const names = { valley: t("A völgy", "valley"), cathedral: t("A katedrális", "cathedral"), forest: t("Az erdő", "forest") };
-  showVeil(t(`${names[name]} épül…`, `Building the ${names[name]}…`));
+  const [hu, en] = SCENE_NAMES[name];
+  showVeil(relight && candleLights > 0
+    ? t(`A katedrális épül ${candleLights} gyertyafénnyel…`, `Building the cathedral with ${candleLights} candle lights…`)
+    : t(`${hu} épül…`, `Building the ${en}…`));
   await nextFrames();
+  if (name === "cathedral") {
+    if (candleLights !== undefined) candles = candleLights;
+    engine.heliosSetCandleLights(candles);
+  }
   engine.heliosLoadScene(name);
   await nextFrames();
   veil.hidden = true;
@@ -557,7 +882,47 @@ async function loadScene(name) {
   return true;
 }
 
-// Presets: scene, camera (eye/at, heights above ground), sun, debug view.
+// Fetches a glTF model next to the page and makes it the scene (`name`: its file name).
+async function loadModel(url, name) {
+  if (!engine || busy) return false;
+  if (engine.heliosScene() === name) return true;
+  busy = true;
+  showVeil(t("A modell töltődik…", "Loading the model…"));
+  await nextFrames();
+  let ok = true;
+  try {
+    await engine.heliosLoadModel(url);
+  } catch (e) {
+    ok = false;
+    console.warn("model", url, e);
+  }
+  await nextFrames();
+  veil.hidden = true;
+  busy = false;
+  return ok;
+}
+
+// Feature states from the HUD, e.g. "shadows on · MegaLights off (33 lights) · Substrate on".
+function hudStates(hud) {
+  const s = {};
+  for (const m of hud.matchAll(/([A-Za-z][A-Za-z +]*?) (on|off)\b/g)) s[m[1].trim().toLowerCase()] = m[2] === "on";
+  const gi = /\bGI (Lumen Lite|Lumen|off)\b/.exec(hud);
+  if (gi) { s.gi = gi[1] !== "off"; s["lumen lite"] = gi[1] === "Lumen Lite"; }
+  const motion = /moving \(0\): \d+ props (moving|paused)/.exec(hud);
+  if (motion) s.motion = motion[1] === "moving";
+  const local = /local lights with shadow maps: (\d+)/.exec(hud);
+  if (local) s["local lights"] = Number(local[1]) > 0;
+  return s;
+}
+// Presses `key` if the HUD says `label` is not `want` yet.
+function ensure(key, label, want) {
+  const on = hudStates(engine.heliosHud())[label];
+  if (on !== undefined && on !== want) engine.heliosKey(key);
+}
+const ENSURE = { megalights: ["Equal", "megalights"], lite: ["Semicolon", "lumen lite"], volumes: ["Quote", "volumes + particles"], substrate: ["PageUp", "substrate"] };
+
+// Presets: scene (or glTF model), camera (eye/at, heights above ground), sun, debug view, and
+// features to switch on or off (`set`).
 const PRESETS = {
   lit: { view: 0 },
   valley: { scene: "valley", view: 0, sun: 18 },
@@ -574,14 +939,37 @@ const PRESETS = {
   underwater: { scene: "valley", view: 0, sun: 50, eye: [-5, 0.4, 18], at: [-5, 3, 26] },
   starry: { scene: "valley", view: 0, sun: -30, eye: [-5, 6, 10], at: [-5, -1, 24] },
   glass: { scene: "cathedral", view: 0, sun: 18, eye: [14, 1.7, 10.25], at: [-0.6, 3, 10.25] },
+  // Round 4
+  "dyn-view": { scene: "cathedral", view: 16 },
+  fox: { model: "media/Fox.glb", name: "Fox", view: 0 },
+  "fox-weights": { model: "media/Fox.glb", name: "Fox", view: 17 },
+  candles: { scene: "cathedral", candles: 300, view: 0, sun: -30, eye: [15, 1.7, 9], at: [35, 0.8, 12.5], set: { megalights: true } },
+  "ml-samples": { scene: "cathedral", view: 18, set: { megalights: true } },
+  "ml-denoise": { scene: "cathedral", view: 19, set: { megalights: true } },
+  "candles-off": { scene: "cathedral", candles: 0, view: 0, sun: 18, set: { megalights: false } },
+  "lite-probes": { scene: "cathedral", view: 20, set: { lite: true } },
+  campfire: { scene: "forest", view: 0, sun: -30, eye: [3.5, 1.4, 1.0], at: [7, 1.0, -1], set: { volumes: true } },
+  incense: { scene: "cathedral", view: 0, sun: 18, eye: [66.2, 1.8, 0.4], at: [68.4, 2.4, 1.9], set: { volumes: true } },
+  dust: { scene: "cathedral", view: 0, sun: 18, eye: [20, 1.7, -4], at: [30, 7, 6], set: { volumes: true } },
+  "vol-steps": { view: 21, set: { volumes: true } },
+  canopy: { scene: "forest", view: 0, sun: 18, eye: [0, 30, 0], at: [200, 0, -60] },
+  "voxel-clusters": { scene: "forest", view: 22, eye: [0, 30, 0], at: [200, 0, -60] },
+  "assembly-parts": { scene: "forest", view: 23 },
+  gallery: { scene: "gallery", view: 0 },
+  "gallery-paint": { scene: "gallery", view: 0, eye: [-7.2, 1.9, 3.4], at: [-7.2, 1.5, 0] },
+  "gallery-night": { scene: "gallery", view: 0, sun: -30, eye: [-1.9, 1.5, 1.8], at: [-1.45, 1.35, 0] },
+  "gallery-features": { scene: "gallery", view: 24, set: { substrate: true } },
 };
 async function applyPreset(name) {
   const p = PRESETS[name];
   if (!engine || !p) return;
-  if (p.scene && !(await loadScene(p.scene))) return;
+  if (p.model && !(await loadModel(p.model, p.name))) return;
+  if (p.scene && !(await loadScene(p.scene, p.candles))) return;
   if (p.view !== undefined) engine.heliosSetView(p.view);
   if (p.sun !== undefined) { $("#sun").value = p.sun; setSun(p.sun); }
   if (p.eye) engine.heliosLookAt(...p.eye, ...p.at);
+  for (const [feature, want] of Object.entries(p.set || {})) ensure(...ENSURE[feature], want);
+  setTimeout(updateTelemetry, 60);
 }
 
 for (const b of $$("[data-scene]")) b.addEventListener("click", () => loadScene(b.dataset.scene));
@@ -591,14 +979,17 @@ for (const b of $$("[data-toggle]")) b.addEventListener("click", () => { engine?
 
 // ---- Telemetry ------------------------------------------------------------------------------
 const CATS = [
-  { id: "geo", color: "#8fb7e6", hu: "Geometria", en: "Geometry", match: /cull|raster(?! vsm)|hzb|visible/ },
-  { id: "mat", color: "#c7a6e8", hu: "Anyagok", en: "Materials", match: /material|rvt|svt|texture/ },
+  { id: "geo", color: "#8fb7e6", hu: "Geometria", en: "Geometry", match: /^(cull|raster|hzb|assembly)/ },
+  { id: "mat", color: "#c7a6e8", hu: "Anyagok", en: "Materials", match: /material|rvt|svt|texture|subsurface/ },
+  { id: "fx", color: "#e98fb4", hu: "Térfogatok", en: "Volumes", match: /^volume |particle|^oit/ },
   { id: "vsm", color: "#e88c6f", hu: "Árnyékok", en: "Shadows", match: /vsm|shadow/ },
   { id: "lumen", color: "#f2b04a", hu: "Lumen", en: "Lumen", match: /lumen|gi temporal/ },
   { id: "air", color: "#7fd1a3", hu: "Ég és köd", en: "Sky & fog", match: /sky|cloud|fog/ },
   { id: "light", color: "#ece6da", hu: "Megvilágítás", en: "Lighting", match: /light|translucen/ },
   { id: "post", color: "#9fa8ba", hu: "Kép", en: "Image", match: /.*/ },
 ];
+// Live readouts in the chapters: GPU passes summed by name.
+const READOUTS = { "t-direct": /^(light culling|local light shadows|lighting|megalights)/, "t-gather": /final gather|^lumen lite/, "t-fx": /^volume |particle|^oit/ };
 const fmt = (n, d = 1) => n.toLocaleString(lang === "en" ? "en-US" : "hu-HU", { minimumFractionDigits: d, maximumFractionDigits: d });
 function updateTelemetry() {
   if (!engine) return;
@@ -612,28 +1003,29 @@ function updateTelemetry() {
   if (tris) $("#t-tris").textContent = fmt(Number(tris[1]), 2) + " M";
   const src = /([\d.]+) M source tris/.exec(hud);
   if (src) $("#t-src").textContent = fmt(Number(src[1]), 0) + " M";
-  // Feature states, e.g. "GI on · shadows on · wind off".
-  const states = {};
-  for (const m of hud.matchAll(/([A-Za-z][A-Za-z ]*?) (on|off)\b/g)) states[m[1].trim().toLowerCase()] = m[2] === "on";
-  const toggles = { KeyG: "gi", KeyL: "wind", Digit1: null, Slash: null };
+  // Feature states of the toggle buttons.
+  const states = hudStates(hud);
   for (const b of $$("[data-toggle]")) {
-    const key = toggles[b.dataset.toggle] ?? b.dataset.label;
-    const on = Object.entries(states).find(([k]) => k.includes(key));
-    if (on) {
-      b.setAttribute("aria-pressed", String(on[1]));
-      $(".state", b).textContent = on[1] ? t("be", "on") : t("ki", "off");
+    const label = b.dataset.label;
+    const on = label in states ? states[label] : Object.entries(states).find(([k]) => k.includes(label))?.[1];
+    if (on !== undefined) {
+      b.setAttribute("aria-pressed", String(on));
+      $(".state", b).textContent = on ? t("be", "on") : t("ki", "off");
     }
   }
   // Per-pass GPU time, grouped.
   const line = hud.split("\n").find((l) => l.startsWith("GPU: "));
   if (!line) return;
   const sums = Object.fromEntries(CATS.map((c) => [c.id, 0]));
+  const reads = Object.fromEntries(Object.keys(READOUTS).map((id) => [id, null]));
   for (const part of line.slice(5).split(" · ")) {
     const m = /^(.+?) ([\d.]+)$/.exec(part.trim());
     if (!m) continue;
     const cat = CATS.find((c) => c.match.test(m[1]));
     sums[cat.id] += Number(m[2]);
+    for (const [id, re] of Object.entries(READOUTS)) if (re.test(m[1])) reads[id] = (reads[id] ?? 0) + Number(m[2]);
   }
+  for (const [id, ms] of Object.entries(reads)) $("#" + id).textContent = ms === null ? "–" : fmt(ms, 2) + " ms";
   const total = Object.values(sums).reduce((a, b) => a + b, 0);
   const scale = Math.max(16.7, total);
   $("#bar").innerHTML = CATS.map((c) => `<i style="width:${(sums[c.id] / scale) * 100}%;background:${c.color}" title="${t(c.hu, c.en)}"></i>`).join("")
