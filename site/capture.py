@@ -31,6 +31,8 @@ MODELS = [FOX]
 LAKE_DOWN = ['--eye', '-5,6,10', '--at', '-5,-1,24']
 AISLE = ['--eye', '31,1.5,10.5', '--at', '38,3,13.5']
 GLASS = ['--eye', '14,1.7,10.25', '--at', '-0.6,3,10.25']
+# South aisle looking west: the windows' coloured patches on the piers and the floor (round 7).
+GLASS_AISLE = ['--eye', '45,1.7,10.3', '--at', '5,4,10.8']
 SPONZA_VIEW = ['--gltf', SPONZA, '--eye', '-9,1.6,0', '--at', '9,3.5,0']
 # Round 4 views (the page's presets use the same cameras).
 NIGHT = ['--sun', '200,-30']
@@ -65,6 +67,9 @@ STILLS = {
     'shadow_local_off': ['--scene', 'cathedral', '--sun', '200,-30', '--keys', 'Digit1'],
     'shadow_local_on': ['--scene', 'cathedral', '--sun', '200,-30'],
     'shadow_local_pages': ['--scene', 'cathedral', '--sun', '200,-30', '--view', '15'],
+    # Round 7: sunlight through the stained glass, white / coloured by the panes
+    'glass_shadow_off': ['--scene', 'cathedral', '--no-glass-shadows'] + GLASS_AISLE,
+    'glass_shadow_on': ['--scene', 'cathedral'] + GLASS_AISLE,
     # Lumen
     'gi_off': ['--scene', 'cathedral', '--keys', 'KeyG'],
     'gi_on': ['--scene', 'cathedral'],
