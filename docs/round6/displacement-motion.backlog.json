@@ -1,0 +1,96 @@
+[
+  {
+    "id": "animated-displacement-speed-bound",
+    "title": "Animált elmozdítás sebességkorlátja: az árnyéklapok csak szükség szerint frissülnek",
+    "area": "Virtuális geometria",
+    "kind": "fix",
+    "summary": "Az időtől függő (Time, Panner) elmozdítású anyaggráfokhoz az anyagfordító konzervatív sebességkorlátot vezet le, így a gyorsítótárazott árnyéklapok – ahogy a szélnél – csak akkor renderelődnek újra, ha a felület már két texelnyit mozdulhatott azóta, hogy a lapot utoljára rajzolták. Korábban minden lap, amelynek texele finomabb volt az elmozdítás hatótávjánál, minden képkockán frissült.",
+    "details": "helios_material::motion: az elmozdító függvény csomópontjain absztrakt interpretáció fut; minden érték komponensenként intervallumot (az összes pontra és időre) és sebességkorlátot (|∂v/∂t|) kap. Szabályok: szorzatnál max|a|·rate(b) + max|b|·rate(a), szinusz/koszinusz az argumentum sebességét tartja, smoothstep meredeksége legfeljebb 1,5/(max−min), a zaj Lipschitz-állandója 4,7 (numerikusan meghatározott felső korlát bármely [−1,1]³ gradiensre: 4,625 a cella közepén), Panner: rate(uv) + |speed|·rate(t), a forgatás (TransformVector) a vektor sebességét tartja. Időben szakadásos csomópont (Frac, Floor, Step, If mozgó értéken), időtől függő koordinátájú textúra, a nullát is felvehető mozgó osztó vagy Time hatványa korlátlan: ezek maradnak a képkockánkénti frissítésnél. A korlát az anyagpéldány paraméterértékeivel számolódik (CompiledGraph::displacement_speed), újrafordítás nélkül követi a csúszkákat. A TessMaterial új motion mezője hordozza (objektum egység/s, negatív: korlátlan; write_graph_motion), a vsm_invalidate collect lépése példányonként per_frame = min(sebesség·Δt, 2·hatótáv) értéket ad a lábnyomnak a korábbi 2·hatótáv helyett. RenderSettings::displacement_speed_bound / --no-displacement-speed-bound adja vissza a referenciát. Szélben is mozgó animált példánynál a két mozgás összeadódik.",
+    "metrics": "2560×1440, RTX 3090 három másik ügynökkel megosztva, a main buildjével váltakozó futások, 3 futás minimuma; lapok és árnyék-mikroháromszögek az utolsó 60 képkocka átlagai. Kendő közelről: 172 → 140 lap/képkocka, árnyék-mikroháromszög 9,95 → 9,55 M, árnyéktesszeláció 2,07 → 2,04 ms, GPU 11,74 → 11,66 ms (a legfinomabb szintek 2–4 mm-es küszöbe kisebb a kendő képkockánkénti 4,4 mm-énél, ezek továbbra is minden képkockán frissülnek). Kendő 7 m-ről: 83 → 45 lap, 0,34 → 0,13 M, 0,17 → 0,12 ms. Galéria alapnézet: 9 → 2,2 lap/képkocka (67 %-on 9 → 1,5). Elavult árnyék nincs: álló kamerával a képkockánkénti referenciához képest 64,4–64,6 dB, legfeljebb 0,0001 % pixel tér el 24/255-nél jobban; időbeli stabilitás 0,0032 % (ugyanannyi, mint a referenciáé és a main-é). A kendő korlátja 1,64 × magnitude/s = 26 cm/s.",
+    "showcase": "Galéria, hullámzó kendő: --scene gallery --eye 4.4,0.6,10.9 --at 6.3,0.15,9.0 (a kendő árnyéka együtt mozog a hullámokkal; debug nézet 16 – Invalidation – a durvább szinteken ritkábban villan). Összehasonlítás: --no-displacement-speed-bound (képkockánkénti frissítés), a képek zajon belül egyeznek. A Details panel az animált anyagnál kiírja a korlátot (cm/s).",
+    "modules": [
+      "crates/helios-material/src/motion.rs",
+      "crates/helios-material/src/compile.rs",
+      "crates/helios-render/src/tessellation.rs",
+      "crates/helios-render/src/substrate_gpu.rs",
+      "crates/helios-render/src/material_graphs.rs",
+      "crates/helios-render/src/shaders/displacement.wgsl",
+      "crates/helios-render/src/shaders/vsm_invalidate.wgsl",
+      "crates/helios-render/src/renderer.rs",
+      "crates/helios-demo/src/main.rs"
+    ]
+  },
+  {
+    "id": "displacement-vector-spaces",
+    "title": "Objektum- és tangenstérbeli vektoros elmozdítás (TransformVector csomópont)",
+    "area": "Virtuális geometria",
+    "kind": "feature",
+    "summary": "Új TransformVector csomópont (UE Transform: Tangent, Local = Object, World) irányvektorokat alakít a terek között a gráf mindkét függvényében. Az objektum- vagy tangenstérben épített vektoros elmozdítás így együtt fordul a példánnyal: a forgó példányon a konstansokból épített vektor is vele fordul, a tesszelátorban, az árnyéklapokon, a resolve-ban és a mozgásvektorokban egyaránt.",
+    "details": "Csomópont a lábon választott tér helyett: így a VectorDisplacement láb jelentése, korlátja (magnitude · skála) és sebességelemzése változatlan, a csomópont pedig kombinálható (tangenstérbeli hajlítás + világtérbeli megereszkedés), és a felületi függvényben is használható – ez az UE-s minta is (WPO világtérben, előtte Transform). Objektumtér: a példány lineáris része osztva a legnagyobb skálával (L/s), így az egységvektor egység marad, és a tesszelátor normálmátrixos visszaalakítása után az eltolás pontosan vektor · magnitude objektumegységben. Tangenstér az elmozdításban: az interpolált objektumnormál és a normál síkjába vetített objektum X tengely (X irányú normálnál Z) – a mesh nem tárol tangenst, az UV-ból háromszögenként számolt keret az élek két oldalán eltérne (repedés); ez a keret a két oldalon bitre azonos. Síkokon és terepen (U az objektum X mentén) egybeesik az árnyalási kerettel. A felületi függvényben a tangenstér a pixel árnyalási kerete (mint a normal map). A mozgásvektor pontos: az objektum- és tangenstérbeli vektor objektumtérbeli eltolása forgásfüggetlen, az előző pozíció az előző transzformáción megy át. Szerkesztő: paletta (Vector kategória), két legördülő tér-választó, az állapotsor 'tangent-space vector displacement'-et ír; a .helios.json a tereket név szerint menti. Preset: combed_tufts. A galéria nyolc kiterjesztett resolve slotja megtelt, ezért 16-ra (8–23) bővült.",
+    "metrics": "Forgó korong nézet (2560×1440): GPU 9,78 ms, 1,79 M mikroháromszög, ~40 árnyéklap/képkocka (mozgó vető), árnyéktesszeláció 0,39 ms. Az alapnézetek nem drágultak (galéria 8,08 → 8,01 ms, völgy 8,74 → 8,72, katedrális 10,83 → 10,83, erdő 16,92 → 16,74; 67 %-on is zajon belül). Teszt: a CPU-tükörben az objektum- és tangenstérbeli vektor objektumtérbeli eltolása két forgatásnál azonos, nem egyenletes skálánál vektor · magnitude; a világtérbeli változik. Böngésző (fej nélküli Chromium, WebGPU): konzol-, WGSL- és validációs hiba nélkül.",
+    "showcase": "Galéria, forgó korong fésült csomókkal az alapnézet mögött: --scene gallery --eye 1.9,1.1,15.6 --at 0,0.1,13.4 (a csomók dőlése a koronggal együtt fordul; 24 s alatt egy fordulat, 0 billentyű megállítja). Gráfszerkesztő: 'Combed tufts' gráf, TransformVector Tangent → World.",
+    "modules": [
+      "crates/helios-material/src/graph.rs",
+      "crates/helios-material/src/nodes.rs",
+      "crates/helios-material/src/compile.rs",
+      "crates/helios-material/src/presets.rs",
+      "crates/helios-render/src/shaders/displacement_graph.wgsl",
+      "crates/helios-render/src/shaders/displacement_height.wgsl",
+      "crates/helios-render/src/shaders/material_graph.wgsl",
+      "crates/helios-render/src/tessellation.rs",
+      "crates/helios-demo/src/scenes/gallery.rs",
+      "web/editor/graph.js",
+      "web/editor/details.js",
+      "crates/helios-demo/src/editor/describe.rs",
+      "crates/helios-demo/src/editor/materials.rs"
+    ]
+  },
+  {
+    "id": "extended-resolve-slots-16",
+    "title": "16 kiterjesztett resolve slot (8–23) a 8 helyett",
+    "area": "Anyagok és árnyalás",
+    "kind": "fix",
+    "summary": "A galéria Substrate-anyagai (két árnyalási modell) és hat gráfja betöltötte mind a nyolc kiterjesztett resolve pipeline-t; egy kilencedik gráf (a fésült csomók) figyelmeztetéssel, gráf nélkül renderelődött volna. Az osztályozás most 24 slotot (8 sima + 16 kiterjesztett) kezel.",
+    "details": "classify.wgsl és gbuffer.wgsl: RESOLVE_SLOTS 24, TILE_ARGS 24, TILE_LISTS 120; a prepare_tiles 32 szálas munkacsoport, a 24 feletti szálak kilépnek. passes/material.rs: EXTENDED_SLOTS 16, RESOLVE_SLOTS, a számlálók törlése a slotok számából. targets.rs: a csempelista-puffer slotszámból méreteződik (2560×1440-nél 1,8 MiB-tal nagyobb). A figyelmeztetés szövege a slotszámot írja ki.",
+    "metrics": "A galéria resolve-ja 0,93 → 0,94 ms (2560×1440), a többi jelenet változatlan; a csempelista-puffer 2560×1440-nél 1,8 MiB-tal nagyobb.",
+    "showcase": "Nem bemutatandó; a galéria minden gráfja a saját pipeline-jával renderelődik (a fésült csomók is).",
+    "modules": [
+      "crates/helios-render/src/passes/material.rs",
+      "crates/helios-render/src/shaders/classify.wgsl",
+      "crates/helios-render/src/shaders/gbuffer.wgsl",
+      "crates/helios-render/src/targets.rs",
+      "crates/helios-render/src/substrate_gpu.rs"
+    ]
+  },
+  {
+    "id": "combed-tufts-turntable",
+    "title": "Galéria: forgó korong fésült csomókkal (tangenstérbeli vektoros elmozdítás)",
+    "area": "Jelenetek és demó",
+    "kind": "feature",
+    "summary": "Új preset (Combed tufts) és galériaelem: objektumtérbeli cellákban hegyes csomók, amelyek a felület tangense felé hajlanak; a vektor tangenstérben épül és TransformVector fordítja világtérbe, így egy 24 s-os fordulatú korongon a dőlés a koronggal együtt fordul. Az alapnézetek mögött áll, így azok nem drágulnak.",
+    "details": "presets::combed_tufts: magasság (1 − smoothstep(0, 0,42, r))², a mesh UV-széleinél zsugorítva; vektor (lean · magasság² · 0,7, 0, magasság · 0,7) tangenstérben; paraméterek: Tuft Density (3/objektum-méter), Lean (0,8), Root/Tip Color. A galériában az ágyás-mesh 0,6-os skálán (1,8 m), magnitude 22 cm (9 cm magas csomók), egy dob tetején, DemoMotion Spin (mozgatható példány).",
+    "metrics": "1,79 M mikroháromszög a korong nézetében (raster 1,20 ms, resolve 0,96 ms), ~40 árnyéklap/képkocka forgás közben; az alapnézet mögött áll, a galéria alapnézete nem lassult (8,08 → 8,01 ms).",
+    "showcase": "--scene gallery --eye 1.9,1.1,15.6 --at 0,0.1,13.4; több képkockaszámnál (--frames) a dőlés iránya a korong forgásával együtt fordul. Debug nézet 25: a tesszeláció.",
+    "modules": [
+      "crates/helios-material/src/presets.rs",
+      "crates/helios-demo/src/scenes/gallery.rs"
+    ]
+  },
+  {
+    "id": "editor-speed-bound-and-spaces",
+    "title": "Szerkesztő: sebességkorlát és vektorterek megjelenítése",
+    "area": "Platform és eszközök",
+    "kind": "feature",
+    "summary": "A Details panel animált elmozdításnál kiírja a sebességkorlátot cm/s-ban (vagy hogy nincs korlát, és az árnyékok minden képkockán frissülnek); a gráfszerkesztő állapotsora a TransformVector által világtérbe fordított tereket ('tangent-space vector displacement') és az animáció korlátját ('≤ 1,64 × magnitude/s') mutatja; a TransformVector csomópontnak két tér-választója van.",
+    "details": "heliosEditorState: anyagonként displacement_speed (m/s egységnyi skálán, null: korlátlan), gráfonként displacement_speed (a magnitúdó egységében, alapértékekkel). Fej nélküli mérésekhez a natív futás az utolsó 60 képkocka átlagos renderelt árnyéklap- és árnyék-mikroháromszögszámát is naplózza.",
+    "metrics": "Teszt: a ruha korlátja anyagonként = gráfkorlát × magnitude; a combed tufts gráf TransformVector csomópontja és terei jelenetfájlban visszatöltődnek; a paletta Object → World alapértékkel kínálja.",
+    "showcase": "Szerkesztő (Tab): Combed tufts és Rippling cloth gráf állapotsora; a kendő anyagának Details panelje.",
+    "modules": [
+      "web/editor/graph.js",
+      "web/editor/details.js",
+      "crates/helios-demo/src/editor/describe.rs",
+      "crates/helios-demo/src/editor/materials.rs",
+      "crates/helios-demo/src/editor/tests.rs"
+    ]
+  }
+]
