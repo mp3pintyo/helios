@@ -110,10 +110,11 @@ class BakePool {
       return;
     }
     if (data.id !== entry.task) return;
+    // A task that trapped may have left the instance broken: the worker is replaced.
+    if (data.error) return this.fail(entry, `could not run a bake (${data.error})`);
     clearTimeout(entry.timer);
     entry.task = 0;
-    this.settle(data.id, data.output ? new Uint8Array(data.output) : null);
-    if (data.error) console.warn(`helios: bake worker task failed (${data.error}); running it on the page`);
+    this.settle(data.id, new Uint8Array(data.output));
     this.dispatch();
   }
 
