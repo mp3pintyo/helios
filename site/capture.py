@@ -19,7 +19,7 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ROOT = sys.argv[sys.argv.index('--out') + 1] if '--out' in sys.argv else os.path.join(REPO, 'site', 'media-src')
 EXE = os.path.join(REPO, 'target', 'release', 'helios.exe')
 # glTF test assets (Sponza, DamagedHelmet from the Khronos glTF Sample Assets).
-ASSETS = os.environ.get('HELIOS_ASSETS', r'D:\AI\helios-work\assets')
+ASSETS = os.environ.get('HELIOS_ASSETS', os.path.join(REPO, 'assets'))
 FFMPEG = shutil.which('ffmpeg') or r'c:\Apps\ffmpeg-shared\bin\ffmpeg.exe'
 SPONZA = os.path.join(ASSETS, 'Sponza', 'Sponza.gltf')
 HELMET = os.path.join(ASSETS, 'DamagedHelmet', 'DamagedHelmet.glb')

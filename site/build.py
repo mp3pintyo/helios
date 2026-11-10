@@ -18,7 +18,7 @@ import sys
 SITE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(SITE)
 MEDIA = sys.argv[1] if len(sys.argv) > 1 else os.path.join(SITE, 'media-src')
-ASSETS = os.environ.get('HELIOS_ASSETS', r'D:\AI\helios-work\assets')
+ASSETS = os.environ.get('HELIOS_ASSETS', os.path.join(ROOT, 'assets'))
 DIST = os.path.join(SITE, 'dist')
 
 SKELETON = ('<!doctype html><html><head><meta charset="utf-8"><link rel="icon" href="data:,">'
