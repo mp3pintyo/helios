@@ -114,6 +114,7 @@ glTF paths resolve against it), `--select i,j` (outline these instances, as the 
 `--gi lumen|lite|auto`, `--megalights`, `--lights N` (the candle-lit cathedral: the first N of up to 1008 candle flames
 lit, each a shadow-casting light), `--no-skinning` (import a glTF model's skinned meshes as static bind-pose meshes, for
 cost comparisons), `--full-invalidation` (every move invalidates everything, as before per-instance invalidation),
+`--moving-light-maps` (moving local lights take spare shadow-map slots again, re-rendered every frame they move),
 `--movers N` (only the first N moving prop groups move), `--static-motion` (the props move as `Mobility::Static`
 instances: the one-off edit path), `--no-tessellation`, `--dice-rate N` (pixels per micro-triangle edge, default 2),
 `--speed N` (fly speed in m/s for held keys, e.g. a slow dolly: `--hold KeyW --speed 0.3`).
@@ -318,7 +319,10 @@ resolution.
 **Measurements.** Unless stated otherwise, costs are GPU times at 1600×900 on an RTX 3090. Those added in round 4
 were taken while the GPU was shared with up to six other agents' builds and renders: they are minima (medians where
 stated) of interleaved on/off runs, whole-frame totals were at times swamped by the other load, and per-pass minima
-are the reliable numbers. The per-feature notes in [`docs/round4/`](docs/round4/) hold the full tables.
+are the reliable numbers. The per-feature notes in [`docs/round4/`](docs/round4/) hold the full tables. Default views
+at 2560×1440, 100 % / 67 % screen percentage, round 3 → round 4 ([`perf-regressions.md`](docs/round4/perf-regressions.md)):
+valley 8.1 / 5.6 → 8.7 / 5.4 ms, cathedral 10.9 / 6.9 → 10.2 / 6.4 ms, forest 14.5 / 11.0 → 17.9 / 12.1 ms (the
+campfire's shadow-casting light and Nanite Foliage's assemblies).
 
 * **Streaming** (`streaming.rs`, `page_source/`). Cluster and page records are always resident; vertex/triangle data
   lives in a fixed GPU pool. Culling stamps "a resident parent wants to refine into this page" into a feedback buffer,
@@ -383,7 +387,10 @@ are the reliable numbers. The per-feature notes in [`docs/round4/`](docs/round4/
   barycentric derivatives for proper filtering; per-triangle tangent frames replace stored tangents; triplanar
   mapping is available in world or object space. The G-buffer resolve and the hardware shadow page raster
   compile skinning only into a `SKINNING` permutation used while the scene has skinned instances (see *Skeletal
-  meshes*).
+  meshes*), and the debug views' recolouring of the G-buffer only into a `DEBUG_VIEWS` permutation used while a
+  debug view is shown: kept in the lit pipelines, a dozen debug colourings kept their inputs (cluster, triangle,
+  instance record, barycentrics) alive across the material evaluation, and the resolve ran 1.4× slower (cathedral at
+  1440p 1.01 → 0.73 ms, forest 0.99 → 0.85 ms).
 * **Substrate-lite** (`substrate.rs`, `substrate_gpu.rs`, `substrate.wgsl`, `brdf.wgsl`, `resolve_extended.wgsl`,
   `subsurface.rs`, `subsurface.wgsl`; UE 5.7's Substrate reduced to one slab per material). `Material::slab`
   (`Slab`) extends the metallic-roughness base with the dielectric's F0 / F90 from an **index of refraction** and a
@@ -620,13 +627,20 @@ are the reliable numbers. The per-feature notes in [`docs/round4/`](docs/round4/
   maps**: movable instances are *dynamic casters* like wind-animated vegetation (the `MOVABLE` instance flag), so they
   stay out of the pages' static layers. The CPU writes each moved caster's footprint into the invalidation list
   before the GPU appends its streaming and wind footprints: the light-space rectangle around the instance's oriented
-  box in its old and new pose (one swept footprint for a small move, one per pose for a jump) — for a chandelier on
-  its 12 m chain a third of the area of its bounding circle — and its bounding spheres for local lights' faces and
-  mips (a skinned instance's padded by its skin's largest reach). Pages under a movable caster re-render only their
-  dynamic casters over their cached static layer; pages under a static instance that was moved are freed and
-  rendered in full. At rest a movable instance costs nothing. **Lumen**: the instance's distance-field record is
-  rewritten in place and the 8³-voxel bricks of each global-field clipmap level under its old and new box (plus the
-  narrow band) are recomposed — distance, albedo and the per-voxel closest card instance — by two new passes over a
+  box in its old and new pose (one swept footprint for a small move, one per pose for a jump) and its bounding
+  spheres for local lights' faces and mips (a skinned instance's padded by its skin's largest reach). A long box is
+  cut into up to 8 roughly cubic slices along its longest axis, each with a footprint of its own (a chandelier's
+  iron, a 2.8 m ring on a 12 m chain: five of 2.4 m instead of one 6.3 m sphere over most of every nearby candle
+  light's cube). A movable caster's footprints also carry a speed bound per slice — its largest corner displacement
+  per frame, held with a slow decay — so, as for the wind, a page is refreshed once the slice may have moved 2 of its
+  texels since the page was rendered: the slices near a pendulum's pivot hardly ever, the swinging ring's fine pages
+  every frame and coarse mips every few. Skipped pages may show the caster up to 2 texels off, so the GPU pads move
+  footprints by that much, and a caster that stops is refreshed once more at rest. Pages under a movable caster
+  re-render only their dynamic casters over their cached static layer; pages under a static instance that was moved
+  (or a jump) are freed and rendered in full. At rest a movable instance costs nothing. **Lumen**: the instance's
+  distance-field record is rewritten in place and the 8³-voxel bricks of each global-field clipmap level under its
+  old and new box (plus the narrow band) are recomposed — distance, albedo and the per-voxel closest card instance —
+  by two new passes over a
   brick list (`cull_listed`, `compose_listed` in `lumen_sdf.wgsl`, one workgroup per brick), within a budget of 1024
   bricks per frame (the rest queue up, finest level first). A level recomposes under an instance only once some
   point of it moved a quarter of that level's voxel since the level last composed it, so the 0.25 m level follows a
@@ -659,7 +673,11 @@ are the reliable numbers. The per-feature notes in [`docs/round4/`](docs/round4/
   (0.42 ms), with it 24–120 (≤ 0.07 ms). CPU: a scan of the instances in frames where something moved plus a few
   record writes. Temporal stability (valley, static camera, pixels changing by more than 24/255 outside the movers and
   their shadow pages): 0.049 % moving vs 0.042 % paused (noise: water waves). Scenes without moving instances render
-  as before.
+  as before. Slices and speed bounds (2560×1440): the swinging cathedral's static candle lights refreshed ~820 pages a
+  frame under the chandeliers (`vsm expand` 0.68 ms), now ~25 (0.23 ms); the valley's sculpture and raft 38 → 15 sun
+  pages. The chandeliers' own lights no longer get shadow maps while they move (*Local light virtual shadow maps*):
+  cathedral GPU frame 14.86 → 10.17 ms (100 %), 10.03 → 6.36 ms (67 %), below the paused cathedral (10.5–10.7 ms,
+  every light shadow-mapped).
 * **Nanite Foliage** (`helios-geometry/src/voxel.rs`, `assembly.rs`; `helios-render/src/assembly.rs`,
   `voxel.wgsl`, `voxel_raster.wgsl`, `vsm_voxel_raster.wgsl`, `voxel_resolve.wgsl`, `assembly.wgsl`; UE 5.7's
   experimental Nanite Foliage). Aggregate geometry — canopies, needles, fronds, grass — cannot be simplified as
@@ -947,9 +965,10 @@ are the reliable numbers. The per-feature notes in [`docs/round4/`](docs/round4/
   (63 before MegaLights). Lights are also injected into the surface cache, so they bounce.
 * **Local light virtual shadow maps** (`vsm_local.rs`, `vsm_local_common.wgsl`, `vsm_local_sample.wgsl`). As in UE5,
   up to 32 shadow-casting point and spot lights per frame — the most influential on screen (range sphere coverage ×
-  brightness, with hysteresis so slots and their pages stick), static lights first: a light that moved within the
-  last 30 frames only gets a slot static lights left over (its cube re-renders in full every frame it moves), and
-  under MegaLights, which traces every light's shadow anyway, none — get virtual shadow maps: six cube faces for a point
+  brightness, with hysteresis so slots and their pages stick), static lights only: a light that moved within the
+  last 30 frames keeps distance-field shadows (its cube would re-render in full every frame it moves; with
+  `RenderSettings::moving_light_shadow_maps` / `--moving-light-maps` it gets a slot static lights left over, except
+  under MegaLights, which traces every light's shadow anyway) — get virtual shadow maps: six cube faces for a point
   light, one perspective face for a spot light, each a 4096² virtual map with a mip chain down to one 128² page.
   Their pages are entries of the sun's page cache after its clipmap levels and live in the same physical atlas, so
   the sun and all lights share one pool, one allocation, one dirty list and the same page renderer (the (cluster,
@@ -980,7 +999,12 @@ are the reliable numbers. The per-feature notes in [`docs/round4/`](docs/round4/
   chandeliers' candles took slots and re-rendered ~970 pages a frame (page raster 11–15 ms); static lights first cut
   that to 713 dynamic-only refreshes (0.11 ms), but near the altar six swinging candles still took the slots left
   over (11.6 ms), hence no slots for moving lights under MegaLights (0.06 ms). The clustered loop keeps the
-  leftover-slot rule; the default cathedral (33 lights) is unchanged.
+  leftover-slot rule as an option only: by default it gives moving lights no slots either, since in the default
+  cathedral (33 lights) the eleven swinging chandelier lights took 10 spare slots and re-rendered their cubes every
+  frame (~80 full pages, `vsm raster` 3.1 ms at 1440p). Their distance-field shadows cost less (lighting 2.14 → 1.88
+  ms: four traced lights per pixel instead of ten more mapped ones), the page pool is no longer full (78 requested
+  pages went unallocated every frame), and with a 1.4 m source radius the image barely changes (42 dB PSNR, 0.02 % of
+  pixels over 24/255: the soft bands under the pier capitals are fainter).
 * **MegaLights** (`megalights.rs`, `megalights_sample.wgsl`, `megalights_shade.wgsl`, `megalights_denoise.wgsl`,
   `megalights_common.wgsl`, `megalights_surface.wgsl`; UE 5.5's MegaLights). `RenderSettings::mega_lights` (`=`)
   replaces the clustered light loop — which can shadow only the 32 shadow-mapped lights plus four distance-field
@@ -1182,7 +1206,10 @@ are the reliable numbers. The per-feature notes in [`docs/round4/`](docs/round4/
   while on screen: 72 bytes per internal pixel (104 MiB at 1600×900) plus the grids (campfire: seven 1 MiB rgba16f
   fields, 1 MiB of pressure and divergence, a 0.1 MiB cache). Temporal stability (static camera, pixels changing by
   more than 24/255): inside the campfire's rectangle 0.11 → 0.42 % (the flames and sparks move), outside it 0.070 →
-  0.083 %; cathedral 0.002 → 0.005 %.
+  0.083 %; cathedral 0.002 → 0.005 %. Not in these numbers (the light stays with `'` off): the campfire's 18 m
+  shadow-casting light refreshes ~120 cube-map pages a frame under the swaying ferns, grass and bushes of the
+  clearing (wind invalidation, ~65 k page draws), +2.0–2.3 ms of `vsm raster` in the forest's default view at
+  2560×1440 (18.4 ms, 16.6 ms with its shadows off) — most of the forest's cost over round 3 besides Nanite Foliage.
 * **Temporal stability.** The renderer coarsens the LOD threshold when visible work nears the culling list
   capacities, instead of letting the GPU drop arbitrary clusters (which flickers). Lumen clamps ray radiance relative
   to the exposure (as UE's `MaxRayIntensity`: tiny bright emitters such as candle flames otherwise tint random probes
@@ -1417,10 +1444,11 @@ Honest differences that remain:
    material's texture) or stored in scene files; time is the renderer's clock.
 4. **Local lights**: at most 32 lights per frame get virtual shadow maps, sharing the sun's 1024-page physical pool
    (UE's default pool is four times larger), so local lights request pages half a mip coarser than the screen
-   footprint; a moving light gets a slot only where static lights leave one spare, and then re-renders all its pages
-   every frame it moves. With the classic clustered loop, the rest get distance-field shadows for the strongest few
-   per pixel and no shadows beyond those (light leaks through walls), and shadow-map soft shadows are PCSS-filtered,
-   not ray-marched. **MegaLights** shadows every light but traces no hardware rays (WebGPU has none): beyond the 1 m
+   footprint; a moving light keeps distance-field shadows until it rests (30 frames; optionally a spare slot, then
+   re-rendering all its pages every frame it moves). With the classic clustered loop, the rest get distance-field
+   shadows for the strongest few per pixel and no shadows beyond those (light leaks through walls), and shadow-map
+   soft shadows are PCSS-filtered, not ray-marched. **MegaLights** shadows every light but traces no hardware rays
+   (WebGPU has none): beyond the 1 m
    screen trace, rays use the light's virtual shadow map (only the ≤ 32 static lights with one; SMRT-style, 8 steps) or
    Lumen's distance fields, which are coarser than triangles (mesh SDFs of at most 48 voxels per axis, 0.25 m global
    voxels beyond 2 m from both ends). The screen trace marches the depth buffer linearly (8 steps, no HZB traversal:
@@ -1478,13 +1506,13 @@ Honest differences that remain:
    a figure that once stretched far refreshes a larger area. Root motion is not extracted (animated root joints move
    the posed bounds, not the instance).
 9. **Dynamic world**: moves are rigid transforms of whole instances (deformation is skinning, item 8). A moved
-   caster's shadow footprint is its whole oriented box in light space, so a long, thin caster (a chandelier's chain)
-   refreshes pages its geometry doesn't touch; UE invalidates per primitive too, but its instance-culled page
-   invalidation is tighter. Rigid moves have no bounded speed, so every page under a moving caster is refreshed every
-   frame it moves (the wind skips pages it cannot have changed by two texels). A moving local light that holds a
-   shadow-map slot re-renders all of its pages every frame (item 4; in the demo the chandeliers' lights dominate the
-   cost of their motion). The global distance field lags by up to a quarter voxel per level (and further for a fast
-   mover beyond the brick budget); an instance that stops within that distance of where a level last composed it
+   caster's shadow footprint is its oriented box in light space, cut into at most 8 slices along its longest axis,
+   so a thin caster with a wide part (a chandelier's chain above its ring) still refreshes some pages its geometry
+   doesn't touch; UE's instance-culled page invalidation is tighter. A move's speed bound is its current displacement
+   held with a decay, not a true bound: a caster that slows down sharply can leave a page a few texels stale until it
+   moves on or stops. A moving local light gets distance-field shadows, not a re-rendered shadow map (item 4). The
+   global distance field lags by up to a quarter voxel per level (and further for a fast mover beyond the brick
+   budget); an instance that stops within that distance of where a level last composed it
    stays there. The voxel surface cache and radiance cache follow moves over a few frames instead of being
    invalidated locally. Instance records are rewritten with one `write_buffer` per contiguous run, not a GPU scatter
    of dirty records (UE's GPU-scene update); adding, hiding or removing instances still rebuilds all instance data.

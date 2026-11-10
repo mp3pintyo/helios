@@ -1,0 +1,46 @@
+[
+  {
+    "id": "moving-lights-distance-field-shadows",
+    "title": "Mozgó helyi fények távolságmező-árnyékkal a klasszikus fényhurokban",
+    "area": "Árnyékok",
+    "kind": "fix",
+    "summary": "A 4. kör óta a katedrális 11 lengő csillárjának fénye a megmaradt árnyéktérkép-helyeket kapta, és mivel mozgó fény gyorsítótárazott lapjai minden képkockában elavulnak, a kockatérképeik minden képkockában teljesen újrarajzolódtak. Mostantól a mozgó fények (MegaLights nélkül is) távolságmező-árnyékot kapnak, amíg mozognak, mint a 32-es keret feletti fények; a régi viselkedés kapcsolóval visszakapcsolható.",
+    "details": "vsm_local.rs: a LocalFrame::moving_shadow_maps alapértelmezetten hamis (RenderSettings::moving_light_shadow_maps, --moving-light-maps), így a 30 képkockán belül mozdult fény nem kap helyet; a világítás a távolságmezős lágy árnyékkal (a négy legerősebb nyomkövetett fény pixelenként) árnyékolja, és megálláskor 30 képkocka után újra árnyéktérképet kap. Kiértékelt alternatívák: ritkított frissítés megtartott középpontból (a fénnyel együtt mozgó csillárgyűrű és gyertyák önárnyéka pontatlan lenne és frissítéskor ugrana, a frissítések pedig egész kockatérképes csúcsokat adnak), statikus vetők fénytérbeli gyorsítótára (más gyorsítótár-szerkezet, az UE is újrarajzolja a mozgó fényeket). A felszabaduló helyek és lapok a statikus fényeké: a lapkészlet már nem telik meg (korábban 78 kért lap maradt lefoglalatlanul minden képkockában).",
+    "metrics": "Katedrális, 2560×1440: GPU 14,86 → 10,17 ms (100 %), 10,03 → 6,36 ms (67 %) — a 3. kör 10,90 / 6,88 ms-a alatt; vsm raster 3,10 → 0,02 ms, cull 0,58 → 0,31 ms, lighting 2,14 → 1,88 ms; ~80 teljes lap és 130 ezer (klaszter, lap) rajzolás helyett 0. Kép: 42 dB PSNR, a pixelek 0,02 %-a változik 24/255-nél többet (a pillérfők alatti lágy sávok halványabbak). Megosztott RTX 3090, 3 váltott futás minimuma.",
+    "showcase": "Katedrális alapnézet (lengő csillárok): GPU-idő --moving-light-maps-szal (régi) és nélküle; előtte/utána kivágás a pillérfőkről és a padsorokról. A 0 billentyű megállítja a lengést: 30 képkocka után a csillárfények ismét árnyéktérképet kapnak.",
+    "modules": ["crates/helios-render/src/vsm_local.rs", "crates/helios-render/src/renderer.rs", "crates/helios-demo/src/main.rs"]
+  },
+  {
+    "id": "move-footprint-slices",
+    "title": "Mozgó árnyékvetők szeletelt, sebességkorlátos lábnyoma",
+    "area": "Árnyékok",
+    "kind": "fix",
+    "summary": "Egy mozgó példány lábnyoma eddig a teljes befoglaló doboza (helyi fényeknél a befoglaló gömbje) volt, és minden alatta lévő lapot minden képkockában frissített: a 12 m-es láncon lengő csillár 6,3 m-es gömbje a közeli gyertyafények kockatérképeinek nagy részét lefedte. Most a hosszú dobozok szeletekre bomlanak, és minden szelet a saját sebességét is viszi, így egy lap csak akkor frissül, ha a szelet 2 texelnyit mozdulhatott, mint a szélnél.",
+    "details": "vsm_motion.rs: a doboz a leghosszabb tengelye mentén legfeljebb 8, nagyjából kocka alakú szeletre bomlik (a csillár vasa öt 2,4 m-esre), mindegyik saját lábnyommal (nap: fény-térbeli téglalap, helyi fények: gömb). Movable vetőnél a lábnyom per_frame mezője a szelet sarkainak képkockánkénti legnagyobb elmozdulása (merev mozgásnál az elmozdulás affin, így a sarkok korlátozzák), 0,95-ös lecsengéssel megtartva; a vsm_invalidate.wgsl ugyanúgy kezeli, mint a szél sebességkorlátját. Az átugrott lapok a vetőt legfeljebb 2 texellel eltolva mutathatják, ezért a GPU ennyivel kibővíti a mozgás-lábnyomokat; a megálló vető még egyszer frissül nyugalmi helyzetében (MoveFootprints). Ugrás és Static példány mozgása továbbra is mindent frissít azonnal.",
+    "metrics": "Katedrális (lengő csillárok, 2560×1440): a statikus gyertyafények ~820 helyett ~25 lapot frissítenek képkockánként, vsm expand 0,68 → 0,23 ms; a mozgó fények árnyéktérképe nélkül mérve 11,25 → 10,45 ms. Völgy (szobor + tutaj): 38 → 15 frissített naplap, GPU 8,92 → 8,65 ms. A régi lábnyomokhoz képest a kép zajszinten azonos.",
+    "showcase": "Katedrális, 16-os debug nézet (Invalidation): a csillárok alatti pirosan sraffozott (újrarajzolt) naplapok sávja keskenyebb és ritkább; a HUD 'shadow pages' sora 841 helyett 25 újrarajzolt lapot mutat.",
+    "modules": ["crates/helios-render/src/vsm_motion.rs", "crates/helios-render/src/vsm.rs", "crates/helios-render/src/gpu_scene.rs", "crates/helios-render/src/shaders/vsm_invalidate.wgsl"]
+  },
+  {
+    "id": "resolve-debug-views-permutation",
+    "title": "Debug nézetek színezése külön G-puffer-feloldó permutációban",
+    "area": "Anyagok és textúrák",
+    "kind": "fix",
+    "summary": "A G-puffer-feloldás debug-nézet switch-e (egyre több esettel: klaszterek, LOD, invalidálás, voxelek, részek, tesszelláció ...) az anyagkiértékelés után futott, és bemeneteit (klaszter, háromszög, példányrekord, baricentrikus koordináták) végig életben tartotta: a lit nézet feloldása 1,4-szer lassabb lett. Mostantól a switch csak a debug nézetek pipeline-jaiba fordul be.",
+    "details": "gbuffer.wgsl és voxel_resolve.wgsl: a debug-színezés egy DEBUG_VIEWS override mögé került; passes/material.rs: negyedik permutációs bit (UV_EXTENSIONS, SKINNING, TESSELLATION mellett), a kiterjesztett (Substrate / anyaggráf) pipeline-ok is megkapják; a renderer akkor kéri, ha a debug_view nem Lit. A regressziót a dinamikus világ merge-e hozta (egy újabb debug eset a switch-ben), egyik szülője sem volt lassabb, a kép változatlan (59,8 dB).",
+    "metrics": "material classify + resolve, 2560×1440: katedrális 1,01 → 0,73 ms (a 3. kör 0,72 ms-a), erdő 0,99 → 0,85 ms, völgy 0,88 → 0,84 ms. 1920×1080, f2ed688-on: a debug eset elhagyása 0,61 → 0,46 ms.",
+    "showcase": "Nincs látható változás: a debug nézetek (V) ugyanúgy működnek; a profilozó 'material classify + resolve' sora mutatja a különbséget.",
+    "modules": ["crates/helios-render/src/shaders/gbuffer.wgsl", "crates/helios-render/src/shaders/voxel_resolve.wgsl", "crates/helios-render/src/passes/material.rs", "crates/helios-render/src/renderer.rs"]
+  },
+  {
+    "id": "round4-regression-bisect",
+    "title": "A 4. kör teljesítményvisszaesésének felderítése (merge-enkénti bisect)",
+    "area": "Platform és eszközök",
+    "kind": "tool",
+    "summary": "A 3. kör és a main közötti minden first-parent merge release buildje, váltott, megosztott GPU-n minimumokkal mért futásokkal és lépésenkénti GPU-időkkel: kiderült, mi okozta a katedrális (+4,0 ms), az erdő (+3,9 ms) és a völgy (+0,8 ms) lassulását. A javítható okok javítva, az új funkciók költsége dokumentálva.",
+    "details": "Erdő: a tábortűz 18 m-es árnyékvető fénye a szélben mozgó páfrányok, fű és bokrok alatt ~120 kockatérkép-lapot frissít képkockánként (+2,0–2,3 ms vsm raster; a volumes funkció saját mérése nem tartalmazta, mert a fény a ' kapcsolóval is megmarad), a Nanite Foliage összeállításai +1,0 ms (culling, finomabb háromszögek), a Lumen Lite −1,2 ms. Völgy: a tó párája (volume march 1,0 ms). Katedrális: a mozgó csillárfények és lábnyomaik (javítva). Nem okoznak mérhető költséget: a VSM shaderek skin/movable/tesszellációs ágai, a 255 fényes froxelek, a nagyobb CullView uniform. Részletek: docs/round4/perf-regressions.md.",
+    "metrics": "2560×1440, 100 % / 67 %, 3. kör → előtte → utána: völgy 8,09 / 5,61 → 8,92 / 5,63 → 8,65 / 5,43 ms; katedrális 10,90 / 6,88 → 14,86 / 10,03 → 10,17 / 6,36 ms; erdő 14,53 / 11,01 → 18,42 / 12,07 → 17,94 / 12,05 ms.",
+    "showcase": "Táblázat a weboldalon: jelenetenkénti GPU-idő a 3. körben, a javítás előtt és után, a merge-enkénti erdő-bisect lépésidőivel.",
+    "modules": ["docs/round4/perf-regressions.md"]
+  }
+]

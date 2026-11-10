@@ -112,6 +112,8 @@ mod native {
         pub move_light: bool,
         /// Every move invalidates everything (as structural changes do), for comparisons.
         pub full_invalidation: bool,
+        /// Moving local lights get virtual shadow maps too (re-rendered every frame), for comparisons.
+        pub moving_light_maps: bool,
         /// Moving prop groups kept moving (the rest stand still), for measurements.
         pub movers: Option<usize>,
         /// The props move as `Mobility::Static` instances (one-off edits), for measurements.
@@ -138,7 +140,7 @@ mod native {
 
     impl Options {
         pub fn parse(args: &[String]) -> Self {
-            let mut o = Options { screenshot: None, size: (1600, 900), frames: 90, view: None, detail: Detail::High, scene: SceneKind::Valley, camera: None, eye: None, at: None, occlusion: true, sw_raster: true, rvt: true, svt: true, animate_sun: false, lod: None, fov: None, pool_mb: None, texture_pool_mb: None, texture_compression: true, switch_to: None, dump_dir: None, dump_count: 16, keys: Vec::new(), keys_at: None, hold: Vec::new(), gltf: None, ground: true, bake_hvm: None, stream_from: None, io_latency_ms: 0, sun: None, move_light: false, full_invalidation: false, movers: None, static_motion: false, screen_percentage: None, gpu_budget_ms: None, local_exposure: Some(Default::default()), scene_file: None, select: Vec::new(), no_skinning: false, gi: None, megalights: false, tessellation: true, dice_rate: None, speed: None };
+            let mut o = Options { screenshot: None, size: (1600, 900), frames: 90, view: None, detail: Detail::High, scene: SceneKind::Valley, camera: None, eye: None, at: None, occlusion: true, sw_raster: true, rvt: true, svt: true, animate_sun: false, lod: None, fov: None, pool_mb: None, texture_pool_mb: None, texture_compression: true, switch_to: None, dump_dir: None, dump_count: 16, keys: Vec::new(), keys_at: None, hold: Vec::new(), gltf: None, ground: true, bake_hvm: None, stream_from: None, io_latency_ms: 0, sun: None, move_light: false, full_invalidation: false, moving_light_maps: false, movers: None, static_motion: false, screen_percentage: None, gpu_budget_ms: None, local_exposure: Some(Default::default()), scene_file: None, select: Vec::new(), no_skinning: false, gi: None, megalights: false, tessellation: true, dice_rate: None, speed: None };
             let mut scene_given = false;
             let mut it = args.iter().skip(1);
             while let Some(arg) = it.next() {
@@ -175,6 +177,7 @@ mod native {
                     "--animate-sun" => o.animate_sun = true,
                     "--move-light" => o.move_light = true,
                     "--full-invalidation" => o.full_invalidation = true,
+                    "--moving-light-maps" => o.moving_light_maps = true,
                     "--movers" => o.movers = value().parse().ok(),
                     "--static-motion" => o.static_motion = true,
                     "--lod" => o.lod = value().parse().ok(),
@@ -319,6 +322,7 @@ mod native {
             }
             app.renderer.settings.local_exposure = self.local_exposure;
             app.renderer.settings.per_instance_invalidation = !self.full_invalidation;
+            app.renderer.settings.moving_light_shadow_maps = self.moving_light_maps;
             if let Some(count) = self.movers {
                 app.motion.limit(&mut app.scene, count);
             }

@@ -439,6 +439,7 @@ fn shadow_move(scene: &Scene, index: usize, old: &GpuInstance, new: &GpuInstance
     let pad = |record: &GpuInstance| record.bounds + Vec4::W * (reach * record.max_scale);
     // Hidden instances cast no shadow (their records carry no shadow flag).
     (instance.cast_shadow && instance.visible && old.world != new.world).then(|| ShadowMove {
+        instance: index as u32,
         aabb,
         old_world: old.world,
         new_world: new.world,
