@@ -105,6 +105,8 @@ pub struct LightingInputs<'a> {
     pub black: &'a wgpu::TextureView,
     /// Bind group 1 of the slab variant while the scene has slab materials.
     pub substrate: Option<&'a wgpu::BindGroup>,
+    /// Sunlight through glass.
+    pub glass: &'a crate::glass_shadow::GlassShadow,
 }
 
 impl LightingPass {
@@ -148,6 +150,8 @@ impl LightingPass {
                 (60, bind::uniform()),
                 (61, bind::storage(false)),
                 (62, bind::texture(false)),
+                (90, bind::uniform()),
+                (91, bind::texture(true)),
             ],
         );
         Self {
@@ -209,6 +213,8 @@ impl LightingPass {
                 (60, inputs.vsm.local.uniform.as_entire_binding()),
                 (61, t.local_shadow_mask.as_entire_binding()),
                 (62, TextureView(inputs.megalights.unwrap_or(inputs.black))),
+                (90, inputs.glass.uniform.as_entire_binding()),
+                (91, TextureView(inputs.glass.view())),
             ],
         );
         // MegaLights traces the shadows of every light itself.

@@ -53,6 +53,7 @@
 // Captured materials (cards.rs): rgb = sqrt(albedo), a = emission e / (1 + e) as a multiple of
 // the albedo; a card record's texels.z is its origin (0xffffffff: not captured).
 @group(0) @binding(28) var card_albedo: texture_2d<f32>;
+#include "glass_shadow.wgsl"
 
 // Fraction of outside light a stained-glass window passes (as in lumen_light.wgsl).
 const GLASS_TRANSMISSION: f32 = 0.5;
@@ -168,7 +169,9 @@ fn card_texel_radiance(p: vec3<f32>, n: vec3<f32>, material: u32, surface: Texel
     let n_dot_l = dot(n, sun);
     if n_dot_l > 0.0 {
         let transmittance = sample_transmittance(transmittance_lut, lumen_sampler, atmosphere_position(p), sun);
-        direct = frame.sun_illuminance.rgb * transmittance * n_dot_l * sun_visibility(p, field, n, sun);
+        // Through glass, coloured by the panes: the coloured patches bounce coloured light.
+        let glass = glass_transmission(p, lumen_sampler);
+        direct = frame.sun_illuminance.rgb * transmittance * glass * n_dot_l * sun_visibility(p, field, n, sun);
     }
     for (var i = 0u; i < frame.light_count; i++) {
         let light = lights[i];

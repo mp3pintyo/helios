@@ -110,6 +110,8 @@ struct Level {
 /// then) with their graphs' slab table and parameters, and the queue (capture uploads).
 pub struct CardInputs<'a> {
     pub vsm: &'a crate::vsm::VirtualShadowMap,
+    /// Sunlight through glass (coloured patches bounce coloured light).
+    pub glass: &'a crate::glass_shadow::GlassShadow,
     pub textures: &'a TextureLibrary,
     pub materials: &'a wgpu::Buffer,
     pub extended: &'a crate::substrate_gpu::ExtendedMaterials,
@@ -402,6 +404,8 @@ impl Lumen {
                     (22, bind::texture_array(true)),
                     (23, bind::sampler()),
                     (28, tex(false)),
+                    (90, u()),
+                    (91, tex(true)),
                 ],
             ),
             debug_cards: Stage::new(
@@ -800,6 +804,8 @@ impl Lumen {
                     (22, TextureView(&surfaces.textures.albedo)),
                     (23, Sampler(&samplers.material)),
                     (28, TextureView(&self.cards.albedo)),
+                    (90, surfaces.glass.uniform.as_entire_binding()),
+                    (91, TextureView(surfaces.glass.view())),
                 ],
             );
             let mut pass = rec.compute_pass("lumen cards");

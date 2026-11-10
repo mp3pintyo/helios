@@ -86,7 +86,8 @@ underwater view. Round 4 (all letters were taken): `0` pauses / resumes the demo
 turning sculpture, drifting raft), `-` next animation clip of a skinned model (0.4 s crossfade; after the last one
 it pauses), `;` GI final gather Lumen ↔ Lumen Lite (ends the automatic choice), `=` MegaLights, `'` volumes +
 particles, `Insert` voxel LODs (off: the triangle-only cut of the same DAG), `PageUp` Substrate slabs (off: every
-material renders as its plain base), `PageDown` Nanite tessellation (off: displaced materials render undisplaced), `Tab` editor (natively: the editor tools without panels — click to select,
+material renders as its plain base), `PageDown` Nanite tessellation (off: displaced materials render undisplaced), `End` coloured sunlight
+through glass (off: it lands white), `Tab` editor (natively: the editor tools without panels — click to select,
 `Del`, `Ctrl+D`, `F`, `Ctrl+Z` / `Ctrl+Y`, `Ctrl+S` saves the scene file; in `editor.html`: play mode).
 
 Editor (`web/editor.html`, viewport focused, right mouse button not held): `W` / `E` / `R` move / rotate / scale,
@@ -104,7 +105,7 @@ micro-triangles), `--eye x,h,z` /
 `--at x,h,z` (heights relative to the ground), `--camera x,y,z,yaw,pitch`, `--lod px`, `--pool-mb N`
 (geometry pool size, to exercise streaming), `--texture-pool-mb N` (texture tile atlases), `--no-texture-compression` (uncompressed tiles; in
 the browser `?texture-compression=0`), `--no-occlusion`, `--no-sw-raster`,
-`--no-rvt`, `--no-svt` (image textures from the 512² arrays only), `--animate-sun`, `--sun AZ,EL` (sun azimuth and
+`--no-rvt`, `--no-glass-shadows` (sunlight through glass stays white), `--no-svt` (image textures from the 512² arrays only), `--animate-sun`, `--sun AZ,EL` (sun azimuth and
 elevation in degrees; e.g. `200,-30` for a starry night),
 `--keys KeyG,KeyH` (press hotkeys after loading; with `--keys-at N` at frame N instead), `--hold KeyW` (hold keys every frame: a moving camera),
 `--screen-percentage N` (render at N % of the output, 25–100, and upscale with TSR), `--gpu-budget-ms N` (dynamic
@@ -1327,11 +1328,22 @@ Chromium and in Firefox (was 31–50 s), Firefox's full set ~33 s; the displaced
   (sub-pixel waves fade into roughness), Beer–Lambert absorption + single scattering over the refracted path to the
   bottom, shore foam, sun glints. **Stained glass**: lead came opaque; glass tints the blurred scene behind and
   diffuses sky (scaled by how open the far side is, from the radiance cache) and sun — matching what Lumen's surface
-  cache emits into the interior, which still gets the panes' coloured light through their distance fields. Untextured
+  cache emits into the interior, which still gets the panes' coloured light through their distance fields — and the
+  sun through the panes lands in their colours (next bullet). Untextured
   `Glass` is a clear pane, tinted by its base colour, its view through blurred by its roughness. Glass and blended
   surfaces under water reflect the water around them rather than the sky, and seen from under water they are lit
   and fogged through the water like the opaque scene. The pass writes the surfaces' own motion vectors for TSR.
   `RenderSettings::translucency` / `U` toggles it.
+* **Coloured light through glass** (`glass_shadow.rs`, `glass_shadow.wgsl`; UE5's translucent shadows). Panes that
+  let the sun through (not shadow casters) would light the interior white; instead the visible `Glass` instances are
+  drawn from the sun into a map of their own — an orthographic view along the sunlight fitted to their boxes, 256²
+  to 2048² texels (the cathedral's 84 m of windows: 4.1 cm) — keeping per texel the pane nearest the sun: what it
+  transmits (base colour × texture, the stained-glass factor, Fresnel, none through lead came) and its depth along
+  the light. A point behind its texel's pane gets the sun filtered by it: the deferred lighting (blurred with the
+  distance behind the pane, ~10 cm under a pane 10 m up), the volumetric fog (coloured shafts) and Lumen's card
+  lighting (coloured bounce). Drawn only when the sun, the panes or the scene change (0.034 ms a frame with an
+  animated sun); the lighting pays ~0.05 ms at 1440p. `RenderSettings::glass_shadows` / `End` /
+  `--no-glass-shadows` toggles it (`docs/round7/glass-shadows.md`).
 * **Water bodies** (`water.rs`, `water.wgsl`, `shore.wgsl`; UE's Water system for lakes). Every `Water` instance is a
   flat *water body* (its world rectangle and level, from its bounds); one uniform carries them with the medium.
   **Lake bed and shore**: the G-buffer resolve turns the landscape into sediment where a body covers it — sand and
@@ -1884,3 +1896,7 @@ Honest differences that remain:
     the core set itself is ~4 s of Firefox compiling (the material resolve 0.6–1.2 s per shading model), the scene's
     content pipelines are found only after the bake, a new scene or a debug view compiles its new pipelines in the
     frame that needs them (the canvas holding its last frame), and the scene bake (3–6 s) runs on the main thread.
+16. **Coloured light through glass** (round 7, `glass-shadows`): the sun's map of the glass panes keeps one pane
+    per texel (light through two panes in a row takes the nearer one's colour) and spans every visible pane (glass
+    spread over a large world gets coarse texels); Lumen's voxel surface cache, translucent surfaces and local
+    lights still see glass as clear (`docs/round7/glass-shadows.md`).

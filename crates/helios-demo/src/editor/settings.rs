@@ -75,6 +75,7 @@ pub fn all() -> Vec<Setting> {
         flag("substrate", "Substrate slabs", "Materials", |s| json!(s.substrate), |s, v| s.substrate = b(v)),
         flag("translucency", "Translucency", "Materials", |s| json!(s.translucency), |s, v| s.translucency = b(v)),
         flag("translucency_layers", "Translucency layers", "Materials", |s| json!(s.translucency_layers), |s, v| s.translucency_layers = b(v)),
+        flag("glass_shadows", "Coloured light through glass", "Materials", |s| json!(s.glass_shadows), |s, v| s.glass_shadows = b(v)),
         flag("taa", "Temporal accumulation (TSR)", "Camera", |s| json!(s.taa), |s, v| s.taa = b(v)),
         number("motion_blur", "Motion blur shutter", "Camera", (0.0, 1.0, 0.05), |s| json!(s.motion_blur), |s, v| s.motion_blur = f(v)),
         flag("depth_of_field", "Depth of field", "Camera", |s| json!(s.depth_of_field.is_some()), |s, v| {
