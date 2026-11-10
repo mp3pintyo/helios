@@ -443,7 +443,7 @@ impl DemoApp {
             on(s.substrate),
         );
         text.push_str(&format!(
-            "\nshadow pages: {}/{} in use, {} rendered ({} dynamic casters only, {} split; {}/{} draws), {} unallocated · local lights with shadow maps: {}",
+            "\nshadow pages: {}/{} in use, {} rendered ({} dynamic casters only, {} split; {}/{} draws), {} unallocated · local lights with shadow maps: {} ({} moving, cached)",
             st.shadow_pages,
             st.shadow_page_capacity,
             st.shadow_dirty_pages,
@@ -453,6 +453,7 @@ impl DemoApp {
             st.shadow_draw_capacity,
             st.shadow_page_overflow,
             self.renderer.shadow_mapped_lights(),
+            self.renderer.shadow_held_lights(),
         ));
         if self.motion.instance_count() > 0 {
             let d = self.renderer.dynamic_stats();

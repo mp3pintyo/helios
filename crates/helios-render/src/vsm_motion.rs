@@ -63,7 +63,8 @@ pub(crate) struct Footprint {
     /// Bounds of the change overall and per frame: unbounded for a jump or a static caster.
     change: f32,
     per_frame: f32,
-    _pad: f32,
+    /// 1 for the wind's own footprints (collected on the GPU); a move's is 0.
+    wind: u32,
     /// Sun light-space half extent of the rectangle around `center`.
     rect: Vec2,
 }
@@ -144,7 +145,7 @@ fn footprint(sphere: Vec4, (lo, hi): (Vec2, Vec2), kind: f32, per_frame: f32) ->
         radius: sphere.w,
         change: ALWAYS,
         per_frame,
-        _pad: 0.0,
+        wind: 0,
         rect: ((hi - lo) * 0.5).max(Vec2::splat(1e-4)),
     }
 }

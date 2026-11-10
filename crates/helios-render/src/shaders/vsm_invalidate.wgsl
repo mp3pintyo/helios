@@ -39,6 +39,14 @@
 // face and mip, once its geometry may have moved WIND_REFRESH_TEXELS of the page's texels at the
 // sphere's nearest face depth (texels grow with the distance from the light). Their own
 // invalidation (a light that moved, vsm.wgsl's invalidate_local) frees whole lights instead.
+// The wind's footprints are the exception: an instance's bounding sphere says little about a
+// light inside or next to it (a campfire among trees: every tree's sphere reaches the light's
+// near plane, so every page of the light would refresh every frame, at the crown's speed). A
+// local page instead knows how fast and how far the wind can move the clusters that were
+// actually drawn into it, in its own texels (INFO_PAGE_MOTION, measured by
+// vsm_expand.wgsl whenever the page is rendered), and is refreshed once they may have moved
+// WIND_REFRESH_TEXELS: pages that see grass at their feet, trunks or distant crowns refresh
+// every few frames or never, pages with near, fast foliage every frame.
 // If the list overflows, every cached page is freed (the old global behaviour).
 
 #include "common.wgsl"
@@ -75,6 +83,9 @@ struct Footprint {
     // Bound of how far the geometry can move overall, and per frame.
     change: f32,
     per_frame: f32,
+    // 1: only the wind moves it. Local light pages ignore the footprint and go by the motion
+    // of the clusters they hold.
+    wind: u32,
     // Moves (vsm_motion.rs): the half extent of a tighter light-space rectangle around `center`,
     // which replaces the circle in the sun's clipmap (0: the circle, not a move).
     rect: vec2<f32>,
@@ -96,7 +107,7 @@ struct Footprints {
 // Per instance: the wind reach it was padded by when last collected, 0 if it was a static caster
 // (its shadow is in the pages' static layers).
 @group(0) @binding(7) var<storage, read_write> dynamic_reach: array<f32>;
-// The VSM info buffer (vsm.wgsl): pending refresh flags per physical page.
+// The VSM info buffer (vsm.wgsl): pending refresh flags and motion bounds per physical page.
 @group(0) @binding(8) var<storage, read_write> info: array<u32>;
 @group(0) @binding(65) var<uniform> wind: Wind;
 @group(0) @binding(66) var skin_palette: texture_2d<f32>;
@@ -120,7 +131,7 @@ fn collect(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (instance.flags & INSTANCE_CAST_SHADOW) == 0u {
         return;
     }
-    var f = Footprint(vec4<f32>(instance.bounds.xyz, FOOTPRINT_DYNAMIC), vec2<f32>(0.0), instance.bounds.w, 0.0, 0.0, vec2<f32>(0.0));
+    var f = Footprint(vec4<f32>(instance.bounds.xyz, FOOTPRINT_DYNAMIC), vec2<f32>(0.0), instance.bounds.w, 0.0, 0.0, 0u, vec2<f32>(0.0));
     let strength = wind_strength(instance);
     var reach = 0.0;
     if dynamic_caster(instance, strength) {
@@ -157,6 +168,7 @@ fn collect(@builtin(global_invocation_id) gid: vec3<u32>) {
     if f.change <= 0.0 {
         return;
     }
+    f.wind = u32(f.change < ALWAYS && !skin_dynamic(instance));
     let slot = atomicAdd(&footprints.count, 1u);
     if slot < CAPACITY {
         let ls = (vsm.light_view * vec4<f32>(instance.bounds.xyz, 1.0)).xyz;
@@ -185,6 +197,9 @@ fn hit_bits(f: Footprint) -> u32 {
 // Whether footprint `f` may have changed the local light page `id` by WIND_REFRESH_TEXELS of its
 // texels since it was rendered `age` frames ago.
 fn local_page_hit(id: LocalPageId, f: Footprint, age: f32) -> bool {
+    if f.wind != 0u {
+        return false;
+    }
     let light = local_vsm.slots[id.slot].position_range;
     let gap = distance(f.world.xyz, light.xyz);
     if gap > f.radius + light.w {
@@ -196,8 +211,7 @@ fn local_page_hit(id: LocalPageId, f: Footprint, age: f32) -> bool {
         radius += local_texel(id.slot, gap + f.radius, id.mip) * WIND_REFRESH_TEXELS;
     }
     let r = local_sphere_rect(id.slot, id.face, vec4<f32>(f.world.xyz, radius));
-    let depth = max(r.front, local_vsm.slots[id.slot].params.y);
-    if !r.valid || min(f.change, f.per_frame * max(age, 1.0)) < local_texel(id.slot, depth, id.mip) * WIND_REFRESH_TEXELS {
+    if !r.valid || min(f.change, f.per_frame * age) < local_texel(id.slot, r.inside, id.mip) * WIND_REFRESH_TEXELS {
         return false;
     }
     let pages = f32(local_mip_pages(id.mip));
@@ -216,14 +230,20 @@ fn invalidate_pages(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invoca
     let entry = owner[wid.x];
     // Overflow: free every page.
     var hits = select(0u, HIT_STATIC, count > CAPACITY);
-    if entry != INVALID_ID && entry >= local_vsm.entry_base && count > 0u {
+    let local_page = entry != INVALID_ID && entry >= local_vsm.entry_base;
+    if local_page {
         let id = local_page_id(entry);
-        let age = f32(vsm.frame - entries[entry].w);
+        let age = max(f32(vsm.frame - entries[entry].w), 1.0);
         for (var i = lid; i < min(count, CAPACITY) && hits < HIT_STATIC; i += 64u) {
             let f = footprints.items[i];
             if local_page_hit(id, f, age) {
                 hits |= hit_bits(f);
             }
+        }
+        // The wind: the page's own casters, by the bounds its last rendering measured.
+        let moved = f32(info[INFO_PAGE_MOTION + 2u * wid.x]) * max(wind.time.x - wind.time.y, 0.0) * age;
+        if lid == 0u && min(moved, f32(info[INFO_PAGE_MOTION + 2u * wid.x + 1u])) >= WIND_REFRESH_TEXELS * PAGE_MOTION_UNITS {
+            hits |= HIT_DYNAMIC;
         }
     } else if entry != INVALID_ID && count > 0u {
         let level = entry / (vsm.level_pages * vsm.level_pages);
@@ -262,7 +282,8 @@ fn invalidate_pages(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invoca
     if (hit & HIT_LAYER) != 0u && info[INFO_PAGE_STATIC + wid.x] != INVALID_ID {
         info[INFO_PAGE_STATIC + wid.x] = STALE_STATIC_LAYER;
     }
-    if (hit & HIT_DYNAMIC) != 0u {
+    // A local page under a caster that entered or left the wind measures its casters again.
+    if (hit & HIT_DYNAMIC) != 0u || (local_page && (hit & HIT_LAYER) != 0u) {
         info[INFO_PAGE_REFRESH + wid.x] = 1u;
     }
 }

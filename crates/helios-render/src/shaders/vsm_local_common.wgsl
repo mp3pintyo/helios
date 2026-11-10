@@ -34,8 +34,12 @@ struct LocalShadowSlot {
     // x: face count (0: unused slot, 1: spot, 6: point), y: near plane, z: focal length
     // (1 / tan(half field of view)), w: mip bias (soft lights need less resolution)
     params: vec4<f32>,
-    // x: 1 = cached pages are stale (the light moved, changed or the slot was reassigned)
+    // x: 1 = cached pages are stale (the map's origin or shape changed, or the slot was reassigned)
     flags: vec4<u32>,
+    // xyz: the map's origin (position_range.xyz) minus the light's position. Zero unless the
+    // light moves: its map then stays at the origin it was rendered from while the light is
+    // near it (vsm_anchor.rs), and receivers correct the parallax (local_filter_follow).
+    anchor_offset: vec4<f32>,
 }
 
 struct LocalVsm {
@@ -185,14 +189,20 @@ fn local_page_id(entry: u32) -> LocalPageId {
     return id;
 }
 
-// Face uv bounds of a world sphere: x / w over the sphere's bounding box (the whole face where
-// the sphere reaches the near plane); `valid` = false if it misses the face.
+// Face uv bounds of a world sphere: x / w over the sphere's bounding box; `valid` = false if it
+// misses the face. Of a sphere that reaches the near plane, the part in front of the plane
+// counts: unbounded towards the side the sphere straddles the face axis on, but a sphere wholly
+// to one side of the axis still projects beyond x / (its far depth) there - which lies outside
+// the face for most of the spheres around a light that cross a face's near plane.
 struct LocalSphereRect {
     valid: bool,
     lo: vec2<f32>,
     hi: vec2<f32>,
     // Face depth of the sphere's nearest point.
     front: f32,
+    // Lower bound of the face depth of its points inside the face: no nearer than `front`, and
+    // inside the face |x| <= w, so a sphere off to one side is at least that far along the axis.
+    inside: f32,
 }
 
 fn local_sphere_rect(slot: u32, face: u32, sphere: vec4<f32>) -> LocalSphereRect {
@@ -204,14 +214,18 @@ fn local_sphere_rect(slot: u32, face: u32, sphere: vec4<f32>) -> LocalSphereRect
     r.valid = clip.w + sphere.w > near;
     var lo = vec2<f32>(-1.0);
     var hi = vec2<f32>(1.0);
+    let a = clip.xy - focal * sphere.w;
+    let b = clip.xy + focal * sphere.w;
+    let back = clip.w + sphere.w;
     if r.front > near {
-        let a = clip.xy - focal * sphere.w;
-        let b = clip.xy + focal * sphere.w;
-        let back = clip.w + sphere.w;
         lo = max(min(a / r.front, a / back), lo);
         hi = min(max(b / r.front, b / back), hi);
-        r.valid = r.valid && all(hi >= lo);
+    } else if r.valid {
+        lo = select(lo, max(a / back, lo), a > vec2<f32>(0.0));
+        hi = select(hi, min(b / back, hi), b < vec2<f32>(0.0));
     }
+    r.valid = r.valid && all(hi >= lo);
+    r.inside = max(max(r.front, near), max(max(a.x, -b.x), max(a.y, -b.y)));
     r.lo = vec2<f32>(lo.x, -hi.y) * 0.5 + 0.5;
     r.hi = vec2<f32>(hi.x, -lo.y) * 0.5 + 0.5;
     return r;

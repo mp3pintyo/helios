@@ -22,10 +22,11 @@ const INFO_DIRTY_MASK: u32 = 136u;
 const INFO_FULL_MASK: u32 = 8328u;
 // Per physical page: this frame's PAGE_* kind | scratch tile << 8 (valid for pages rendered this
 // frame); the entry whose static layer the mirror holds (or INVALID_ID); a pending dynamic
-// refresh (vsm_invalidate.wgsl).
+// refresh (vsm_invalidate.wgsl); motion bounds (two words, below).
 const INFO_PAGE_STATE: u32 = 22152u;
 const INFO_PAGE_STATIC: u32 = 23176u;
 const INFO_PAGE_REFRESH: u32 = 24200u;
+const INFO_PAGE_MOTION: u32 = 25224u;
 // INFO_PAGE_STATIC of a page whose static layer is out of date (a caster changed layer): the
 // mirror still holds it, so the page's next render clears it.
 const STALE_STATIC_LAYER: u32 = 0xfffffffeu;
@@ -45,6 +46,12 @@ const PAGE_CLEAR: u32 = 4u;
 // the atlas' tiles (tile index physical_count + scratch); NO_SCRATCH if none was left (they take
 // the hardware path).
 const NO_SCRATCH: u32 = 0xffffffu;
+
+// Local light pages keep bounds of their wind-swayed casters' motion (INFO_PAGE_MOTION, two
+// words per physical page: speed in texels per second and the largest distance between two
+// poses in texels, both in 1 / PAGE_MOTION_UNITS). The page's rendering measures them
+// (vsm_expand.wgsl), its invalidation schedules the next refresh by them (vsm_invalidate.wgsl).
+const PAGE_MOTION_UNITS: f32 = 16.0;
 
 fn page_kind(state: u32) -> u32 {
     return state & PAGE_KIND_MASK;
