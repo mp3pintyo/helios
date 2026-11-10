@@ -34,6 +34,7 @@ const SOURCES: &[(&str, &str)] = &[
     ("lumen_card_light.wgsl", include_str!("shaders/lumen_card_light.wgsl")),
     ("lumen_cards.wgsl", include_str!("shaders/lumen_cards.wgsl")),
     ("lumen_common.wgsl", include_str!("shaders/lumen_common.wgsl")),
+    ("lumen_displace.wgsl", include_str!("shaders/lumen_displace.wgsl")),
     ("lumen_gather.wgsl", include_str!("shaders/lumen_gather.wgsl")),
     ("lumen_light.wgsl", include_str!("shaders/lumen_light.wgsl")),
     ("lumen_lite.wgsl", include_str!("shaders/lumen_lite.wgsl")),
@@ -344,7 +345,7 @@ mod tests {
         assert!(moving.contains("if DISPLACEMENT_ANIMATED {\n        let before = displaced_input(instance, objects, normals, uvs, l, tess.time.y);"));
         let code = crate::tessellation::graphs::dispatch_module(&functions);
         assert!(code.contains("displacement_from_height(displacement_graph_") && code.contains("displacement_from_vector(displacement_graph_"));
-        for name in ["tess.wgsl", "vsm_tess.wgsl"] {
+        for name in ["tess.wgsl", "vsm_tess.wgsl", "lumen_displace.wgsl"] {
             failures.extend(validate(name, &compose_variant(name, &[("displacement_graphs_off.wgsl", &code)])).err());
         }
         assert!(failures.is_empty(), "{}", failures.join("\n"));

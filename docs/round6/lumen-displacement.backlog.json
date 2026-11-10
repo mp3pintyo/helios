@@ -1,0 +1,50 @@
+[
+ {
+  "id": "lumen-sees-displacement",
+  "title": "A Lumen követi a Nanite-tesszeláció elmozdítását (elmozdított mesh-változatok)",
+  "area": "Globális megvilágítás",
+  "kind": "feature",
+  "summary": "Minden példányt, amelynek anyaga elmozdítja a hálóját, a Lumen egy elmozdított változattal képvisel: a távolságmező és a mesh card-ok az elmozdított felületből sülnek, így a globális távolságmező, a near field, a card- és voxel-felületcache, az indirekt fény, az égbolt-takarás és a tükröződések is látják a domborzatot (textúra-magasság, gráf-magasság, gráf-vektor). Elmozdítás nélküli jelenetek pontosan úgy töltődnek fel, mint eddig.",
+  "details": "A változat kulcsa (mesh, anyag, elhelyezés) és egy tartalom-hash (az anyag Displacement-je, textúrája, leképezése, a gráf elmozdító kódja és paraméterei). Az elhelyezés (a példány transzformációja) csak akkor része a kulcsnak, ha az elmozdítás függ tőle: világtérbeli triplanáris textúra, WorldPosition-t / világnormált olvasó gráf, vektoros elmozdítás; az objektumterű elmozdítás (a völgy sziklái) példányok között közös. Sütés: (1) a háló háromszögei – egy voxelnél finomabb LOD-vágás – egyenletes baricentrikus rácsra bomlanak, élenként kettő hatványú szegmensszámmal, legfeljebb ¾ voxel lépésközzel, a közös pontok attribútumbitek szerint összehegesztve (munkaszálon); (2) a GPU a tesszellátor saját függvényével (displacement_position, gráfoknál a kockázó passz generált modulja: graphs::scene_dispatch_module) mozdítja el a pontokat, a textúrákat és a zajt a pontok lépésközére szűrve (lumen_displace.wgsl, a tesszelációs uniform anyagtáblája a GPU-n másolva); (3) visszaolvasás után a CPU ugyanazzal a kóddal süti a mezőt (bake_volume / bake_heightfield a háló saját voxelméretével) és a card-ok háromszögeit, mint bármely más hálónál (munkaszálon; böngészőben képkockánként egy). Amíg az új változat nincs kész, a régi marad használatban; résenként egyszerre egy sütés fut (húzott csúszka). A Lumen a változatok megérkezése után egyszer tölti újra a jelenetet. Tesszeláció kikapcsolva (PageDown) a hálók saját mezői azonnal visszajönnek, a változatok gyorsítótárban maradnak.",
+  "metrics": "2560×1440, RTX 3090 egy másik ügynök renderelésével 80–95 %-on megosztva (ugyanaz a nézet futásonként 2–3× eltérő képkockaidővel), 6–8 váltott futás minimuma: a Lumen passzok zajon belül változatlanok (pl. katedrális final gather 2,46 → 2,41 ms, ösvény 6,95 → 6,86 ms, gombák 2,14 → 2,03 ms); a Lumen részaránya a képkockában ±1,5 százalékponton belül. Elmozdítás nélküli jelenetek képe zajon belül (katedrális 55,2 / 56,3 dB új–main / main–main, erdő 41,3 / 40,7 dB). Egyszeri költség: völgyi szikla 96–106 k háromszög, 5,6 cm voxel, sütés 0,7–1,3 s munkaszálon; gombák 0,65–0,74 s; tégla magasságmező 25–80 ms. A finomítás (175 ms) és a card-felvétel munkaszálra költöztetése után a legrosszabb CPU-képkocka betöltés után 61–65 ms → 7–13 ms. Debug nézet 14, voxel-tartalékon (lila) maradó pixelek: gombaágyás 98,5 → 14,0 %, vászon nézet 80,6 → 28,8 %, nagy völgyi szikla 19,1 → 14,3 %.",
+  "showcase": "Galéria, gombaágyás: --scene gallery --eye -5.9,0.3,10.4 --at -6.5,0.08,9.2, debug nézet 14 (mesh card-ok: előtte az ágyás lila – nincs card, voxel-tartalék –, utána a gombák saját card-világítással, a kalapok árnyékával), 7 (indirekt fény: a kalapok takarnak és visszavernek), 12 (globális távolságmező: az ágyás megjelenik). Kép: docs/round6/lumen-displacement/mushrooms-cards.jpg, mushrooms-indirect.jpg, mushrooms-field.jpg; völgy, sziklák: --scene valley --eye -26,1.8,39 --at -33,0.2,53, nézet 14 (boulder-cards.jpg).",
+  "modules": [
+   "crates/helios-render/src/lumen_displaced.rs",
+   "crates/helios-render/src/shaders/lumen_displace.wgsl",
+   "crates/helios-render/src/lumen.rs",
+   "crates/helios-render/src/cards.rs",
+   "crates/helios-render/src/near_field.rs",
+   "crates/helios-render/src/lumen_dynamic.rs",
+   "crates/helios-render/src/renderer.rs",
+   "crates/helios-render/src/gpu_scene.rs",
+   "crates/helios-render/src/shader.rs"
+  ]
+ },
+ {
+  "id": "lumen-animated-displacement-mean",
+  "title": "Animált elmozdítás a Lumenben: az átlagos felület",
+  "area": "Globális megvilágítás",
+  "kind": "feature",
+  "summary": "Az időt olvasó (animált) elmozdító gráfokat a Lumen az átlagos felületükkel képviseli: a GPU 8 másodpercen át 32 időpontban értékeli ki az elmozdítást és átlagol; a sütés naplózza, mennyire tér el tőle a mozgó felület (RMS).",
+  "details": "Mért döntés a hullámzó vásznon: a mozgó felület legfeljebb 3,6 cm RMS-re tér el az átlagtól, a voxel 3,3 cm. Egy pillanatkép átlagosan √2-ször messzebb van (5,1 cm), a burkoló (söpört térfogat) 16 cm vastag lap lenne, amely elzárja a fényt, a periodikus újrasütés pedig egy a késleltetésnél (≥ 0,46–0,52 s sütés + teljes Lumen-újratöltés) régebbi pillanatkép: egy ω körfrekvenciájú hullámnál csak a < π/(3ω) korig jobb az átlagnál, ami a vászon hosszú hullámára 0,55 s, rövidre 0,34 s – utolérhetetlen. A szórást az első mintához mért eltolásokból számolja (nagy koordinátáknál nem oltja ki a kerekítés).",
+  "metrics": "Hullámzó vászon (96 voxel, 3,3 cm): 124 160 háromszög, 32 időminta, sütés 0,46–0,52 s munkaszálon; a mozgó felület legfeljebb 3,6 cm RMS-re az átlagtól. A sütés után nincs futásidejű költség.",
+  "showcase": "Galéria, hullámzó vászon: --scene gallery --eye 4.4,0.6,10.9 --at 6.3,0.15,9.0, debug nézet 14 (előtte lila: a vászon nincs a Lumenben; utána az átlagos felület card-jai). Kép: docs/round6/lumen-displacement/cloth-cards.jpg.",
+  "modules": [
+   "crates/helios-render/src/lumen_displaced.rs",
+   "crates/helios-render/src/shaders/lumen_displace.wgsl"
+  ]
+ },
+ {
+  "id": "gallery-displaced-beds-in-lumen",
+  "title": "Galéria: a tégla terasz és az ágyások bekerülnek a Lumenbe",
+  "area": "Demó jelenetek",
+  "kind": "feature",
+  "summary": "A tégla terasz 1,6 cm-es cellájú magasságmezőt (512 cella 8 m-en), az ágyások hálója 96 voxeles térfogati mezőt (3,3 cm) kapott; a Lumen ezeket az elmozdított felületből süti (téglák, gombák, a vászon átlaga).",
+  "details": "Eddig SdfMode::None volt: a lapos lapok néhány centire az udvar magasságmezője fölött csak egy kétoldalú héjat adtak volna. Elmozdítva már van mit ábrázolni. A völgy macskaköves útja továbbra is mező nélküli (a kövek messze a 30 m-es kiterjedéshez tartozó voxel alatt vannak; a terep magasságmezője képviseli).",
+  "metrics": "Galéria képe main-hez képest: gombák 37,8 dB (main–main 40,5 dB), a pixelek 0,52 %-a tér el 24/255-nél többet (tönkök és a kalapok alatti talaj sötétebb); téglák 42,8 dB; vászon 49,9 dB. Három új Lumen-példány (terasz, két ágyás); a Lumen passzok a megosztott GPU zaján belül.",
+  "showcase": "Galéria tégla terasz: --scene gallery --eye 0.9,0.45,10.9 --at 0,0,9.2, debug nézet 7 (bricks-indirect.jpg).",
+  "modules": [
+   "crates/helios-demo/src/scenes/gallery.rs"
+  ]
+ }
+]

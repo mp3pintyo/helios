@@ -834,9 +834,9 @@ with 300 lights under MegaLights 15.3 / 9.2 ms. Round 5 ([`docs/round5/`](docs/r
   mirror, scratch tiles included: the static / dynamic page cache treats displaced instances like any other —
   static ones are cached, moving ones (dynamic world) and ones whose displacement is animated (below) re-render
   over their static layer; heights are the main view's, so shadows fall from the surface the camera sees. **Interplay**: skinned instances and voxel
-  clusters are not tessellated; alpha-masked or translucent displaced materials render undisplaced; Lumen's
-  distance fields and mesh cards stay undisplaced (the displacement is far below their voxels; screen traces see
-  it). Debug view **25** colours displaced surfaces by tessellation depth (splits, then dice level: blue → green →
+  clusters are not tessellated; alpha-masked or translucent displaced materials render undisplaced; Lumen sees
+  the displaced surface through baked variants of the meshes' distance fields and cards (round 6, see *Lumen*).
+  Debug view **25** colours displaced surfaces by tessellation depth (splits, then dice level: blue → green →
   red) and shades every micro-triangle; `PageDown` toggles tessellation. The valley gained a cobblestone path
   and displaced boulders behind the initial view (one turning on its plinth: a movable displaced instance).
   Measured (RTX 3090 shared with up to six other agents: interleaved runs, minima of 3; valley high, tessellation
@@ -917,8 +917,8 @@ with 300 lights under MegaLights 15.3 / 9.2 ms. Round 5 ([`docs/round5/`](docs/r
   never; finer ones every frame: an arbitrary graph has no speed bound). The resolve of an animated graph
   evaluates the pixel's base point once more at the previous frame's time for its motion vector (TSR and motion
   blur follow the surface); static graphs and texture displacement compile both out and keep their fully cached
-  shadows. Lumen's distance fields, cards and surface cache stay undisplaced; screen traces see the moving
-  surface. Presets *Mushrooms (vector displacement)* — a disc of ground around each cell centre wrapped over a
+  shadows. Lumen represents an animated displacement by its mean surface (see *Lumen*: displaced surfaces);
+  screen traces see the moving one. Presets *Mushrooms (vector displacement)* — a disc of ground around each cell centre wrapped over a
   cap, its underside and a stem — and *Rippling cloth (animated displacement)* — travelling sine waves and a
   scrolling noise, pinned at the edges —, both as 3 m beds in the gallery.
   Measured (1600×900, RTX 3090 shared with another agent, minima of 3 interleaved runs against the previous
@@ -973,6 +973,22 @@ with 300 lights under MegaLights 15.3 / 9.2 ms. Round 5 ([`docs/round5/`](docs/r
   0.22–0.35 ms (cathedral 1.48 → 0.35, forest 1.42 → 0.24, Sponza 1.49 → 0.22, valley 1.43 → 0.22; shared GPU,
   minimums of interleaved runs), images unchanged within noise. Both final gathers profit. Moved instances update
   the global field, cards and near field in place (see *Dynamic world*).
+  **Displaced surfaces** (`lumen_displaced.rs`, `lumen_displace.wgsl`; round 6, `docs/round6/lumen-displacement.md`):
+  Lumen follows Nanite tessellation. Every instance whose material displaces its mesh is represented by a
+  *displaced variant* of the mesh — a distance field (the mesh's own kind and voxel size) and mesh cards baked from
+  the displaced surface — so the global field, the near field, both surface caches, indirect light, sky occlusion
+  and reflections see the relief: texture heights, graph heights and vectors (overhangs) alike. Variants are per
+  (mesh, material), and per instance where the displacement depends on its placement (world-space graphs and
+  vectors, world triplanar heights). The mesh is refined into points at most ¾ of a voxel apart (welded, on a
+  worker thread), the GPU displaces them with the tessellator's own `displacement_position` — for graphs through
+  the dicing passes' generated module — filtered for the point spacing, and the field and cards are baked from the
+  read-back positions on worker threads with the same code as every mesh's (in the browser one bake per frame). An
+  animated displacement is represented by its mean surface (32 times in 8 s): the gallery's cloth moves at most
+  3.6 cm RMS from it at 3.3 cm voxels, where a snapshot would be √2 times as far off and a re-bake could never keep
+  up with the waves. Until a variant is ready (0.5–1.3 s of CPU per variant) instances keep their previous one;
+  the variants of a scene arrive in one Lumen re-upload. Debug view 14 shows the gallery's mushroom bed and cloth
+  in card lighting where they were voxel fallback (purple) before, and fewer unmatched card texels on the
+  valley's displaced boulders (19 → 14 % of their pixels). Scenes without displacement upload and render as before.
 * **Lumen Lite** (`lumen_lite.rs`, `lumen_lite.wgsl`, `lumen_trace.wgsl`; UE 5.8's `r.Lumen.FinalGatherMethod 0`).
   An alternative final gather for weak GPUs (`RenderSettings::gi_method = GiMethod::LumenLite`): instead of tracing
   64 rays from every 16×16 screen tile (plus adaptive probes) every frame, diffuse GI is gathered from a world-space
@@ -1496,9 +1512,10 @@ Honest differences that remain:
    0.3–0.4 ms at 1600×900 (the final gather goes from 0.5–0.55 to 0.8–0.95 ms). Remaining slow flicker on thin geometry
    comes from the surface caches' incremental updates (cards, voxels, radiance cache), not from probe placement.
    The surface caches see neither skinned meshes, volumes nor particles (only a fire's driven light), and follow
-   moved instances over a few frames (item 9). **Lumen Lite**'s irradiance field covers ±64 m around the camera
-   (4 levels of 16³ probes; beyond, Lumen's radiance cache with an estimated sky visibility); probes are refreshed
-   within a fixed budget of 512 a frame (128 rays each), so lighting changes reach distant and off-screen probes over a
+   moved instances over a few frames (item 9); they see displaced surfaces to the resolution of their baked
+   variants, animated ones as their mean surface (item 14). **Lumen Lite**'s irradiance field covers ±64 m around
+   the camera (4 levels of 16³ probes; beyond, Lumen's radiance cache with an estimated sky visibility); probes are
+   refreshed within a fixed budget of 512 a frame (128 rays each), so lighting changes reach distant and off-screen probes over a
    few hundred milliseconds and a refreshed probe changes in small steps (fine grain in the indirect light: 1.05 % of
    pixels change by > 4/255 per frame on a static camera vs 0.30 % with screen probes); classification uses the
    global distance field only (alpha-masked foliage is not in it, so probes in tree crowns can sleep); there is no
@@ -1681,8 +1698,14 @@ Honest differences that remain:
     graph's displacement may read the time but not the camera, vertex colours, UV set 1 or the tangent frame
     (compile errors); an animated displacement has no speed bound, so every cached shadow page whose texels are
     finer than its reach re-renders its dynamic casters every frame (UE re-renders WPO-animated casters likewise;
-    the wind here refreshes coarse levels less often), and Lumen's distance fields, cards and surface cache
-    follow neither static nor animated displacement. A graph displaces
+    the wind here refreshes coarse levels less often). Lumen follows displacement through baked *variants*
+    (distance field and cards per mesh and displacement): accurate to the mesh's voxels and the cards' ~10 cm
+    texels, so relief finer than those (mortar joints, cobbles) only reaches it through screen traces; an
+    animated displacement is represented by its mean surface (8 s average), not the moving one; a variant takes a
+    few frames to bake after a displacement changes (0.5–1.3 s of CPU time per variant natively, on worker threads;
+    in the browser, which has no threads, one bake per frame, each a hitch of that length); a world-dependent
+    displacement of a moving instance keeps the variant baked where the instance stood; meshes baked without a
+    distance field (`SdfMode::None`) stay out of Lumen, displaced or not. A graph displaces
     only while it has one of the 8 extended resolve pipelines (else its materials stay flat); every displacing
     graph of the scene runs in one dicing permutation behind a switch on the material, compiled when the set
     changes (a hitch while a graph is edited). Dicing uses a uniform 2^k grid per patch with
@@ -1696,6 +1719,6 @@ Honest differences that remain:
     draw displaced clusters undisplaced. Lists hold 512 k patches per split queue and 256 k per dice level: when
     they overflow, the dice rate is raised until they fit (HUD). The visibility payload names the base triangle
     and a second per-pixel target the point on it (16-bit barycentrics, where UE's visibility buffer encodes the
-    patch and micro-triangle); texture derivatives are the base plane's. Lumen sees displaced surfaces only through
-    screen traces. Skinned, alpha-masked, translucent and voxel geometry is not tessellated; the wind does not
+    patch and micro-triangle); texture derivatives are the base plane's. Skinned, alpha-masked, translucent and
+    voxel geometry is not tessellated; the wind does not
     rotate displaced normals.

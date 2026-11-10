@@ -271,7 +271,7 @@ impl DynamicField {
     }
 
     /// Moves the distance-field instances `changes` moved: rewrites their records (written to
-    /// `sdf_instances`) and `bounds`, and queues the bricks under their old and new boxes in the
+    /// `sdf_instances`) and `bounds` (from their fields' mesh-space boxes `aabbs`), and queues the bricks under their old and new boxes in the
     /// levels of the global field they belong to (`in_global`), once they moved far enough from
     /// where a level last composed them. Returns the moved instances' (scene index,
     /// distance-field index).
@@ -282,6 +282,7 @@ impl DynamicField {
         scene: &Scene,
         changes: &SceneChanges,
         sdf_instances: &wgpu::Buffer,
+        aabbs: &[helios_geometry::Aabb],
         bounds: &mut [(Vec3, Vec3)],
         in_global: &[bool],
         levels: &[LevelPlacement],
@@ -292,7 +293,7 @@ impl DynamicField {
             let Some(&k) = self.index.get(i).filter(|&&k| k != u32::MAX) else { continue };
             let k = k as usize;
             let instance = &scene.instances[i];
-            let aabb = &scene.meshes[instance.mesh.0 as usize].aabb;
+            let aabb = &aabbs[k];
             bounds[k] = self.records[k].place(aabb, instance.transform);
             let size = std::mem::size_of::<SdfInstance>();
             queue.write_buffer(sdf_instances, (k * size) as u64, bytemuck::bytes_of(&self.records[k]));

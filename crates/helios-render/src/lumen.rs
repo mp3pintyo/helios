@@ -21,6 +21,9 @@
 //!   gather and reflection hits read them where they match the hit surface and fall back to the
 //!   voxel lighting elsewhere. The global field stores the closest instance per voxel, so its
 //!   hits know which instance's cards to read.
+//! * **Displaced surfaces** (`lumen_displaced.rs`) — instances whose material displaces their
+//!   mesh (Nanite tessellation) are represented by a distance field and cards baked from the
+//!   displaced surface, so all of the above follow the displacement.
 
 use std::collections::HashMap;
 
@@ -30,6 +33,7 @@ use wgpu::BindingResource::{Sampler, TextureView};
 use wgpu::{BindingType, ShaderStages, TextureFormat as F, TextureUsages as U};
 
 use crate::cards::{CardCache, CardUniform};
+use crate::lumen_displaced::{DisplaceInputs, DisplacedSurfaces, Surface};
 use crate::lumen_dynamic::{ComposeParams, DynamicField, DynamicFieldStats, FieldBindings, LevelPlacement, SdfInstance};
 use crate::motion::SceneChanges;
 use crate::near_field::{NearField, NearFieldUniform};
@@ -155,6 +159,10 @@ pub struct Lumen {
     /// Incremental updates for moved instances.
     dynamic: DynamicField,
     levels: Vec<Level>,
+    /// Displaced variants of meshes, which displaced instances are represented by.
+    displaced: DisplacedSurfaces,
+    /// Per distance-field instance: its field's mesh-space box and its world box.
+    instance_aabbs: Vec<helios_geometry::Aabb>,
     instance_bounds: Vec<(Vec3, Vec3)>,
     /// Per distance-field instance: whether it is composed into the global field (alpha-masked
     /// instances are not, see `upload_scene`).
@@ -247,6 +255,8 @@ impl Lumen {
             cards: CardCache::new(device),
             dynamic: DynamicField::new(device, &sdf_module, SDF_LEVELS),
             levels: level_list,
+            displaced: DisplacedSurfaces::new(),
+            instance_aabbs: Vec::new(),
             instance_bounds: Vec::new(),
             in_global_field: Vec::new(),
             mask_coverage: MaskCoverage::default(),
@@ -415,7 +425,9 @@ impl Lumen {
     }
 
     /// Uploads mesh SDFs and instances when the scene changes (moved instances incrementally,
-    /// see `lumen_dynamic.rs`), places the clipmaps around the camera and writes the uniforms.
+    /// see `lumen_dynamic.rs`) or a displaced variant is ready (`tessellation`: displaced
+    /// materials displace, see `lumen_displaced.rs`), places the clipmaps around the camera and
+    /// writes the uniforms.
     #[allow(clippy::too_many_arguments)]
     pub fn update(
         &mut self,
@@ -426,26 +438,37 @@ impl Lumen {
         camera_position: Vec3,
         frame: u32,
         targets: &FrameTargets,
+        tessellation: bool,
     ) {
         self.frame = frame;
         let versions = (scene.geometry_version, scene.instance_version, scene.material_version, scene.texture_version);
-        if versions != self.versions || changes.structural {
+        let displaced = self.displaced.sync(scene, tessellation);
+        if versions != self.versions || changes.structural || displaced {
             self.versions = versions;
-            let (sdf_instances, coverage) = self.upload_scene(device, queue, scene);
+            self.displaced.assign(scene);
+            // Uploading borrows Lumen mutably and the variants immutably.
+            let variants = std::mem::replace(&mut self.displaced, DisplacedSurfaces::new());
+            let surfaces = variants.surfaces(scene);
+            let surface_of = variants.surface_of();
+            let (sdf_instances, coverage) = self.upload_scene(device, queue, scene, &surfaces, surface_of);
             // Every scene instance's index among the distance-field instances (= card instance).
             let mut card_instances = vec![u32::MAX; scene.instances.len()];
             for (k, &i) in sdf_instances.iter().enumerate() {
                 card_instances[i] = k as u32;
             }
-            self.near_field.upload(device, queue, scene, &card_instances, &coverage);
-            self.cards.upload(device, queue, scene, &sdf_instances, &self.instance_bounds);
+            let fields: Vec<_> = surfaces.iter().map(Surface::sdf).collect();
+            self.near_field.upload(device, queue, scene, &fields, surface_of, &card_instances, &coverage);
+            self.cards.upload(device, queue, scene, &surfaces, surface_of, &sdf_instances, &self.instance_bounds);
+            drop(surfaces);
+            self.displaced = variants;
             for level in &mut self.levels {
                 level.dirty = true;
             }
         } else if !changes.moved.is_empty() {
             let placements: Vec<LevelPlacement> = self.placements();
-            let moved = self.dynamic.apply(queue, scene, changes, &self.sdf_instances, &mut self.instance_bounds, &self.in_global_field, &placements);
-            self.near_field.move_instances(queue, scene, moved.iter().map(|&(i, _)| i));
+            let moved = self.dynamic.apply(queue, scene, changes, &self.sdf_instances, &self.instance_aabbs, &mut self.instance_bounds, &self.in_global_field, &placements);
+            let fields: Vec<_> = self.displaced.surfaces(scene).iter().map(Surface::sdf).collect();
+            self.near_field.move_instances(queue, scene, &fields, moved.iter().map(|&(i, _)| i));
             for (i, k) in moved {
                 self.cards.move_instance(queue, k, scene.instances[i].transform, self.instance_bounds[k]);
             }
@@ -552,12 +575,15 @@ impl Lumen {
     /// (`lumen_mesh_sdf.wgsl`), but they stay out of the global distance field: its voxels
     /// (0.25 m and up) are far coarser than leaves and chain links, which would merge into
     /// solid blobs that block all light, and it has no channel left to hold a coverage.
-    fn upload_scene(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, scene: &Scene) -> (Vec<usize>, Vec<f32>) {
+    ///
+    /// `surfaces` are the meshes' distance fields, then the displaced variants'; `surface_of`
+    /// maps every scene instance to its surface.
+    fn upload_scene(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, scene: &Scene, surfaces: &[Surface], surface_of: &[usize]) -> (Vec<usize>, Vec<f32>) {
         let mut descs: Vec<MeshSdfDesc> = Vec::new();
         let mut words: Vec<u32> = Vec::new();
         let mut mesh_desc: Vec<Option<u32>> = Vec::new();
-        for mesh in &scene.meshes {
-            let Some(sdf) = &mesh.sdf else {
+        for surface in surfaces {
+            let Some(sdf) = surface.sdf() else {
                 mesh_desc.push(None);
                 continue;
             };
@@ -572,13 +598,14 @@ impl Lumen {
         }
         let mut instances: Vec<SdfInstance> = Vec::new();
         let mut indices = Vec::new();
-        let mut warned = vec![false; scene.meshes.len()];
+        let mut warned = vec![false; surfaces.len()];
         let mut coverage = vec![1.0; scene.instances.len()];
+        self.instance_aabbs.clear();
         self.instance_bounds.clear();
         self.in_global_field.clear();
         for (index, instance) in scene.instances.iter().enumerate().filter(|(_, i)| i.visible) {
-            let mesh = &scene.meshes[instance.mesh.0 as usize];
-            let Some(desc) = mesh_desc[instance.mesh.0 as usize] else { continue };
+            let surface = &surfaces[surface_of[index]];
+            let Some(desc) = mesh_desc[surface_of[index]] else { continue };
             coverage[index] = self.mask_coverage.of(scene, instance);
             if coverage[index] < MIN_COVERAGE {
                 continue;
@@ -586,9 +613,9 @@ impl Lumen {
             let world = instance.transform;
             let linear = glam::Mat3::from_mat4(world);
             let max_scale = linear.x_axis.length().max(linear.y_axis.length()).max(linear.z_axis.length());
-            if let Some(sdf) = mesh.sdf.as_ref().filter(|s| s.two_sided) {
+            if let Some(sdf) = surface.sdf().filter(|s| s.two_sided) {
                 let shell = 0.5 * sdf.voxel_size * max_scale;
-                if shell > MAX_SHELL && !std::mem::replace(&mut warned[instance.mesh.0 as usize], true) {
+                if shell > MAX_SHELL && !std::mem::replace(&mut warned[surface_of[index]], true) {
                     log::warn!(
                         "lumen: open mesh {} has a {shell:.1} m thick distance-field shell, which blocks nearby light; \
                          bake terrain and ground sheets with SdfMode::Heightfield",
@@ -599,10 +626,12 @@ impl Lumen {
             let mut record = SdfInstance {
                 material: instance.material.0,
                 mesh: desc,
-                has_cards: mesh.sdf.as_ref().is_some_and(|s| s.kind == helios_geometry::SdfKind::Volume) as u32,
+                has_cards: surface.sdf().is_some_and(|s| s.kind == helios_geometry::SdfKind::Volume) as u32,
                 ..Zeroable::zeroed()
             };
-            self.instance_bounds.push(record.place(&mesh.aabb, world));
+            let aabb = surface.aabb();
+            self.instance_bounds.push(record.place(&aabb, world));
+            self.instance_aabbs.push(aabb);
             instances.push(record);
             self.in_global_field.push(coverage[index] >= 1.0);
             indices.push(index);
@@ -620,6 +649,16 @@ impl Lumen {
         );
         self.dynamic.reset(instances, &indices, scene.instances.len());
         (indices, coverage)
+    }
+
+    /// Records the GPU displacement of displaced variants still to bake (nothing in scenes without
+    /// displacement); call [`Lumen::after_submit`] once the frame is submitted.
+    pub fn record_displacement(&mut self, rec: &mut Recorder, queue: &wgpu::Queue, scene: &Scene, inputs: &DisplaceInputs) {
+        self.displaced.record(rec, queue, scene, inputs);
+    }
+
+    pub fn after_submit(&mut self) {
+        self.displaced.after_submit();
     }
 
     /// Composes the clipmap levels of the global distance field scheduled by `update`. Recorded
