@@ -326,10 +326,9 @@ at 2560×1440, 100 % / 67 % screen percentage, round 3 → round 4 (final build 
 runs; [`perf-regressions.md`](docs/round4/perf-regressions.md)): valley 8.1 / 5.6 → 8.7 / 5.5 ms, cathedral
 10.9 / 6.9 → 10.3 / 6.4 ms, forest 14.5 / 11.0 → 18.3 / 12.2 ms (the campfire's shadow-casting light and Nanite
 Foliage's assemblies); new in round 4: gallery 8.0 / 5.0 ms (with the graph-displaced brick terrace in view), cathedral
-with 300 lights under MegaLights 15.3 / 9.2 ms. Round 5 ([`docs/round5/`](docs/round5/), shared GPU, minima of 3
-interleaved runs against round 4's build): cathedral 10.3 / 6.3 → 10.8 / 6.5 ms (the swinging chandelier lights have
-shadow maps again, cached), forest 18.5 / 12.1 → 17.6 / 11.3 ms (16.7 ms in a quieter batch; local light pages),
-valley and gallery unchanged.
+with 300 lights under MegaLights 15.3 / 9.2 ms. Round 5 ([`docs/round5/`](docs/round5/); final build on an idle GPU, minimum of 3 interleaved runs): valley
+8.8 / 5.5 ms, cathedral 10.7 / 6.7 ms (the swinging chandelier lights have shadow maps again, cached), forest
+17.0 / 11.3 ms (local light pages), gallery 8.0 / 5.0 ms, cathedral with 300 lights under MegaLights 15.2 / 9.0 ms.
 
 * **Streaming** (`streaming.rs`, `page_source/`). Cluster and page records are always resident; vertex/triangle data
   lives in a fixed GPU pool. Culling stamps "a resident parent wants to refine into this page" into a feedback buffer,
