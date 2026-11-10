@@ -177,11 +177,85 @@ no points cross to the worker). The variant's `cards` are a `SurfaceCapture` (ca
 so a recapture at another texel or scale than the bake's has no material inputs and keeps the average albedo.
 `offloaded_work_is_bit_identical` checks the attributes too.
 
+## Follow-ups: depth-aware card filtering, captured albedo in the voxels
+
+### Depth-aware filtering of the card lighting (fix)
+
+With per-texel albedo, a weakness of the card lookup became visible: `card_sample` checked that the hit lies on the
+captured surface at the hit's own texel, then filtered bilinearly over the four nearest *lit* texels, skipping only
+texels without a surface. A ground hit next to a mushroom mixed in the cap texel's light (red halos around every cap
+in view 14); a floor hit at the foot of a wall mixed in the wall's. Now every lit texel stores the depth of the surface
+it was lit at (`light_cards` writes `1 + stored depth / 65534` into the lighting atlas's alpha; 0 still means no
+surface), and each tap is weighted by how well that depth lies on the hit's tangent plane: the depth the hit's plane
+has at the tap's centre (the hit's depth plus the slope from its normal, clamped to ±4) against the tap's, within
+the hit's tolerance + half the field's voxel + half a lighting texel. Taps on another surface drop out, and the
+confidence counts the agreeing taps (`saturate(4 × weight)`: one agreeing nearest tap is full confidence).
+
+* The depth costs nothing to store (the alpha was a constant 1) and one subtraction per tap to check; at rgba16f the
+  stored depth has 10 bits over the card's depth range (a 3 m bed: 3 mm), far below the tolerance.
+* Rejected: reading the captured depth of each tap from the capture atlas (4 more texture loads per tap at mip 0,
+  and at coarse mips it is not the depth the texel was lit at); comparing normals (a cap's top and the ground both
+  face up — depth is what separates them).
+
+### Captured albedo in the global distance field and the voxel surface cache (feature)
+
+The voxel surface cache lights the albedo the global distance field stores per voxel, which was the closest
+instance's material average (base colour × texture 1×1 mip): a graph's colours never reached it. The capture pass
+now also sums each pair's captured texels (8-bit albedo and emission, count; a workgroup reduction and one atomic add
+per workgroup and word, `pair_sums`), every sdf instance record names its pair (`SdfInstance::pair`, written after
+the card upload), and `compose` stores the pair's mean albedo where it is captured (glass and self-luminous materials
+keep their sign). When the captures pending after a load or an edit are done, Lumen recomposes the field's levels
+once, as after any scene change; the voxel lighting follows over its usual refresh. The near field's estimate for
+hits without cards reads the same field albedo.
+
+* One mean per instance and material, not per voxel: voxels are 0.25–2 m, so a per-voxel lookup into the cards would
+  have to average many texels per voxel (or alias); the mean is exact for the instance as a whole and covers what was
+  wrong — graphs and textured materials whose average is not the base colour times the 1×1 mip.
+* Rejected: a per-voxel card lookup in `compose` (projecting each voxel into the closest instance's cards: three more
+  bindings in a pass at the 8-storage-buffer limit, and an average over the voxel's footprint per voxel and level);
+  reading the means back to the CPU (latency, and the CPU does not need them).
+
+### Follow-up measurements
+
+Interleaved against a build of the card-albedo state before the follow-ups (e7b4f35), 2560×1440, 6 runs per build,
+minima (ms). Steady state — the field is recomposed once after captures finish, never per frame (the "lumen sdf"
+pass is 0 in both builds' steady-state means):
+
+| Scene | GPU frame 100 % / 67 % | lumen cards | final gather 100 % / 67 % | surface + radiance cache |
+|---|---|---|---|---|
+| valley | 8.69 → 8.71 / 5.51 → 5.46 | 0.030 → 0.030 | 1.75 → 1.79 / 0.90 → 0.87 | 0.216 → 0.224 |
+| cathedral | 10.93 → 10.84 / 6.80 → 6.61 | 0.071 → 0.069 | 2.32 → 2.40 / 1.09 → 1.08 | 0.356 → 0.363 |
+| forest | 16.88 → 16.19 / 10.42 → 10.64 | 0.034 → 0.034 | 2.51 → 2.30 / 0.99 → 1.03 | 0.263 → 0.265 |
+| gallery | 7.96 → 8.06 / 4.97 → 4.96 | 0.053 → 0.055 | 1.88 → 2.02 / 0.95 → 0.93 | 0.221 → 0.231 |
+
+The depth check adds a subtraction and a multiply per card tap in every card lookup (gather, reflections, radiance
+cache): the final gather moves by −0.21 to +0.14 ms between the builds' minima, the same spread as between main and
+the first card-albedo build, whose gather code was identical — within this GPU's noise. The sums add one workgroup
+reduction to the capture (load frames only). A full recompose of the field's four levels after captures finish
+costs what a scene change's does (it could not be timed separately: the shared GPU ran at 70–210 ms frames while
+this was measured).
+
+Images (1280×720; `card-albedo/followup-*.jpg`):
+
+* Card view (14), mushrooms `--eye -5.9,0.3,10.4 --at -6.5,0.08,9.2`: 27.6 dB against the build before, 14.3 % of
+  pixels over 24/255 — the red halos around the caps are gone, the ground between them is moss again, the caps are
+  evenly red (`followup-mushrooms-cards.jpg`); from above 27.0 dB (`followup-bed-top-cards.jpg`).
+* Voxel surface cache (view 11): the bed's voxels change from moss green to the mean of caps, stems, gills and moss —
+  mean colour of the lower screen half (122.6, 126.1, 87.2) → (164.1, 143.4, 113.6) (`followup-mushrooms-voxels.jpg`).
+* Indirect light (view 7): red/green of the bed region 0.800 (main) → 0.833 (cards' albedo) → 0.870 (both follow-ups)
+  (`followup-mushrooms-indirect-vs-main.jpg`, difference ×8); lit image 50.6 dB against the build before.
+* Elsewhere: cathedral lit 56.0 dB, view 11 51.7 dB, view 14 36.1 dB (1 % of pixels: wall/floor edges); the valley's
+  card view at 300 frames 38.9 dB, 0.26 % (at 150 frames the boulders' variants arrive at different frames in the two
+  runs).
+* Browser (headless Chromium, `?bake-workers=0`): gallery card view and cathedral voxel view render, no console,
+  WGSL or validation errors.
+
 ## Tests
 
 * `helios-geometry`: every texel's source interpolates its triangle's corners to the point the texel sees (layer 1
   under a second slab included); nothing is recorded without the flag.
-* `helios-render`: a tiled quad's texels carry their UVs, the base offset (decoded from f16) and the UV footprint;
+* `helios-render` (all shaders validate, including the capture with its workgroup reduction and the compose
+  reading the pair sums): a tiled quad's texels carry their UVs, the base offset (decoded from f16) and the UV footprint;
   the offloaded bake round-trips the captured attributes bit-identically;
   the UV footprint follows the projection (0 edge-on); half-float rounding and saturation; a graph's surface code
   leaves out the displacement function; the capture shader validates (naga + the Tint bitwise check) without a
@@ -190,12 +264,13 @@ so a recapture at another texel or scale than the bake's has no material inputs 
 ## Remaining limits
 
 * Texel density is the cards' ~10 cm: detail finer than a texel bounces as its footprint's average (a mushroom cap
-  of 8–17 cm is one or two texels). The card lighting's bilinear filter does not check depth across texels, so a
-  coloured texel's light also tints its neighbours (red halos around the caps in view 14).
+  of 8–17 cm is one or two texels). At coarse lighting mips a lit texel stands for up to 2^mip × 2^mip captured texels
+  with one depth (its first surface), so the depth-aware filter separates surfaces only to that resolution.
 * Not captured: vertex colours and the second UV set (UV set 0 stands in); a graph's time and camera inputs are
   frozen at capture (an animated lava bounces one moment of its glow).
 * Placement-dependent materials beyond 1 M texels of per-instance pairs share the first instance's capture.
-* The voxel surface cache and the global distance field keep the average albedo (distant and uncarded surfaces).
+* The voxel surface cache and the global distance field see one mean captured albedo per instance and material
+  (not per voxel), and no emission (as before: the voxel cache lights glass as windows and ignores emission).
 * The capture inputs stay on the CPU: 16 bytes per captured texel, 20 with the depth/normal texels (1.2 MiB in the
   gallery, 19–31 MiB in the valley, cathedral and forest).
 * A displaced variant recaptured at another texel or scale than its bake's keeps the average albedo (the base points

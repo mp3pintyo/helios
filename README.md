@@ -1026,7 +1026,13 @@ culling), gallery 8.0 / 5.0 → 8.1 / 5.0 ms, cathedral with 300 lights under Me
   frame (at most ~0.3 ms) after a scene loads (the cathedral's 2.1 M in 3 frames) and again for the pairs whose material,
   graph or parameters change; until then a pair uses the average; pairs that did not change keep their albedo
   through scene re-uploads. Memory: the albedo atlas within 16 MiB (gallery 2.6, cathedral 10.7 MiB), the texels'
-  material inputs kept on the CPU for recaptures (16 bytes per captured texel).
+  material inputs kept on the CPU for recaptures (16 bytes per captured texel). The capture also sums each pair's
+  texels: the global distance field stores, per voxel, the mean captured albedo of the closest instance's pair
+  instead of the material's average, so the voxel surface cache (and the near field's estimate from it) bounces a
+  graph's colours too — the mushroom bed's voxels went from moss green to the caps', stems' and moss's mean; the
+  field recomposes once captures finish. Card lighting is filtered **depth-aware**: every lit texel stores the depth
+  of the surface it was lit at, and a hit's bilinear taps keep only texels on its tangent plane, so a mushroom cap's
+  light no longer tints the ground beside it (nor a wall's the floor at its foot).
   **Radiance cache refresh** (`update_probes` in `lumen_light.wgsl`): it ran one thread per probe tracing its 32 rays
   in turn — ~3500 long serial threads, most of the GPU idle; it now runs a workgroup per probe, a thread per ray,
   with a shared-memory reduction of the SH: the "lumen surface + radiance cache" pass went from 1.42–1.49 to
@@ -1585,7 +1591,7 @@ Honest differences that remain:
    invalidate them globally.
 2. **Lumen**'s mesh cards are axis-aligned (6 directions × 3 depth layers per mesh, no per-mesh card fitting as in UE5),
    carry their materials per ~10 cm texel (the bounce of detail finer than that is averaged by the texel's
-   footprint; the voxel surface cache keeps the average albedo), are lit with one bounce from the radiance cache
+   footprint; the voxel surface cache sees one mean per instance and material), are lit with one bounce from the radiance cache
    rather than card-to-card radiosity, and local lights shadow them through the global field only; surfaces no card
    sees (deep concavities, sub-texel slivers) and instances beyond 100 m use the voxel surface cache, which still leaks
    a little light through thin walls; translucent surfaces get no Lumen
@@ -1620,7 +1626,7 @@ Honest differences that remain:
    `transmissionTexture` and `thicknessTexture` are ignored). Alpha tests ignore wrap modes and vertex alpha. Lumen's
    cards capture materials per texel (graphs included) but without vertex colours or the second UV set, and graphs
    that read the camera or time are captured as they were at capture; its voxels and the global distance field see
-   a material's average albedo. Simplification keeps second-UV and colour seams but
+   one mean captured albedo per instance and material (no emission). Simplification keeps second-UV and colour seams but
    does not weigh their deviation. Alpha tests read image textures with mesh UVs only (not procedural textures or
    triplanar mapping), with 8-bit cutoffs. In Lumen an alpha-masked instance is partially transparent by
    one average coverage (its partial shadows and occlusion are uniform, not shaped like its holes), only in the near

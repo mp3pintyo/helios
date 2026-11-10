@@ -21,5 +21,36 @@
    "crates/helios-render/src/shader.rs",
    "crates/helios-render/src/lumen_offload.rs"
   ]
+ },
+ {
+  "id": "lumen-card-depth-aware-filter",
+  "title": "Mélységérzékeny szűrés a card-megvilágításban: nincs fényszivárgás mélységugrásokon át",
+  "area": "Globális megvilágítás",
+  "kind": "fix",
+  "summary": "A card-mintavétel a négy legközelebbi megvilágított texel között bilineárisan szűrt, és csak a felület nélküli texeleket hagyta ki: a gomba melletti talaj a kalap (most már piros) fényét is bekeverte – piros glóriák minden kalap körül a 14-es nézetben –, a fal tövében a padló a falét. Most minden megvilágított texel eltárolja, milyen mélységű felületen világították meg, és a szűrő csak a találat érintősíkjára eső texeleket használja.",
+  "details": "A light_cards a megvilágítási atlasz alfájába írja: 1 + a tárolt mélység / 65534 (0: nincs felület; addig konstans 1 volt, így ingyenes). A card_sample minden tapnál összeveti ezt azzal a mélységgel, amelyet a találat síkja a tap közepén ad (a találat mélysége + a normálból számolt lejtés, ±4-re vágva), a találat tűrése + fél mezővoxel + fél megvilágítási texel tűréssel; a bizalom az egyező tapok súlyából jön (saturate(4·súly)). rgba16f-ben a mélység 10 bites a card mélységtartományán (3 m-es ágyás: 3 mm). Elvetve: a tapok befogott mélységének olvasása a capture atlaszból (taponként +1 textúraolvasás, durva mipen nem az a mélység, amelyen megvilágították), normálok összevetése (a kalap teteje és a talaj egyaránt felfelé néz).",
+  "metrics": "1280×720, gombák card-nézete (14): az előző buildhez képest 27,6 dB, a pixelek 14,3 %-a változik 24/255-nél többet – a kalapok körüli piros glória eltűnt; felülről 27,0 dB. Költség (2560×1440, buildenként 6 váltott futás minimuma): a final gather −0,21…+0,14 ms között mozog, ugyanannyit, mint main és az első card-albedo build között, ahol a kód azonos volt – zajon belül; a card-megvilágító pass változatlan (0,030 → 0,030, 0,071 → 0,069 ms).",
+  "showcase": "Galéria, gombaágyás: --scene gallery --eye -5.9,0.3,10.4 --at -6.5,0.08,9.2 --view 14 és felülről --eye -6.5,1.6,9.6 --at -6.5,0.0,9.2 --view 14: a kalapok körüli piros glória eltűnt, a kalapok egyenletesen pirosak. Képek: docs/round6/card-albedo/followup-mushrooms-cards.jpg, followup-bed-top-cards.jpg.",
+  "modules": [
+   "crates/helios-render/src/shaders/lumen_cards.wgsl",
+   "crates/helios-render/src/shaders/lumen_card_light.wgsl"
+  ]
+ },
+ {
+  "id": "lumen-voxel-captured-albedo",
+  "title": "A globális távolságmező és a voxel-felületcache a befogott card-albedót használja",
+  "area": "Globális megvilágítás",
+  "kind": "feature",
+  "summary": "A voxel-felületcache a globális távolságmező voxelenként tárolt albedójával világít, ami eddig a legközelebbi példány anyagának átlaga volt (alapszín × textúra 1×1 mip): egy gráf színei nem jutottak el hozzá. Most a befogás páronként összegzi a texeleket, és a mező a pár befogott átlagos albedóját tárolja – a gombaágyás voxeljei mohazöldből a kalapok, tönkök és moha átlagos színére váltanak.",
+  "details": "A lumen_card_capture.wgsl munkacsoportonként redukálja a befogott texelek 8 bites albedóját és emisszióját és a darabszámot, majd szavanként egy atomic add-dal a pár összegeihez adja (pair_sums, páronként 5 u32). Az SdfInstance _pad mezője pair lett (1 + a példány card-párja, a card-feltöltés után beírva, a lumen_dynamic CPU-másolatában is). A compose (és a compose_listed) a pár átlagát tárolja, ha befogott; az üveg és az önvilágító anyagok előjele megmarad. Amikor a függő befogások elfogynak (betöltés vagy anyagszerkesztés után), a Lumen egyszer újrakomponálja a szinteket, mint bármely jelenetváltozás után; újrafeltöltéskor a változatlan párok összegei átmásolódnak. Elvetve: voxelenkénti card-lekérés a compose-ban (a voxelek 0,25–2 m-esek: sok texelt kellene átlagolni, plusz kötések egy 8 tárolópuffer-határon lévő passban), az átlagok CPU-ra olvasása.",
+  "metrics": "Gombaágyás voxel-felületcache (view 11): a képalsó fél átlagszíne (122,6; 126,1; 87,2) → (164,1; 143,4; 113,6); az indirekt fény vörös/zöld aránya main 0,800 → card-albedó 0,833 → követő javításokkal 0,870. Állandó állapotban nincs költség (a 'lumen sdf' pass átlaga 0 mindkét buildben; GPU-képkocka völgy 8,69 → 8,71, katedrális 10,93 → 10,84, erdő 16,88 → 16,19, galéria 7,96 → 8,06 ms, zajon belül); befogások után egyszeri teljes újrakomponálás, mint jelenetváltozáskor. Memória: páronként 20 bájt.",
+  "showcase": "Galéria, gombaágyás: --scene gallery --eye -5.9,0.3,10.4 --at -6.5,0.08,9.2 --view 11 (voxel-felületcache: előtte mohazöld, utána a gombák átlagszíne) és --view 7 (indirekt fény). Képek: docs/round6/card-albedo/followup-mushrooms-voxels.jpg, followup-mushrooms-indirect-vs-main.jpg.",
+  "modules": [
+   "crates/helios-render/src/shaders/lumen_card_capture.wgsl",
+   "crates/helios-render/src/shaders/lumen_sdf.wgsl",
+   "crates/helios-render/src/cards.rs",
+   "crates/helios-render/src/lumen.rs",
+   "crates/helios-render/src/lumen_dynamic.rs"
+  ]
  }
 ]
