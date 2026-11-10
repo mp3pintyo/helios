@@ -99,15 +99,17 @@ fn build_scene(detail: Detail) -> Scene {
     let ring: Mesh = primitives::cylinder(64, 1, 1.1, 0.25, false);
     let ring = add_baked_with(&mut scene, "gallery/basin", &ring, BuildConfig { sdf: SdfMode::None, ..Default::default() });
     // The brick terrace: 8 × 3 m in front of the wet stone, its bricks 3 cm above the courtyard
-    // (the mortar joints sink 2.8 cm), framed by a kerb.
+    // (the mortar joints sink 2.8 cm), framed by a kerb. Lumen sees it as a heightfield of 1.6 cm
+    // cells, baked from its displaced surface (lumen_displaced.rs).
     let mut terrace = primitives::terrain(8.0, 32, 0.0, 4);
     terrace.deform(|p| Vec3::new(p.x, BRICK_LEVEL, p.z * 0.375 + 9.0));
-    let terrace = add_baked_with(&mut scene, "gallery/brick terrace", &terrace, BuildConfig { sdf: SdfMode::None, ..Default::default() });
+    let terrace = add_baked_with(&mut scene, "gallery/brick terrace", &terrace, BuildConfig { sdf: SdfMode::Heightfield { resolution: 512 }, ..Default::default() });
     // The beds: flat 3 m squares (their graphs do the modelling). The cloth's UVs span it (its
-    // graph pins the edges by them).
+    // graph pins the edges by them). Their distance fields (3.3 cm voxels) are baked per
+    // material from the displaced surface: mushrooms on one, the cloth's mean surface on the other.
     let mut bed = primitives::terrain(3.0, 12, 0.0, 5);
     bed.deform(|p| Vec3::new(p.x, 0.0, p.z));
-    let bed = add_baked_with(&mut scene, "gallery/bed", &bed, BuildConfig { sdf: SdfMode::None, ..Default::default() });
+    let bed = add_baked_with(&mut scene, "gallery/bed", &bed, volume(96));
     let kerb = add_baked_with(&mut scene, "gallery/kerb", &cuboid(Vec3::new(-0.5, 0.0, -0.5), Vec3::new(0.5, 1.0, 0.5)), volume(8));
     let mut pool = primitives::terrain(2.2, 24, 0.0, 3);
     pool.deform(|p| Vec3::new(p.x, 0.0, p.z));
