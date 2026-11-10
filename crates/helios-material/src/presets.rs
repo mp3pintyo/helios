@@ -701,7 +701,8 @@ pub fn rippling_cloth() -> MaterialGraph {
 /// built in tangent space — up the normal, along the tangent — and turned into world space by a
 /// TransformVector node, so the tufts follow their instance: on a turning platform they turn with
 /// it, where a world-space vector from the same constants would keep leaning the same way. The
-/// tips are lighter than the roots. Its material's magnitude is the tufts' height.
+/// tips are lighter than the roots, and the tufts shrink towards the mesh's edges (by its UVs).
+/// Its material's magnitude is the tufts' height.
 pub fn combed_tufts() -> MaterialGraph {
     let mut g = GraphBuilder::new("Combed tufts");
     let position = g.node(Op::ObjectPosition, [-1200.0, 0.0]);
@@ -713,7 +714,16 @@ pub fn combed_tufts() -> MaterialGraph {
     let distance = g.node(Op::Length, [-350.0, 40.0]);
     let falloff = g.node(Op::SmoothStep, [-180.0, 40.0]);
     let profile = g.node(Op::OneMinus, [-10.0, 40.0]);
-    let height = g.node(Op::Multiply, [160.0, 40.0]);
+    let squared = g.node(Op::Multiply, [160.0, 40.0]);
+    // Shorter towards the mesh's edges (by its UVs), so no tuft is cut in half.
+    let uv = g.node(Op::TexCoord { set: 0, tiling: [1.0, 1.0] }, [-520.0, 300.0]);
+    let far_side = g.node(Op::OneMinus, [-350.0, 360.0]);
+    let nearest = g.node(Op::Min, [-180.0, 300.0]);
+    let border = g.node(Op::SmoothStep, [-10.0, 300.0]);
+    let border_u = g.node(Op::ComponentMask { channels: "x".into() }, [160.0, 260.0]);
+    let border_v = g.node(Op::ComponentMask { channels: "y".into() }, [160.0, 340.0]);
+    let inside = g.node(Op::Multiply, [330.0, 300.0]);
+    let height = g.node(Op::Multiply, [330.0, 40.0]);
     // Up the normal; along the tangent by lean · height² (the tips bend furthest).
     let lean = g.node(Op::ScalarParameter { name: "Lean".into(), default: 0.8, min: 0.0, max: 1.4 }, [160.0, 200.0]);
     let bend = g.node(Op::Multiply, [330.0, 160.0]);
@@ -739,8 +749,20 @@ pub fn combed_tufts() -> MaterialGraph {
         .value(falloff, "Max", 0.42)
         .link(distance, "Out", falloff, "X")
         .link(falloff, "Out", profile, "In")
-        .link(profile, "Out", height, "A")
-        .link(profile, "Out", height, "B")
+        .link(profile, "Out", squared, "A")
+        .link(profile, "Out", squared, "B")
+        .link(uv, "Out", far_side, "In")
+        .link(uv, "Out", nearest, "A")
+        .link(far_side, "Out", nearest, "B")
+        .value(border, "Min", 0.02)
+        .value(border, "Max", 0.1)
+        .link(nearest, "Out", border, "X")
+        .link(border, "Out", border_u, "In")
+        .link(border, "Out", border_v, "In")
+        .link(border_u, "Out", inside, "A")
+        .link(border_v, "Out", inside, "B")
+        .link(squared, "Out", height, "A")
+        .link(inside, "Out", height, "B")
         .link(height, "Out", bend, "A")
         .link(height, "Out", bend, "B")
         .link(bend, "Out", along, "A")
