@@ -14,13 +14,15 @@ use crate::profiler::Recorder;
 use crate::shader::create_module;
 use crate::substrate_gpu::{ExtendedMaterials, SUBSURFACE_FORMAT};
 use crate::targets::{FrameTargets, HDR_FORMAT};
-use crate::util::{bind, bind_group, bind_group_layout, compute_pipeline, pipeline_layout, workgroups};
+use crate::util::{bind, bind_group, bind_group_layout, lazy_compute_pipeline, pipeline_layout, workgroups};
+use crate::pipelines::Lazy;
 
+/// Its pipelines are compiled when a scene first has subsurface materials ([`Lazy::new`]).
 pub struct SubsurfacePass {
     horizontal_layout: wgpu::BindGroupLayout,
-    horizontal: wgpu::ComputePipeline,
+    horizontal: Lazy<wgpu::ComputePipeline>,
     vertical_layout: wgpu::BindGroupLayout,
-    vertical: wgpu::RenderPipeline,
+    vertical: Lazy<wgpu::RenderPipeline>,
 }
 
 impl SubsurfacePass {
@@ -30,33 +32,45 @@ impl SubsurfacePass {
         let common = [(0, bind::uniform()), (1, tex), (2, bind::texture_uint()), (3, bind::uniform()), (4, tex), (7, tex)];
         let horizontal_layout = bind_group_layout(device, "subsurface horizontal", ShaderStages::COMPUTE, &[&common[..], &[(5, bind::storage_texture(SUBSURFACE_FORMAT))]].concat());
         let vertical_layout = bind_group_layout(device, "subsurface vertical", ShaderStages::FRAGMENT, &[&common[..], &[(6, tex)]].concat());
-        let additive = wgpu::BlendComponent { src_factor: wgpu::BlendFactor::One, dst_factor: wgpu::BlendFactor::One, operation: wgpu::BlendOperation::Add };
-        let vertical = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("subsurface vertical"),
-            layout: Some(&pipeline_layout(device, "subsurface vertical", &[&vertical_layout])),
-            vertex: wgpu::VertexState { module: &module, entry_point: Some("fullscreen"), compilation_options: Default::default(), buffers: &[] },
-            fragment: Some(wgpu::FragmentState {
-                module: &module,
-                entry_point: Some("vertical"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: HDR_FORMAT,
-                    blend: Some(wgpu::BlendState { color: additive, alpha: additive }),
-                    write_mask: wgpu::ColorWrites::COLOR,
-                })],
-            }),
-            primitive: Default::default(),
-            depth_stencil: None,
-            multisample: Default::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+        let vertical = {
+            let (device, module, vertical_layout) = (device.clone(), module.clone(), vertical_layout.clone());
+            Lazy::new(move || {
+                let additive = wgpu::BlendComponent { src_factor: wgpu::BlendFactor::One, dst_factor: wgpu::BlendFactor::One, operation: wgpu::BlendOperation::Add };
+                device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some("subsurface vertical"),
+                    layout: Some(&pipeline_layout(&device, "subsurface vertical", &[&vertical_layout])),
+                    vertex: wgpu::VertexState { module: &module, entry_point: Some("fullscreen"), compilation_options: Default::default(), buffers: &[] },
+                    fragment: Some(wgpu::FragmentState {
+                        module: &module,
+                        entry_point: Some("vertical"),
+                        compilation_options: Default::default(),
+                        targets: &[Some(wgpu::ColorTargetState {
+                            format: HDR_FORMAT,
+                            blend: Some(wgpu::BlendState { color: additive, alpha: additive }),
+                            write_mask: wgpu::ColorWrites::COLOR,
+                        })],
+                    }),
+                    primitive: Default::default(),
+                    depth_stencil: None,
+                    multisample: Default::default(),
+                    multiview_mask: None,
+                    cache: None,
+                })
+            })
+        };
         Self {
-            horizontal: compute_pipeline(device, "subsurface horizontal", &module, "horizontal", &horizontal_layout, &[]),
+            horizontal: lazy_compute_pipeline(device, "subsurface horizontal", &module, "horizontal", &horizontal_layout, &[]),
             horizontal_layout,
             vertical_layout,
             vertical,
         }
+    }
+
+    /// Queues the pipelines for the browser's background compile (the scene has subsurface
+    /// materials).
+    pub fn prefetch(&self) {
+        self.horizontal.prefetch();
+        self.vertical.prefetch();
     }
 
     pub fn record(&self, rec: &mut Recorder, frame: &wgpu::Buffer, targets: &FrameTargets, extended: &ExtendedMaterials) {

@@ -23,6 +23,7 @@ use crate::profiler::Recorder;
 use crate::scene::Scene;
 use crate::shader::create_module;
 use crate::util::{bind, bind_group, bind_group_layout, compute_pipeline, storage_buffer, storage_buffer_init, uniform_buffer};
+use crate::pipelines::Lazy;
 
 /// Part instances a frame may expand (instance records after the scene's and the assembly
 /// instances' culling records: 240 bytes each).
@@ -79,7 +80,7 @@ struct GpuAssemblyInstance {
 
 pub struct Assemblies {
     layout: wgpu::BindGroupLayout,
-    expand: wgpu::ComputePipeline,
+    expand: Lazy<wgpu::ComputePipeline>,
     params_buffer: wgpu::Buffer,
     assemblies: wgpu::Buffer,
     parts: wgpu::Buffer,

@@ -140,8 +140,9 @@ fn fibonacci_direction(i: u32, n: u32, rotation: f32) -> vec3<f32> {
 
 const PROBE_RAYS: u32 = 32u;
 
-// Per ray: L0, L1x, L1y, L1z radiance, summed over the workgroup.
-var<workgroup> probe_sh: array<array<vec3<f32>, 4>, PROBE_RAYS>;
+// Per ray: one of L0, L1x, L1y, L1z radiance at a time, summed over the workgroup (a small
+// array: the browser zero-initialises workgroup memory, which Firefox's compiler is slow at).
+var<workgroup> probe_sh: array<vec3<f32>, PROBE_RAYS>;
 
 // One workgroup per refreshed probe, one thread per ray: a thread per probe tracing all its
 // rays in turn left most of the GPU idle (a few thousand long, serial threads).
@@ -176,23 +177,27 @@ fn update_probes(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocatio
         n = select(n, -n, dot(n, dir) > 0.0);
         radiance = card_field_radiance(radiance, hit.position, n, hit.level, lumen.sdf_levels[hit.level].w * 0.5);
     }
-    probe_sh[i] = array<vec3<f32>, 4>(radiance * 0.282095, radiance * (0.488603 * dir.x), radiance * (0.488603 * dir.y), radiance * (0.488603 * dir.z));
-    workgroupBarrier();
-    for (var stride = PROBE_RAYS / 2u; stride > 0u; stride >>= 1u) {
-        if i < stride {
-            for (var k = 0u; k < 4u; k++) {
-                probe_sh[i][k] += probe_sh[i + stride][k];
+    let coefficients = array<vec3<f32>, 4>(radiance * 0.282095, radiance * (0.488603 * dir.x), radiance * (0.488603 * dir.y), radiance * (0.488603 * dir.z));
+    var sums: array<vec3<f32>, 4>;
+    for (var k = 0u; k < 4u; k++) {
+        probe_sh[i] = coefficients[k];
+        workgroupBarrier();
+        for (var stride = PROBE_RAYS / 2u; stride > 0u; stride >>= 1u) {
+            if i < stride {
+                probe_sh[i] += probe_sh[i + stride];
             }
+            workgroupBarrier();
         }
+        sums[k] = probe_sh[0];
         workgroupBarrier();
     }
     if i != 0u {
         return;
     }
-    let l0 = probe_sh[0][0];
-    let l1x = probe_sh[0][1];
-    let l1y = probe_sh[0][2];
-    let l1z = probe_sh[0][3];
+    let l0 = sums[0];
+    let l1x = sums[1];
+    let l1y = sums[2];
+    let l1z = sums[3];
     let norm = 4.0 * PI / f32(PROBE_RAYS);
     let base = probe * 4u;
     let previous_valid = radiance_probes[base].w > 0.5;

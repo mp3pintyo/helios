@@ -8,7 +8,9 @@ lights), **Substrate**-style layered materials with material graphs, heterogeneo
 dynamic world of moving instances, with its material / lighting / post stack — running natively and in the
 browser, where a UE-style level editor with scene files and a PCG graph sits around the live viewport.
 
-**Live showcase:** https://mp3pintyo.github.io/helios/ (needs a WebGPU browser, e.g. recent Chrome or Edge).
+**Live showcase:** https://mp3pintyo.github.io/helios/ (needs a WebGPU browser: recent Chrome, Edge or Firefox; the
+browser compiles the renderer's GPU shaders on the way: the first image after ~9 s in Chrome and ~11–15 s in Firefox,
+shadows, Lumen and the rest joining as their shaders arrive — see gap 15).
 Redeploy with `python site/build.py` then `python site/deploy_pages.py`.
 Round 4's design notes, measurements and screenshots, one file per feature: [`docs/round4/`](docs/round4/).
 
@@ -44,6 +46,7 @@ rustup target add wasm32-unknown-unknown
 cargo install wasm-bindgen-cli --version 0.2.130
 ./build-web.ps1
 python -m http.server 8080 --directory web     # open http://localhost:8080/?scene=cathedral
+#   ?shaders=serial|parallel: how the browser's background shader compile is worked (default: by browser)
 
 # The level editor (browser): outliner, details, gizmos, content browser, PCG volumes, material graphs
 python serve.py 8080 web
@@ -62,6 +65,7 @@ cargo run -p helios-demo --release -- --gltf path/to/Fox.glb          # - (Minus
 #   browser: http://localhost:8080/?gltf=models/DamagedHelmet.glb (fetched relative to the page)
 #   browser resolution: dynamic resolution (14 ms GPU budget) is on by default; ?sp=67 fixes the screen
 #   percentage, ?budget=10 changes the budget, ?budget=0 turns it off
+#   ?bake-workers=0: Lumen's displaced variants bake on the render thread instead of Web Workers (comparisons)
 
 # Streaming geometry from pre-baked .hvm files instead of baking at startup
 cargo run -p helios-demo --release -- --scene forest --bake-hvm hvm/forest      # bake once
@@ -178,7 +182,13 @@ the story of how Helios was built. It talks to the engine through the page API i
 `globalThis.heliosConfig = { scene, embedded, screenPercentage, gpuBudgetMs, gi, megaLights, lights, statusElement }`
 before loading the module, then `heliosLoadScene`, `heliosLoadModel(url)` (fetch a glTF model and make it the scene;
 a promise), `heliosSetCandleLights(n)` (the cathedral's candle lights from its next build; 0: the 33 fixture lights),
-`heliosKey`, `heliosLookAt`, `heliosSetSun`, `heliosSetView`, `heliosSetPaused`, `heliosHud` and `heliosScene`.
+`heliosKey`, `heliosLookAt`, `heliosSetSun`, `heliosSetView`, `heliosSetPaused`, `heliosHud`, `heliosScene` and
+`heliosBusy` (what the engine waits for — `Compiling GPU shaders… 4 s (31 / 52)` while the browser compiles the
+core pipelines of the first image, `Compiling GPU shaders… 2 s` for a new scene's or a feature's that a frame needs at
+once, the canvas keeping its last frame — or empty while it renders), `heliosFrames` (frames presented; 0 until the
+first image) and `heliosShaders` (the background compile as JSON: pipelines compiled and in all, the features still
+waiting for theirs, the time to the first image and to full quality). The site shows `heliosBusy` on its veil until
+the first frame, then a note with the features still compiling.
 `embedded: true` keeps keyboard input on the focused canvas and leaves the mouse wheel to the page; `statusElement`
 names the element the engine writes its (English) progress and errors into instead of `#status`, so a page can show
 its own, translated text. The editor uses a second set of exports (`heliosEditor*`, `heliosMaterialNodes`; see
@@ -189,7 +199,7 @@ its own, translated text. The editor uses a second set of exports (`heliosEditor
 cargo build --release -p helios-demo
 python site/capture.py all          # stills + tour videos into site/media-src (needs ffmpeg; HELIOS_ASSETS = glTF samples)
 uv run --with playwright --with pillow python -I site/capture_editor.py   # editor stills + video (headless Chromium)
-python site/build.py                # site/dist: page, pkg, editor, the media the page references
+python site/build.py                # site/dist: page, pkg (with pkg/snippets/: the bake worker), editor, media
 python serve.py 8080 site/dist      # open http://localhost:8080/preview.html
 ```
 
@@ -1023,7 +1033,13 @@ culling), gallery 8.0 / 5.0 → 8.1 / 5.0 ms, cathedral with 300 lights under Me
   vectors, world triplanar heights). The mesh is refined into points at most ¾ of a voxel apart (welded, on a
   worker thread), the GPU displaces them with the tessellator's own `displacement_position` — for graphs through
   the dicing passes' generated module — filtered for the point spacing, and the field and cards are baked from the
-  read-back positions on worker threads with the same code as every mesh's (in the browser one bake per frame). An
+  read-back positions on worker threads with the same code as every mesh's. In the browser, which has no threads
+  without cross-origin isolation, the refinement and the bake run on **Web Workers** that each run a second instance
+  of the wasm module (`lumen_offload.rs`, `web_bake.rs`, `bake_worker.js`; `docs/round6/web-bake-worker.md`): the
+  render thread only hands over the inputs and takes in the results, one per frame, so a scene's variants no longer
+  stall frames for 30–920 ms each (worst frame while the gallery's four variants bake 718–920 → 6–7 ms, against
+  2–4 ms without baking, and all of them in after 1.5–1.6 instead of 2.3–3.3 s; `?bake-workers=0` runs them on the
+  render thread as before, as does a browser where a worker cannot start). An
   animated displacement is represented by its mean surface (32 times in 8 s): the gallery's cloth moves at most
   3.6 cm RMS from it at 3.3 cm voxels, where a snapshot would be √2 times as far off and a re-bake could never keep
   up with the waves. Until a variant is ready (0.5–1.3 s of CPU per variant) instances keep their previous one;
@@ -1546,6 +1562,8 @@ culling), gallery 8.0 / 5.0 → 8.1 / 5.0 ms, cathedral with 300 lights under Me
 | Read-write storage textures only for 32-bit single-channel formats | Subsurface diffusion adds its result to the rgba16f scene colour with a full-screen pass and additive blending instead of a compute read-modify-write |
 | No hardware ray tracing | MegaLights' shadow rays march the depth buffer, the lights' virtual shadow maps and Lumen's distance fields |
 | No derivatives in compute shaders (the material resolve is compute over the visibility buffer) | Analytic barycentric UV derivatives; material graphs carry screen derivatives through their math by forward-mode differentiation |
+| Browsers compile every pipeline in their GPU process before running what follows it (Firefox one at a time, asynchronous or not, on every visit); wgpu calls only the synchronous `create*Pipeline` | Progressive start-up (`pipelines.rs`): every pipeline belongs to a feature group and is queued in the browser; the renderer turns a feature off until its group is compiled, so the first image needs only the core set. Chromium: each pipeline is warmed through `create*PipelineAsync` (Dawn compiles in parallel) and made when warm, a cache hit. Firefox: the core set compiles while the scene bakes, the rest one per frame. The frame loop renders into its own texture and presents only frames that queued no compile, so the page never stalls behind one; content pipelines (skinning, masks, a translucent model…) are made on first use or queued once the scene has the content (`Lazy`) |
+| No wasm threads without cross-origin isolation (`SharedArrayBuffer` needs COOP/COEP headers, which GitHub Pages cannot send) | Lumen's displaced-variant bakes run on Web Workers that each instantiate the page's compiled wasm module and exchange bytes with it (`bake_worker.js`); other start-up work (scene build, texture encoding) runs on the render thread |
 ## Status vs. Unreal Engine 5 — what is still simpler
 
 Honest differences that remain:
@@ -1765,9 +1783,10 @@ Honest differences that remain:
     displacement through baked *variants* (distance field and cards per mesh and displacement): accurate to the
     mesh's voxels and the cards' ~10 cm texels, so relief finer than those (mortar joints, cobbles) only reaches it
     through screen traces; an animated displacement is represented by its mean surface (8 s average), not the moving
-    one; a variant takes a few frames to bake after a displacement changes (0.5–1.3 s of CPU time per variant
-    natively, on worker threads; in the browser, which has no threads, one bake per frame, each a hitch of that
-    length); a world-dependent displacement of a moving instance keeps the variant baked where the instance stood;
+    one; a variant takes a few frames to bake after a displacement changes (0.5–1.3 s of CPU time per variant, on
+    worker threads natively and on Web Workers in the browser, where the render thread still copies each result in —
+    up to ≈ 5 ms for a 124 k-triangle variant — and Lumen re-uploads its scene when a scene's variants are in, as on
+    any structural change); a world-dependent displacement of a moving instance keeps the variant baked where the instance stood;
     meshes baked without a distance field (`SdfMode::None`) stay out of Lumen, displaced or not. A graph displaces
     only while it has one of the 16 extended resolve pipelines (else its materials stay flat); every displacing
     graph of the scene runs in one dicing permutation behind a switch on the material, compiled when the set
@@ -1785,3 +1804,16 @@ Honest differences that remain:
     patch and micro-triangle); texture derivatives are the base plane's. Skinned, alpha-masked, translucent and
     voxel geometry is not tessellated; the wind does not
     rotate displaced normals.
+15. **Browser start-up** (round 6, `firefox-freeze`, `browser-startup`): the browser compiles every pipeline in its
+    GPU process (WGSL → HLSL → DXC on Windows) — Firefox one at a time on every visit, Chrome through wgpu's
+    synchronous calls one at a time too on a first visit. UE ships precompiled shaders and a PSO cache. Helios
+    compiles progressively instead, like UE's asynchronous compilation with fallbacks (`pipelines.rs`,
+    `docs/round6/browser-startup.md`): the first image needs only the core pipelines, and shadows, Lumen, clouds,
+    fog, translucency, tessellation and occlusion culling come on as theirs arrive; Chrome compiles them in parallel
+    (warmed through `create*PipelineAsync`, then made from Dawn's cache), Firefox the core set while the scene bakes
+    and the rest one batch per frame. The first image now takes ~9 s in a fresh Chrome profile (was 26–41 s) and
+    11–15 s in Firefox (was 36–50 s) on this shared Ryzen 5 7600X; the full set ~11 s in Chrome and 33–51 s in
+    Firefox, about when it used to show its first image (a slower CPU waits proportionally longer). Still simpler:
+    the core set itself is ~4 s of Firefox compiling (the material resolve 0.6–1.2 s per shading model), the scene's
+    content pipelines are found only after the bake, a new scene or a debug view compiles its new pipelines in the
+    frame that needs them (the canvas holding its last frame), and the scene bake (3–6 s) runs on the main thread.

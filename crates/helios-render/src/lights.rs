@@ -8,6 +8,7 @@ use crate::profiler::Recorder;
 use crate::scene::{LightKind, Scene};
 use crate::shader::create_module;
 use crate::util::{bind, bind_group, bind_group_layout, compute_pipeline, storage_buffer, workgroups};
+use crate::pipelines::Lazy;
 
 pub const MAX_LIGHTS: usize = 1024;
 const CLUSTERS: u32 = 16 * 9 * 24;
@@ -27,7 +28,7 @@ pub struct LightCulling {
     pub grid: wgpu::Buffer,
     pub count: u32,
     layout: wgpu::BindGroupLayout,
-    pipeline: wgpu::ComputePipeline,
+    pipeline: Lazy<wgpu::ComputePipeline>,
 }
 
 impl LightCulling {

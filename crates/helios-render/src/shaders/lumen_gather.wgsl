@@ -404,7 +404,10 @@ fn trace_probes(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation
     textureStore(probe_atlas_out, texel, vec4<f32>(clamp_ray(color, MAX_PROBE_RAY_INTENSITY), r.sky));
 }
 
-var<workgroup> sh_partial: array<array<vec4<f32>, 10>, 64>;
+// Summed one coefficient at a time (the same additions as a 64 × 10 array): the browser
+// zero-initialises workgroup memory, and Firefox's shader compiler took 1 s over the
+// initialisation of the 640-element array.
+var<workgroup> sh_partial: array<vec4<f32>, 64>;
 
 // Adds what probe `other` traced in direction `dir` to the spatial filter of the probe at
 // `position` (`normal_depth`), weighted by how well it lies on the same surface (`own`: the
@@ -487,28 +490,31 @@ fn probe_sh(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id)
     radiance /= max(weight, 1e-4);
 
     // Project onto SH (hemisphere texels of equal solid angle, approximately 2pi / 64 each).
+    // Thread k keeps the sum of coefficient k (9: the sky visibility).
     let y = sh_basis(dir);
     let solid_angle = 2.0 * PI / 64.0;
-    for (var k = 0u; k < 9u; k++) {
-        sh_partial[li][k] = vec4<f32>(radiance.rgb * y[k] * solid_angle, 0.0);
-    }
-    sh_partial[li][9] = vec4<f32>(radiance.a / 64.0);
-    workgroupBarrier();
-    for (var stride = 32u; stride > 0u; stride >>= 1u) {
-        if li < stride {
-            for (var k = 0u; k < 10u; k++) {
-                sh_partial[li][k] += sh_partial[li + stride][k];
+    var total = vec4<f32>(0.0);
+    for (var k = 0u; k < 10u; k++) {
+        sh_partial[li] = select(vec4<f32>(radiance.a / 64.0), vec4<f32>(radiance.rgb * y[min(k, 8u)] * solid_angle, 0.0), k < 9u);
+        workgroupBarrier();
+        for (var stride = 32u; stride > 0u; stride >>= 1u) {
+            if li < stride {
+                sh_partial[li] += sh_partial[li + stride];
             }
+            workgroupBarrier();
+        }
+        if li == k {
+            total = sh_partial[0];
         }
         workgroupBarrier();
     }
     if li < 9u {
-        probes[base + 2u + li] = select(sh_partial[0][li], vec4<f32>(0.0), info.w == 0.0);
+        probes[base + 2u + li] = select(total, vec4<f32>(0.0), info.w == 0.0);
     }
     if li == 9u {
         probes[base + 1u] = vec4<f32>(normal_depth.xyz, normal_depth.w);
         // Sky visibility rides in the position's w channel (1 + visibility, 0 = invalid).
-        probes[base] = vec4<f32>(info.xyz, select(0.0, 1.0 + sh_partial[0][9].x, info.w != 0.0));
+        probes[base] = vec4<f32>(info.xyz, select(0.0, 1.0 + total.x, info.w != 0.0));
     }
 }
 

@@ -41,7 +41,7 @@ use crate::passes::Samplers;
 use crate::profiler::Recorder;
 use crate::shader::create_module;
 use crate::targets::FrameTargets;
-use crate::util::{bind, bind_group, bind_group_layout, compute_pipeline, storage_buffer, texture, workgroups, TextureSpec};
+use crate::util::{bind, bind_group, bind_group_layout, lazy_compute_pipeline, Lazy, storage_buffer, texture, workgroups, TextureSpec};
 use crate::vsm::VirtualShadowMap;
 
 const C: ShaderStages = ShaderStages::COMPUTE;
@@ -101,20 +101,22 @@ impl Targets {
     }
 }
 
+/// The pipelines are compiled when MegaLights first runs ([`Lazy`]): it is off by default, and a
+/// browser compiles every pipeline the renderer creates before its first frame.
 pub struct MegaLights {
     sample_layout: wgpu::BindGroupLayout,
-    generate: wgpu::ComputePipeline,
-    trace: wgpu::ComputePipeline,
+    generate: Lazy<wgpu::ComputePipeline>,
+    trace: Lazy<wgpu::ComputePipeline>,
     shade_layout: wgpu::BindGroupLayout,
-    shade: wgpu::ComputePipeline,
+    shade: Lazy<wgpu::ComputePipeline>,
     /// Shading with Substrate slabs (`substrate_gpu.rs`), compiled when first needed.
-    shade_substrate: Option<wgpu::ComputePipeline>,
+    shade_substrate: Option<Lazy<wgpu::ComputePipeline>>,
     debug_layout: wgpu::BindGroupLayout,
-    debug: wgpu::ComputePipeline,
+    debug: Lazy<wgpu::ComputePipeline>,
     temporal_layout: wgpu::BindGroupLayout,
-    temporal: wgpu::ComputePipeline,
+    temporal: Lazy<wgpu::ComputePipeline>,
     spatial_layout: wgpu::BindGroupLayout,
-    spatial: wgpu::ComputePipeline,
+    spatial: Lazy<wgpu::ComputePipeline>,
     /// Per spatial iteration: (stride, first iteration).
     spatial_params: Vec<wgpu::Buffer>,
     targets: Option<Targets>,
@@ -174,17 +176,17 @@ impl MegaLights {
             })
             .collect();
         Self {
-            generate: compute_pipeline(device, "megalights generate", &sample_module, "generate", &sample_layout, &[]),
-            trace: compute_pipeline(device, "megalights trace", &sample_module, "trace", &sample_layout, &[]),
+            generate: lazy_compute_pipeline(device, "megalights generate", &sample_module, "generate", &sample_layout, &[]),
+            trace: lazy_compute_pipeline(device, "megalights trace", &sample_module, "trace", &sample_layout, &[]),
             sample_layout,
-            shade: compute_pipeline(device, "megalights shade", &shade_module, "shade", &shade_layout, &[]),
+            shade: lazy_compute_pipeline(device, "megalights shade", &shade_module, "shade", &shade_layout, &[]),
             shade_substrate: None,
             shade_layout,
-            debug: compute_pipeline(device, "megalights debug", &shade_module, "debug", &debug_layout, &[]),
+            debug: lazy_compute_pipeline(device, "megalights debug", &shade_module, "debug", &debug_layout, &[]),
             debug_layout,
-            temporal: compute_pipeline(device, "megalights temporal", &denoise_module, "temporal", &temporal_layout, &[]),
+            temporal: lazy_compute_pipeline(device, "megalights temporal", &denoise_module, "temporal", &temporal_layout, &[]),
             temporal_layout,
-            spatial: compute_pipeline(device, "megalights spatial", &denoise_module, "spatial", &spatial_layout, &[]),
+            spatial: lazy_compute_pipeline(device, "megalights spatial", &denoise_module, "spatial", &spatial_layout, &[]),
             spatial_layout,
             spatial_params,
             targets: None,

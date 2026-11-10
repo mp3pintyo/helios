@@ -51,6 +51,13 @@ impl Effects {
         Self { volumes: HeterogeneousVolumes::new(device), particles: ParticleSystem::new(device), oit: Oit::new(device), active: false }
     }
 
+    /// Queues the pipelines of the volumes and particles the scene has for the browser's
+    /// background compile.
+    pub fn prefetch(&self, scene: &crate::Scene) {
+        self.volumes.prefetch(scene);
+        self.particles.prefetch(scene);
+    }
+
     pub fn update(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, f: &EffectsFrame) {
         self.volumes.update(device, queue, f.scene, f.eye, f.view_proj, f.volumes, f.delta_time, f.internal, f.capacity);
         self.particles.update(device, queue, f.scene, f.particles, f.delta_time);

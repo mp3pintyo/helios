@@ -6,6 +6,7 @@ use crate::profiler::Recorder;
 use crate::shader::create_module;
 use crate::targets::FrameTargets;
 use crate::util::{bind, bind_group, bind_group_layout, compute_pipeline, workgroups};
+use crate::pipelines::Lazy;
 
 /// Uniform offset alignment: one [`HzbLevel`] per mip at this stride (dynamic offsets).
 const LEVEL_STRIDE: u64 = 256;
@@ -21,8 +22,8 @@ struct HzbLevel {
 }
 
 pub struct Hzb {
-    from_depth: wgpu::ComputePipeline,
-    downsample: wgpu::ComputePipeline,
+    from_depth: Lazy<wgpu::ComputePipeline>,
+    downsample: Lazy<wgpu::ComputePipeline>,
     depth_layout: wgpu::BindGroupLayout,
     down_layout: wgpu::BindGroupLayout,
     levels: wgpu::Buffer,

@@ -58,6 +58,7 @@ use crate::skin::{skin_entry, skin_resource};
 use crate::vsm_motion::{self, MoveFootprints, ShadowMove};
 use crate::wind::{wind_entry, wind_resource};
 use crate::Camera;
+use crate::pipelines::Lazy;
 
 pub const MAX_LEVELS: usize = 16;
 const PAGE_TEXELS: u32 = 128;
@@ -217,32 +218,32 @@ pub struct VirtualShadowMap {
     draw_layout: wgpu::BindGroupLayout,
     sw_layout: wgpu::BindGroupLayout,
     resolve_layout: wgpu::BindGroupLayout,
-    mark: wgpu::ComputePipeline,
-    mark_volume: wgpu::ComputePipeline,
-    mark_local: wgpu::ComputePipeline,
-    invalidate_local: wgpu::ComputePipeline,
+    mark: Lazy<wgpu::ComputePipeline>,
+    mark_volume: Lazy<wgpu::ComputePipeline>,
+    mark_local: Lazy<wgpu::ComputePipeline>,
+    invalidate_local: Lazy<wgpu::ComputePipeline>,
     /// Volumetric fog samples the shadow map this frame.
     volume_marking: bool,
-    info_begin: wgpu::ComputePipeline,
-    dirty_info: wgpu::ComputePipeline,
-    refresh: wgpu::ComputePipeline,
-    expand: wgpu::ComputePipeline,
-    expand_local: wgpu::ComputePipeline,
+    info_begin: Lazy<wgpu::ComputePipeline>,
+    dirty_info: Lazy<wgpu::ComputePipeline>,
+    refresh: Lazy<wgpu::ComputePipeline>,
+    expand: Lazy<wgpu::ComputePipeline>,
+    expand_local: Lazy<wgpu::ComputePipeline>,
     /// Local lights' shadow maps (pages of this cache and atlas).
     pub local: LocalShadows,
-    draw_args: wgpu::ComputePipeline,
-    raster_sw: wgpu::ComputePipeline,
+    draw_args: Lazy<wgpu::ComputePipeline>,
+    raster_sw: Lazy<wgpu::ComputePipeline>,
     /// The software rasteriser specialised for alpha-masked clusters.
-    raster_sw_masked: wgpu::ComputePipeline,
+    raster_sw_masked: Lazy<wgpu::ComputePipeline>,
     /// Voxel clusters' page items (vsm_voxel_raster.wgsl).
-    raster_voxels: wgpu::ComputePipeline,
-    resolve: wgpu::RenderPipeline,
+    raster_voxels: Lazy<wgpu::ComputePipeline>,
+    resolve: Lazy<wgpu::RenderPipeline>,
     /// Hardware page raster without and with skinning (`SKINNING` in vsm_page.wgsl): scenes
     /// without skinned instances use the leaner one.
-    raster: [wgpu::RenderPipeline; 2],
+    raster: [Lazy<wgpu::RenderPipeline>; 2],
     static_layout: wgpu::BindGroupLayout,
-    clear_static: wgpu::ComputePipeline,
-    capture_static: wgpu::ComputePipeline,
+    clear_static: Lazy<wgpu::ComputePipeline>,
+    capture_static: Lazy<wgpu::ComputePipeline>,
     invalidation: PageInvalidation,
     /// Footprints of moved instances, with their recent speeds.
     moves: MoveFootprints,
@@ -376,33 +377,36 @@ impl VirtualShadowMap {
         // Clip page draws to their tile where the device can (see vsm_draw_clipped.wgsl).
         let clipped = device.features().contains(wgpu::Features::CLIP_DISTANCES);
         let clipped_module = clipped.then(|| create_module(device, "vsm_draw_clipped.wgsl"));
-        let render = |label: &str,
+        let render = |label: &'static str,
                       layout: &wgpu::PipelineLayout,
                       module: &wgpu::ShaderModule,
-                      (vs, constants): (&str, &[(&str, f64)]),
-                      fs: &str,
+                      (vs, constants): (&'static str, &[(&'static str, f64)]),
+                      fs: &'static str,
                       depth: wgpu::DepthStencilState,
                       cull: Option<wgpu::Face>| {
-            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some(label),
-                layout: Some(layout),
-                vertex: wgpu::VertexState {
-                    module,
-                    entry_point: Some(vs),
-                    compilation_options: wgpu::PipelineCompilationOptions { constants, ..Default::default() },
-                    buffers: &[],
-                },
-                primitive: wgpu::PrimitiveState { cull_mode: cull, ..Default::default() },
-                depth_stencil: Some(depth),
-                multisample: Default::default(),
-                fragment: Some(wgpu::FragmentState {
-                    module,
-                    entry_point: Some(fs),
-                    compilation_options: Default::default(),
-                    targets: &[],
-                }),
-                multiview_mask: None,
-                cache: None,
+            let (device, layout, module, constants) = (device.clone(), layout.clone(), module.clone(), constants.to_vec());
+            Lazy::background(move || {
+                device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some(label),
+                    layout: Some(&layout),
+                    vertex: wgpu::VertexState {
+                        module: &module,
+                        entry_point: Some(vs),
+                        compilation_options: wgpu::PipelineCompilationOptions { constants: &constants, ..Default::default() },
+                        buffers: &[],
+                    },
+                    primitive: wgpu::PrimitiveState { cull_mode: cull, ..Default::default() },
+                    depth_stencil: Some(depth.clone()),
+                    multisample: Default::default(),
+                    fragment: Some(wgpu::FragmentState {
+                        module: &module,
+                        entry_point: Some(fs),
+                        compilation_options: Default::default(),
+                        targets: &[],
+                    }),
+                    multiview_mask: None,
+                    cache: None,
+                })
             })
         };
         // Reverse-Z: push stored depth away from the light by a slope-scaled amount against acne.
@@ -946,9 +950,9 @@ struct PageInvalidation {
     /// Indexed by [residency changed][wind switched on or off]: the first also collects
     /// instances whose streamed pages changed residency, the second frees the pages of casters
     /// that changed layer instead of dropping their static layer.
-    collect: [[wgpu::ComputePipeline; 2]; 2],
-    remember_residency: wgpu::ComputePipeline,
-    invalidate_pages: wgpu::ComputePipeline,
+    collect: [[Lazy<wgpu::ComputePipeline>; 2]; 2],
+    remember_residency: Lazy<wgpu::ComputePipeline>,
+    invalidate_pages: Lazy<wgpu::ComputePipeline>,
     /// The page table as of the previous residency check (resized with the scene's).
     previous_page_table: wgpu::Buffer,
     /// Count + light-space footprints of the changed instances.

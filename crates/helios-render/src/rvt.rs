@@ -16,6 +16,7 @@ use crate::scene::{MaterialKind, Scene};
 use crate::shader::create_module;
 use crate::textures::TextureLibrary;
 use crate::util::{bind, bind_group, bind_group_layout, compute_pipeline, uniform_buffer};
+use crate::pipelines::Lazy;
 
 const VIRTUAL_PAGES: u32 = 1024;
 const PAGE_TEXELS: u32 = 128;
@@ -58,7 +59,7 @@ pub struct RuntimeVirtualTexture {
     detail_storage: wgpu::TextureView,
     heightfield: wgpu::TextureView,
     layout: wgpu::BindGroupLayout,
-    render: wgpu::ComputePipeline,
+    render: Lazy<wgpu::ComputePipeline>,
     state: RvtParams,
     /// Scene versions (geometry, material, texture) the setup was derived from.
     versions: (u64, u64, u64),

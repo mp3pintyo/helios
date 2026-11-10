@@ -9,6 +9,7 @@ use crate::profiler::Recorder;
 use crate::shader::create_module;
 use crate::targets::FrameTargets;
 use crate::util::{bind, bind_group, bind_group_layout, compute_pipeline, workgroups};
+use crate::pipelines::{in_group, Group, Lazy};
 
 const C: ShaderStages = ShaderStages::COMPUTE;
 
@@ -19,7 +20,7 @@ fn dispatch_full(pass: &mut wgpu::ComputePass, width: u32, height: u32) {
 // ---- Screen-space global illumination ----------------------------------------------------------
 
 pub struct GiPass {
-    temporal: wgpu::ComputePipeline,
+    temporal: Lazy<wgpu::ComputePipeline>,
     temporal_layout: wgpu::BindGroupLayout,
 }
 
@@ -74,13 +75,13 @@ impl GiPass {
 // ---- Deferred lighting -----------------------------------------------------------------------
 
 pub struct LightingPass {
-    pipeline: wgpu::ComputePipeline,
+    pipeline: Lazy<wgpu::ComputePipeline>,
     /// Soft shadows of the strongest shadow-mapped local lights per pixel, before the shading.
-    local_shadows: wgpu::ComputePipeline,
+    local_shadows: Lazy<wgpu::ComputePipeline>,
     layout: wgpu::BindGroupLayout,
     /// The shading with Substrate slabs (bind group 1: `substrate_gpu.rs`), compiled when a
     /// scene first has slab materials.
-    substrate: Option<wgpu::ComputePipeline>,
+    substrate: Option<Lazy<wgpu::ComputePipeline>>,
 }
 
 pub struct LightingInputs<'a> {
@@ -151,7 +152,8 @@ impl LightingPass {
         );
         Self {
             pipeline: compute_pipeline(device, "lighting", &module, "shade", &layout, &[]),
-            local_shadows: compute_pipeline(device, "local light shadows", &module, "local_shadows", &layout, &[]),
+            // Runs only with local lights' shadow maps.
+            local_shadows: in_group(Group::Shadows, || compute_pipeline(device, "local light shadows", &module, "local_shadows", &layout, &[])),
             layout,
             substrate: None,
         }

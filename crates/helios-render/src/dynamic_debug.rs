@@ -11,12 +11,13 @@ use crate::passes::Samplers;
 use crate::profiler::Recorder;
 use crate::shader::create_module;
 use crate::targets::FrameTargets;
-use crate::util::{bind, bind_group, bind_group_layout, compute_pipeline, workgroups};
+use crate::util::{bind, bind_group, bind_group_layout, lazy_compute_pipeline, workgroups};
 use crate::vsm::VirtualShadowMap;
+use crate::pipelines::Lazy;
 
 pub(crate) struct InvalidationDebug {
     layout: wgpu::BindGroupLayout,
-    pipeline: wgpu::ComputePipeline,
+    pipeline: Lazy<wgpu::ComputePipeline>,
 }
 
 impl InvalidationDebug {
@@ -40,7 +41,7 @@ impl InvalidationDebug {
             ],
         );
         let module = create_module(device, "dynamic_debug.wgsl");
-        Self { pipeline: compute_pipeline(device, "invalidation debug", &module, "invalidation", &layout, &[]), layout }
+        Self { pipeline: lazy_compute_pipeline(device, "invalidation debug", &module, "invalidation", &layout, &[]), layout }
     }
 
     /// Overwrites the lit pixels of `targets.hdr` with the view.

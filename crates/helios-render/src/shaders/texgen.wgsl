@@ -35,6 +35,9 @@ struct Recipe {
 @group(0) @binding(10) var in_occlusion: texture_2d<f32>;           // R: ambient occlusion
 
 override PACK_OCCLUSION: bool = false;
+// `generate` is specialised per pattern: one pipeline holds one pattern's code (60-100 ms to
+// compile in the browser instead of 1.5 s for all of them), and a scene compiles the ones it uses.
+override PATTERN: u32 = 0u;
 
 const PATTERN_ASHLAR: u32 = 0u;
 const PATTERN_FLAGSTONE: u32 = 1u;
@@ -452,7 +455,7 @@ fn cobblestone(uv: vec2<f32>) -> Texel {
 }
 
 fn evaluate(uv: vec2<f32>) -> Texel {
-    switch recipe.pattern {
+    switch PATTERN {
         case PATTERN_ASHLAR: { return ashlar(uv, false); }
         case PATTERN_CARVED_STONE: { return ashlar(uv, true); }
         case PATTERN_FLAGSTONE: { return flagstone(uv, false); }

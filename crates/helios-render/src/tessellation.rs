@@ -51,6 +51,7 @@ use helios_material::{DisplacementKind, ParameterKind};
 use crate::shader::{compose_variant, create_module, create_module_from};
 use crate::util::{bind, bind_group, bind_group_layout, compute_pipeline, storage_buffer};
 use crate::wind::{wind_entry, wind_resource};
+use crate::pipelines::Lazy;
 
 /// Binding of the tessellation uniform (`Tessellation` in displacement.wgsl).
 pub const BINDING_TESSELLATION: u32 = 67;
@@ -247,13 +248,13 @@ pub struct TessellationStats {
 }
 
 /// Per grid level, per raster pass (the shadow view has one).
-type DicePipelines = Vec<Vec<wgpu::ComputePipeline>>;
+type DicePipelines = Vec<Vec<Lazy<wgpu::ComputePipeline>>>;
 
 struct ViewPipelines {
-    emit: Vec<wgpu::ComputePipeline>,
-    split: wgpu::ComputePipeline,
-    prepare_split: wgpu::ComputePipeline,
-    prepare_dice: wgpu::ComputePipeline,
+    emit: Vec<Lazy<wgpu::ComputePipeline>>,
+    split: Lazy<wgpu::ComputePipeline>,
+    prepare_split: Lazy<wgpu::ComputePipeline>,
+    prepare_dice: Lazy<wgpu::ComputePipeline>,
     dice: DicePipelines,
 }
 
