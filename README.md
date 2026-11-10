@@ -133,7 +133,7 @@ honouring `Range`, e.g. a CDN) streams pages on demand. Imported glTF models are
 | `valley` | Mountain valley, 600 boulders, a gold sculpture (turning once in 45 s) and a small lake with a log raft that drifts, bobs and rolls on it, procedural (not simulated) mist over the water; terrain textured through a runtime virtual texture; at the lake's north end, out of the initial view, a glass pane and two crossing tinted panels standing in the water (layered translucency test); behind the initial view a cobblestone path and displaced boulders (Nanite tessellation; one turning slowly on its plinth: a movable displaced instance), e.g. `--eye -26,1.8,39 --at -33,0.2,53` | 613 instances, 50 M (medium) / 199 M (high) source triangles |
 | `cathedral` | Gothic basilica: 11-bay nave with clustered piers, triforium, stained-glass clerestory and aisles, quadripartite rib vaults, flying buttresses, polygonal apse with half dome, west front with rose window and twin spired towers; pews, altar, candelabra and eleven chandeliers swinging on their 12 m chains (7 s pendulums, 1–3°, their candle lights moving along), 33 candle lights in all; dust motes in the clerestory's light shafts and incense rising from a censer before the altar; alpha-tested wrought-iron choir screens; at the west end of the north aisle, behind the initial view, a stained-glass screen and two crossing tinted glass panes (layered translucency test). **Candle-lit** with `--lights N` / `?lights=N`: every candle flame its own shadow-casting light (60 candelabrum, 88 chandelier and 2 altar candles) plus votive racks of tea lights against the aisle walls (858), the first N lit, up to 1008 | 458 instances, 4 M (medium) / 18 M (high) |
 | `forest` | Mixed broadleaf / conifer forest with real leaf geometry, bushes, ferns, grass, mossy boulders, fallen logs and mushrooms at golden hour, swaying in a gusty breeze; conifers built from shared needle-spray assemblies, foliage with voxel LODs; a campfire in the clearing in front of the initial view (simulated fire and smoke, sparks that bounce, embers that settle and cool, a flickering fire light; best at night, `--sun 200,-30 --eye 3.5,1.4,1.0 --at 7,1.0,-1`) | 8 278 instances (≈ 26 400 assembly parts when expanded), 82 M (medium) source triangles |
-| `gallery` | The material gallery: a paved courtyard at golden hour with a row of plinths — clear-coat car paint, velvet with sheen, subsurface skin, a lit wax candle and a marble egg, a bush whose leaves let a lamp's light through, an anisotropic brushed-metal pot, dielectrics of IOR 1.33 / 2.4 and a tinted specular, an unlit sign — and four material graphs: animated lava (a pool and an egg), stylised water (two instances of one graph with different parameters), a terrace of wet stone with puddles and, in front of it, a brick terrace whose graph displaces its mortar joints (Nanite tessellation driven by a material graph, e.g. `--eye 0.9,0.45,10.9 --at 0,0,9.2`) | 38 instances |
+| `gallery` | The material gallery: a paved courtyard at golden hour with a row of plinths — clear-coat car paint, velvet with sheen, subsurface skin, a lit wax candle and a marble egg, a bush whose leaves let a lamp's light through, an anisotropic brushed-metal pot, dielectrics of IOR 1.33 / 2.4 and a tinted specular, an unlit sign — and six material graphs: animated lava (a pool and an egg), stylised water (two instances of one graph with different parameters), a terrace of wet stone with puddles and, in front of it, three beds displaced by their graphs through Nanite tessellation: a brick terrace with carved mortar joints (`--eye 0.9,0.45,10.9 --at 0,0,9.2`), left of it a bed of mushrooms (a vector displacement: caps overhanging their stems, `--eye -5.9,0.3,10.4 --at -6.5,0.08,9.2`) and right of it a rippling cloth (an animated displacement, `--eye 4.4,0.6,10.9 --at 6.3,0.15,9.0`) | 48 instances |
 
 These are procedural: meshes come from `helios_geometry::modeling` / `vegetation`, textures from GPU
 texture synthesis (`TexturePattern`). `0` pauses the moving props; `Y` tours each procedural scene, the gallery
@@ -453,7 +453,7 @@ with 300 lights under MegaLights 15.3 / 9.2 ms.
   filtered fractal **noise**, **fresnel**, **panner**, reoriented **normal blend**, **if**, and the output (base
   colour, metallic, roughness, specular, tangent-space normal, emissive, ambient occlusion, the slab parameters:
   clear coat and its roughness, sheen colour and roughness, subsurface, transmission, anisotropy — and the
-  **displacement** height, which drives Nanite tessellation: see there). **Compilation**
+  **displacement**, a height or a vector, which drives Nanite tessellation: see there). **Compilation**
   (`helios_material::compile`): ids, links, pins, a single output and cycles are validated, value widths inferred
   (float to vec4, scalars broadcast) and every problem reported with its node ("node #4: Add: cannot combine a
   vec2<f32> with a vec3<f32>"); the result is one WGSL function `graph_eval(m, input, params, vertex_color,
@@ -471,15 +471,19 @@ with 300 lights under MegaLights 15.3 / 9.2 ms.
   parameters sample the material's own texture, so a graph assigned to an imported material picks up its images.
   Unit tests compile every node type (on a texture-coordinate path, so its derivative code too) and every preset
   into the extended resolve and validate it with naga and the Tint bitwise-precedence check. **Displacement**: the
-  output's Displacement pin compiles to a second function, `graph_displacement(m, input, params) -> f32`, from the
-  nodes it depends on (sharing the node code and the parameter slots; nodes feeding only one of the two functions
-  stay out of the other), which the tessellator calls per micro-triangle vertex. Its inputs (`DisplacementSurface`:
-  mesh UVs, world / object position, normal) carry the size of a dice segment as their "derivatives", so texture
-  samples (the 512² arrays, not streamed tiles) and noise are filtered for the micro-triangles; the compiler rejects,
-  with an error on the node, what would make the height anything but a static function of the point — `Time` (and a
-  panner left on the clock: displaced surfaces are static, cached shadow pages and the geomorphing rely on it),
-  `CameraVector` / `Fresnel` (every view must displace alike), vertex colours, UV set 1 and the triplanar tangent
-  normal (the tessellator does not read them). Texture sample and triplanar nodes gained a `Height` output (a
+  output's Displacement pin (a height along the normal) or its VectorDisplacement pin (a world-space offset in
+  units of the material's magnitude, its length clamped to 1: overhangs; one of the two, both is an error) compiles
+  to a second function, `graph_displacement(m, input, params) -> f32` or `-> vec3<f32>`, from the nodes it depends
+  on (sharing the node code and the parameter slots; nodes feeding only one of the two functions stay out of the
+  other), which the tessellator calls per micro-triangle vertex. Its inputs (`DisplacementSurface`: mesh UVs, world
+  / object position, normal, time) carry the size of a dice segment as their "derivatives", so texture samples (the
+  512² arrays, not streamed tiles) and noise are filtered for the micro-triangles. `Time` (and a panner left on the
+  clock) is allowed: the compiler reports the displacement as animated (`CompiledGraph::displacement_animated`,
+  next to `displacement_kind`), which makes the material's instances dynamic shadow casters, and reads the clock
+  from the function's input so the renderer can evaluate the previous frame's surface for motion vectors; a
+  static graph pays for none of it. Still rejected, with an error on the node: `CameraVector` / `Fresnel` (every
+  view must displace alike), vertex colours, UV set 1 and the triplanar tangent normal (the tessellator does not
+  read them). Texture sample and triplanar nodes gained a `Height` output (a
   procedural texture's height). The node editor is part of the browser editor (see *Material graph editor*).
 * **Runtime virtual texture** (`rvt.rs`). The layered landscape material (height-blended texture layers driven by
   slope, altitude and noise) is rendered on demand into 128² pages of a 128k² virtual texture, cached in a 24×24-page
@@ -793,20 +797,24 @@ with 300 lights under MegaLights 15.3 / 9.2 ms.
   rate keeps them at a few pixels; ones stretched over 4096 pixels by a cliff in the height are dropped, and ones
   crossing the near plane are culled. **Visibility payload**: unchanged — `(cluster slot << 7 | base triangle)`,
   as for any software triangle — so material classification, picking, selection and Lumen's screen traces see an
-  ordinary id. The G-buffer resolve (a `TESSELLATION` permutation, used only while the scene has displaced
-  instances) recovers the displaced point from the merged depth: it projects the hit onto the base triangle's
-  plane after taking off the displacement there (a fixed-point iteration: the offset runs along the nearly face
-  normal, so four steps converge), shades the base triangle's attributes there and tilts the interpolated
-  normal by the surface gradient of the displacement (height differences a pixel apart along both edges), so
-  shading is smooth across micro-triangles; motion vectors carry the hit's own position (otherwise the tiny
+  ordinary id. Next to it the payload pass stores the **barycentrics on the base triangle** of the point
+  that was displaced to the pixel — the grid vertices' own, interpolated perspective-correctly over the
+  micro-triangle, two 16-bit fractions in a per-pixel R32Uint target allocated with the first displaced instance.
+  The G-buffer resolve (a `TESSELLATION` permutation, used only while the scene has displaced instances) reads
+  that point instead of searching for it (round 4 projected the depth's hit onto the base plane iteratively,
+  which only converges while the displaced surface is a height field over that plane), takes the world position
+  from the merged depth, shades the base triangle's attributes there — the material is evaluated at the
+  *undisplaced* point, as the displacement is, so a pattern that drives both stays attached — and tilts the
+  interpolated normal by the surface gradient of the displacement (height differences a pixel apart along both
+  edges), so shading is smooth across micro-triangles; motion vectors carry the hit's own position (otherwise the tiny
   offset between the solved point and the micro-triangle read as motion, and TSR plus motion blur flickered on a
   still surface: 0.45 % → 0.003 % of pixels changing by > 24/255 per frame). **Shadows**: `vsm_tess.wgsl` runs the
   same emit / split / dice on the (cluster, page) software items of displaced clusters, with factors in the
   page's texels (clipmap level or local light face mip at the point), patches culled against the page and
   micro-triangles rasterised like `vsm_raster.wgsl` (24.8 fixed point, page clip, slope bias) into the atlas'
-  mirror, scratch tiles included: displacement is static, so the static / dynamic page cache treats displaced
-  instances like any other and moving ones (dynamic world) re-render over their static layer; heights are the
-  main view's, so shadows fall from the surface the camera sees. **Interplay**: skinned instances and voxel
+  mirror, scratch tiles included: the static / dynamic page cache treats displaced instances like any other —
+  static ones are cached, moving ones (dynamic world) and ones whose displacement is animated (below) re-render
+  over their static layer; heights are the main view's, so shadows fall from the surface the camera sees. **Interplay**: skinned instances and voxel
   clusters are not tessellated; alpha-masked or translucent displaced materials render undisplaced; Lumen's
   distance fields and mesh cards stay undisplaced (the displacement is far below their voxels; screen traces see
   it). Debug view **25** colours displaced surfaces by tessellation depth (splits, then dice level: blue → green →
@@ -867,6 +875,34 @@ with 300 lights under MegaLights 15.3 / 9.2 ms.
   (tessellation off 0.0012 %). Scenes without displacement and the texture path render as before (forest,
   cathedral, valley: image differences and pass times within run-to-run noise); the gallery's initial view, which
   now shows the terrace's near edge, went from 3.76 to 4.58 ms.
+  **Vector and animated displacement** (round 5; `docs/round5/displacement.md` has the design). A graph's
+  **VectorDisplacement** pin moves the surface by a vector instead of a height along the normal: world space (the
+  space of `VertexNormal` and `WorldPosition`, so `VertexNormal × height` is the height pin's displacement and a
+  tangent frame can be built in the graph; a per-triangle UV tangent frame would differ across an edge — a crack),
+  in units of the material's magnitude times the instance scale, zero in place, its length clamped to 1 so the
+  magnitude bounds it: culling pads by `magnitude · scale` (a height's bound is `magnitude · max(centre, 1 −
+  centre)`). The tessellators turn it into an object-space offset with the instance's normal matrix as a row
+  transform (the inverse linear part, no inverse in the shader). The dicing permutation's switch wraps each
+  graph's function by what it returns, so heights and vectors dice in one dispatch; pipelines without a vector
+  graph compile the vector path out. Surfaces can now **fold over themselves** — the reason the resolve reads
+  stored barycentrics (above): under an overhang several base points project to the same place and a search
+  lands on the wrong one. A vector's shading normal is the cross product of the displaced surface's tangents (the
+  edge steps in the plane of the interpolated normal plus the offset's finite differences a pixel apart), right
+  on undersides too; displaced pixels are no longer flipped as back-facing by their *base* triangle. Shared edges
+  stay bit-identical (the CPU mirror runs a folding mushroom field), and the mirror checks that the stored
+  barycentrics name every grid vertex's own point. **Animated**: a displacement that reads the time flags its
+  instances `INSTANCE_ANIMATED`: they are dynamic shadow casters like movable or wind-blown ones (kept out of the
+  pages' static layers), and the invalidation's collect pass appends their footprint every frame — bounds padded
+  by the displacement's reach, change 2 · reach — so the pages under them re-render only their dynamic casters
+  over the cached static layer, and only levels whose texels the displacement can change by two (coarser levels
+  never; finer ones every frame: an arbitrary graph has no speed bound). The resolve of an animated graph
+  evaluates the pixel's base point once more at the previous frame's time for its motion vector (TSR and motion
+  blur follow the surface); static graphs and texture displacement compile both out and keep their fully cached
+  shadows. Lumen's distance fields, cards and surface cache stay undisplaced; screen traces see the moving
+  surface. Presets *Mushrooms (vector displacement)* — a disc of ground around each cell centre wrapped over a
+  cap, its underside and a stem — and *Rippling cloth (animated displacement)* — travelling sine waves and a
+  scrolling noise, pinned at the edges —, both as 3 m beds in the gallery.
+  MEASURED
 * **Lumen-style GI** (`lumen.rs`). A 4-level global distance field (0.25–2 m voxels) is composited on the GPU from
   per-mesh SDFs; a voxel **surface cache** stores the radiance leaving nearby surfaces (sun with SDF soft shadows,
   sky with SDF occlusion, local lights, emission, one bounce from the **radiance cache** of world probes), so bounces
@@ -1357,7 +1393,10 @@ with 300 lights under MegaLights 15.3 / 9.2 ms.
   material's graph (assign / open), its parameters as sliders and colour pickers (material instance values, saved
   per material), its Substrate slab (clear coat, sheen, subsurface and radius, transmission, anisotropy, IOR,
   specular, unlit) and its displacement — magnitude, centre and the height channel, or *Driven by graph* (opening
-  it) while the graph's Displacement pin is linked; linking a node to that pin re-dices the surface live.
+  it) while one of the graph's displacement pins is linked: *Height* or *Vector* (no centre), marked *animated*
+  when the graph reads the time; linking a node to such a pin re-dices the surface live. The Output node sets its
+  two geometry pins (Displacement, VectorDisplacement) apart with a tooltip each, and the status line names what
+  the graph does to geometry ("vector displacement", "animated displacement").
 
 ### WebGPU constraints that shaped the design
 
@@ -1437,7 +1476,7 @@ Honest differences that remain:
    of subsurface pixels is not diffused (MegaLights keeps diffuse light whole). Translucent materials (glass, water,
    `BLEND`) ignore slabs. Unlit colours are scaled to a white surface in full sun. Devices limited to WebGPU's default
    16 sampled textures per stage render slab materials as their plain base. **Material graphs** run in the G-buffer
-   resolve and, for their displacement height, in the tessellator: no graph-driven opacity mask, world position
+   resolve and, for their displacement (a height or a vector), in the tessellator: no graph-driven opacity mask, world position
    offset, translucent or decal materials (raster and translucency shaders are fixed); at most 8 distinct (shading model, graph) pipelines per frame (further
    materials render without their graph, with a warning) and 1024 parameter slots in all; no custom HLSL/WGSL node,
    material functions, static switches, texture objects or per-node previews; noise and texture outputs carry no
@@ -1569,12 +1608,18 @@ Honest differences that remain:
     runs on the main thread (no partitioned / hierarchical generation, no runtime generation around the camera), and
     spawned instances are not individually editable. Native and wasm builds may differ in the last bits of `sin` /
     `cos`, so a point exactly at a filter threshold could flip between them; saved output sidesteps it.
-14. **Nanite Tessellation**: displacement is a scalar height along the interpolated normal — a texture channel
-    through the material's mapping, or a material graph's Displacement output (UE also has vector displacement);
-    textures are read from the 512² texture array layer (streamed image tiles are not consulted) at a mip chosen
-    from the dice segment size, so heights finer than the layer's texels are lost. Graph heights must be static
-    functions of the undisplaced point: time, the camera, vertex colours, UV set 1 and the tangent frame are compile
-    errors in the displacement (UE allows animated displacement at the cost of its shadow cache); a graph displaces
+14. **Nanite Tessellation**: displacement is a height along the interpolated normal — a texture channel through
+    the material's mapping or a material graph's Displacement output — or a graph's vector, which is world space
+    only (no tangent- or object-space vector: the tessellator has no tangent frame and graphs no transform node,
+    so a vector built from constants does not turn with a rotating instance). Tessellation factors come from the
+    undisplaced edges, so where a vector stretches the surface micro-triangles grow with it (silhouettes coarsen;
+    shading stays smooth). Textures are read from the 512² texture array layer (streamed image tiles are not
+    consulted) at a mip chosen from the dice segment size, so heights finer than the layer's texels are lost. A
+    graph's displacement may read the time but not the camera, vertex colours, UV set 1 or the tangent frame
+    (compile errors); an animated displacement has no speed bound, so every cached shadow page whose texels are
+    finer than its reach re-renders its dynamic casters every frame (UE re-renders WPO-animated casters likewise;
+    the wind here refreshes coarse levels less often), and Lumen's distance fields, cards and surface cache
+    follow neither static nor animated displacement. A graph displaces
     only while it has one of the 8 extended resolve pipelines (else its materials stay flat); every displacing
     graph of the scene runs in one dicing permutation behind a switch on the material, compiled when the set
     changes (a hitch while a graph is edited). Dicing uses a uniform 2^k grid per patch with
@@ -1586,8 +1631,8 @@ Honest differences that remain:
     crossing the near plane culled — there is no hardware fallback for them; the shadow pages' hardware fallbacks
     (local light items reaching the near plane, dynamic pages without a scratch tile, dynamic casters of split pages)
     draw displaced clusters undisplaced. Lists hold 512 k patches per split queue and 256 k per dice level: when
-    they overflow, the dice rate is raised until they fit (HUD). The visibility payload names the base triangle:
-    the resolve finds the displaced point by an iterative projection, which is approximate where the displacement
-    folds over itself, and texture derivatives are the base plane's. Lumen sees displaced surfaces only through
+    they overflow, the dice rate is raised until they fit (HUD). The visibility payload names the base triangle
+    and a second per-pixel target the point on it (16-bit barycentrics, where UE's visibility buffer encodes the
+    patch and micro-triangle); texture derivatives are the base plane's. Lumen sees displaced surfaces only through
     screen traces. Skinned, alpha-masked, translucent and voxel geometry is not tessellated; the wind does not
     rotate displaced normals.

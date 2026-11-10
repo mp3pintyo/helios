@@ -106,6 +106,12 @@ fn displacement_distance(material: u32, height: f32) -> f32 {
 
 // The object-space offset of the point `p` of `instance` displaced by `value`.
 fn displacement_offset(instance: Instance, p: DisplacementInput, value: DisplacementValue) -> vec3<f32> {
+    if DISPLACEMENT_VECTORS && value.is_vector {
+        // The normal matrix is the inverse transpose of the instance's linear part times its
+        // scale: a world vector of magnitude * scale times it (as a row) is the object offset.
+        let normal_matrix = mat3x3<f32>(instance.normal_matrix_0.xyz, instance.normal_matrix_1.xyz, instance.normal_matrix_2.xyz);
+        return (value.vector * tess.materials[instance.material].params.x) * normal_matrix;
+    }
     return p.normal * displacement_distance(instance.material, value.height);
 }
 
