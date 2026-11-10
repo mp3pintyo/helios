@@ -193,6 +193,8 @@ pub fn graphs_value(scene: &Scene) -> Value {
                 "hash": compiled.map(|c| format!("{:016x}", c.hash)),
                 "displacement": displacement,
                 "displacement_animated": animated,
+                // Units of the magnitude per second at the graph's defaults; null: no bound.
+                "displacement_speed": compiled.and_then(|c| c.displacement_speed(&[])),
             })
         })
         .collect();

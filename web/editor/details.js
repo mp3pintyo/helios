@@ -186,7 +186,14 @@ export function createDetails(ed) {
     const rows = [h("div", { class: "ed-note" }, note), field("Magnitude (m)", "magnitude", { min: 0, max: 0.5, step: 0.005, precision: 3 })];
     if (!vector) rows.push(field("Centre", "center", { min: 0, max: 1, step: 0.01 }));
     rows.push(source);
-    if (m.displacement_graph && m.displacement_animated) rows.push(h("div", { class: "ed-note" }, "Animated: its instances' shadows are re-rendered as the surface moves"));
+    if (m.displacement_graph && m.displacement_animated) {
+      // The material compiler's speed bound (m/s at unit instance scale) paces the shadow refreshes.
+      const speed = m.displacement_speed;
+      const pace = speed == null
+        ? "the graph's motion has no speed bound, so they refresh every frame"
+        : `they refresh once it may have moved two shadow texels (at most ${(speed * 100).toFixed(1)} cm/s)`;
+      rows.push(h("div", { class: "ed-note" }, `Animated: its instances' shadows are re-rendered as the surface moves; ${pace}`));
+    }
     return section("Displacement", rows, { open: d.magnitude > 0 || m.displacement_graph });
   }
 

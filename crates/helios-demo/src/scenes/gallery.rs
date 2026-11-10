@@ -4,8 +4,10 @@
 //! graphs (animated lava, wet stone with puddles, stylised water, and three beds displaced by
 //! their graphs through Nanite tessellation: a brick pavement with carved mortar joints, a bed of
 //! mushrooms — a vector displacement with overhangs — and a rippling cloth, whose displacement
-//! is animated). `PageUp` switches the slabs off for an A/B against the plain metallic-roughness
-//! base; debug view 24 shows each pixel's slab features, view 25 the tessellation.
+//! is animated) — and, behind the default view, a turning platform of combed tufts whose vector
+//! displacement is built in tangent space and turns with it. `PageUp` switches the slabs off for
+//! an A/B against the plain metallic-roughness base; debug view 24 shows each pixel's slab
+//! features, view 25 the tessellation.
 //!
 //! A low sun from the front left shows the skin's and the wax's soft terminators and the
 //! coats' reflections; a lamp behind the bush shines through its leaves, a candle burns on the
@@ -21,6 +23,7 @@ use helios_render::{
 };
 
 use super::{add_baked, add_baked_with, Detail, SceneSetup};
+use crate::motion::{DemoMotion, Motion};
 
 pub const SUN: (f32, f32, f32) = (2.25, 0.42, 10.0);
 /// Plinths stand in a row along x, 2.7 m apart.
@@ -34,6 +37,12 @@ const BED_Z: f32 = 9.0;
 /// Height of the mushroom bed's ground and of the rippling cloth's rest surface.
 const MOSS_LEVEL: f32 = 0.02;
 const CLOTH_LEVEL: f32 = 0.16;
+/// The turning platform of tufts: centre (behind the default view and out of the beds' views),
+/// the drum's radius and height, the platform's half size.
+const TURNTABLE: Vec3 = Vec3::new(0.0, 0.0, 13.4);
+const DRUM_RADIUS: f32 = 1.35;
+const DRUM_HEIGHT: f32 = 0.12;
+const PLATFORM: f32 = 0.9;
 
 fn floor(_: f32, _: f32) -> f32 {
     0.0
@@ -65,8 +74,9 @@ impl Gallery<'_> {
     }
 }
 
-fn build_scene(detail: Detail) -> Scene {
+fn build_scene(detail: Detail) -> (Scene, DemoMotion) {
     let mut scene = Scene::new();
+    let mut motion = DemoMotion::default();
     scene.sun = Sun::from_angles(SUN.0, SUN.1, SUN.2);
     scene.ground_albedo = Vec3::new(0.3, 0.28, 0.25);
     scene.clouds = helios_render::CloudLayer::cumulus(0.25);
@@ -264,6 +274,22 @@ fn build_scene(detail: Detail) -> Scene {
         }
     }
 
+    // Graph — combed tufts on a turning platform (a 1.8 m square of the bed mesh on a drum): a
+    // vector displacement built in tangent space (up the normal, bent along the tangent) and
+    // turned into world space by a TransformVector node, so the tufts lean the way the platform
+    // faces as it turns. A movable instance: its shadow follows it (cached pages under it
+    // refresh as it moves), the default views do not see it.
+    let tuft_graph = g.scene.add_material_graph(presets::combed_tufts());
+    let tufts = g.material(
+        "combed tufts",
+        Material { graph: Some(tuft_graph), displacement: Some(Displacement::height(0.22, 0.0)), ..Material::standard(Vec3::new(0.2, 0.25, 0.08), 0.85, 0.0) },
+    );
+    let drum = add_baked_with(g.scene, "gallery/drum", &primitives::cylinder(64, 1, DRUM_RADIUS, DRUM_HEIGHT, true), volume(8));
+    g.scene.add_instance(drum, kerb_material, Mat4::from_translation(TURNTABLE));
+    let scale = PLATFORM * 2.0 / 3.0;
+    let platform = g.scene.add_instance(bed, tufts, Mat4::from_scale_rotation_translation(Vec3::splat(scale), Quat::IDENTITY, TURNTABLE + Vec3::Y * (DRUM_HEIGHT + 0.005)));
+    motion.add(g.scene, Motion::Spin { center: TURNTABLE, period: 24.0 }, &[platform], &[]);
+
     // An unlit sign behind the row (KHR_materials_unlit): the stained-glass pattern, unshaded.
     let unlit = g.material("unlit sign", Material { slab: Slab { unlit: true, ..Default::default() }, ..Material::textured(MaterialKind::Standard, glass, TextureMapping::MeshUv, 1.0) });
     g.scene.add_instance(sign, unlit, Mat4::from_translation(Vec3::new(0.0, 2.6, -3.5)));
@@ -273,7 +299,7 @@ fn build_scene(detail: Detail) -> Scene {
     // A warm spot light on the velvet and the car paint.
     let spot_from = Vec3::new(-7.5, 4.5, 4.0);
     g.scene.add_light(Light::spot(spot_from, Vec3::new(-6.4, 1.2, 0.0) - spot_from, Vec3::new(1.0, 0.85, 0.65), 18.0, 12.0, 0.5));
-    scene
+    (scene, motion)
 }
 
 fn initial_camera() -> Camera {
@@ -284,5 +310,6 @@ fn initial_camera() -> Camera {
 }
 
 pub fn build(detail: Detail) -> SceneSetup {
-    SceneSetup { scene: build_scene(detail), camera: initial_camera(), sun: SUN, floor, animation: None, motion: Default::default() }
+    let (scene, motion) = build_scene(detail);
+    SceneSetup { scene, camera: initial_camera(), sun: SUN, floor, animation: None, motion }
 }
