@@ -40,8 +40,9 @@ const MAX_DISPATCH: u32 = 65535u;
 @group(0) @binding(6) var<storage, read> entries: array<vec4<u32>>;
 @group(0) @binding(7) var<storage, read_write> draws: array<atomic<u32>>;
 // Per-level dirty rectangles and the dirty page bit mask, and the local lights' dirty boxes and
-// face mip rectangles (vsm.wgsl).
-@group(0) @binding(8) var<storage, read> info: array<i32>;
+// face mip rectangles (vsm.wgsl). Written only for the motion bounds of local light pages
+// (INFO_PAGE_MOTION, vsm_common.wgsl).
+@group(0) @binding(8) var<storage, read_write> info: array<atomic<i32>>;
 @group(0) @binding(60) var<uniform> local_vsm: LocalVsm;
 @group(0) @binding(65) var<uniform> wind: Wind;
 @group(0) @binding(66) var skin_palette: texture_2d<f32>;
@@ -52,6 +53,10 @@ const MAX_PAGES_PER_CLUSTER: i32 = 256;
 // The split pages' list (vsm.rs).
 override SPLIT_DRAWS: u32 = 0u;
 override SPLIT_CAPACITY: u32 = 0u;
+
+fn info_word(i: u32) -> i32 {
+    return atomicLoad(&info[i]);
+}
 
 // Draw lists.
 const LIST_HARDWARE: u32 = 0u;
@@ -75,7 +80,7 @@ fn emit(list: u32, item: vec4<u32>) {
 // Emits the draw of a cluster into a dirty page (physical page `physical`, which `level` and
 // `tag` address) according to the page's kind this frame (vsm_common.wgsl).
 fn emit_page_draw(item: vec4<u32>, dynamic: bool, software: bool, physical: u32, level: u32, tag: u32) {
-    let state = bitcast<u32>(info[INFO_PAGE_STATE + physical]);
+    let state = bitcast<u32>(info_word(INFO_PAGE_STATE + physical));
     let kind = page_kind(state);
     var list = select(LIST_HARDWARE, LIST_SOFTWARE, software);
     var target_page = physical;
@@ -127,8 +132,8 @@ fn expand(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups
     // Static casters only go to the pages rendered in full.
     let rect = level * 8u + select(4u, 0u, dynamic);
     let mask = select(INFO_FULL_MASK, INFO_DIRTY_MASK, dynamic);
-    let lo = max(max(vec2<i32>(floor(v - r)), origin), vec2<i32>(info[rect], info[rect + 1u]));
-    let hi = min(min(vec2<i32>(floor(v + r)), origin + n - 1), vec2<i32>(info[rect + 2u], info[rect + 3u]));
+    let lo = max(max(vec2<i32>(floor(v - r)), origin), vec2<i32>(info_word(rect), info_word(rect + 1u)));
+    let hi = min(min(vec2<i32>(floor(v + r)), origin + n - 1), vec2<i32>(info_word(rect + 2u), info_word(rect + 3u)));
     if any(hi < lo) {
         return;
     }
@@ -141,7 +146,7 @@ fn expand(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups
             }
             let wrapped = ((vec2<i32>(x, y) % n) + n) % n;
             let index = level * vsm.level_pages * vsm.level_pages + u32(wrapped.y) * vsm.level_pages + u32(wrapped.x);
-            if (bitcast<u32>(info[mask + index / 32u]) & (1u << (index % 32u))) == 0u {
+            if (bitcast<u32>(info_word(mask + index / 32u)) & (1u << (index % 32u))) == 0u {
                 continue;
             }
             let e = entries[index];
@@ -175,17 +180,25 @@ fn expand_local(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_work
     // posed triangles touch.
     let strength = wind_strength(instance);
     let dynamic = dynamic_caster(instance, strength);
-    let sphere = skin_padded(instance, wind_padded(instance, strength, displacement_padded(instance, transform_sphere(instance.world, clusters[item.y].bounds, instance.max_scale))));
+    let rest = displacement_padded(instance, transform_sphere(instance.world, clusters[item.y].bounds, instance.max_scale));
+    let sphere = skin_padded(instance, wind_padded(instance, strength, rest));
+    // How the wind can move the cluster: its speed (m/s) and the distance between two of its
+    // poses, at the scene's full wind strength (the instance's fades with the camera's
+    // distance, which a cached page must not depend on).
+    var sway = vec2<f32>(0.0);
+    if strength > 0.0 {
+        sway = vec2<f32>(wind_speed(instance, wind.direction.w, rest), 2.0 * wind_reach(instance, wind.direction.w, rest));
+    }
     var visited = 0;
     for (var slot = 0u; slot < LOCAL_SLOTS; slot++) {
         // Static casters: the box of the light's pages rendered in full.
         let o = LOCAL_INFO_SLOTS + slot * LOCAL_INFO_SLOT_WORDS + select(12u, 0u, dynamic);
-        let lo = vec3<f32>(f32(info[o]), f32(info[o + 1u]), f32(info[o + 2u])) * view.vsm.y;
-        let hi = vec3<f32>(f32(info[o + 3u]), f32(info[o + 4u]), f32(info[o + 5u])) * view.vsm.y;
+        let lo = vec3<f32>(f32(info_word(o)), f32(info_word(o + 1u)), f32(info_word(o + 2u))) * view.vsm.y;
+        let hi = vec3<f32>(f32(info_word(o + 3u)), f32(info_word(o + 4u)), f32(info_word(o + 5u))) * view.vsm.y;
         if any(hi < lo) || distance(clamp(sphere.xyz, lo, hi), sphere.xyz) > sphere.w {
             continue;
         }
-        visited = expand_into_light(item, dynamic, sphere, slot, visited);
+        visited = expand_into_light(item, dynamic, sphere, sway, slot, visited);
         if visited > MAX_LOCAL_PAGES_PER_CLUSTER {
             return;
         }
@@ -193,8 +206,12 @@ fn expand_local(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_work
 }
 
 // Emits a cluster's draws into the dirty pages of one light; returns the running count of
-// pages visited.
-fn expand_into_light(item: vec4<u32>, dynamic: bool, sphere: vec4<f32>, slot: u32, visited_before: i32) -> i32 {
+// pages visited. Each page also learns how fast and how far the wind can move the clusters drawn
+// into it (`sway`: m/s and m), in its own texels at the cluster's nearest depth inside the face:
+// the bounds its next refresh is scheduled by (vsm_invalidate.wgsl). They come from the clusters
+// a page really holds, where an instance's bounds would say that a tree near a light can move
+// every page of the light by its crown's sway.
+fn expand_into_light(item: vec4<u32>, dynamic: bool, sphere: vec4<f32>, sway: vec2<f32>, slot: u32, visited_before: i32) -> i32 {
     var visited = visited_before;
     let software = item.z != 0u;
     let tessellated = is_tessellated(instances[item.x].flags, clusters[item.y]);
@@ -207,17 +224,19 @@ fn expand_into_light(item: vec4<u32>, dynamic: bool, sphere: vec4<f32>, slot: u3
         let uv_lo = r.lo;
         let uv_hi = r.hi;
         let front = r.front;
+        let inside = r.inside;
         let view_index = slot * LOCAL_FACES + face;
         for (var mip = 0u; mip < LOCAL_MIPS; mip++) {
             let rect = LOCAL_INFO_RECTS + (view_index * LOCAL_MIPS + mip) * 4u;
             let pages = f32(local_mip_pages(mip));
-            let page_lo = max(vec2<i32>(floor(uv_lo * pages)), vec2<i32>(info[rect], info[rect + 1u]));
-            let page_hi = min(vec2<i32>(floor(uv_hi * pages)), vec2<i32>(info[rect + 2u], info[rect + 3u]));
+            let page_lo = max(vec2<i32>(floor(uv_lo * pages)), vec2<i32>(info_word(rect), info_word(rect + 1u)));
+            let page_hi = min(vec2<i32>(floor(uv_hi * pages)), vec2<i32>(info_word(rect + 2u), info_word(rect + 3u)));
             let extent = (uv_hi - uv_lo) * pages * f32(vsm.page_texels);
             // Voxels are always software (vsm_voxel_raster.wgsl clips per voxel), tessellated
             // clusters in front of the near plane too (vsm_tess.wgsl bounds micro-triangles).
             let sw = software && ((item.z & CLUSTER_VOXEL) != 0u || (front > 2.0 * near && (tessellated || all(extent <= vec2<f32>(LOCAL_SW_MAX_TEXELS)))));
             let level = LOCAL_LEVEL + view_index * LOCAL_MIPS + mip;
+            let motion = vec2<i32>(min(sway * (PAGE_MOTION_UNITS / local_texel(slot, inside, mip)), vec2<f32>(2.0e9)));
             for (var y = page_lo.y; y <= page_hi.y; y++) {
                 for (var x = page_lo.x; x <= page_hi.x; x++) {
                     visited++;
@@ -230,6 +249,10 @@ fn expand_into_light(item: vec4<u32>, dynamic: bool, sphere: vec4<f32>, slot: u3
                         continue;
                     }
                     emit_page_draw(item, dynamic, sw, e.x, level, page.x | (page.y << 16u));
+                    if motion.y > 0 {
+                        atomicMax(&info[INFO_PAGE_MOTION + 2u * e.x], motion.x);
+                        atomicMax(&info[INFO_PAGE_MOTION + 2u * e.x + 1u], motion.y);
+                    }
                 }
             }
         }
@@ -241,8 +264,8 @@ fn expand_into_light(item: vec4<u32>, dynamic: bool, sphere: vec4<f32>, slot: u3
 fn draw_args() {
     // Statistics.
     atomicStore(&draws[12], atomicLoad(&draws[4]) + atomicLoad(&draws[5]) + atomicLoad(&draws[SPLIT_DRAWS + 4u]));
-    atomicStore(&draws[13], u32(info[INFO_COUNTERS]));
-    atomicStore(&draws[14], u32(info[INFO_COUNTERS + 1u]));
+    atomicStore(&draws[13], u32(info_word(INFO_COUNTERS)));
+    atomicStore(&draws[14], u32(info_word(INFO_COUNTERS + 1u)));
     atomicStore(&draws[SPLIT_DRAWS], MAX_CLUSTER_TRIANGLES * 3u);
     atomicStore(&draws[SPLIT_DRAWS + 1u], min(atomicLoad(&draws[SPLIT_DRAWS + 4u]), SPLIT_CAPACITY));
     atomicStore(&draws[SPLIT_DRAWS + 2u], 0u);

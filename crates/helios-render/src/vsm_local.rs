@@ -12,10 +12,11 @@
 //! physical pages go wherever they are needed, between the sun and the lights.
 //!
 //! Each frame up to [`LOCAL_SLOTS`] shadow-casting lights are given a *slot*, prioritised by
-//! their influence on the screen; the others — and, by default, lights that are moving — keep
-//! distance-field shadows. A light keeps its slot
-//! (and its cached pages) while it stays selected; its pages are dropped when it moves or
-//! changes shape, when the scene changes, or when the slot passes to another light.
+//! their influence on the screen; the others keep distance-field shadows. A light keeps its slot
+//! (and its cached pages) while it stays selected; its pages are dropped when its shadow map's
+//! origin or shape changes, when the scene changes, or when the slot passes to another light.
+//! A light that moves keeps its map's origin while it stays close to it and is re-rendered
+//! within a budget (`vsm_anchor.rs`).
 //!
 //! One culling view covers every light, face and mip, so the cost of a frame without new pages
 //! does not grow with the number of lights. It keeps clusters that overlap a world box around
@@ -31,6 +32,7 @@ use crate::gpu_types::CullViewUniform;
 use crate::passes::culling::{CullCapacity, CullView};
 use crate::scene::{Light, LightKind};
 use crate::util::uniform_buffer;
+use crate::vsm_anchor::{self, AnchorSettings, Anchors, LightState, MovingLightShadows};
 
 /// Lights with a virtual shadow map per frame.
 pub const LOCAL_SLOTS: usize = 32;
@@ -53,6 +55,10 @@ const SPOT_MARGIN: f32 = 0.05;
 /// Lights whose source is larger than this cast soft shadows that need less resolution: each
 /// doubling of the radius coarsens their mips by one.
 const SHARP_SOURCE_RADIUS: f32 = 0.25;
+/// A moving light's shadow map is this many mips coarser (UE's
+/// `r.Shadow.Virtual.ResolutionLodBiasLocalMoving`): what it renders, per frame for the casters
+/// moving with it and in full when its origin moves, covers a quarter of the pages.
+const MOVING_MIP_BIAS: f32 = 1.0;
 /// A light that holds a slot keeps it against newcomers up to this much more influential, so
 /// slots (and their cached pages) do not flip between lights of similar importance.
 const KEEP_BONUS: f32 = 1.5;
@@ -69,6 +75,9 @@ struct GpuSlot {
     params: Vec4,
     /// x: cached pages are stale.
     flags: [u32; 4],
+    /// xyz: the map's origin (`position_range`) minus the light's position: zero unless the
+    /// light moves (`vsm_anchor.rs`).
+    anchor_offset: Vec4,
 }
 
 #[repr(C)]
@@ -81,8 +90,8 @@ struct LocalVsmUniform {
     _pad: u32,
 }
 
-const _: () = assert!(std::mem::size_of::<GpuSlot>() == 816);
-const _: () = assert!(std::mem::size_of::<LocalVsmUniform>() == 816 * LOCAL_SLOTS + 16);
+const _: () = assert!(std::mem::size_of::<GpuSlot>() == 832);
+const _: () = assert!(std::mem::size_of::<LocalVsmUniform>() == 832 * LOCAL_SLOTS + 16);
 
 /// Influence of a light on the screen, for choosing which lights get shadow maps: the share of
 /// the view its range sphere covers (1 with the camera inside it) times its brightness. Zero for
@@ -174,9 +183,9 @@ impl SlotAllocator {
         out
     }
 
-    /// Slots in use and their lights.
-    pub fn occupied(&self) -> impl Iterator<Item = (usize, &Light)> {
-        self.slots.iter().enumerate().filter_map(|(s, slot)| slot.as_ref().map(|(_, light)| (s, light)))
+    /// Slots in use: the slot, its light's index and the light as its shadow map renders it.
+    pub fn occupied(&self) -> impl Iterator<Item = (usize, usize, &Light)> {
+        self.slots.iter().enumerate().filter_map(|(s, slot)| slot.as_ref().map(|(index, light)| (s, *index, light)))
     }
 }
 
@@ -188,9 +197,9 @@ struct LightMotion {
 }
 
 impl LightMotion {
-    /// Per light of this frame: whether it moved in the last [`MOVING_FRAMES`] frames. A new
-    /// light list (another scene) starts at rest.
-    fn update(&mut self, lights: &[Light]) -> Vec<bool> {
+    /// Per light of this frame: whether it moved in the last [`MOVING_FRAMES`] frames, and its
+    /// move since the last frame. A new light list (another scene) starts at rest.
+    fn update(&mut self, lights: &[Light]) -> Vec<(bool, Vec3)> {
         if self.last.len() != lights.len() {
             self.last = lights.iter().map(|l| (l.position, MOVING_FRAMES)).collect();
         }
@@ -198,9 +207,10 @@ impl LightMotion {
             .iter_mut()
             .zip(lights)
             .map(|((position, since), light)| {
-                *since = if *position == light.position { since.saturating_add(1) } else { 0 };
+                let step = light.position - *position;
+                *since = if step == Vec3::ZERO { since.saturating_add(1) } else { 0 };
                 *position = light.position;
-                *since < MOVING_FRAMES
+                (*since < MOVING_FRAMES, step)
             })
             .collect()
     }
@@ -241,13 +251,12 @@ pub struct LocalFrame<'a> {
     pub enabled: bool,
     /// Geometry or instances changed: every cached local page is stale.
     pub scene_changed: bool,
-    /// Moving lights may take the slots static ones leave over
-    /// (`RenderSettings::moving_light_shadow_maps`, off by default and under MegaLights). A
-    /// moving light's shadow map re-renders in full every frame (the cathedral's eleven swinging
-    /// chandelier lights: 3.5 ms at 1440p, the candle-lit variant's six candle lights near the
-    /// altar 11 ms), while its distance-field shadow costs no more than a mapped light's
-    /// filtering; its slot goes back to static lights.
-    pub moving_shadow_maps: bool,
+    /// How moving lights are shadowed (`RenderSettings::moving_light_shadows`; distance fields
+    /// under MegaLights, which traces them). They take the slots static lights leave over.
+    pub moving: MovingLightShadows,
+    /// Moving lights' shadow maps rendered in full per frame
+    /// (`RenderSettings::moving_light_renders`).
+    pub moving_renders: usize,
 }
 
 /// Per-frame culling parameters of the local lights' view.
@@ -264,12 +273,15 @@ pub struct LocalShadows {
     pub uniform: wgpu::Buffer,
     allocator: SlotAllocator,
     motion: LightMotion,
+    anchors: Anchors,
     gpu: Box<LocalVsmUniform>,
     /// The culling view of all local lights.
     view: CullView,
     /// Per light of the scene: its slot or `u32::MAX` (uploaded with the lights).
     light_slots: Vec<u32>,
     active: usize,
+    /// Slots whose light is away from its map's origin.
+    held: usize,
     any_stale: bool,
     info_base: u32,
 }
@@ -284,10 +296,12 @@ impl LocalShadows {
             uniform: uniform_buffer(device, "local vsm", std::mem::size_of::<LocalVsmUniform>() as u64),
             allocator: SlotAllocator::default(),
             motion: LightMotion::default(),
+            anchors: Anchors::default(),
             gpu,
             view: CullView::new(device, "local vsm", capacity),
             light_slots: Vec::new(),
             active: 0,
+            held: 0,
             any_stale: false,
             info_base,
         }
@@ -300,14 +314,24 @@ impl LocalShadows {
 
     /// Chooses this frame's shadowed lights. Call before uploading the lights.
     pub fn assign(&mut self, f: &LocalFrame) {
-        let moving = self.motion.update(f.lights);
-        let influence: Vec<f32> = f
-            .lights
-            .iter()
-            .zip(&moving)
-            .map(|(l, &moving)| if f.enabled && (f.moving_shadow_maps || !moving) { screen_influence(l, f.eye, &f.planes) } else { 0.0 })
+        let motion = self.motion.update(f.lights);
+        let mut influence: Vec<f32> = f.lights.iter().map(|l| if f.enabled { screen_influence(l, f.eye, &f.planes) } else { 0.0 }).collect();
+        // Each light as its shadow map is rendered: from the map's origin, which a moving light
+        // leaves behind (vsm_anchor.rs). Lights without an origin get no slot.
+        let states: Vec<LightState> = (f.lights.iter().zip(&motion).zip(&influence))
+            .map(|((l, &(moving, step)), &influence)| LightState { position: l.position, moving, step, tolerance: vsm_anchor::tolerance(l), influence })
             .collect();
-        let assignment = self.allocator.assign(f.lights, &influence, &moving, f.scene_changed);
+        let origins = self.anchors.update(&states, AnchorSettings { mode: f.moving, budget: f.moving_renders });
+        let mut rendered = f.lights.to_vec();
+        for ((light, influence), origin) in rendered.iter_mut().zip(&mut influence).zip(&origins) {
+            match origin {
+                Some(origin) => light.position = *origin,
+                None => *influence = 0.0,
+            }
+        }
+        let moving: Vec<bool> = motion.iter().map(|m| m.0).collect();
+        let assignment = self.allocator.assign(&rendered, &influence, &moving, f.scene_changed);
+        self.anchors.keep(|i| assignment.light_slots[i] != u32::MAX);
         self.light_slots = assignment.light_slots;
         self.any_stale = assignment.stale.iter().any(|&s| s);
         let gpu = &mut *self.gpu;
@@ -317,16 +341,20 @@ impl LocalShadows {
             slot.flags[0] = assignment.stale[s] as u32;
         }
         self.active = 0;
-        for (s, light) in self.allocator.occupied() {
+        self.held = 0;
+        for (s, index, light) in self.allocator.occupied() {
             let (faces, near, focal) = face_projections(light);
             let slot = &mut gpu.slots[s];
             for (i, view_proj) in faces.iter().enumerate() {
                 slot.view_proj[i] = *view_proj;
                 slot.inv_view_proj[i] = view_proj.inverse();
             }
-            let mip_bias = (light.source_radius / SHARP_SOURCE_RADIUS).log2().max(0.0);
+            let cached_moving = moving[index] && f.moving == MovingLightShadows::Cached;
+            let mip_bias = (light.source_radius / SHARP_SOURCE_RADIUS).log2().max(0.0) + if cached_moving { MOVING_MIP_BIAS } else { 0.0 };
             slot.position_range = light.position.extend(light.range);
             slot.params = Vec4::new(faces.len() as f32, near, focal, mip_bias);
+            slot.anchor_offset = (light.position - f.lights[index].position).extend(0.0);
+            self.held += (slot.anchor_offset != Vec4::ZERO) as usize;
             self.active += 1;
         }
     }
@@ -376,6 +404,11 @@ impl LocalShadows {
     /// Lights with a shadow map this frame.
     pub fn active_count(&self) -> usize {
         self.active
+    }
+
+    /// Lights whose shadow map is held at an origin they moved away from.
+    pub fn held_count(&self) -> usize {
+        self.held
     }
 
     /// Some slot's cached pages must be dropped this frame.
@@ -473,13 +506,14 @@ mod tests {
     fn lights_count_as_moving_until_they_rest_a_while() {
         let mut lights = lights(2);
         let mut motion = LightMotion::default();
-        assert_eq!(motion.update(&lights), vec![false, false], "a new scene starts at rest");
-        lights[1].position.x += 0.1;
-        assert_eq!(motion.update(&lights), vec![false, true]);
+        let moving = |motion: &mut LightMotion, lights: &[Light]| motion.update(lights).iter().map(|m| m.0).collect::<Vec<_>>();
+        assert_eq!(moving(&mut motion, &lights), vec![false, false], "a new scene starts at rest");
+        lights[1].position.x += 0.5;
+        assert_eq!(motion.update(&lights)[1], (true, Vec3::X * 0.5));
         for _ in 1..MOVING_FRAMES {
-            assert_eq!(motion.update(&lights), vec![false, true]);
+            assert_eq!(moving(&mut motion, &lights), vec![false, true]);
         }
-        assert_eq!(motion.update(&lights), vec![false, false], "at rest again");
+        assert_eq!(moving(&mut motion, &lights), vec![false, false], "at rest again");
     }
 
     #[test]
@@ -489,6 +523,65 @@ mod tests {
         let pages: u32 = (0..MIPS).map(|mip| (32u32 >> mip).pow(2)).sum();
         assert_eq!(pages, FACE_ENTRIES);
         assert_eq!(32 >> (MIPS - 1), 1);
+    }
+
+    /// `local_sphere_rect` of vsm_local_common.wgsl: (valid, lo, hi, inside) in clip x / w.
+    fn sphere_rect(view_proj: &Mat4, near: f32, center: Vec3, radius: f32) -> (bool, glam::Vec2, glam::Vec2, f32) {
+        let clip = *view_proj * center.extend(1.0);
+        let front = clip.w - radius;
+        let mut valid = clip.w + radius > near;
+        let (mut lo, mut hi) = (glam::Vec2::splat(-1.0), glam::Vec2::splat(1.0));
+        let (a, b) = (clip.truncate().truncate() - radius, clip.truncate().truncate() + radius);
+        let back = clip.w + radius;
+        if front > near {
+            lo = (a / front).min(a / back).max(lo);
+            hi = (b / front).max(b / back).min(hi);
+        } else if valid {
+            lo = glam::Vec2::select(a.cmpgt(glam::Vec2::ZERO), (a / back).max(lo), lo);
+            hi = glam::Vec2::select(b.cmplt(glam::Vec2::ZERO), (b / back).min(hi), hi);
+        }
+        valid = valid && hi.cmpge(lo).all();
+        (valid, lo, hi, front.max(near).max(a.x.max(-b.x)).max(a.y.max(-b.y)))
+    }
+
+    #[test]
+    fn sphere_rects_bound_what_a_face_sees() {
+        // Spheres all around a light, many across the near planes of its faces: every point of a
+        // sphere that a face sees lies in the sphere's rectangle, no nearer than its bound.
+        let light = Light::point(Vec3::new(1.0, 2.0, 3.0), Vec3::ONE, 1.0, 10.0);
+        let (faces, near, _) = face_projections(&light);
+        let mut state = 0x2545_f491u32;
+        let mut random = || {
+            state = state.wrapping_mul(1664525).wrapping_add(1013904223);
+            (state >> 8) as f32 / (1u32 << 24) as f32 * 2.0 - 1.0
+        };
+        let (mut culled, mut seen) = (0, 0);
+        for _ in 0..400 {
+            let center = light.position + Vec3::new(random(), random(), random()) * 6.0;
+            let radius = 0.05 + (random() + 1.0) * 1.5;
+            for face in &faces {
+                let (valid, lo, hi, inside) = sphere_rect(face, near, center, radius);
+                culled += !valid as usize;
+                for _ in 0..60 {
+                    let p = center + Vec3::new(random(), random(), random()).normalize_or_zero() * radius * random().abs();
+                    let clip = *face * p.extend(1.0);
+                    let ndc = clip.truncate().truncate() / clip.w;
+                    if clip.w <= near || ndc.abs().max_element() > 1.0 {
+                        continue;
+                    }
+                    seen += 1;
+                    assert!(valid, "{center} {radius}: a visible point in a culled sphere");
+                    assert!(ndc.cmpge(lo - 1e-4).all() && ndc.cmple(hi + 1e-4).all(), "{ndc} outside {lo}..{hi}");
+                    assert!(clip.w >= inside - 1e-4, "depth {} below the bound {inside}", clip.w);
+                }
+            }
+        }
+        // The test means something: faces see points, and most spheres miss most faces — also
+        // those reaching a face's near plane from the side (they used to cover the whole face).
+        assert!(seen > 5000 && culled > 400 * 3, "{seen} {culled}");
+        let beside = light.position + Vec3::new(0.1, 4.0, 0.0);
+        assert!(!sphere_rect(&faces[0], near, beside, 1.0).0, "beside the +X face, across its near plane");
+        assert!(sphere_rect(&faces[2], near, beside, 1.0).3 > 2.9, "in the +Y face, 3 m out");
     }
 
     #[test]

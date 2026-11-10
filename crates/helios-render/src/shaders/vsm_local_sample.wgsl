@@ -119,13 +119,36 @@ fn local_filter_tap(f: LocalFilter, o: vec2<f32>) -> LocalLookup {
     return s;
 }
 
+// Moves a filter to where a light that left its shadow map's origin casts the shadows the map
+// holds (vsm_anchor.rs). The map sees an occluder at face depth `blocker` along the ray from the
+// origin O; from the light P = O - offset the same occluder shadows the receiver plane
+// (t - 1) * offset further on, t = receiver depth / blocker depth (similar triangles: nothing at
+// contact, more the nearer the occluder is to the light). So the receiver looks its shadow up
+// (t - 1) * offset back, slid along the light direction onto its tangent plane like the filter
+// taps. Only occluders the blocker search can have found count (`reach`, its radius):
+// the shift fades out beyond it, and such shadows (of occluders next to the light, whose
+// penumbra the filter cannot span anyway) stay where the origin casts them.
+fn local_filter_follow(f: LocalFilter, r: LocalReceiver, n: vec3<f32>, blocker: f32, reach: f32) -> LocalFilter {
+    var moved = f;
+    let offset = local_vsm.slots[f.slot].anchor_offset.xyz;
+    var shift = offset * (1.0 - r.w / blocker);
+    shift -= r.l * dot(shift, r.l);
+    shift *= saturate(2.0 - length(shift) / reach);
+    let n_dot_l = dot(n, r.l);
+    let slope = 1.0 / select(min(n_dot_l, -0.3), max(n_dot_l, 0.3), n_dot_l >= 0.0);
+    shift -= r.l * (dot(shift, n) * slope);
+    moved.p += shift;
+    moved.center += local_vsm.slots[f.slot].view_proj[f.face] * vec4<f32>(shift, 0.0);
+    return moved;
+}
+
 // Contact-hardening soft shadow (PCSS) of the light in `slot` at `world` with normal `n`: a
 // blocker search over the light's source radius estimates the penumbra from the average blocker
 // distance, which then sets the radius of `taps` filtered depth comparisons - crisp where an
 // occluder touches the receiver (pew legs, candle holders), soft far from it.
 fn local_vsm_shadow(slot: u32, world: vec3<f32>, n: vec3<f32>, source_radius: f32, noise: f32, taps: u32) -> f32 {
     let r = local_receiver(slot, world, n, 0u);
-    let f = local_filter(slot, r, n);
+    var f = local_filter(slot, r, n);
     let near = local_vsm.slots[slot].params.y;
     let phi = noise * 6.2831853;
     let max_radius = LOCAL_MAX_FILTER_TEXELS * r.texel;
@@ -158,6 +181,9 @@ fn local_vsm_shadow(slot: u32, world: vec3<f32>, n: vec3<f32>, source_radius: f3
     }
     let blocker = blocker_w / blockers;
     let penumbra = clamp(source_radius * (r.w - blocker) / max(blocker, near), r.texel, max_radius);
+    if any(local_vsm.slots[slot].anchor_offset.xyz != vec3<f32>(0.0)) {
+        f = local_filter_follow(f, r, n, max(blocker, near), search);
+    }
 
     var lit = 0.0;
     var count = 0.0;

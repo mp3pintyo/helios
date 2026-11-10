@@ -81,7 +81,7 @@ const _: () = assert!(MIRROR_TEXELS * 4 <= 128 << 20);
 /// the page clear arguments and counters, two bit masks over the clipmap page table entries (all
 /// dirty pages, pages rendered in full), per local light slot LOCAL_SLOT_WORDS words
 /// (LOCAL_INFO_SLOTS), per local face mip 4 words (LOCAL_INFO_RECTS) and three words per
-/// physical page.
+/// physical page, then two words per physical page for local light pages' motion bounds.
 const INFO_ARGS: u32 = 128;
 /// Word offset of the dirty page bit masks and the size of each: a bit per clipmap page table
 /// entry.
@@ -95,8 +95,12 @@ const INFO_LOCAL_RECTS: u32 = INFO_LOCAL_SLOTS + vsm_local::LOCAL_SLOTS as u32 *
 /// initially none) and its pending refresh flag (persistent).
 const INFO_PAGE_STATE: u32 = INFO_LOCAL_RECTS + vsm_local::FACE_MIPS * 4;
 const INFO_PAGE_STATIC: u32 = INFO_PAGE_STATE + PHYSICAL_PAGES;
-const INFO_WORDS: u64 = (INFO_PAGE_STATIC + 2 * PHYSICAL_PAGES) as u64;
-const _: () = assert!(INFO_LOCAL_SLOTS == 16520 && INFO_LOCAL_RECTS == 17544 && INFO_PAGE_STATE == 22152 && INFO_WORDS == 25224);
+/// Per physical page: bounds of the motion of a local light page's wind-swayed casters, in its
+/// texels (speed, distance; `PAGE_MOTION_UNITS` in vsm_common.wgsl), by which its refreshes are
+/// scheduled (vsm_invalidate.wgsl).
+const INFO_PAGE_MOTION: u32 = INFO_PAGE_STATIC + 2 * PHYSICAL_PAGES;
+const INFO_WORDS: u64 = (INFO_PAGE_MOTION + 2 * PHYSICAL_PAGES) as u64;
+const _: () = assert!(INFO_LOCAL_SLOTS == 16520 && INFO_LOCAL_RECTS == 17544 && INFO_PAGE_STATE == 22152 && INFO_WORDS == 27272);
 const _: () = assert!(vsm_local::LOCAL_LEVEL == MAX_LEVELS as u32);
 /// Items of the info buffer reset each frame (info_begin in vsm.wgsl).
 const INFO_ITEMS: u32 = MAX_LEVELS as u32 + vsm_local::LOCAL_SLOTS as u32 + vsm_local::FACE_MIPS;
@@ -176,6 +180,9 @@ pub struct VsmFrame<'a> {
     /// The wind or skeletal animation moves shadow casters: cached pages under them re-render
     /// these (dynamic) casters as they move.
     pub wind: bool,
+    /// What bounds the wind's motion (strength, gust frequency, turbulence): local light pages
+    /// measure their casters' motion again when it changes.
+    pub wind_bounds: [f32; 3],
     /// Shadow casters moved this frame (only the pages under them are re-rendered).
     pub moves: &'a [ShadowMove],
     /// Some instance moved or changed mobility (casters may change layer).
@@ -199,6 +206,8 @@ pub struct VirtualShadowMap {
     /// the static layer of pages that have one (`INFO_PAGE_STATIC` in vsm_common.wgsl); zero
     /// elsewhere except between the software raster and the page clear.
     sw_depth: wgpu::Buffer,
+    /// What bounded the wind's motion when local pages last measured theirs.
+    wind_bounds: [f32; 3],
     levels: Vec<CullView>,
     level_count: u32,
     mark_layout: wgpu::BindGroupLayout,
@@ -302,7 +311,8 @@ impl VirtualShadowMap {
         let mut expand_entries = vec![(0, bind::uniform()), (1, bind::uniform())];
         expand_entries.extend((2..=6).map(|b| (b, bind::storage(true))));
         expand_entries.push((7, bind::storage(false)));
-        expand_entries.push((8, bind::storage(true)));
+        // The info buffer: the expansion also records local pages' motion bounds in it.
+        expand_entries.push((8, bind::storage(false)));
         expand_entries.push(wind_entry());
         expand_entries.push(skin_entry());
         expand_entries.push(tessellation_entry());
@@ -465,6 +475,7 @@ impl VirtualShadowMap {
             // COPY_SRC: the header is read back for statistics.
             draws: storage_buffer(device, "vsm draws", SPLIT_DRAWS_OFFSET + SPLIT_DRAWS_SIZE, wgpu::BufferUsages::INDIRECT | wgpu::BufferUsages::COPY_SRC),
             sw_depth: storage_buffer(device, "vsm software depth", MIRROR_TEXELS * 4, wgpu::BufferUsages::empty()),
+            wind_bounds: [0.0; 3],
             levels: (0..MAX_LEVELS).map(|i| CullView::new(device, &format!("vsm level {i}"), LEVEL_CAPACITY)).collect(),
             level_count: 0,
             mark_layout,
@@ -493,6 +504,12 @@ impl VirtualShadowMap {
         self.volume_marking = f.volume_distance > 0.0;
         self.residency_changed |= f.geometry_streamed;
         self.wind = f.wind;
+        if f.wind_bounds != self.wind_bounds {
+            // Bounds measured under another wind say nothing: every local page is refreshed and
+            // measured again.
+            self.wind_bounds = f.wind_bounds;
+            queue.write_buffer(&self.info, INFO_PAGE_MOTION as u64 * 4, &vec![0xffu8; PHYSICAL_PAGES as usize * 8]);
+        }
         let sun = f.sun_direction.normalize();
         let up = if sun.y.abs() > 0.99 { Vec3::Z } else { Vec3::Y };
         let light_view = look_to_mat4(Vec3::ZERO, -sun, up);
@@ -1054,6 +1071,7 @@ mod tests {
             ("INFO_PAGE_STATE", INFO_PAGE_STATE),
             ("INFO_PAGE_STATIC", INFO_PAGE_STATIC),
             ("INFO_PAGE_REFRESH", INFO_PAGE_STATIC + PHYSICAL_PAGES),
+            ("INFO_PAGE_MOTION", INFO_PAGE_MOTION),
             ("LOCAL_INFO_SLOTS", INFO_LOCAL_SLOTS),
             ("LOCAL_INFO_SLOT_WORDS", LOCAL_SLOT_WORDS),
             ("LOCAL_INFO_RECTS", INFO_LOCAL_RECTS),
