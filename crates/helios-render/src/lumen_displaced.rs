@@ -18,8 +18,9 @@
 //! The positions are read back and the distance field and the cards' triangles are baked on the
 //! CPU with the same code as every other mesh's ([`MeshSdf::bake_volume`] /
 //! [`MeshSdf::bake_heightfield`] at the mesh's own voxel size, [`helios_geometry::cards`]).
-//! Until a variant is ready (a few frames after the scene changes, the bake running on a worker
-//! thread natively) its instances keep the previous variant or the undisplaced mesh.
+//! The CPU work runs off the render thread (`lumen_offload.rs`: worker threads natively, Web
+//! Workers in the browser). Until a variant is ready (a few frames after the scene changes) its
+//! instances keep the previous variant or the undisplaced mesh.
 //!
 //! **Animated displacement** (graphs that read the time) is represented by its *mean surface*:
 //! the displacement averaged over [`ANIMATED_SAMPLES`] times spread over [`ANIMATED_WINDOW`]
@@ -43,6 +44,7 @@ use helios_geometry::{lod_cut_resident, Aabb, LodView, MeshSdf, SdfKind, Virtual
 use wgpu::BindingResource::{Sampler, TextureView};
 
 use crate::gpu_scene::GpuScene;
+use crate::lumen_offload::{self, BakeMesh, Output, Work};
 use crate::profiler::Recorder;
 use crate::scene::{Scene, TextureMapping};
 use crate::shader::{compose, compose_variant, create_module_from};
@@ -60,6 +62,10 @@ const MAX_TRIANGLES: usize = 1 << 19;
 const SPACING: f32 = 0.75;
 /// Points displaced per job at most (variants beyond wait for the next job).
 const MAX_JOB_POINTS: usize = 1 << 21;
+/// One variant per job in the browser: the page uploads a job's points and hands its positions to
+/// the bakes in one frame, so a job of one variant bounds that frame's copying (the GPU work of a
+/// job is small; a variant waits a few frames longer).
+const ONE_VARIANT_PER_JOB: bool = cfg!(target_arch = "wasm32");
 /// Segments per base triangle edge at most.
 const MAX_SEGMENTS: u32 = 64;
 /// Displacement filter of the job's `tess` header: a dice segment is `max(distance, FAR) ·
@@ -91,6 +97,7 @@ impl<'a> Surface<'a> {
 }
 
 /// The distance field and card geometry of a displaced (mesh, displacement) pair, in mesh space.
+#[derive(Debug, PartialEq)]
 pub(crate) struct DisplacedVariant {
     pub sdf: MeshSdf,
     pub aabb: Aabb,
@@ -129,9 +136,9 @@ struct Request {
 /// One point of a refined surface (`SurfacePoint` in lumen_displace.wgsl).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Pod, Zeroable)]
-struct SurfacePoint {
-    object_u: [f32; 4],
-    normal_v: [f32; 4],
+pub(crate) struct SurfacePoint {
+    pub object_u: [f32; 4],
+    pub normal_v: [f32; 4],
 }
 
 /// `DisplaceJob` in lumen_displace.wgsl.
@@ -146,14 +153,14 @@ struct JobUniform {
 }
 
 /// A mesh's triangles refined for sampling a displacement: welded points and triangles over them.
-#[derive(Debug, Default)]
-struct Refined {
-    points: Vec<SurfacePoint>,
-    triangles: Vec<[u32; 3]>,
+#[derive(Debug, Default, PartialEq)]
+pub(crate) struct Refined {
+    pub points: Vec<SurfacePoint>,
+    pub triangles: Vec<[u32; 3]>,
 }
 
 /// A triangle corner: position, normal, UV.
-type Corner = (Vec3, Vec3, Vec2);
+pub(crate) type Corner = (Vec3, Vec3, Vec2);
 
 fn corner_bits(c: &Corner) -> [u32; 8] {
     [c.0.x, c.0.y, c.0.z, c.1.x, c.1.y, c.1.z, c.2.x, c.2.y].map(f32::to_bits)
@@ -185,7 +192,7 @@ fn segments(t: &[Corner; 3], spacing: f32) -> u32 {
 /// Splits every triangle into n² by a uniform barycentric grid (n from [`segments`], the spacing
 /// grown until the refined triangles fit [`MAX_TRIANGLES`]); points shared by triangles (vertices,
 /// edges with equal attributes at both ends) are emitted once.
-fn refine(triangles: &[[Corner; 3]], spacing: f32) -> Refined {
+pub(crate) fn refine(triangles: &[[Corner; 3]], spacing: f32) -> Refined {
     let mut spacing = spacing;
     while triangles.iter().map(|t| segments(t, spacing).pow(2) as usize).sum::<usize>() > MAX_TRIANGLES.max(triangles.len()) {
         spacing *= 1.25;
@@ -250,10 +257,10 @@ fn mesh_corners(mesh: &VirtualMesh, error: f32) -> Vec<[Corner; 3]> {
     triangles
 }
 
-/// The baked variant of displaced `positions` over `refined`'s triangles, with `base`'s kind of
-/// distance field at its voxel size.
-fn bake(base: &MeshSdf, refined: &Refined, positions: &[Vec3], card_scale: f32, serial: u64) -> Option<DisplacedVariant> {
-    let soup: Vec<[Vec3; 3]> = refined.triangles.iter().map(|t| t.map(|i| positions[i as usize])).collect();
+/// The baked variant of displaced `positions` over a refinement's triangles (`refined`), with
+/// `base`'s kind of distance field at its voxel size.
+pub(crate) fn bake(base: &MeshSdf, refined: &[[u32; 3]], positions: &[Vec3], card_scale: f32, serial: u64) -> Option<DisplacedVariant> {
+    let soup: Vec<[Vec3; 3]> = refined.iter().map(|t| t.map(|i| positions[i as usize])).collect();
     let aabb = Aabb::from_points(positions.iter().copied());
     let extent = aabb.extent();
     let sdf = match base.kind {
@@ -273,14 +280,13 @@ fn bake(base: &MeshSdf, refined: &Refined, positions: &[Vec3], card_scale: f32, 
     }
     // Area-weighted normals of the welded displaced surface for the cards.
     let mut normals = vec![Vec3::ZERO; positions.len()];
-    for (t, p) in refined.triangles.iter().zip(&soup) {
+    for (t, p) in refined.iter().zip(&soup) {
         let n = (p[1] - p[0]).cross(p[2] - p[0]);
         for &i in t {
             normals[i as usize] += n;
         }
     }
     let triangles: Vec<[CardVertex; 3]> = refined
-        .triangles
         .iter()
         .zip(&soup)
         .map(|(t, p)| {
@@ -381,14 +387,11 @@ fn requests(scene: &Scene) -> Vec<Option<Request>> {
     out
 }
 
-/// A variant on its way: refined on the CPU, displaced on the GPU, then baked.
+/// A variant on its way: refined on the CPU, displaced on the GPU (its points from `first` on in
+/// the job's buffers), then baked.
 struct Pending {
-    request: Request,
-    refined: Refined,
-    base: MeshSdf,
+    refinement: Refinement,
     first: usize,
-    /// World units per mesh unit of the instance displacing the points.
-    scale: f32,
 }
 
 const IDLE: u32 = 0;
@@ -408,27 +411,35 @@ struct Job {
 /// mean (world units, RMS at the point moving most) and the CPU time of the bake (ms).
 type Baked = (Request, Option<DisplacedVariant>, f32, f32);
 
-/// CPU work off the render thread: on a worker thread natively; in the browser, which has no
-/// threads, run by [`finished`] (one task per frame).
+/// CPU work off the render thread (`lumen_offload.rs`): a [`Work`] and what to make of its
+/// [`Output`]. Natively it runs on a worker thread; in the browser on a Web Worker if the page
+/// installed them, else (or if the worker fails) on the render thread, run by [`finished`] one
+/// task per frame.
 enum Task<T> {
     #[cfg(not(target_arch = "wasm32"))]
     Thread(std::sync::mpsc::Receiver<T>),
+    /// Offloaded; the work is kept to run here should the worker fail.
     #[cfg(target_arch = "wasm32")]
-    Deferred(Box<dyn FnOnce() -> T>),
+    Remote(lumen_offload::Offloaded, Work, Box<dyn FnOnce(Output) -> T>),
+    #[cfg(target_arch = "wasm32")]
+    Deferred(Work, Box<dyn FnOnce(Output) -> T>),
 }
 
 impl<T: Send + 'static> Task<T> {
-    fn spawn(work: impl FnOnce() -> T + Send + 'static) -> Self {
+    fn spawn(work: Work, finish: impl FnOnce(Output) -> T + Send + 'static) -> Self {
         #[cfg(not(target_arch = "wasm32"))]
         {
             let (send, receive) = std::sync::mpsc::channel();
             std::thread::spawn(move || {
-                let _ = send.send(work());
+                let _ = send.send(finish(work.run()));
             });
             Task::Thread(receive)
         }
         #[cfg(target_arch = "wasm32")]
-        Task::Deferred(Box::new(work))
+        match lumen_offload::submit(&work) {
+            Some(id) => Task::Remote(id, work, Box::new(finish)),
+            None => Task::Deferred(work, Box::new(finish)),
+        }
     }
 }
 
@@ -453,11 +464,35 @@ fn finished<T>(tasks: &mut Vec<Task<T>>, run: &mut bool) -> Vec<T> {
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => {}
             },
+            // A worker's result is copied into the page's memory: one per frame too, like a
+            // deferred task's run (a bed's bake is about 9 MB).
             #[cfg(target_arch = "wasm32")]
-            Task::Deferred(_) => {
+            Task::Remote(task, ..) if *run => {
+                let result = match task.poll() {
+                    lumen_offload::BakePoll::Pending => None,
+                    lumen_offload::BakePoll::Done(bytes) => Some(Output::decode(&bytes)),
+                    lumen_offload::BakePoll::Failed => Some(None),
+                };
+                if let Some(output) = result {
+                    let Task::Remote(_, work, finish) = tasks.remove(i) else { unreachable!() };
+                    match output {
+                        Some(output) => {
+                            *run = false;
+                            out.push(finish(output));
+                        }
+                        // The worker failed: the task runs here (the next pass of the loop).
+                        None => tasks.insert(i, Task::Deferred(work, finish)),
+                    }
+                    continue;
+                }
+            }
+            #[cfg(target_arch = "wasm32")]
+            Task::Remote(..) => {}
+            #[cfg(target_arch = "wasm32")]
+            Task::Deferred(..) => {
                 if std::mem::take(run) {
-                    let Task::Deferred(work) = tasks.remove(i);
-                    out.push(work());
+                    let Task::Deferred(work, finish) = tasks.remove(i) else { unreachable!() };
+                    out.push(finish(work.run()));
                     continue;
                 }
             }
@@ -467,9 +502,24 @@ fn finished<T>(tasks: &mut Vec<Task<T>>, run: &mut bool) -> Vec<T> {
     out
 }
 
-/// A refined mesh surface for a request: the request, the mesh's own field (whose kind and voxel
-/// size the variant takes), the displacing instance's scale and the points.
-type Refinement = (Request, MeshSdf, f32, Refined);
+/// `sdf` without its voxels: what a variant's bake reads of its mesh's field (kind, voxel size).
+fn sdf_header(sdf: &MeshSdf) -> MeshSdf {
+    MeshSdf { words: Vec::new(), ..*sdf }
+}
+
+/// A refined mesh surface for a request.
+struct Refinement {
+    request: Request,
+    /// The mesh's own field without its voxels (the variant takes its kind and voxel size).
+    base: MeshSdf,
+    /// World units per mesh unit of the instance displacing the points.
+    scale: f32,
+    refined: Refined,
+    /// Offloaded (a Web Worker refined it): the LOD cut, which the bake's worker refines again
+    /// for the triangles instead of them crossing to the page and back (`refined` then has the
+    /// points only). Refining is deterministic, so the triangles are the same.
+    corners: Option<Vec<[Corner; 3]>>,
+}
 
 /// What the displacement job binds besides its own buffers.
 pub struct DisplaceInputs<'a> {
@@ -508,6 +558,10 @@ pub(crate) struct DisplacedSurfaces {
     assigned: Vec<Option<usize>>,
     /// A variant became ready since the last upload.
     changed: bool,
+    /// In the browser: this frame's [`DisplacedSurfaces::sync`] already did its one piece of
+    /// render-thread work (handed a job's positions to a bake, took in a worker's result or ran a
+    /// task), so [`DisplacedSurfaces::record`] leaves the next GPU job to the next frame.
+    busy: bool,
 }
 
 impl DisplacedSurfaces {
@@ -528,6 +582,7 @@ impl DisplacedSurfaces {
             surface_of: Vec::new(),
             assigned: Vec::new(),
             changed: false,
+            busy: false,
         }
     }
 
@@ -564,19 +619,22 @@ impl DisplacedSurfaces {
             // the displacement alone).
             changed = self.assignment(scene.instances.len()) != self.assigned;
         }
-        self.take_job();
-        let mut run = true;
+        // In the browser one piece of render-thread work per frame (see `busy`).
+        let mut run = !(self.take_job() && cfg!(target_arch = "wasm32"));
         for baked in finished(&mut self.bakes, &mut run) {
             self.accept(baked);
         }
         for refinement in finished(&mut self.refining, &mut run) {
-            if self.wanted(&refinement.0) {
+            let request = &refinement.request;
+            if self.wanted(request) {
                 self.refined.push(refinement);
-            } else if self.in_flight.get(&refinement.0.slot) == Some(&refinement.0.content) {
-                self.in_flight.remove(&refinement.0.slot);
+            } else if self.in_flight.get(&request.slot) == Some(&request.content) {
+                self.in_flight.remove(&request.slot);
             }
         }
-        if changed || (self.changed && self.in_flight.is_empty()) {
+        self.busy = !run;
+        // (The upload too waits for a frame without other work.)
+        if changed || (self.changed && self.in_flight.is_empty() && !self.busy) {
             self.changed = false;
             return true;
         }
@@ -606,33 +664,40 @@ impl DisplacedSurfaces {
         self.changed = true;
     }
 
-    /// Takes a finished read-back: bakes its variants off the render thread.
-    fn take_job(&mut self) {
-        let Some(job) = self.job.as_ref().filter(|j| j.status.load(Ordering::Acquire) == READY) else { return };
-        // Copied without a cast: the mapped bytes need not be aligned for Vec4 (in the browser).
-        let words: Option<Vec<Vec4>> =
-            job.readback.get_mapped_range(..).ok().map(|view| bytemuck::pod_collect_to_vec::<u8, [f32; 4]>(&view).into_iter().map(Vec4::from_array).collect());
+    /// Takes a finished read-back: bakes its variants off the render thread. Returns whether there
+    /// was one.
+    fn take_job(&mut self) -> bool {
+        let Some(job) = self.job.as_ref().filter(|j| j.status.load(Ordering::Acquire) == READY) else { return false };
+        // Per variant its positions (xyz) and the largest motion (w). Read without a cast: the
+        // mapped bytes need not be aligned for Vec4 (in the browser).
+        let read = job.readback.get_mapped_range(..).ok().map(|view| {
+            let words = |p: &Pending| view[p.first * 16..(p.first + p.refinement.refined.points.len()) * 16].chunks_exact(16).map(bytemuck::pod_read_unaligned::<Vec4>);
+            job.pending.iter().map(|p| (words(p).map(Vec4::truncate).collect::<Vec<Vec3>>(), words(p).map(|w| w.w).fold(0.0, f32::max))).collect::<Vec<_>>()
+        });
         job.readback.unmap();
         let job = self.job.take().unwrap();
-        let Some(words) = words else {
+        let Some(read) = read else {
             // Lost: the variants are requested again.
             for p in &job.pending {
-                self.in_flight.remove(&p.request.slot);
+                self.in_flight.remove(&p.refinement.request.slot);
             }
-            return;
+            return true;
         };
-        for pending in job.pending {
-            let range = &words[pending.first..pending.first + pending.refined.points.len()];
-            let positions: Vec<Vec3> = range.iter().map(|w| w.truncate()).collect();
-            let motion = range.iter().map(|w| w.w).fold(0.0, f32::max) * pending.scale;
+        for (Pending { refinement, .. }, (positions, motion)) in job.pending.into_iter().zip(read) {
+            let Refinement { request, base, scale, refined, corners } = refinement;
+            let motion = motion * scale;
             self.serial += 1;
-            let serial = self.serial;
-            self.bakes.push(Task::spawn(move || {
-                let start = web_time::Instant::now();
-                let variant = bake(&pending.base, &pending.refined, &positions, pending.request.card_scale, serial);
-                (pending.request, variant, motion, start.elapsed().as_secs_f32() * 1000.0)
+            let mesh = match corners {
+                Some(corners) => BakeMesh::Refine(corners, request.spacing),
+                None => BakeMesh::Triangles(refined.triangles),
+            };
+            let work = Work::Bake { base, mesh, positions, card_scale: request.card_scale, serial: self.serial };
+            self.bakes.push(Task::spawn(work, move |output| match output {
+                Output::Baked(variant, ms) => (request, variant, motion, ms),
+                Output::Refined(_) => (request, None, motion, 0.0),
             }));
         }
+        true
     }
 
     /// Lumen's surfaces for an upload: the scene's meshes, then the ready variants; and per scene
@@ -678,42 +743,59 @@ impl DisplacedSurfaces {
                 continue;
             }
             let mesh = &scene.meshes[request.slot.mesh as usize];
-            let Some(base) = mesh.sdf.clone() else { continue };
+            let Some(base) = mesh.sdf.as_ref().map(sdf_header) else { continue };
             // The LOD cut needs the mesh; the refinement runs off the render thread.
             let corners = mesh_corners(mesh, request.spacing);
             let scale = max_scale(scene.instances[request.instance as usize].transform);
             let request = *request;
             self.in_flight.insert(request.slot, request.content);
-            self.refining.push(Task::spawn(move || (request, base, scale, refine(&corners, request.spacing))));
+            // Offloaded, the page keeps the (small) LOD cut and gets only the points back.
+            let keep = lumen_offload::offloading().then(|| corners.clone());
+            let work = Work::Refine { corners, spacing: request.spacing, triangles: keep.is_none() };
+            self.refining.push(Task::spawn(work, move |output| {
+                let refined = match output {
+                    Output::Refined(refined) => refined,
+                    Output::Baked(..) => Refined::default(),
+                };
+                Refinement { request, base, scale, refined, corners: keep }
+            }));
         }
-        if self.job.is_some() || self.refined.is_empty() {
+        if self.job.is_some() || self.refined.is_empty() || self.busy {
             return;
         }
         let mut pending: Vec<Pending> = Vec::new();
-        let mut points: Vec<SurfacePoint> = Vec::new();
+        let mut total = 0;
         let mut waiting = Vec::new();
-        for (request, base, scale, refined) in std::mem::take(&mut self.refined) {
-            if !self.wanted(&request) {
+        for refinement in std::mem::take(&mut self.refined) {
+            let request = &refinement.request;
+            if !self.wanted(request) {
                 if self.in_flight.get(&request.slot) == Some(&request.content) {
                     self.in_flight.remove(&request.slot);
                 }
                 continue;
             }
-            if refined.points.is_empty() {
+            let count = refinement.refined.points.len();
+            if count == 0 {
                 self.in_flight.remove(&request.slot);
                 continue;
             }
-            if points.len() + refined.points.len() > MAX_JOB_POINTS && !pending.is_empty() {
-                waiting.push((request, base, scale, refined));
+            if !pending.is_empty() && (total + count > MAX_JOB_POINTS || ONE_VARIANT_PER_JOB) {
+                waiting.push(refinement);
                 continue;
             }
-            points.extend_from_slice(&refined.points);
-            pending.push(Pending { request, first: points.len() - refined.points.len(), refined, base, scale });
+            pending.push(Pending { first: total, refinement });
+            total += count;
         }
         self.refined = waiting;
-        if pending.is_empty() {
-            return;
-        }
+        let joined: Vec<SurfacePoint>;
+        let points: &[SurfacePoint] = match pending.as_slice() {
+            [] => return,
+            [one] => &one.refinement.refined.points,
+            _ => {
+                joined = pending.iter().flat_map(|p| p.refinement.refined.points.iter().copied()).collect();
+                &joined
+            }
+        };
         log::debug!("lumen: displacing {} variants ({} points)", pending.len(), points.len());
         let device = rec.device;
         let layout = self.layout.get_or_insert_with(|| {
@@ -748,13 +830,13 @@ impl DisplacedSurfaces {
             (*compute_pipeline(device, "lumen displace", &create_module_from(device, "lumen displace", wgsl), "displace", layout, &[])).clone()
         });
 
-        let point_buffer = storage_buffer_init(device, queue, "lumen displace points", bytemuck::cast_slice(&points));
+        let point_buffer = storage_buffer_init(device, queue, "lumen displace points", bytemuck::cast_slice(points));
         let size = (points.len() * 16) as u64;
         let output = storage_buffer(device, "lumen displaced points", size, wgpu::BufferUsages::COPY_SRC);
         let mut groups = Vec::new();
         for p in &pending {
-            let r = &p.request;
-            let world_spacing = r.spacing * p.scale;
+            let r = &p.refinement.request;
+            let world_spacing = r.spacing * p.refinement.scale;
             // The tessellation uniform: this job's filter header, then the scene's material table.
             let tess = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("lumen displace tessellation"),
@@ -770,7 +852,7 @@ impl DisplacedSurfaces {
             let uniform = JobUniform {
                 instance: r.instance,
                 first: p.first as u32,
-                count: p.refined.points.len() as u32,
+                count: p.refinement.refined.points.len() as u32,
                 samples,
                 time: Vec4::new(0.0, ANIMATED_WINDOW / samples as f32, 0.0, 0.0),
             };
@@ -897,7 +979,7 @@ mod tests {
                 q + Vec3::Y * (0.2 * (1.0 - (q.x * q.x + q.z * q.z) / 0.09).max(0.0))
             })
             .collect();
-        let variant = bake(&base, &refined, &positions, 1.0, 1).unwrap();
+        let variant = bake(&base, &refined.triangles, &positions, 1.0, 1).unwrap();
         assert!((variant.aabb.max.y - 0.2).abs() < 1e-3);
         assert!(variant.sdf.voxel_size <= base.voxel_size * 1.01, "{} vs {}", variant.sdf.voxel_size, base.voxel_size);
         // The top of the bump: on the displaced surface (a sheet: a thin two-sided shell), far

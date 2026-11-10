@@ -64,6 +64,7 @@ cargo run -p helios-demo --release -- --gltf path/to/Fox.glb          # - (Minus
 #   browser: http://localhost:8080/?gltf=models/DamagedHelmet.glb (fetched relative to the page)
 #   browser resolution: dynamic resolution (14 ms GPU budget) is on by default; ?sp=67 fixes the screen
 #   percentage, ?budget=10 changes the budget, ?budget=0 turns it off
+#   ?bake-workers=0: Lumen's displaced variants bake on the render thread instead of Web Workers (comparisons)
 
 # Streaming geometry from pre-baked .hvm files instead of baking at startup
 cargo run -p helios-demo --release -- --scene forest --bake-hvm hvm/forest      # bake once
@@ -193,7 +194,7 @@ its own, translated text. The editor uses a second set of exports (`heliosEditor
 cargo build --release -p helios-demo
 python site/capture.py all          # stills + tour videos into site/media-src (needs ffmpeg; HELIOS_ASSETS = glTF samples)
 uv run --with playwright --with pillow python -I site/capture_editor.py   # editor stills + video (headless Chromium)
-python site/build.py                # site/dist: page, pkg, editor, the media the page references
+python site/build.py                # site/dist: page, pkg (with pkg/snippets/: the bake worker), editor, media
 python serve.py 8080 site/dist      # open http://localhost:8080/preview.html
 ```
 
@@ -1027,7 +1028,13 @@ culling), gallery 8.0 / 5.0 → 8.1 / 5.0 ms, cathedral with 300 lights under Me
   vectors, world triplanar heights). The mesh is refined into points at most ¾ of a voxel apart (welded, on a
   worker thread), the GPU displaces them with the tessellator's own `displacement_position` — for graphs through
   the dicing passes' generated module — filtered for the point spacing, and the field and cards are baked from the
-  read-back positions on worker threads with the same code as every mesh's (in the browser one bake per frame). An
+  read-back positions on worker threads with the same code as every mesh's. In the browser, which has no threads
+  without cross-origin isolation, the refinement and the bake run on **Web Workers** that each run a second instance
+  of the wasm module (`lumen_offload.rs`, `web_bake.rs`, `bake_worker.js`; `docs/round6/web-bake-worker.md`): the
+  render thread only hands over the inputs and takes in the results, one per frame, so a scene's variants no longer
+  stall frames for 30–920 ms each (worst frame while the gallery's four variants bake 718–920 → 6–7 ms, against
+  2–4 ms without baking, and all of them in after 1.5–1.6 instead of 2.3–3.3 s; `?bake-workers=0` runs them on the
+  render thread as before, as does a browser where a worker cannot start). An
   animated displacement is represented by its mean surface (32 times in 8 s): the gallery's cloth moves at most
   3.6 cm RMS from it at 3.3 cm voxels, where a snapshot would be √2 times as far off and a re-bake could never keep
   up with the waves. Until a variant is ready (0.5–1.3 s of CPU per variant) instances keep their previous one;
@@ -1551,6 +1558,7 @@ culling), gallery 8.0 / 5.0 → 8.1 / 5.0 ms, cathedral with 300 lights under Me
 | No hardware ray tracing | MegaLights' shadow rays march the depth buffer, the lights' virtual shadow maps and Lumen's distance fields |
 | No derivatives in compute shaders (the material resolve is compute over the visibility buffer) | Analytic barycentric UV derivatives; material graphs carry screen derivatives through their math by forward-mode differentiation |
 | Browsers compile every pipeline in their GPU process before running what follows it (Firefox one at a time, on every visit); wgpu has no asynchronous pipeline creation | The browser frame loop renders into its own texture and presents only frames that queued no compile, waiting for `onSubmittedWorkDone` otherwise, so the page never stalls behind a compile; pipelines for content a scene may not have are compiled on first use (`util::Lazy`) |
+| No wasm threads without cross-origin isolation (`SharedArrayBuffer` needs COOP/COEP headers, which GitHub Pages cannot send) | Lumen's displaced-variant bakes run on Web Workers that each instantiate the page's compiled wasm module and exchange bytes with it (`bake_worker.js`); other start-up work (scene build, texture encoding) runs on the render thread |
 ## Status vs. Unreal Engine 5 — what is still simpler
 
 Honest differences that remain:
@@ -1770,9 +1778,10 @@ Honest differences that remain:
     displacement through baked *variants* (distance field and cards per mesh and displacement): accurate to the
     mesh's voxels and the cards' ~10 cm texels, so relief finer than those (mortar joints, cobbles) only reaches it
     through screen traces; an animated displacement is represented by its mean surface (8 s average), not the moving
-    one; a variant takes a few frames to bake after a displacement changes (0.5–1.3 s of CPU time per variant
-    natively, on worker threads; in the browser, which has no threads, one bake per frame, each a hitch of that
-    length); a world-dependent displacement of a moving instance keeps the variant baked where the instance stood;
+    one; a variant takes a few frames to bake after a displacement changes (0.5–1.3 s of CPU time per variant, on
+    worker threads natively and on Web Workers in the browser, where the render thread still copies each result in —
+    up to ≈ 5 ms for a 124 k-triangle variant — and Lumen re-uploads its scene when a scene's variants are in, as on
+    any structural change); a world-dependent displacement of a moving instance keeps the variant baked where the instance stood;
     meshes baked without a distance field (`SdfMode::None`) stay out of Lumen, displaced or not. A graph displaces
     only while it has one of the 16 extended resolve pipelines (else its materials stay flat); every displacing
     graph of the scene runs in one dicing permutation behind a switch on the material, compiled when the set
