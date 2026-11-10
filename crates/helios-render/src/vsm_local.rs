@@ -108,6 +108,7 @@ pub(crate) fn map_work(rendered: f32, resident: f32, requested: f32) -> Option<f
         Some(rendered)
     }
 }
+
 /// Per slot, the rank of its light among the occupied slots (`(slot, influence on screen)`):
 /// 0 for the most influential, unused slots after all used ones. A full page pool serves the
 /// slots' pages in this order (`bucket` in page_cache.wgsl): the lights that matter most on
@@ -139,10 +140,10 @@ const POOL_SETTLE: u32 = 4;
 /// cuts falls back to a face's coarsest page: the lights below the cut lose all resolution at
 /// once. Requesting coarser mips instead loses a little everywhere, and most where it shows
 /// least: the bias is spread over the slots by rank, from none for the light that matters most
-/// on screen to twice it for the faintest. A mip coarser quarters a light's
-/// fine pages, so the bias rises by half the log₂ of the overload at once when requests exceed
-/// the pool, and falls slowly while the pool has room (with hysteresis between the two: the
-/// pages of a new resolution must be rendered, so it must not oscillate).
+/// on screen to twice it for the faintest. A mip coarser quarters a light's fine pages, so the
+/// bias rises by half the log₂ of the overload at once when requests exceed the pool, and falls
+/// slowly while the pool has room (with hysteresis between the two: the pages of a new
+/// resolution must be rendered, so it must not oscillate).
 #[derive(Debug, Default)]
 pub(crate) struct PoolPressure {
     bias: f32,

@@ -4,7 +4,8 @@
 //   cache_begin     : reset per-frame counters and the priority histogram
 //   cache_update    : per entry: keep / free / queue for allocation; stale tags are freed
 //   cache_plan      : if the pool cannot hold every request, where the priorities cut off
-//   cache_reassign  : only then: evicts what falls below the cut and queues the rest by priority
+//   cache_reassign  : only then (dispatched indirectly): evicts retained pages and what falls
+//                     below the cut, and queues the rest by priority
 //   cache_free_list : per physical page: collect unowned pages
 //   cache_allocate  : per queued entry: take a free page, mark it dirty (must be rendered)
 //   cache_args      : indirect dispatch for the client's page-render pass
@@ -42,8 +43,6 @@ const H_OVERFLOW: u32 = 4u;
 // although not requested.
 const H_REQUESTED: u32 = 5u;
 const H_RETAINED: u32 = 6u;
-// Set when the pool cannot hold this frame's requests and retained pages: cache_reassign runs.
-const H_FULL: u32 = 7u;
 const H_ARGS: u32 = 8u;    // dirty dispatch x, y, z
 // The cut-off bucket (BUCKETS: none), how many of its resident pages stay, the counter of
 // those that did, and the requested entries resident before the allocation.
@@ -170,7 +169,6 @@ fn cache_begin(@builtin(local_invocation_index) i: u32) {
     atomicStore(&lists[H_DIRTY], 0u);
     atomicStore(&lists[H_REQUESTED], 0u);
     atomicStore(&lists[H_RETAINED], 0u);
-    atomicStore(&lists[H_FULL], 0u);
     atomicStore(&lists[H_CUTOFF], BUCKETS);
     atomicStore(&lists[H_KEPT], 0u);
     atomicStore(&lists[H_RESIDENT], 0u);
@@ -230,7 +228,6 @@ fn cache_plan() {
     if requested + atomicLoad(&lists[H_RETAINED]) <= pool {
         return;
     }
-    atomicStore(&lists[H_FULL], 1u);
     let groups = (params.entry_count + 63u) / 64u;
     reassign_args = array<u32, 3>(min(groups, 65535u), (groups + 65534u) / 65535u, 1u);
     if requested <= pool {
