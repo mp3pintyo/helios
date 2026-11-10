@@ -55,7 +55,7 @@ use crate::scene::{MaterialKind, Scene, TextureMapping};
 use crate::shader::{compose_variant, create_module_from};
 use crate::substrate_gpu::ExtendedMaterials;
 use crate::textures::TextureLibrary;
-use crate::util::{bind, bind_group, bind_group_layout, compute_pipeline_with, storage_buffer, storage_buffer_init};
+use crate::util::{bind, bind_group, bind_group_layout, compute_pipeline_with, storage_buffer, Lazy, storage_buffer_init};
 
 /// Card slots per mesh / instance: directions × layers (`CARD_SLOTS` in lumen_cards.wgsl).
 const CARD_SLOTS: usize = CARD_AXES * MAX_CARD_LAYERS;
@@ -437,7 +437,7 @@ struct CapturePipelines {
     layout: wgpu::BindGroupLayout,
     graph_layout: wgpu::BindGroupLayout,
     /// By (shading model, graph hash).
-    pipelines: HashMap<(u32, u64), wgpu::ComputePipeline>,
+    pipelines: HashMap<(u32, u64), Lazy<wgpu::ComputePipeline>>,
     modules: HashMap<u64, wgpu::ShaderModule>,
 }
 
