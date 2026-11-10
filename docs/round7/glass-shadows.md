@@ -1,8 +1,8 @@
 # Coloured sunlight through glass (round 7: `glass-shadows`)
 
-Design note. The README carries the user-facing text (the *Coloured light through glass* bullet of the GPU
-pipeline section, gap 16 of "Status vs. Unreal Engine 5"); this file records why it is built the way it is, and the
-measurements.
+Design note. The user-facing text is the *Coloured light through glass* bullet of
+[`docs/architecture/translucency.md`](../architecture/translucency.md) and gap 16 of
+[`docs/status.md`](../status.md); this file records why it is built the way it is, and the measurements.
 
 ## What
 

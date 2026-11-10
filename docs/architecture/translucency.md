@@ -1,0 +1,83 @@
+# Translucency, coloured glass shadows and water
+
+Part of the `helios-render` GPU pipeline; the pipeline diagram and the index of these pages are in the
+[README](../../README.md). Costs are GPU times at 1600×900 on an RTX 3090 unless stated otherwise
+([measurement method and per-round frame times](../performance.md)).
+* **Translucency** (`translucency.rs`, `translucency.wgsl`, `water.wgsl`). As in UE5, a separate forward pass after
+  the deferred lighting: `Glass`, `Water` and `Translucent` (glTF `BLEND`) instances are skipped by the main view's
+  culling (they never occlude through the visibility buffer / HZB) and drawn as plain indexed meshes — the finest
+  in-memory level of their virtual mesh, decoded once — one draw per instance, frustum culled and sorted back to
+  front on the CPU (GPU cluster lists are unordered and drawn by one indirect call). The lit HDR image is copied with
+  a 5-level blurred mip chain; refracting surfaces read it at a displaced position and replace the pixel, blended
+  ones are premultiplied "over". **Layers** are composited in per-pixel depth order wherever translucent surfaces may
+  overlap (depth peeling, so every surface keeps its own shading model, refraction included): the CPU bounds the
+  layers any pixel can see — the most projected bounding boxes of visible instances stacked at one point, a
+  non-convex mesh counting as all (convexity / flatness is tested once per decoded mesh) — and for *n* > 1 layers,
+  depth-only draws peel the nearest *n* − 1 into a depth texture array (each keeps the nearest fragment behind the
+  previous layer). Then everything behind them is drawn in instance order as before, and each peeled layer over
+  it, back to front, after a fresh copy of the scene colour — so water refracts the glass and panels standing in it,
+  glass shows the glass behind it, intersecting surfaces cross correctly, and refraction never fetches a layer that
+  lies in front. Up to 4 layers are exact (deeper ones fall back to instance order); views without overlap (the
+  scenes' initial ones) peel nothing and cost what they did. `/` (`RenderSettings::translucency_layers`) toggles it.
+  Cost (1600×900, RTX 3090, medians of 4, all translucency passes): the initial views unchanged (valley 0.43 → 0.42 ms,
+  cathedral 0.40 → 0.39 ms), one peeled layer (cathedral apse) 0.42 → 0.49 ms, three (lake test corner) 1.86 → 2.02 ms
+  and (aisle glass screens) 0.45 → 0.89 ms; the layer depths take 4 bytes per pixel and layer at the internal
+  resolution's capacity (17 MB for three at 1600×900), allocated once a view needs them.
+  Shading: GGX sun with VSM + cloud shadows, clustered local lights, Lumen radiance
+  cache for ambient light, reflections from a screen-space trace against the opaque depth and colour, then Lumen's
+  global distance field + surface cache, then sky with the on-screen clouds; aerial perspective and volumetric fog are
+  applied at the surface depth exactly (`A·surface + B·(1 − T) + T·background`, the background already carries the
+  fog behind). **Water**: 16 directional waves (3 m down to 5 cm, directions fanning out wider for shorter ones,
+  each crest bent sideways by its own slow sinusoids, evaluated on a gently warped domain) with sharpened crests and
+  deep-water dispersion as a per-pixel normal
+  (sub-pixel waves fade into roughness), Beer–Lambert absorption + single scattering over the refracted path to the
+  bottom, shore foam, sun glints. **Stained glass**: lead came opaque; glass tints the blurred scene behind and
+  diffuses sky (scaled by how open the far side is, from the radiance cache) and sun — matching what Lumen's surface
+  cache emits into the interior, which still gets the panes' coloured light through their distance fields — and the
+  sun through the panes lands in their colours (next bullet). Untextured
+  `Glass` is a clear pane, tinted by its base colour, its view through blurred by its roughness. Glass and blended
+  surfaces under water reflect the water around them rather than the sky, and seen from under water they are lit
+  and fogged through the water like the opaque scene. The pass writes the surfaces' own motion vectors for TSR.
+  `RenderSettings::translucency` / `U` toggles it.
+* **Coloured light through glass** (`glass_shadow.rs`, `glass_shadow.wgsl`; UE5's translucent shadows). Panes that
+  let the sun through (not shadow casters) would light the interior white; instead the visible `Glass` instances are
+  drawn from the sun into a map of their own — an orthographic view along the sunlight fitted to their boxes, 256²
+  to 2048² texels (the cathedral's 84 m of windows: 4.1 cm) — keeping per texel the pane nearest the sun: what it
+  transmits (base colour × texture, the stained-glass factor, Fresnel, none through lead came) and its depth along
+  the light. A point behind its texel's pane gets the sun filtered by it: the deferred lighting (blurred with the
+  distance behind the pane, ~10 cm under a pane 10 m up), the volumetric fog (coloured shafts) and Lumen's card
+  lighting (coloured bounce). Drawn only when the sun, the panes or the scene change (0.034 ms a frame with an
+  animated sun); the lighting pays ~0.05 ms at 1440p. `RenderSettings::glass_shadows` / `End` /
+  `--no-glass-shadows` toggles it (`docs/round7/glass-shadows.md`).
+* **Water bodies** (`water.rs`, `water.wgsl`, `shore.wgsl`; UE's Water system for lakes). Every `Water` instance is a
+  flat *water body* (its world rectangle and level, from its bounds); one uniform carries them with the medium.
+  **Lake bed and shore**: the G-buffer resolve turns the landscape into sediment where a body covers it — sand and
+  gravel near the water line, dark silt with scattered, silt-coated stones and algae patches deeper, ripples in the
+  shallows (procedural, footprint-filtered: lumpy pebble domes on jittered grids, fbm) — and soaks a band just above
+  the water (darker, glossy). It runs per pixel after the runtime virtual texture lookup (or the direct layering), at
+  the mesh's exact height, so the bed meets the water line exactly whichever path shaded the landscape (the RVT's
+  heightfield is 1.8 m coarse). **Caustics**: the sun's light on the bed is `1 / det(I + d·(1 − 1/n)·H)`, H the
+  Hessian of the same 16 waves at the point the refracted sun ray entered (one fixed-point step for the waves' own
+  displacement), each wave fading where its pattern is finer than the bed's pixel or the sun disk's blur over the
+  depth. The bent crests make the few dominant short waves cross at angles that change from place to place, so the
+  caustics form irregular cells rather than a lattice of parallelograms (straight crests did); the bends only vary
+  across each wave's travel direction, so they travel with it and nothing shimmers. Caustics they scale only the bed's direct-sun share `(E_sun·c + E_amb)/(E_sun + E_amb)` (no albedo needed), with E_sun
+  through the bed's virtual shadow map and cloud shadows — so no caustics in shadow. **Underwater**: with the camera
+  in a body, a full-screen draw fogs the opaque scene by absorption and single scattering along the view (to the
+  surface where the ray leaves the water) and adds caustics on the bed. The in-scattered light is the sun (through the
+  surface's Fresnel transmission and its shadows) and the sky / GI irradiance (Lumen's radiance cache) entering the
+  surface above the middle of the ray, fading with depth: since the depth changes linearly along the ray, the single
+  scattering integral has a closed form, so looking up is brighter than looking down and deep water darkens. Lake
+  water scatters mostly forwards (a quarter isotropic, three quarters Henyey–Greenstein: g 0.8 for the sun beam, a
+  broad 0.5 lobe for the diffuse sky light from above), so water seen sideways stays clear and the refracted sun
+  glows. The default medium is a clear mountain lake: pure water's absorption with a little dissolved organic matter
+  (0.40, 0.06, 0.09 /m) and light particle scattering (0.03–0.038 /m), about 10 m of visibility; water surfaces are drawn two-sided and from
+  below show Snell's window (the world above through refraction, screen trace → distance field → sky, with exact
+  dielectric Fresnel) and total internal reflection of the deep water around it, no sky leaking; air fog is skipped.
+  Reflection rays leaving a water surface ignore screen-space hits below it (the submerged bed is in the depth buffer).
+  Exposure under water keeps Snell's window in its metering: the histogram otherwise drops the brightest 10 % of the
+  view (for sun disks and flames), which under water is the window, the scene's light source — the camera then
+  exposed for the dim water alone and burnt the window out to white.
+  Cost (valley high, 1600×900, RTX 3090, min of 5): looking down at the lake filling the screen, translucency 2.00 →
+  2.40 ms and the material pass 0.26 → 0.48 ms (GPU 5.93 → 6.64 ms); the default view (lake ~10 % of the screen)
+  4.54 → 4.59 ms; scenes without water are unchanged. Under water (full-screen pass + surface from below): 1.97 ms.
