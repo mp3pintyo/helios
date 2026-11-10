@@ -11,7 +11,7 @@ use crate::shader::create_module;
 use crate::stats::STATE_SIZE;
 use crate::targets::{FrameTargets, DEPTH_FORMAT, VISIBILITY_FORMAT};
 use crate::textures::TextureLibrary;
-use crate::util::{self, bind, bind_group, bind_group_layout, compute_pipeline, storage_buffer, uniform_buffer};
+use crate::util::{self, bind, bind_group, bind_group_layout, compute_pipeline, lazy_compute_pipeline, storage_buffer, uniform_buffer, Lazy};
 use crate::skin::{skin_entry, skin_resource};
 use crate::tessellation::{tessellation_entry, tessellation_resource, Tessellation};
 use crate::wind::{wind_entry, wind_resource};
@@ -123,8 +123,9 @@ pub struct Culling {
     sw_layout: wgpu::BindGroupLayout,
     merge_layout: wgpu::BindGroupLayout,
     /// The culling passes for scenes without and with skinned instances (`SKINNING` in
-    /// dynamic_caster.wgsl).
-    passes: [CullPasses; 2],
+    /// dynamic_caster.wgsl), each compiled when a scene first needs it, as the alpha-masked and
+    /// voxel rasterisers below ([`Lazy`]): scenes without that content never pay their compiles.
+    passes: [Lazy<CullPasses>; 2],
     prepare_pages: wgpu::ComputePipeline,
     prepare_clusters: wgpu::ComputePipeline,
     prepare_early_draw: wgpu::ComputePipeline,
@@ -132,14 +133,14 @@ pub struct Culling {
     raster_early: wgpu::RenderPipeline,
     raster_late: wgpu::RenderPipeline,
     /// Alpha-masked hardware clusters ("programmable raster": the fragment shader discards).
-    raster_masked_early: wgpu::RenderPipeline,
-    raster_masked_late: wgpu::RenderPipeline,
+    raster_masked_early: Lazy<wgpu::RenderPipeline>,
+    raster_masked_late: Lazy<wgpu::RenderPipeline>,
     /// [early depth, early payload, late depth, late payload]
     sw_raster: [wgpu::ComputePipeline; 4],
     /// The same for alpha-masked clusters (each specialisation skips the other's clusters).
-    sw_raster_masked: [wgpu::ComputePipeline; 4],
+    sw_raster_masked: [Lazy<wgpu::ComputePipeline>; 4],
     /// The same for voxel clusters (voxel_raster.wgsl).
-    voxel_raster: [wgpu::ComputePipeline; 4],
+    voxel_raster: [Lazy<wgpu::ComputePipeline>; 4],
     merge: wgpu::ComputePipeline,
     dummy_hzb: wgpu::TextureView,
     /// Nanite tessellation of displaced clusters, created when a scene first needs it.
@@ -151,6 +152,20 @@ struct CullPasses {
     instances: wgpu::ComputePipeline,
     pages: wgpu::ComputePipeline,
     clusters: [wgpu::ComputePipeline; 3],
+}
+
+impl CullPasses {
+    fn new(device: &wgpu::Device, module: &wgpu::ShaderModule, layout: &wgpu::BindGroupLayout, skinning: bool) -> Self {
+        let skinning = ("SKINNING", if skinning { 1.0 } else { 0.0 });
+        let cluster_pipeline = |mode: CullMode| {
+            compute_pipeline(device, "cull clusters", module, "cull_clusters", layout, &[("CULL_MODE", mode as u32 as f64), skinning])
+        };
+        Self {
+            instances: compute_pipeline(device, "cull instances", module, "cull_instances", layout, &[skinning]),
+            pages: compute_pipeline(device, "cull pages", module, "cull_pages", layout, &[skinning]),
+            clusters: [cluster_pipeline(CullMode::Single), cluster_pipeline(CullMode::Early), cluster_pipeline(CullMode::Late)],
+        }
+    }
 }
 
 impl Culling {
@@ -196,19 +211,12 @@ impl Culling {
         );
 
         let cull_passes = |skinning: bool| {
-            let skinning = ("SKINNING", if skinning { 1.0 } else { 0.0 });
-            let cluster_pipeline = |mode: CullMode| {
-                compute_pipeline(device, "cull clusters", &cull_module, "cull_clusters", &cull_layout, &[("CULL_MODE", mode as u32 as f64), skinning])
-            };
-            CullPasses {
-                instances: compute_pipeline(device, "cull instances", &cull_module, "cull_instances", &cull_layout, &[skinning]),
-                pages: compute_pipeline(device, "cull pages", &cull_module, "cull_pages", &cull_layout, &[skinning]),
-                clusters: [cluster_pipeline(CullMode::Single), cluster_pipeline(CullMode::Early), cluster_pipeline(CullMode::Late)],
-            }
+            let (device, module, layout) = (device.clone(), cull_module.clone(), cull_layout.clone());
+            Lazy::new(move || CullPasses::new(&device, &module, &layout, skinning))
         };
         let args_pipeline = |entry: &str| compute_pipeline(device, entry, &args_module, entry, &args_layout, &[]);
         let sw_pipeline = |pass: u32, late: bool, masked: bool| {
-            compute_pipeline(
+            lazy_compute_pipeline(
                 device,
                 if masked { "sw raster (alpha-masked)" } else { "sw raster" },
                 &sw_module,
@@ -221,7 +229,11 @@ impl Culling {
         let voxel_module = create_module(device, "voxel_raster.wgsl");
         let voxel_pipeline = |pass: u32, late: bool| {
             let constants = [("PASS", pass as f64), ("LATE", if late { 1.0 } else { 0.0 })];
-            compute_pipeline(device, "voxel raster", &voxel_module, "rasterize", &sw_layout, &constants)
+            lazy_compute_pipeline(device, "voxel raster", &voxel_module, "rasterize", &sw_layout, &constants)
+        };
+        let masked_raster_pipeline = |late: bool| {
+            let (device, module, layout) = (device.clone(), raster_module.clone(), raster_layout.clone());
+            Lazy::new(move || raster_pipeline(&device, &module, &layout, late, true))
         };
 
         let dummy_hzb = util::texture(
@@ -246,9 +258,10 @@ impl Culling {
             prepare_late_draw: args_pipeline("prepare_late_draw"),
             raster_early: raster_pipeline(device, &raster_module, &raster_layout, false, false),
             raster_late: raster_pipeline(device, &raster_module, &raster_layout, true, false),
-            raster_masked_early: raster_pipeline(device, &raster_module, &raster_layout, false, true),
-            raster_masked_late: raster_pipeline(device, &raster_module, &raster_layout, true, true),
-            sw_raster: sw_pipelines(false),
+            raster_masked_early: masked_raster_pipeline(false),
+            raster_masked_late: masked_raster_pipeline(true),
+            // Every scene has opaque clusters: compiled now.
+            sw_raster: sw_pipelines(false).map(|p| (*p).clone()),
             sw_raster_masked: sw_pipelines(true),
             voxel_raster: [voxel_pipeline(0, false), voxel_pipeline(1, false), voxel_pipeline(0, true), voxel_pipeline(1, true)],
             merge: compute_pipeline(device, "visibility merge", &merge_module, "merge", &merge_layout, &[]),

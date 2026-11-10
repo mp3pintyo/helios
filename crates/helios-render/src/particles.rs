@@ -19,7 +19,7 @@ use crate::passes::shading::LightingInputs;
 use crate::profiler::Recorder;
 use crate::scene::Scene;
 use crate::shader::create_module;
-use crate::util::{bind, bind_group, bind_group_layout, compute_pipeline, storage_buffer, uniform_buffer, workgroups};
+use crate::util::{bind, bind_group, bind_group_layout, lazy_compute_pipeline, Lazy, storage_buffer, uniform_buffer, workgroups};
 
 /// Emitters per scene (the uniform's array).
 const MAX_EMITTERS: usize = 16;
@@ -309,8 +309,8 @@ impl Spawner {
 }
 
 pub(crate) struct ParticleSystem {
-    simulate: wgpu::ComputePipeline,
-    light: wgpu::ComputePipeline,
+    simulate: Lazy<wgpu::ComputePipeline>,
+    light: Lazy<wgpu::ComputePipeline>,
     draw: wgpu::RenderPipeline,
     simulate_layout: wgpu::BindGroupLayout,
     light_layout: wgpu::BindGroupLayout,
@@ -356,8 +356,8 @@ impl ParticleSystem {
             &[(0, bind::uniform()), (112, bind::storage(true)), (115, bind::storage(true)), (116, bind::texture(false)), (118, bind::texture(false))],
         );
         Self {
-            simulate: compute_pipeline(device, "particle simulation", &module, "simulate", &simulate_layout, &[]),
-            light: compute_pipeline(device, "particle lighting", &module, "light", &light_layout, &[]),
+            simulate: lazy_compute_pipeline(device, "particle simulation", &module, "simulate", &simulate_layout, &[]),
+            light: lazy_compute_pipeline(device, "particle lighting", &module, "light", &light_layout, &[]),
             draw: crate::oit::particle_pipeline(device, &module, &draw_layout),
             simulate_layout,
             light_layout,

@@ -134,8 +134,9 @@ impl MaterialPass {
                 (BINDING_TESS_LAMBDA, bind::texture_uint()),
             ],
         );
-        let mut resolve: [Option<Vec<(u32, wgpu::ComputePipeline)>>; 16] = Default::default();
-        resolve[0] = Some(resolve_pipelines(device, &module, &layout, 0));
+        // None compiled yet: the first frame's `sync` compiles the permutation the scene needs
+        // (the valley's tessellation one, say, never the plain one).
+        let resolve: [Option<Vec<(u32, wgpu::ComputePipeline)>>; 16] = Default::default();
         let classify_module = create_module(device, "classify.wgsl");
         let classify_layout = bind_group_layout(
             device,

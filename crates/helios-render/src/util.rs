@@ -215,3 +215,76 @@ pub fn workgroups(size: u32, group: u32) -> u32 {
 pub fn mip_count(width: u32, height: u32) -> u32 {
     32 - width.max(height).max(1).leading_zeros()
 }
+
+#[cfg(not(target_arch = "wasm32"))]
+type Make<T> = Box<dyn Fn() -> T + Send + Sync>;
+#[cfg(target_arch = "wasm32")]
+type Make<T> = Box<dyn Fn() -> T>;
+
+/// A value made on first use, for pipelines a frame may never need: permutations for content a
+/// scene may not have (skinned instances, alpha-masked or voxel clusters, a translucent shading
+/// model). Every pipeline is a shader compile, and in the browser those queue up in the GPU
+/// process before the first frame: 0.1–1.5 s each in Firefox, which compiles one at a time.
+/// Dereferences to the value, so `pass.set_pipeline(&self.pipeline)` reads as before.
+pub struct Lazy<T> {
+    value: std::sync::OnceLock<T>,
+    make: Make<T>,
+}
+
+impl<T> Lazy<T> {
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn new(make: impl Fn() -> T + Send + Sync + 'static) -> Self {
+        Self { value: std::sync::OnceLock::new(), make: Box::new(make) }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub fn new(make: impl Fn() -> T + 'static) -> Self {
+        Self { value: std::sync::OnceLock::new(), make: Box::new(make) }
+    }
+}
+
+impl<T> std::ops::Deref for Lazy<T> {
+    type Target = T;
+
+    fn deref(&self) -> &T {
+        self.value.get_or_init(|| (self.make)())
+    }
+}
+
+/// [`compute_pipeline`], compiled on first use.
+pub fn lazy_compute_pipeline(
+    device: &wgpu::Device,
+    label: &str,
+    module: &wgpu::ShaderModule,
+    entry_point: &str,
+    layout: &wgpu::BindGroupLayout,
+    constants: &[(&str, f64)],
+) -> Lazy<wgpu::ComputePipeline> {
+    let (device, module, layout) = (device.clone(), module.clone(), layout.clone());
+    let (label, entry_point) = (label.to_string(), entry_point.to_string());
+    let constants: Vec<(String, f64)> = constants.iter().map(|&(name, value)| (name.to_string(), value)).collect();
+    Lazy::new(move || {
+        let constants: Vec<(&str, f64)> = constants.iter().map(|(name, value)| (name.as_str(), *value)).collect();
+        compute_pipeline(&device, &label, &module, &entry_point, &layout, &constants)
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::Arc;
+
+    #[test]
+    fn lazy_makes_its_value_once_on_first_use() {
+        let made = Arc::new(AtomicU32::new(0));
+        let counter = made.clone();
+        let lazy = Lazy::new(move || {
+            counter.fetch_add(1, Ordering::Relaxed);
+            7
+        });
+        assert_eq!(made.load(Ordering::Relaxed), 0);
+        assert_eq!(*lazy + *lazy, 14);
+        assert_eq!(made.load(Ordering::Relaxed), 1);
+    }
+}
