@@ -1,5 +1,5 @@
 //! Demo motion: props that move every frame (swinging chandeliers, a drifting raft, a turning
-//! sculpture), to show the renderer's dynamic world — moved instances update only what they
+//! sculpture, a lantern carried down the nave), to show the renderer's dynamic world — moved instances update only what they
 //! touch (see `helios_render::Mobility`). `Digit0` pauses and resumes it.
 
 use glam::{Mat4, Quat, Vec3};
@@ -16,6 +16,11 @@ pub enum Motion {
     /// Floats on water around `center`: drifts on a slow loop of radius `drift`, turns with it,
     /// bobs and rolls on the waves.
     Float { center: Vec3, drift: f32, period: f32 },
+    /// Carried at walking pace from `from` to `to` and back (`period` seconds for the round
+    /// trip, easing in and out at the ends), starting `phase` of the way into the trip, and
+    /// swinging about the hand holding it (`from` in the rest pose) by up to `sway` radians with
+    /// the steps.
+    Carry { from: Vec3, to: Vec3, period: f32, phase: f32, sway: f32 },
 }
 
 impl Motion {
@@ -34,6 +39,15 @@ impl Motion {
                 let offset = Vec3::new(drift * a.cos(), 0.04 * (1.9 * t).sin(), drift * a.sin());
                 let rotation = Quat::from_rotation_y(0.35 * a.sin()) * Quat::from_rotation_x(0.025 * (1.3 * t).sin()) * Quat::from_rotation_z(0.03 * (1.7 * t + 1.0).sin());
                 Mat4::from_translation(offset) * about(center, rotation)
+            }
+            Motion::Carry { from, to, period, phase, sway } => {
+                let a = TAU * (t / period + phase);
+                // Two steps a second: the hand bobs, the lantern swings across the walk.
+                let step = TAU * t;
+                let along = (to - from) * (0.5 - 0.5 * a.cos()) + Vec3::Y * (0.012 * (2.0 * step).sin());
+                let across = (to - from).cross(Vec3::Y).normalize_or_zero();
+                let swing = Quat::from_axis_angle((to - from).normalize_or_zero(), sway * step.sin()) * Quat::from_axis_angle(across, 0.5 * sway * (step + 1.0).sin());
+                Mat4::from_translation(along) * about(from, swing)
             }
         }
     }
@@ -81,6 +95,12 @@ impl DemoMotion {
         // Rest positions: undo the motion so far (none before the first update).
         let to_rest = group.motion.at(self.time).inverse();
         group.lights.extend(lights.iter().map(|&l| (l, to_rest.transform_point3(scene.light_mut(l).position))));
+    }
+
+    /// Makes the group added last the first (for [`DemoMotion::limit`]); call once no group
+    /// index from [`DemoMotion::add`] is used any more.
+    pub fn move_last_first(&mut self) {
+        self.groups.rotate_right(1);
     }
 
     /// Keeps the first `count` groups moving; the others stay where they are, static again
@@ -136,6 +156,7 @@ mod tests {
             Motion::Pendulum { pivot: Vec3::new(1.0, 20.0, 0.0), axis: Vec3::Z, amplitude: 0.05, length: 12.0, phase: 0.0 },
             Motion::Spin { center: Vec3::new(0.0, 5.0, 0.0), period: 40.0 },
             Motion::Float { center: Vec3::new(-6.0, -2.2, 23.0), drift: 1.5, period: 60.0 },
+            Motion::Carry { from: Vec3::new(8.0, 0.9, 0.5), to: Vec3::new(30.0, 0.9, 0.5), period: 44.0, phase: 0.0, sway: 0.2 },
         ];
         for motion in motions {
             // Rigid: lengths are kept.
@@ -150,6 +171,18 @@ mod tests {
             assert!(pendulum.at(t).transform_point3(Vec3::new(1.0, 8.0, 0.0)).distance(Vec3::new(1.0, 8.0, 0.0)) <= 12.0 * 0.05 + 1e-3);
         }
         assert!(motions[1].at(0.0).abs_diff_eq(Mat4::IDENTITY, 1e-5) && motions[0].at(0.0).abs_diff_eq(Mat4::IDENTITY, 1e-5));
+        // A carried lantern: the hand goes to the far end and back, within a few centimetres
+        // of the path, and the lantern hangs no further than its sway from the hand.
+        let carry = motions[3];
+        let hand = Vec3::new(8.0, 0.9, 0.5);
+        assert!(carry.at(22.0).transform_point3(hand).distance(Vec3::new(30.0, 0.9, 0.5)) < 0.05);
+        assert!(carry.at(44.0).transform_point3(hand).distance(hand) < 0.05);
+        let below = hand - Vec3::Y * 0.3;
+        for t in [3.3, 11.1, 27.9] {
+            let m = carry.at(t);
+            assert!(m.transform_point3(below).distance(m.transform_point3(hand)) - 0.3 < 1e-4);
+            assert!(m.transform_point3(below).y < m.transform_point3(hand).y - 0.3 * 0.95);
+        }
     }
 
     #[test]
