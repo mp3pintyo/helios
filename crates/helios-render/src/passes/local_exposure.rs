@@ -16,6 +16,7 @@ use super::Samplers;
 use crate::profiler::Recorder;
 use crate::shader::create_module;
 use crate::util::{bind, bind_group, bind_group_layout, compute_pipeline, texture, uniform_buffer, workgroups, TextureSpec};
+use crate::pipelines::Lazy;
 
 const HDR: TextureFormat = TextureFormat::Rgba16Float;
 /// Log-luminance bins of the bilateral grid (`BINS` in local_exposure.wgsl).
@@ -100,9 +101,9 @@ struct Targets {
 
 pub struct LocalExposurePass {
     layout: wgpu::BindGroupLayout,
-    build: wgpu::ComputePipeline,
-    blur: [wgpu::ComputePipeline; 3],
-    apply: wgpu::ComputePipeline,
+    build: Lazy<wgpu::ComputePipeline>,
+    blur: [Lazy<wgpu::ComputePipeline>; 3],
+    apply: Lazy<wgpu::ComputePipeline>,
     uniform: wgpu::Buffer,
     targets: Option<Targets>,
     enabled: bool,

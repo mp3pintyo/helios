@@ -1,5 +1,6 @@
 //! Small, explicit helpers that keep pass code focused on *what* it binds, not boilerplate.
 
+pub use crate::pipelines::{Lazy, MakeFn};
 use wgpu::{
     BindGroupLayoutEntry, BindingType, BufferBindingType, SamplerBindingType, ShaderStages,
     StorageTextureAccess, TextureFormat, TextureSampleType, TextureViewDimension,
@@ -114,6 +115,8 @@ pub fn pipeline_layout(device: &wgpu::Device, label: &str, layouts: &[&wgpu::Bin
     })
 }
 
+/// A compute pipeline over one bind group, made in the background in the browser (see
+/// [`crate::pipelines`]): compiled with the rest of its [`crate::pipelines::Group`].
 pub fn compute_pipeline(
     device: &wgpu::Device,
     label: &str,
@@ -121,11 +124,12 @@ pub fn compute_pipeline(
     entry_point: &str,
     layout: &wgpu::BindGroupLayout,
     constants: &[(&str, f64)],
-) -> wgpu::ComputePipeline {
+) -> Lazy<wgpu::ComputePipeline> {
     compute_pipeline_with(device, label, module, entry_point, &[layout], constants)
 }
 
-/// A compute pipeline over several bind groups (group `i` = `layouts[i]`).
+/// A compute pipeline over several bind groups (group `i` = `layouts[i]`), made in the
+/// background in the browser.
 pub fn compute_pipeline_with(
     device: &wgpu::Device,
     label: &str,
@@ -133,19 +137,50 @@ pub fn compute_pipeline_with(
     entry_point: &str,
     layouts: &[&wgpu::BindGroupLayout],
     constants: &[(&str, f64)],
-) -> wgpu::ComputePipeline {
-    let layout = pipeline_layout(device, label, layouts);
-    device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-        label: Some(label),
-        layout: Some(&layout),
-        module,
-        entry_point: Some(entry_point),
-        compilation_options: wgpu::PipelineCompilationOptions {
-            constants,
-            zero_initialize_workgroup_memory: true,
-        },
-        cache: None,
-    })
+) -> Lazy<wgpu::ComputePipeline> {
+    Lazy::background(compute_pipeline_maker(device, label, module, entry_point, layouts, constants))
+}
+
+/// [`compute_pipeline`], compiled when a frame first uses it (or once the scene is known to need
+/// it: [`Lazy::prefetch`]).
+pub fn lazy_compute_pipeline(
+    device: &wgpu::Device,
+    label: &str,
+    module: &wgpu::ShaderModule,
+    entry_point: &str,
+    layout: &wgpu::BindGroupLayout,
+    constants: &[(&str, f64)],
+) -> Lazy<wgpu::ComputePipeline> {
+    Lazy::new(compute_pipeline_maker(device, label, module, entry_point, &[layout], constants))
+}
+
+/// The constructor of a compute pipeline: owns what the descriptor refers to, so it can run
+/// later (and twice in the browser: once to warm the compile, once to make the pipeline).
+fn compute_pipeline_maker(
+    device: &wgpu::Device,
+    label: &str,
+    module: &wgpu::ShaderModule,
+    entry_point: &str,
+    layouts: &[&wgpu::BindGroupLayout],
+    constants: &[(&str, f64)],
+) -> impl MakeFn<wgpu::ComputePipeline> {
+    let (device, module) = (device.clone(), module.clone());
+    let layouts: Vec<wgpu::BindGroupLayout> = layouts.iter().map(|&l| l.clone()).collect();
+    let (label, entry_point) = (label.to_string(), entry_point.to_string());
+    let constants: Vec<(String, f64)> = constants.iter().map(|&(name, value)| (name.to_string(), value)).collect();
+    move || {
+        let constants: Vec<(&str, f64)> = constants.iter().map(|(name, value)| (name.as_str(), *value)).collect();
+        let layouts: Vec<&wgpu::BindGroupLayout> = layouts.iter().collect();
+        let layout = pipeline_layout(&device, &label, &layouts);
+        device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some(&label),
+            layout: Some(&layout),
+            module: &module,
+            entry_point: Some(&entry_point),
+            compilation_options: wgpu::PipelineCompilationOptions { constants: &constants, zero_initialize_workgroup_memory: true },
+            cache: None,
+        })
+    }
 }
 
 pub struct TextureSpec<'a> {
@@ -214,77 +249,4 @@ pub fn workgroups(size: u32, group: u32) -> u32 {
 /// Mip count for a full chain down to 1x1.
 pub fn mip_count(width: u32, height: u32) -> u32 {
     32 - width.max(height).max(1).leading_zeros()
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-type Make<T> = Box<dyn Fn() -> T + Send + Sync>;
-#[cfg(target_arch = "wasm32")]
-type Make<T> = Box<dyn Fn() -> T>;
-
-/// A value made on first use, for pipelines a frame may never need: permutations for content a
-/// scene may not have (skinned instances, alpha-masked or voxel clusters, a translucent shading
-/// model). Every pipeline is a shader compile, and in the browser those queue up in the GPU
-/// process before the first frame: 0.1–1.5 s each in Firefox, which compiles one at a time.
-/// Dereferences to the value, so `pass.set_pipeline(&self.pipeline)` reads as before.
-pub struct Lazy<T> {
-    value: std::sync::OnceLock<T>,
-    make: Make<T>,
-}
-
-impl<T> Lazy<T> {
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn new(make: impl Fn() -> T + Send + Sync + 'static) -> Self {
-        Self { value: std::sync::OnceLock::new(), make: Box::new(make) }
-    }
-
-    #[cfg(target_arch = "wasm32")]
-    pub fn new(make: impl Fn() -> T + 'static) -> Self {
-        Self { value: std::sync::OnceLock::new(), make: Box::new(make) }
-    }
-}
-
-impl<T> std::ops::Deref for Lazy<T> {
-    type Target = T;
-
-    fn deref(&self) -> &T {
-        self.value.get_or_init(|| (self.make)())
-    }
-}
-
-/// [`compute_pipeline`], compiled on first use.
-pub fn lazy_compute_pipeline(
-    device: &wgpu::Device,
-    label: &str,
-    module: &wgpu::ShaderModule,
-    entry_point: &str,
-    layout: &wgpu::BindGroupLayout,
-    constants: &[(&str, f64)],
-) -> Lazy<wgpu::ComputePipeline> {
-    let (device, module, layout) = (device.clone(), module.clone(), layout.clone());
-    let (label, entry_point) = (label.to_string(), entry_point.to_string());
-    let constants: Vec<(String, f64)> = constants.iter().map(|&(name, value)| (name.to_string(), value)).collect();
-    Lazy::new(move || {
-        let constants: Vec<(&str, f64)> = constants.iter().map(|(name, value)| (name.as_str(), *value)).collect();
-        compute_pipeline(&device, &label, &module, &entry_point, &layout, &constants)
-    })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::sync::atomic::{AtomicU32, Ordering};
-    use std::sync::Arc;
-
-    #[test]
-    fn lazy_makes_its_value_once_on_first_use() {
-        let made = Arc::new(AtomicU32::new(0));
-        let counter = made.clone();
-        let lazy = Lazy::new(move || {
-            counter.fetch_add(1, Ordering::Relaxed);
-            7
-        });
-        assert_eq!(made.load(Ordering::Relaxed), 0);
-        assert_eq!(*lazy + *lazy, 14);
-        assert_eq!(made.load(Ordering::Relaxed), 1);
-    }
 }

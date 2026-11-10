@@ -43,6 +43,7 @@ use crate::shader::create_module;
 use crate::targets::FrameTargets;
 use crate::textures::TextureLibrary;
 use crate::util::{bind, bind_group, bind_group_layout, compute_pipeline, storage_buffer, storage_buffer_init, uniform_buffer, workgroups};
+use crate::pipelines::{in_group, Group, Lazy};
 
 pub const SDF_LEVELS: usize = 4;
 const SDF_RES: u32 = 128;
@@ -115,7 +116,7 @@ pub struct CardInputs<'a> {
 /// Per-entry-point pipeline with its own (exact) bind group layout.
 pub(crate) struct Stage {
     layout: wgpu::BindGroupLayout,
-    pub pipeline: wgpu::ComputePipeline,
+    pub pipeline: Lazy<wgpu::ComputePipeline>,
 }
 
 impl Stage {
@@ -253,7 +254,9 @@ impl Lumen {
             bricks: storage_buffer(device, "sdf bricks", 4096 * 64 * 4, wgpu::BufferUsages::empty()),
             near_field: NearField::new(device),
             cards: CardCache::new(device),
-            dynamic: DynamicField::new(device, &sdf_module, SDF_LEVELS),
+            // The global distance field is built (and its shadows traced) whether GI is on or not:
+            // compiled with the core set in the browser.
+            dynamic: in_group(Group::Core, || DynamicField::new(device, &sdf_module, SDF_LEVELS)),
             levels: level_list,
             displaced: DisplacedSurfaces::new(),
             instance_aabbs: Vec::new(),
@@ -265,8 +268,8 @@ impl Lumen {
             probe_origins: [Vec3::splat(f32::MAX); 2],
             frame: 0,
             gather: None,
-            cull_bricks: Stage::new(device, &sdf_module, "cull_bricks", &[(0, u()), (1, ro()), (4, ro()), (5, rw())]),
-            compose: Stage::new(
+            cull_bricks: in_group(Group::Core, || Stage::new(device, &sdf_module, "cull_bricks", &[(0, u()), (1, ro()), (4, ro()), (5, rw())])),
+            compose: in_group(Group::Core, || Stage::new(
                 device,
                 &sdf_module,
                 "compose",
@@ -282,7 +285,7 @@ impl Lumen {
                     (9, bind::storage_texture_3d(F::Rgba8Snorm)),
                     (70, bind::storage_texture_3d(F::R32Uint)),
                 ],
-            ),
+            )),
             update_voxels: Stage::new(
                 device,
                 &light_module,

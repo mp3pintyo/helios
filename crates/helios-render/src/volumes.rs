@@ -33,7 +33,8 @@ use crate::passes::shading::LightingInputs;
 use crate::profiler::Recorder;
 use crate::scene::{LightHandle, Scene};
 use crate::shader::create_module;
-use crate::util::{bind, bind_group, bind_group_layout, compute_pipeline, storage_buffer, uniform_buffer, workgroups};
+use crate::util::{bind, bind_group, bind_group_layout, lazy_compute_pipeline, storage_buffer, uniform_buffer, workgroups};
+use crate::pipelines::Lazy;
 
 /// Volumes marched per frame (the nearest visible ones).
 pub(crate) const MAX_VISIBLE: usize = 4;
@@ -395,18 +396,18 @@ impl ScreenTargets {
 }
 
 pub(crate) struct HeterogeneousVolumes {
-    curl: wgpu::ComputePipeline,
-    forces: wgpu::ComputePipeline,
-    divergence: wgpu::ComputePipeline,
-    pressure: [wgpu::ComputePipeline; 2],
-    project: wgpu::ComputePipeline,
-    advect: wgpu::ComputePipeline,
-    maccormack: wgpu::ComputePipeline,
-    procedural: wgpu::ComputePipeline,
-    flicker: wgpu::ComputePipeline,
-    light_cache: wgpu::ComputePipeline,
-    march: wgpu::ComputePipeline,
-    resolve: wgpu::ComputePipeline,
+    curl: Lazy<wgpu::ComputePipeline>,
+    forces: Lazy<wgpu::ComputePipeline>,
+    divergence: Lazy<wgpu::ComputePipeline>,
+    pressure: [Lazy<wgpu::ComputePipeline>; 2],
+    project: Lazy<wgpu::ComputePipeline>,
+    advect: Lazy<wgpu::ComputePipeline>,
+    maccormack: Lazy<wgpu::ComputePipeline>,
+    procedural: Lazy<wgpu::ComputePipeline>,
+    flicker: Lazy<wgpu::ComputePipeline>,
+    light_cache: Lazy<wgpu::ComputePipeline>,
+    march: Lazy<wgpu::ComputePipeline>,
+    resolve: Lazy<wgpu::ComputePipeline>,
     curl_layout: wgpu::BindGroupLayout,
     forces_layout: wgpu::BindGroupLayout,
     divergence_layout: wgpu::BindGroupLayout,
@@ -486,10 +487,11 @@ impl HeterogeneousVolumes {
                 (96, bind::texture(true)),
             ],
         );
+        // Compiled when a scene first has volumes (in the browser in the background: `update`).
         let pipeline = |label: &str, module: &wgpu::ShaderModule, entry: &str, layout: &wgpu::BindGroupLayout| {
-            compute_pipeline(device, label, module, entry, layout, &[])
+            lazy_compute_pipeline(device, label, module, entry, layout, &[])
         };
-        let pressure = [0.0, 1.0].map(|parity| compute_pipeline(device, "volume pressure", &sim, "pressure_sweep", &pressure_layout, &[("PARITY", parity)]));
+        let pressure = [0.0, 1.0].map(|parity| lazy_compute_pipeline(device, "volume pressure", &sim, "pressure_sweep", &pressure_layout, &[("PARITY", parity)]));
         Self {
             curl: pipeline("volume curl", &sim, "curl", &curl_layout),
             forces: pipeline("volume forces", &sim, "forces", &forces_layout),
@@ -575,6 +577,12 @@ impl HeterogeneousVolumes {
         self.visible.clear();
         self.rect = [0; 4];
         self.flicker_count = 0;
+        if !scene.volumes.is_empty() {
+            for pipeline in [&self.curl, &self.forces, &self.divergence, &self.project, &self.advect, &self.maccormack, &self.procedural, &self.flicker, &self.light_cache, &self.march, &self.resolve] {
+                pipeline.prefetch();
+            }
+            self.pressure.iter().for_each(Lazy::prefetch);
+        }
         for gpu in &mut self.emitters {
             gpu.update = false;
             gpu.visible = false;

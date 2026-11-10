@@ -20,6 +20,7 @@ use wgpu::{ShaderStages, TextureFormat as F, TextureUsages as U};
 use crate::scene::{Image, ImageTexture, Scene, TextureDesc, TextureSource};
 use crate::shader::create_module;
 use crate::util::{bind, bind_group, bind_group_layout, compute_pipeline, mip_count, uniform_buffer, workgroups};
+use crate::pipelines::Lazy;
 
 pub const TEXTURE_SIZE: u32 = 512;
 
@@ -40,13 +41,13 @@ pub struct TextureLibrary {
     pub data: wgpu::TextureView,
     pub layer_count: u32,
     version: u64,
-    generate: wgpu::ComputePipeline,
-    normals: wgpu::ComputePipeline,
-    pack: wgpu::ComputePipeline,
+    generate: Lazy<wgpu::ComputePipeline>,
+    normals: Lazy<wgpu::ComputePipeline>,
+    pack: Lazy<wgpu::ComputePipeline>,
     /// `pack` with the occlusion image in the albedo alpha.
-    pack_occlusion: wgpu::ComputePipeline,
-    down_albedo: wgpu::ComputePipeline,
-    down_data: wgpu::ComputePipeline,
+    pack_occlusion: Lazy<wgpu::ComputePipeline>,
+    down_albedo: Lazy<wgpu::ComputePipeline>,
+    down_data: Lazy<wgpu::ComputePipeline>,
     layouts: [wgpu::BindGroupLayout; 5],
     image_sampler: wgpu::Sampler,
     /// 1×1 stand-ins for missing images: white base colour, flat normal, roughness = metallic = 1,

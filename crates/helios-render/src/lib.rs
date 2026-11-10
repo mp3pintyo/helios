@@ -67,6 +67,7 @@ pub mod page_source;
 mod particles;
 mod passes;
 mod picking;
+pub mod pipelines;
 mod profiler;
 mod renderer;
 mod resolution;

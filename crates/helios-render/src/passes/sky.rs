@@ -6,6 +6,7 @@ use wgpu::{ShaderStages, TextureFormat, TextureUsages};
 use crate::profiler::Recorder;
 use crate::shader::create_module;
 use crate::util::{bind, bind_group, bind_group_layout, compute_pipeline, storage_buffer, texture, workgroups, TextureSpec};
+use crate::pipelines::Lazy;
 
 const LUT_FORMAT: TextureFormat = TextureFormat::Rgba16Float;
 const TRANSMITTANCE_SIZE: (u32, u32) = (256, 64);
@@ -18,10 +19,10 @@ pub struct Sky {
     pub sky_view: wgpu::TextureView,
     /// Nine RGB SH coefficients of sky radiance per unit sun illuminance.
     pub sh: wgpu::Buffer,
-    transmittance_pipeline: wgpu::ComputePipeline,
-    multiscatter_pipeline: wgpu::ComputePipeline,
-    sky_view_pipeline: wgpu::ComputePipeline,
-    sh_pipeline: wgpu::ComputePipeline,
+    transmittance_pipeline: Lazy<wgpu::ComputePipeline>,
+    multiscatter_pipeline: Lazy<wgpu::ComputePipeline>,
+    sky_view_pipeline: Lazy<wgpu::ComputePipeline>,
+    sh_pipeline: Lazy<wgpu::ComputePipeline>,
     layouts: [wgpu::BindGroupLayout; 4],
     /// Ground albedo the static LUTs were built for.
     built_for: Option<Vec3>,

@@ -34,6 +34,7 @@ use crate::lights::{LightCulling, MAX_LIGHTS};
 use crate::lumen::{CardInputs, Lumen};
 use crate::lumen_displaced::DisplaceInputs;
 use crate::picking::{PickResult, Picker};
+use crate::pipelines::{self, in_group, Group};
 use crate::lumen_lite::{GiMethod, LiteFallback, LiteInputs, LumenLite};
 use crate::motion::MotionTracker;
 use crate::megalights::{MegaLights, MegaLightsInputs};
@@ -384,6 +385,9 @@ pub struct Renderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
     pub settings: RenderSettings,
+    /// The settings asked for this frame (`settings` holds the ones it renders with: features
+    /// whose pipelines the browser is still compiling are off, see [`Renderer::render`]).
+    requested: RenderSettings,
     frame_uniform: wgpu::Buffer,
     scene: GpuScene,
     targets: FrameTargets,
@@ -468,14 +472,15 @@ impl Renderer {
             device: device.clone(),
             queue: queue.clone(),
             settings: RenderSettings::default(),
+            requested: RenderSettings::default(),
             frame_uniform: uniform_buffer(device, "frame", std::mem::size_of::<FrameUniform>() as u64),
             scene: GpuScene::new(device, pool),
             targets: FrameTargets::new(device, (width, height), (width, height)),
             samplers: Samplers::new(device),
             culling: Culling::new(device),
             main_view: CullView::new(device, "main view", MAIN_CAPACITY),
-            vsm: VirtualShadowMap::new(device, queue),
-            hzb: Hzb::new(device),
+            vsm: in_group(Group::Shadows, || VirtualShadowMap::new(device, queue)),
+            hzb: in_group(Group::OcclusionCulling, || Hzb::new(device)),
             sky: Sky::new(device),
             material: MaterialPass::new(device),
             extended: ExtendedMaterials::new(device),
@@ -483,12 +488,12 @@ impl Renderer {
             textures: TextureLibrary::new(device, queue),
             rvt: RuntimeVirtualTexture::new(device, queue),
             svt: StreamingVirtualTexture::new(device, config.texture_pool_bytes, TileFormat::select(device.features(), config.texture_compression)),
-            lumen: Lumen::new(device),
+            lumen: in_group(Group::GlobalIllumination, || Lumen::new(device)),
             lumen_lite: None,
             lite_fallback: LiteFallback::default(),
             lights: LightCulling::new(device),
-            clouds: Clouds::new(device),
-            fog: VolumetricFog::new(device),
+            clouds: in_group(Group::Clouds, || Clouds::new(device)),
+            fog: in_group(Group::Fog, || VolumetricFog::new(device)),
             black: crate::util::texture(
                 device,
                 crate::util::TextureSpec {
@@ -502,15 +507,15 @@ impl Renderer {
                 },
             )
             .create_view(&Default::default()),
-            gi: GiPass::new(device),
+            gi: in_group(Group::GlobalIllumination, || GiPass::new(device)),
             lighting: LightingPass::new(device),
             megalights: MegaLights::new(device, queue),
-            translucency: Translucency::new(device),
-            effects: Effects::new(device),
+            translucency: in_group(Group::Translucency, || Translucency::new(device)),
+            effects: in_group(Group::Effects, || Effects::new(device)),
             tsr: TsrPass::new(device),
-            post_fx: PostFxPass::new(device),
+            post_fx: in_group(Group::CameraEffects, || PostFxPass::new(device)),
             exposure: ExposurePass::new(device),
-            local_exposure: LocalExposurePass::new(device),
+            local_exposure: in_group(Group::CameraEffects, || LocalExposurePass::new(device)),
             bloom: BloomPass::new(device),
             tonemap: TonemapPass::new(device, output_format),
             picker: Picker::new(device),
@@ -722,8 +727,29 @@ impl Renderer {
         self.history_valid = false;
     }
 
+    /// Frames rendered so far. A browser frame loop can tell from it that a frame before the
+    /// first image was skipped because the pipelines it needs are still compiling.
+    pub fn frame_count(&self) -> u32 {
+        self.frame_index
+    }
+
     /// Renders `scene` from `camera` into `output` (which must match the output format).
+    ///
+    /// In the browser the pipelines compile in the background ([`crate::pipelines`]): a feature
+    /// whose pipelines are not made yet is off for the frame, as if switched off in the settings
+    /// (which keep what was asked for), so the first frames render with the core set and every
+    /// feature joins once compiled. Natively every pipeline is made up front and this changes
+    /// nothing.
     pub fn render(&mut self, scene: &Scene, camera: &Camera, output: &wgpu::TextureView, delta_time: f32) {
+        let requested = self.settings;
+        self.requested = requested;
+        self.settings = compiled_features(requested);
+        self.render_frame(scene, camera, output, delta_time);
+        // Keep the one choice a frame makes itself (the Lumen Lite fallback).
+        self.settings = RenderSettings { gi_method: self.settings.gi_method, ..requested };
+    }
+
+    fn render_frame(&mut self, scene: &Scene, camera: &Camera, output: &wgpu::TextureView, delta_time: f32) {
         self.update_resolution();
         let frame = self.frame_index + 1;
         self.motion.incremental = self.settings.per_instance_invalidation;
@@ -750,7 +776,13 @@ impl Renderer {
         self.textures.sync(&self.device, &self.queue, scene);
         let substrate = self.settings.substrate;
         self.extended.sync(&self.device, &self.queue, scene, &self.scene, substrate, self.targets.capacity);
-        self.culling.prepare_tessellation(&self.device, scene, &self.scene, &self.textures, &self.samplers.material, self.extended.parameter_buffer());
+        // The scene's content pipelines (made on first use natively) are queued for the browser.
+        self.culling.prefetch(&self.scene);
+        if self.extended.subsurface {
+            self.subsurface.prefetch();
+        }
+        let tessellation_wanted = self.requested.tessellation && self.scene.has_displaceable();
+        self.culling.prepare_tessellation(&self.device, scene, &self.scene, &self.textures, &self.samplers.material, self.extended.parameter_buffer(), tessellation_wanted);
         self.targets.prepare_tessellation(&self.device, self.scene.has_displacement());
         // Editing a displacement (magnitude, a displacing graph or its parameters) reshapes
         // static surfaces: their cached shadow pages are stale.
@@ -761,10 +793,18 @@ impl Renderer {
         self.displacement_cached = displacement;
         let tessellation = self.scene.has_displacement();
         let debug_views = self.settings.debug_view != DebugView::Lit;
-        self.material.sync(&self.device, self.scene.uv_extensions, self.scene.skins.skinned_instances, tessellation, debug_views, &self.extended, substrate);
+        let (uv_extensions, skinning, kinds) = (self.scene.uv_extensions, self.scene.skins.skinned_instances, self.scene.resolve_kinds);
+        self.material.sync(&self.device, uv_extensions, skinning, tessellation, tessellation_wanted, debug_views, kinds, &self.extended, substrate);
         let slab_lighting = self.extended.lighting.then_some(&self.extended.lighting_layout);
         self.lighting.sync_substrate(&self.device, slab_lighting);
         self.megalights.sync_substrate(&self.device, self.extended.lighting.then_some(&self.extended.megalights_layout));
+        // Before the first image the browser waits for every core pipeline the frame needs (the
+        // scene's material permutations, say) instead of compiling one inside the frame, which
+        // would hold the frame (Firefox) or compile on the page's GPU thread (Chromium). Later a
+        // newly needed one (an editor change) is compiled in the frame, as natively.
+        if self.frame_index == 0 && !pipelines::ready(Group::Core) {
+            return;
+        }
         self.rvt.sync(&self.device, &self.queue, scene, self.settings.virtual_texturing, frame);
         // Texture feedback is per rendered pixel (internal size); the froxel volume and the
         // screen targets of Lumen, clouds and translucency are sized for the capacity, so a
@@ -773,9 +813,16 @@ impl Renderer {
         let capacity = self.targets.capacity;
         self.svt.sync(&self.device, &self.queue, scene, self.settings.texture_streaming, frame, size);
         self.lumen.update(&self.device, &self.queue, scene, &self.motion.changes, camera.position, frame, &self.targets, self.settings.tessellation);
+        // Created as soon as it is asked for, so the browser compiles it before GI comes on.
+        let r = &self.requested;
+        if r.global_illumination && (r.gi_method == GiMethod::LumenLite || r.debug_view == DebugView::LumenLiteProbes) {
+            let device = &self.device;
+            self.lumen_lite.get_or_insert_with(|| in_group(Group::GlobalIllumination, || LumenLite::new(device)));
+        }
         if self.uses_lumen_lite() {
-            let lite = self.lumen_lite.get_or_insert_with(|| LumenLite::new(&self.device));
-            lite.update(&self.queue, scene, camera.position, frame);
+            if let Some(lite) = self.lumen_lite.as_mut() {
+                lite.update(&self.queue, scene, camera.position, frame);
+            }
         }
         let view_proj = camera.projection(self.targets.output.0 as f32 / self.targets.output.1 as f32) * camera.view_matrix();
         let lights = scene.lights();
@@ -1183,6 +1230,29 @@ impl Renderer {
             0
         }
     }
+}
+
+/// `settings` with the features whose pipelines are not made yet switched off (in the browser,
+/// while they compile in the background; natively every group is ready).
+fn compiled_features(mut s: RenderSettings) -> RenderSettings {
+    let ready = pipelines::ready;
+    s.occlusion_culling &= ready(Group::OcclusionCulling);
+    s.shadows &= ready(Group::Shadows);
+    s.global_illumination &= ready(Group::GlobalIllumination);
+    s.clouds &= ready(Group::Clouds);
+    s.volumetric_fog &= ready(Group::Fog);
+    s.translucency &= ready(Group::Translucency);
+    s.tessellation &= ready(Group::Tessellation);
+    if !ready(Group::Effects) {
+        s.volumes = false;
+        s.particles = false;
+    }
+    if !ready(Group::CameraEffects) {
+        s.motion_blur = 0.0;
+        s.depth_of_field = None;
+        s.local_exposure = None;
+    }
+    s
 }
 
 /// Moving instances in a frame ([`Renderer::dynamic_stats`]).

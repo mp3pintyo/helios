@@ -110,7 +110,7 @@ pub struct MegaLights {
     shade_layout: wgpu::BindGroupLayout,
     shade: Lazy<wgpu::ComputePipeline>,
     /// Shading with Substrate slabs (`substrate_gpu.rs`), compiled when first needed.
-    shade_substrate: Option<wgpu::ComputePipeline>,
+    shade_substrate: Option<Lazy<wgpu::ComputePipeline>>,
     debug_layout: wgpu::BindGroupLayout,
     debug: Lazy<wgpu::ComputePipeline>,
     temporal_layout: wgpu::BindGroupLayout,

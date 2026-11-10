@@ -7,6 +7,7 @@ use wgpu::ShaderStages;
 use crate::profiler::Recorder;
 use crate::shader::create_module;
 use crate::util::{bind, bind_group, bind_group_layout, compute_pipeline, storage_buffer, uniform_buffer, workgroups};
+use crate::pipelines::Lazy;
 
 pub const INVALID: u32 = u32::MAX;
 const HEADER_WORDS: u64 = 16;
@@ -47,11 +48,11 @@ pub struct PageCache {
     pub entry_count: u32,
     pub physical_count: u32,
     layout: wgpu::BindGroupLayout,
-    begin: wgpu::ComputePipeline,
-    update: wgpu::ComputePipeline,
-    free_list: wgpu::ComputePipeline,
-    allocate: wgpu::ComputePipeline,
-    args: wgpu::ComputePipeline,
+    begin: Lazy<wgpu::ComputePipeline>,
+    update: Lazy<wgpu::ComputePipeline>,
+    free_list: Lazy<wgpu::ComputePipeline>,
+    allocate: Lazy<wgpu::ComputePipeline>,
+    args: Lazy<wgpu::ComputePipeline>,
     label: &'static str,
 }
 

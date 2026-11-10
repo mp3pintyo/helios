@@ -418,14 +418,15 @@ fn layer_ranges(peel_count: usize) -> Vec<LayerRange> {
 
 pub struct Translucency {
     layout: wgpu::BindGroupLayout,
-    /// By [`Shading`], each compiled when a frame first draws that model ([`Lazy`]): a scene
-    /// without water never pays the water pipeline's compile, 1–1.5 s in Firefox.
+    /// By [`Shading`], each compiled when a frame first draws that model ([`Lazy`]; in the
+    /// browser in the background once the scene has it): a scene without water never pays the
+    /// water pipeline's compile, 1–1.5 s in Firefox.
     pipelines: Vec<Lazy<wgpu::RenderPipeline>>,
     peel_layout: wgpu::BindGroupLayout,
     /// Depth-only peeling draws by [`Shading::SURFACES`].
     peel_pipelines: Vec<Lazy<wgpu::RenderPipeline>>,
     downsample_layout: wgpu::BindGroupLayout,
-    downsample: wgpu::ComputePipeline,
+    downsample: Lazy<wgpu::ComputePipeline>,
     /// [`WaterUniform`]: the medium and the water bodies (the G-buffer resolve reads it too).
     water: wgpu::Buffer,
     water_bodies: Vec<WaterBody>,
@@ -543,6 +544,14 @@ impl Translucency {
             self.versions = versions;
         } else {
             self.move_instances(scene, changes);
+        }
+        // The browser compiles the models the scene has in the background.
+        for c in &self.candidates {
+            self.pipelines[c.shading as usize].prefetch();
+            self.peel_pipelines[c.shading as usize].prefetch();
+        }
+        if !self.water_bodies.is_empty() {
+            self.pipelines[Shading::Underwater as usize].prefetch();
         }
         self.draws = if enabled { sort_back_to_front(&self.candidates, eye, &frustum_planes(view_proj)) } else { Vec::new() };
         self.camera_body = if enabled { self.water_bodies.iter().position(|b| b.contains(eye)) } else { None };

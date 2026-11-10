@@ -45,6 +45,9 @@ pub struct GpuScene {
     /// Some material samples a texture with the second UV set, a wrap mode other than repeat or
     /// an occlusion layer of its own: the G-buffer resolve needs its `UV_EXTENSIONS` permutation.
     pub uv_extensions: bool,
+    /// The plain resolve slots (shading models) the materials use, a bit each: the resolve
+    /// creates pipelines for these only.
+    pub resolve_kinds: u32,
     /// Counts uploads of `materials` (extended materials patch their resolve slots after each).
     pub material_uploads: u64,
     /// [`WindUniform`], written every frame ([`GpuScene::write_wind`]).
@@ -79,6 +82,9 @@ pub struct GpuScene {
     voxels: bool,
     /// Some instance is displaced (the tessellator runs), and the setting its flags were made with.
     displaced: bool,
+    /// Some instance's material displaces it, whatever the setting (the browser compiles
+    /// tessellation in the background while it is off: `pipelines.rs`).
+    displaceable: bool,
     /// Some shadow caster's displacement is animated (its shadow pages refresh every frame).
     animated_shadows: bool,
     tessellation_uploaded: bool,
@@ -101,6 +107,7 @@ impl GpuScene {
             instances: empty("instances"),
             materials: crate::util::uniform_buffer(device, "materials", (MAX_MATERIALS * std::mem::size_of::<GpuMaterial>()) as u64),
             uv_extensions: false,
+            resolve_kinds: 0,
             material_uploads: 0,
             wind: crate::util::uniform_buffer(device, "wind", std::mem::size_of::<WindUniform>() as u64),
             // Lumen's displaced variants copy its material table (lumen_displaced.rs).
@@ -125,6 +132,7 @@ impl GpuScene {
             wind_shadows: false,
             voxels: false,
             displaced: false,
+            displaceable: false,
             animated_shadows: false,
             tessellation_uploaded: true,
             versions: (u64::MAX, u64::MAX, u64::MAX, u64::MAX),
@@ -154,6 +162,11 @@ impl GpuScene {
     /// Whether some instance is displaced and tessellated.
     pub fn has_displacement(&self) -> bool {
         self.displaced
+    }
+
+    /// Whether some instance would be displaced with tessellation on.
+    pub fn has_displaceable(&self) -> bool {
+        self.displaceable
     }
 
     /// Whether some shadow caster is displaced by a graph that reads the time.
@@ -336,6 +349,7 @@ impl GpuScene {
         }
         materials.truncate(MAX_MATERIALS);
         self.uv_extensions = materials.iter().any(needs_uv_extensions);
+        self.resolve_kinds = materials.iter().fold(0, |kinds, m| kinds | (1 << m.resolve.min(31)));
         materials.resize(MAX_MATERIALS, bytemuck::Zeroable::zeroed());
         queue.write_buffer(&self.materials, 0, bytemuck::cast_slice(&materials));
         self.material_uploads += 1;
@@ -434,6 +448,7 @@ impl GpuScene {
         self.instance_count = count as u32;
         self.wind_shadows = wind_shadows;
         self.displaced = instances.iter().any(|i| i.flags & instance_flags::DISPLACED != 0);
+        self.displaceable = scene.instances.iter().any(|i| displaced(scene, i));
         let animated_caster = instance_flags::ANIMATED | instance_flags::CAST_SHADOW;
         self.animated_shadows = instances.iter().any(|i| i.flags & animated_caster == animated_caster);
         self.tessellation_uploaded = self.tessellation_enabled;

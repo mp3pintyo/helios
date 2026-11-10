@@ -745,7 +745,7 @@ impl DisplacedSurfaces {
             } else {
                 compose_variant("lumen_displace.wgsl", &[("displacement_graphs_off.wgsl", &graphs::scene_dispatch_module(scene, &set))])
             };
-            compute_pipeline(device, "lumen displace", &create_module_from(device, "lumen displace", wgsl), "displace", layout, &[])
+            (*compute_pipeline(device, "lumen displace", &create_module_from(device, "lumen displace", wgsl), "displace", layout, &[])).clone()
         });
 
         let point_buffer = storage_buffer_init(device, queue, "lumen displace points", bytemuck::cast_slice(&points));

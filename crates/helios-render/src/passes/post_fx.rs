@@ -10,6 +10,7 @@ use crate::profiler::Recorder;
 use crate::shader::create_module;
 use crate::targets::FrameTargets;
 use crate::util::{bind, bind_group, bind_group_layout, compute_pipeline, storage_buffer, texture, uniform_buffer, workgroups, TextureSpec};
+use crate::pipelines::Lazy;
 
 const HDR: TextureFormat = TextureFormat::Rgba16Float;
 const TILE: u32 = 16;
@@ -49,11 +50,11 @@ struct Targets {
 
 pub struct PostFxPass {
     layout: wgpu::BindGroupLayout,
-    focus: wgpu::ComputePipeline,
-    tiles: wgpu::ComputePipeline,
-    dilate: wgpu::ComputePipeline,
-    dof: wgpu::ComputePipeline,
-    motion: wgpu::ComputePipeline,
+    focus: Lazy<wgpu::ComputePipeline>,
+    tiles: Lazy<wgpu::ComputePipeline>,
+    dilate: Lazy<wgpu::ComputePipeline>,
+    dof: Lazy<wgpu::ComputePipeline>,
+    motion: Lazy<wgpu::ComputePipeline>,
     uniform: wgpu::Buffer,
     focus_state: wgpu::Buffer,
     targets: Option<Targets>,

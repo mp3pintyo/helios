@@ -311,7 +311,7 @@ impl Spawner {
 pub(crate) struct ParticleSystem {
     simulate: Lazy<wgpu::ComputePipeline>,
     light: Lazy<wgpu::ComputePipeline>,
-    draw: wgpu::RenderPipeline,
+    draw: Lazy<wgpu::RenderPipeline>,
     simulate_layout: wgpu::BindGroupLayout,
     light_layout: wgpu::BindGroupLayout,
     draw_layout: wgpu::BindGroupLayout,
@@ -358,7 +358,10 @@ impl ParticleSystem {
         Self {
             simulate: lazy_compute_pipeline(device, "particle simulation", &module, "simulate", &simulate_layout, &[]),
             light: lazy_compute_pipeline(device, "particle lighting", &module, "light", &light_layout, &[]),
-            draw: crate::oit::particle_pipeline(device, &module, &draw_layout),
+            draw: {
+                let (device, module, layout) = (device.clone(), module.clone(), draw_layout.clone());
+                Lazy::new(move || crate::oit::particle_pipeline(&device, &module, &layout))
+            },
             simulate_layout,
             light_layout,
             draw_layout,
@@ -384,7 +387,15 @@ impl ParticleSystem {
     /// uploads the uniform.
     pub fn update(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, scene: &Scene, enabled: bool, delta_time: f32) {
         let emitters = &scene.particles[..scene.particles.len().min(MAX_EMITTERS)];
-        self.active = enabled && emitters.iter().any(|e| e.capacity > 0);
+        let wanted = emitters.iter().any(|e| e.capacity > 0);
+        if wanted {
+            // Compiled in the background in the browser while the scene has emitters.
+            for pipeline in [&self.simulate, &self.light] {
+                pipeline.prefetch();
+            }
+            self.draw.prefetch();
+        }
+        self.active = enabled && wanted;
         if !self.active {
             return;
         }
