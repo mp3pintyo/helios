@@ -19,7 +19,7 @@
 //!   bakes; the first image needs only those, every feature (shadows, Lumen, clouds,
 //!   tessellation…) joins as its pipelines arrive in the background, and the last image is the
 //!   full one. Chromium compiles them all in parallel through `create*PipelineAsync` (warmed,
-//!   then made from its cache); Firefox one per presented frame;
+//!   then made from its cache); Firefox in batches between presented frames;
 //! * each frame renders into the engine's own texture, copied to the canvas only if the frame
 //!   created no pipeline; otherwise the canvas keeps its last frame and the loop waits
 //!   (`onSubmittedWorkDone`, which resolves once the GPU process has worked through the compiles)

@@ -23,8 +23,9 @@ asynchronous shader compilation with fallbacks, and the last image is the one a 
 * **Two compilers.** Chromium (Dawn) compiles `create*PipelineAsync` on a thread pool and returns an identical
   descriptor's compiled pipeline at once: every queued pipeline is *warmed* — its constructor runs with the device's
   `create*Pipeline` switched to the asynchronous call, the stand-in it returns dropped — and made once warm, a cache
-  hit. Firefox compiles one pipeline at a time whatever the API: the core set is created at once, the rest one per
-  presented frame, each in a frame of its own that the next frames wait for (never presenting behind it).
+  hit. Firefox compiles one pipeline at a time whatever the API: the core set is created at once, the rest in
+  batches, each in a frame of its own between presented frames that the next frames wait for (never presenting
+  behind it).
 * **Overlap with the bake.** The renderer (and its core queue) is created before the scene is baked: the GPU process
   compiles while the main thread bakes.
 * **Cheaper shaders.** Three shaders took Firefox ~0.5–1 s each only to zero-initialise a large workgroup array; the
@@ -87,12 +88,14 @@ normal way. The compiler is chosen by the user agent (`Chrome/`; `?shaders=seria
 
 Firefox compiles one pipeline at a time, asynchronous or not, and the queue waits for each. So the core set is
 created at once before the bake (the GPU process works through it while the main thread bakes), and the rest goes
-one pipeline per cycle: a presented frame, then a frame that only creates the next pipeline and is not rendered,
-then frames that wait (`onSubmittedWorkDone`) until it is compiled. Creating the pipeline right after presenting
+one batch per cycle: a presented frame, then a frame that only creates the next batch and is not rendered, then
+frames that wait (`onSubmittedWorkDone`) until it is compiled. A batch doubles (up to 32) while it compiles in under
+0.3 s and halves over 1 s: every cycle costs a rendered frame and a round trip the GPU process serves between
+compiles, and one pipeline per cycle reached full quality 10–25 % later than the base's single batch; the final sizes
+reach it about when the base showed its first image, the canvas updating about once a second meanwhile. Creating the pipeline right after presenting
 held the page's next paint until the compile was done (rAF gaps of 0.2–1.4 s on the site whenever its telemetry
 changed the DOM): the canvas's presentation waits in the same GPU-process queue. With a frame between them the page
-painted at 16.7 ms throughout (below). A full-quality image therefore arrives later than in one batch (each compile
-costs a frame or two of waiting), but the scene is interactive at a few frames per second meanwhile.
+painted at 16.7 ms throughout (below). The scene stays interactive (at a few frames per second) while it compiles.
 
 Two Firefox details found on the way: creating the renderer's shader modules and the core pipelines in one task
 blocked the content main thread for ~5 s at the next turn of the event loop (until the GPU process had compiled the

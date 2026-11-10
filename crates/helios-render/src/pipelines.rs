@@ -34,7 +34,7 @@
 //!   cached pipeline at once. The whole set compiles in a few seconds in parallel, without ever
 //!   blocking the page.
 //! * **Serial** (Firefox and the rest): the core set is created at once (it compiles in the GPU
-//!   process while the main thread bakes the scene), the rest one pipeline per presented frame,
+//!   process while the main thread bakes the scene), the rest in batches between presented frames,
 //!   each frame waiting for the previous compile instead of presenting behind it.
 
 use std::cell::{Cell, RefCell};
