@@ -1,7 +1,7 @@
 //! Browser platform layer: canvas surface, DOM input and a requestAnimationFrame loop.
 //!
 //! A page can embed the engine instead of using `index.html`'s full-window demo: it sets
-//! `globalThis.heliosConfig = { scene, screenPercentage, gpuBudgetMs, embedded, lights, megaLights }` before
+//! `globalThis.heliosConfig = { scene, screenPercentage, gpuBudgetMs, embedded, lights, megaLights, statusElement }` before
 //! loading the module (query parameters still work and take part as fallbacks), and drives the
 //! running engine through the exported `helios*` functions (scene, glTF model, candle lights,
 //! camera, sun, hotkeys, HUD).
@@ -56,8 +56,12 @@ fn window() -> web_sys::Window {
     web_sys::window().expect("no window")
 }
 
+/// Writes a progress or error line into the page's status element: `#status`, or the id in
+/// `heliosConfig.statusElement` (a page that shows its own, translated progress text points it at
+/// a hidden element and reads errors from there).
 fn set_status(text: &str) {
-    if let Some(el) = window().document().and_then(|d| d.get_element_by_id("status")) {
+    let id = page_config("statusElement").and_then(|v| v.as_string()).unwrap_or_else(|| "status".into());
+    if let Some(el) = window().document().and_then(|d| d.get_element_by_id(&id)) {
         el.set_text_content(Some(text));
     }
 }

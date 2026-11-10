@@ -368,7 +368,7 @@ footer .wide-inner { gap: 10px; }
     <div class="era" id="round4">
       <div class="eyebrow" data-en="Round 4">4. kör</div>
       <h2 data-en="A world that moves, a thousand lights, an editor">Mozgó világ, ezer fény, szerkesztő</h2>
-      <p data-en="Nine features built in parallel: moving and animated objects, MegaLights, a cheaper GI for weaker GPUs, fire and smoke, foliage that holds up in the distance, layered materials, and an editor with procedural generation. The buttons drive the live engine here too.">Kilenc, párhuzamosan készült funkció: mozgó és animált tárgyak, MegaLights, olcsóbb globális megvilágítás gyengébb GPU-knak, tűz és füst, távolban is sűrű lomb, rétegzett anyagok, valamint egy szerkesztő procedurális tartalomgenerálással. A gombok itt is az élő motort vezérlik.</p>
+      <p data-en="Nine features built in parallel: moving and animated objects, MegaLights, a cheaper GI for weaker GPUs, fire and smoke, foliage that holds up in the distance, geometry raised from textures, layered materials, and an editor with procedural generation. The buttons drive the live engine here too.">Kilenc, párhuzamosan készült funkció: mozgó és animált tárgyak, MegaLights, olcsóbb globális megvilágítás gyengébb GPU-knak, tűz és füst, távolban is sűrű lomb, textúrából kiemelt geometria, rétegzett anyagok, valamint egy szerkesztő procedurális tartalomgenerálással. A gombok itt is az élő motort vezérlik.</p>
     </div>
 
     <section class="chapter" id="motion">
@@ -565,8 +565,53 @@ footer .wide-inner { gap: 10px; }
       </div>
     </section>
 
+    <section class="chapter" id="tessellation">
+      <div class="eyebrow" data-en="14 · Nanite tessellation">14 · Nanite-tesszelláció</div>
+      <h2 data-en="Stones raised from a texture">Kövek, amelyeket a textúra emel ki</h2>
+      <p data-en="The mesh stays smooth and small; the detail comes from a height texture. While rendering, the GPU splits the triangles of displaced materials into micro-triangles about two pixels across and moves the surface along its normal, like UE 5.4's Nanite tessellation. Patches that are too large are split at their edge midpoints, the rest are diced on a regular grid; both sides of a shared edge get exactly the same vertices, so the surface has no cracks, and every micro-triangle goes through the software rasteriser. Behind the valley's opening view runs a cobblestone path with displaced boulders, one of them slowly turning on its plinth.">A háló sima és kicsi marad, a részletet a magasságtextúra adja: renderelés közben a GPU az elmozdított anyagok háromszögeit nagyjából két pixeles mikroháromszögekre bontja, és a felületet a normál mentén elmozdítja, ahogy az UE 5.4 Nanite-tesszellációja. A túl nagy foltokat az élfelező pontjaiknál tovább osztja, a többit egyenletes rácsra bontja; a közös él két oldala pontosan ugyanazokat a csúcsokat kapja, így a felület nem reped szét, a mikroháromszögeket pedig a szoftveres raszterizáló rajzolja ki. A völgy kezdőnézete mögött macskaköves ösvény fut elmozdított sziklákkal, amelyek közül az egyik lassan forog a talapzatán.</p>
+      <div class="controls">
+        <button class="btn primary" type="button" data-preset="tess-path" data-en="Cobblestone path">Macskaköves ösvény</button>
+        <button class="btn" type="button" data-toggle="PageDown" data-label="tessellation" data-en="Tessellation">Tesszelláció <span class="state"></span></button>
+        <button class="btn" type="button" data-preset="tess-graze" data-en="Grazing view">Súroló nézet</button>
+        <button class="btn" type="button" data-preset="tess-boulder" data-en="Turning boulder">Forgó szikla</button>
+        <button class="btn" type="button" data-preset="tess-view" data-en="Micro-triangles (25)">Mikroháromszögek (25)</button>
+        <button class="btn" type="button" data-preset="lit" data-en="Back to the image">Vissza a képhez</button>
+      </div>
+      <p class="dim" data-en="With tessellation off (PageDown) the same material renders as a flat, normal-mapped surface. View 25 colours the tessellation depth (blue → green → red) and outlines every micro-triangle.">Kikapcsolt tesszellációnál (PageDown) ugyanaz az anyag lapos, normal mappes felületként jelenik meg. A 25-ös nézet a tesszelláció mélységét színezi (kék → zöld → piros), és minden mikroháromszöget kirajzol.</p>
+      <div class="readout"><span data-en="Micro-triangles right now">Mikroháromszögek most</span><b id="t-tess">–</b><span data-en="software raster">szoftveres raszter</span><b id="t-tess-raster">–</b></div>
+      <figure>
+        <div class="compare" style="--cut:50%">
+          <img src="media/tess_path_off.webp" alt="" data-alt-hu="A macskaköves ösvény tesszelláció nélkül" data-alt-en="The cobblestone path without tessellation">
+          <img class="after" src="media/tess_path_on.webp" alt="" data-alt-hu="A macskaköves ösvény tesszellációval" data-alt-en="The cobblestone path with tessellation">
+          <span class="handle" aria-hidden="true"></span>
+          <span class="tag l" data-en="Normal map">Normal map</span><span class="tag r" data-en="Displaced">Elmozdítva</span>
+          <input type="range" min="0" max="100" value="50" aria-label="Összehasonlítás">
+        </div>
+        <figcaption data-en="The sunlit path: without tessellation the stones are only painted on by the normal map; with it, real cobbles stand out and shade each other.">A napsütötte ösvény: tesszelláció nélkül a köveket csak a normal map festi rá, vele valódi, kiálló kövek vetnek árnyékot egymásra.</figcaption>
+      </figure>
+      <figure>
+        <div class="compare" style="--cut:50%">
+          <img src="media/tess_graze_off.webp" alt="" data-alt-hu="Súroló nézet tesszelláció nélkül" data-alt-en="Grazing view without tessellation">
+          <img class="after" src="media/tess_graze_on.webp" alt="" data-alt-hu="Súroló nézet tesszellációval" data-alt-en="Grazing view with tessellation">
+          <span class="handle" aria-hidden="true"></span>
+          <span class="tag l" data-en="Normal map">Normal map</span><span class="tag r" data-en="Displaced">Elmozdítva</span>
+          <input type="range" min="0" max="100" value="50" aria-label="Összehasonlítás">
+        </div>
+        <figcaption data-en="At a grazing angle the difference is in the silhouette: the stones rise out of the path's plane, and the boulders' crags out of their outline.">Súroló szögből a sziluettben látszik a különbség: a kövek kiemelkednek az ösvény síkjából, a sziklák repedései a körvonalukból.</figcaption>
+      </figure>
+      <div class="metrics">
+        <div class="metric"><b>1,82 M</b><span data-en="micro-triangles in the path view (1600×900)">mikroháromszög az ösvény-nézetben (1600×900)</span></div>
+        <div class="metric"><b>0,08 → 1,62 ms</b><span data-en="software raster in the path view, off → on">szoftveres raszter az ösvény-nézetben, ki → be</span></div>
+        <div class="metric"><b>≈ 0,85 ms</b><span data-en="per million micro-triangles, both raster passes">millió mikroháromszögenként, a két raszter-menetre</span></div>
+        <div class="metric"><b>±0,03 ms</b><span data-en="every pass of a scene without displacement">minden menet elmozdítás nélküli jelenetben</span></div>
+      </div>
+      <div class="shots">
+        <img src="media/tess_depth.webp" alt="" loading="lazy" data-alt-hu="Tesszellációs mélység és mikroháromszögek" data-alt-en="Tessellation depth and micro-triangles">
+      </div>
+    </section>
+
     <section class="chapter" id="substrate">
-      <div class="eyebrow" data-en="14 · Substrate and material graphs">14 · Substrate és anyaggráfok</div>
+      <div class="eyebrow" data-en="15 · Substrate and material graphs">15 · Substrate és anyaggráfok</div>
       <h2 data-en="Clear coat, velvet, wax and graphs compiled live">Lakk, bársony, viasz és élőben fordított gráfok</h2>
       <p data-en="Beyond the metallic-roughness base, a material can take a Substrate-style slab, as in UE 5.7: an index of refraction, anisotropic highlights, a clear coat with its own roughness, velvet sheen, subsurface scattering and thin transmission. Material graphs are compiled to WGSL at run time, in the browser too; screen-space derivatives are carried through the maths by the chain rule, so textures are filtered correctly even in a compute shader.">Az anyagok a fém–érdesség alapon túl az UE 5.7 Substrate-jéhez hasonló réteget (slab) kaphatnak: törésmutatót, anizotróp csillanást, saját érdességű lakkréteget, bársonyfényt, felszín alatti szórást és vékony áteresztést. Az anyaggráfokat a motor futás közben fordítja WGSL-re, a böngészőben is; a képernyőtérbeli deriváltakat a láncszabály viszi végig a számításon, így a textúrák compute shaderben is helyesen szűrődnek.</p>
       <div class="controls">
@@ -600,7 +645,7 @@ footer .wide-inner { gap: 10px; }
     </section>
 
     <section class="chapter" id="editor">
-      <div class="eyebrow" data-en="15 · Editor and PCG">15 · Szerkesztő és PCG</div>
+      <div class="eyebrow" data-en="16 · Editor and PCG">16 · Szerkesztő és PCG</div>
       <h2 data-en="A level editor in the browser">Szintszerkesztő a böngészőben</h2>
       <p data-en="A UE5-style level editor around the live viewport: content browser, World Outliner, Details panel, move, rotate and scale gizmos, selection outline, undo. Picking reads the visibility buffer, so it selects exactly what the pixel shows, a leaf in the wind included. Scenes are saved as .helios.json files, and the node-based material editor recompiles as you link the pins.">UE5-stílusú szintszerkesztő az élő nézetablak körül: tartalomböngésző, World Outliner, Details panel, mozgató, forgató és méretező gizmó, kijelölés körvonallal, visszavonás. A kijelölés a láthatósági pufferből olvas, így pontosan azt választja ki, ami a pixelen látszik, a szélben mozgó levelet is. A jelenet .helios.json fájlba menthető, a csomópontos anyagszerkesztő pedig a pinek összekötése közben fordít újra.</p>
       <p data-en="PCG volumes, after UE 5.7's Procedural Content Generation, run a deterministic point graph: surface sampling, slope and noise filters, self-pruning and weighted prefab spawning. There are three presets, rocks on slopes, flowers in meadows and a forest edge, and dragging a node's parameter regenerates the volume live.">A PCG-kötetek az UE 5.7 Procedural Content Generation rendszerének mintájára determinisztikus pontgráfot futtatnak: felületi mintavétel, lejtő- és zajszűrők, önritkítás, végül előregyártott elemek (prefabok) súlyozott elhelyezése. Három előre beállított gráf van: sziklák a lejtőkön, virágos rét és erdőszél; egy csomópont paraméterének húzására a kötet élőben újragenerálódik.</p>
@@ -626,36 +671,13 @@ footer .wide-inner { gap: 10px; }
       </div>
     </section>
 
-    <!-- PLACEHOLDER · 16 · Nanite tessellation and displacement (still being built on its own branch).
-         When it lands: PageDown toggles it, debug view 25 shows the patches; add presets, a before/after
-         pair (displacement off / on, captured by site/capture.py) and the measured cost, then uncomment.
-    <section class="chapter" id="tessellation">
-      <div class="eyebrow" data-en="16 · Nanite tessellation">16 · Nanite-tesszeláció</div>
-      <h2 data-en="Displacement on virtual geometry">Felületi elmozdítás virtuális geometrián</h2>
-      <p data-en="…">…</p>
-      <div class="controls">
-        <button class="btn" type="button" data-toggle="PageDown" data-label="tessellation" data-en="Tessellation">Tesszeláció <span class="state"></span></button>
-        <button class="btn" type="button" data-preset="tessellation-view" data-en="Patches (25)">Foltok (25)</button>
-        <button class="btn" type="button" data-preset="lit" data-en="Back to the image">Vissza a képhez</button>
-      </div>
-      <figure>
-        <div class="compare" style="--cut:50%">
-          <img src="media/tessellation_off.webp" alt="" data-alt-hu="Elmozdítás nélkül" data-alt-en="Without displacement">
-          <img class="after" src="media/tessellation_on.webp" alt="" data-alt-hu="Elmozdítással" data-alt-en="With displacement">
-          <span class="handle" aria-hidden="true"></span>
-          <span class="tag l" data-en="Flat">Sík</span><span class="tag r" data-en="Displaced">Elmozdítva</span>
-          <input type="range" min="0" max="100" value="50" aria-label="Összehasonlítás">
-        </div>
-      </figure>
-    </section>
-    -->
   </main>
 
   <aside class="stage" aria-label="Élő motor">
     <div class="viewport" id="viewport">
       <img class="poster" id="poster" src="media/hero_valley.webp" alt="" data-alt-hu="A völgy" data-alt-en="The valley scene">
       <canvas id="helios-canvas" tabindex="0" aria-label="Helios élő renderelés"></canvas>
-      <div class="veil" id="veil"><div><div class="spin"></div><span id="status" data-en="Starting the engine…">A motor indul…</span></div></div>
+      <div class="veil" id="veil"><div><div class="spin"></div><span id="status" data-en="Starting the engine…">A motor indul…</span><span id="engine-status" hidden></span></div></div>
       <span class="live-badge off" id="badge">LIVE</span>
       <span class="hint" id="hint" data-en="click · WASD/QE · drag">kattintás · WASD/QE · húzás</span>
     </div>
@@ -704,8 +726,8 @@ footer .wide-inner { gap: 10px; }
       <div class="round"><h3 data-en="Round 3 · Parallel waves">3. kör · Párhuzamos hullámok</h3><p data-en="Up to four agents at once, each wave merged and measured before the next:">Egyszerre legfeljebb négy ügynök, minden hullám összefésülve és lemérve a következő előtt:</p>
         <div class="chips"><span class="chip" data-en="alpha masks">alfamaszkok</span><span class="chip" data-en="streaming textures">streamelt textúrák</span><span class="chip" data-en="glass &amp; water">üveg és víz</span><span class="chip" data-en="geometry compression">geometriatömörítés</span><span class="chip" data-en="depth of field">mélységélesség</span><span class="chip" data-en="day &amp; night">nappal és éjszaka</span><span class="chip" data-en="wind">szél</span><span class="chip" data-en="Lumen cards">Lumen-kártyák</span><span class="chip" data-en="local-light VSM">pontfény-VSM</span><span class="chip" data-en="TSR">TSR</span><span class="chip" data-en="BC7 / BC5">BC7 / BC5</span><span class="chip" data-en="adaptive probes">adaptív próbák</span><span class="chip" data-en="caustics">kausztika</span><span class="chip" data-en="depth peeling">depth peeling</span><span class="chip" data-en="glTF extensions">glTF-bővítmények</span><span class="chip" data-en="static shadow cache">statikus árnyék-gyorsítótár</span><span class="chip" data-en="local exposure">helyi expozíció</span></div>
       </div>
-      <div class="round"><h3 data-en="Round 4 · Agents on parallel branches">4. kör · Ügynökök párhuzamos ágakon</h3><p data-en="Nine features in two waves. Each agent worked in its own git worktree and branch from the same brief: Chrome's WGSL rules, how to measure, which keys and debug views were taken, and to touch shared files only as much as needed. The seven branches of the first wave were merged one by one into the round4 integration branch; the second wave (Substrate and material graphs, Nanite tessellation, this page) built on it. Git flagged the textual conflicts; the merge agents found the semantic ones with tests, measurements and browser runs. Up to seven agents shared one RTX 3090, so every timing is the minimum or median of interleaved runs.">Kilenc funkció, két hullámban. Minden ügynök saját git worktree-ben és ágon dolgozott, ugyanabból a feladatleírásból: a Chrome WGSL-szabályai, a mérési módszer, a foglalt billentyűk és debug nézetek, és hogy a közös fájlokhoz csak a legszükségesebb mértékben nyúljon. Az első hullám hét ága egyenként került a round4 integrációs ágra; a második hullám (Substrate és anyaggráfok, Nanite-tesszeláció, ez az oldal) már erre épült. A szöveges ütközéseket a git jelezte, a jelentésbelieket az összefésülést végző ügynökök találták meg tesztekkel, mérésekkel és böngészős futtatással. Egyszerre legfeljebb hét ügynök osztozott egyetlen RTX 3090-en, ezért minden időmérés váltakozó futások minimuma vagy mediánja.</p>
-        <div class="chips"><span class="chip" data-en="dynamic world">dinamikus világ</span><span class="chip" data-en="skeletal animation">csontvázas animáció</span><span class="chip">MegaLights</span><span class="chip">Lumen Lite</span><span class="chip" data-en="volumes &amp; particles">térfogatok és részecskék</span><span class="chip" data-en="OIT">sorrendfüggetlen átlátszóság</span><span class="chip">Nanite Foliage</span><span class="chip" data-en="editor">szerkesztő</span><span class="chip">PCG</span><span class="chip" data-en="scene files">jelenetfájlok</span><span class="chip">Substrate</span><span class="chip" data-en="material graphs">anyaggráfok</span><span class="chip" data-en="glTF PBR extensions">glTF PBR-bővítmények</span></div>
+      <div class="round"><h3 data-en="Round 4 · Agents on parallel branches">4. kör · Ügynökök párhuzamos ágakon</h3><p data-en="Nine features in two waves. Each agent worked in its own git worktree and branch from the same brief: Chrome's WGSL rules, how to measure, which keys and debug views were taken, and to touch shared files only as much as needed. The seven branches of the first wave were merged one by one into the round4 integration branch; the second wave (Substrate and material graphs, Nanite tessellation, this page) built on it. Git flagged the textual conflicts; the merge agents found the semantic ones with tests, measurements and browser runs. Up to seven agents shared one RTX 3090, so every timing is the minimum or median of interleaved runs.">Kilenc funkció, két hullámban. Minden ügynök saját git worktree-ben és ágon dolgozott, ugyanabból a feladatleírásból: a Chrome WGSL-szabályai, a mérési módszer, a foglalt billentyűk és debug nézetek, és hogy a közös fájlokhoz csak a legszükségesebb mértékben nyúljon. Az első hullám hét ága egyenként került a round4 integrációs ágra; a második hullám (Substrate és anyaggráfok, Nanite-tesszelláció, ez az oldal) már erre épült. A szöveges ütközéseket a git jelezte, a jelentésbelieket az összefésülést végző ügynökök találták meg tesztekkel, mérésekkel és böngészős futtatással. Egyszerre legfeljebb hét ügynök osztozott egyetlen RTX 3090-en, ezért minden időmérés váltakozó futások minimuma vagy mediánja.</p>
+        <div class="chips"><span class="chip" data-en="dynamic world">dinamikus világ</span><span class="chip" data-en="skeletal animation">csontvázas animáció</span><span class="chip">MegaLights</span><span class="chip">Lumen Lite</span><span class="chip" data-en="volumes &amp; particles">térfogatok és részecskék</span><span class="chip" data-en="OIT">sorrendfüggetlen átlátszóság</span><span class="chip">Nanite Foliage</span><span class="chip" data-en="Nanite tessellation">Nanite-tesszelláció</span><span class="chip" data-en="editor">szerkesztő</span><span class="chip">PCG</span><span class="chip" data-en="scene files">jelenetfájlok</span><span class="chip">Substrate</span><span class="chip" data-en="material graphs">anyaggráfok</span><span class="chip" data-en="glTF PBR extensions">glTF PBR-bővítmények</span></div>
       </div>
     </div>
   </div>
@@ -727,6 +749,8 @@ footer .wide-inner { gap: 10px; }
       <article class="story"><span class="round-tag" data-en="Round 4 · merge">4. kör · összefésülés</span><h3 data-en="Code that never runs still costs">Kód, amely nem fut, mégis lassít</h3><p data-en="The skinning code slowed culling down even in scenes without a single skinned mesh, and the forest's 26 000 conifer parts multiplied the cost. The shaders are now built in two variants, and without skinned instances the leaner one runs.">A csontvázas animáció kódja a nem látható elemek kiszűrését (culling) akkor is lassította, ha a jelenetben egyetlen bőrözött háló sem volt, és az erdő 26 ezer fenyőrésze ezt megsokszorozta. A shaderek most két változatban készülnek, és bőrözött példány nélkül a karcsúbb fut.</p><div class="delta" data-en="culling 1.21 → 1.11 ms · resolve 0.74 → 0.41 ms">culling 1,21 → 1,11 ms · feloldás 0,74 → 0,41 ms</div></article>
       <article class="story"><span class="round-tag" data-en="Round 4">4. kör</span><h3 data-en="Workgroups past the end of the list">Munkacsoportok a lista végén túl</h3><p data-en="Beyond 65 535 software-rasterised clusters the two-dimensional indirect dispatch overshot, and the extra workgroups drew stale entries that earlier frames had left past the end of the list. Every rasteriser now stops at the list's actual length.">65 535-nél több szoftveresen raszterizált klaszternél a kétdimenziós indirekt dispatch túlfutott, és a fölösleges munkacsoportok a lista végén túl maradt, korábbi képkockákból származó bejegyzéseket is kirajzolták. Most minden raszterizáló a lista tényleges hosszáig dolgozik.</p><div class="delta" data-en="2.47% → 0.012% changing pixels">2,47% → 0,012% változó pixel</div></article>
       <article class="story"><span class="round-tag" data-en="Round 4">4. kör</span><h3 data-en="Thousands of threads, one ray at a time">Több ezer szál, egyesével</h3><p data-en="The radiance cache refresh traced one probe per thread, its 32 rays one after another: a few thousand long serial threads, with most of the GPU idle. Now a workgroup handles each probe, with a thread per ray and the result summed in shared memory.">A radiance cache frissítése szálanként egy próbát követett, mind a 32 sugarával egymás után: néhány ezer hosszú, soros szál, miközben a GPU nagy része tétlen volt. Most minden próbára egy munkacsoport jut, sugaranként egy szállal, az eredményt megosztott memóriában összegezve.</p><div class="delta" data-en="1.48 → 0.35 ms">1,48 → 0,35 ms</div></article>
+      <article class="story"><span class="round-tag" data-en="Round 4">4. kör</span><h3 data-en="The surface that swam">A felület, amely úszott</h3><p data-en="New tessellation vertices fade in as the camera approaches. Morphed in the triangle's barycentric space, a vertex slid across the height texture on its way, so the stones crawled over the path. Now it grows out of the coarser segment's midpoint to its final place in displaced space, as CDLOD terrain does; a CPU mirror of the dicer checks that both sides of every edge put down bit-identical vertices.">A tesszelláció új csúcsai a kamera közeledtével fokozatosan jelennek meg. Amikor a háromszög baricentrikus terében morfoltak, útközben végigcsúsztak a magasságtextúrán, így a kövek mászkáltak az ösvényen. Most az elmozdított térben nőnek ki a durvább szakasz felezőpontjából a végleges helyükre, ahogy a CDLOD-terepeknél; a felbontó logika CPU-s tükörmásolata ellenőrzi, hogy minden él két oldala bitre azonos csúcsokat tesz le.</p><div class="delta" data-en="edge drift with the morph &lt; 0.01 (without: 0.031)">élcsúcs-eltérés morffal &lt; 0,01 (nélküle 0,031)</div></article>
+      <article class="story"><span class="round-tag" data-en="Round 4">4. kör</span><h3 data-en="Still stones that flickered">Álló kövek, amelyek villogtak</h3><p data-en="The resolve finds the displaced point by an iteration that lands a hair away from the micro-triangle the depth came from. That hair read as motion, so TSR and motion blur shimmered on a still camera. The previous-frame position now carries the hit point's own motion.">A G-puffer-feloldás egy iterációval keresi meg az elmozdított pontot, amely egy hajszálnyira attól a mikroháromszögtől landol, amelyből a mélység jött. Ez a hajszál mozgásnak látszott, ezért álló kamerán is remegett a TSR és a mozgási elmosás. Az előző képkocka pozíciója most a találati pont saját mozgását kapja.</p><div class="delta" data-en="0.45% → 0.003% changing pixels">0,45% → 0,003% változó pixel</div></article>
     </div>
   </div>
 </section>
@@ -738,7 +762,7 @@ footer .wide-inner { gap: 10px; }
     <div class="pipeline-wrap">
       <div class="pipeline">
         <div class="stage-box"><span class="cat" style="background:#8fb7e6"></span><h3 data-en="Culling">Láthatóság</h3><ul><li>instance → cluster</li><li>assembly parts</li><li>HZB, two passes</li><li>LOD cut &lt; 1 px</li></ul></div>
-        <div class="stage-box"><span class="cat" style="background:#8fb7e6"></span><h3 data-en="Rasterising">Raszterizálás</h3><ul><li>hardware</li><li>compute (tiny tris)</li><li>voxels (foliage)</li><li>skinning</li><li>visibility buffer</li></ul></div>
+        <div class="stage-box"><span class="cat" style="background:#8fb7e6"></span><h3 data-en="Rasterising">Raszterizálás</h3><ul><li>hardware</li><li>compute (tiny tris)</li><li>tessellation (displacement)</li><li>voxels (foliage)</li><li>skinning</li><li>visibility buffer</li></ul></div>
         <div class="stage-box"><span class="cat" style="background:#c7a6e8"></span><h3 data-en="Materials">Anyagok</h3><ul><li>classify &amp; resolve</li><li>Substrate slabs</li><li>material graphs</li><li>BC7 tile streaming</li></ul></div>
         <div class="stage-box"><span class="cat" style="background:#e88c6f"></span><h3 data-en="Shadows">Árnyékok</h3><ul><li>mark pages</li><li>static / dynamic cache</li><li>movable casters</li><li>sun + 32 lights</li></ul></div>
         <div class="stage-box"><span class="cat" style="background:#f2b04a"></span><h3>Lumen</h3><ul><li>cards &amp; voxels</li><li>radiance cache</li><li>screen probes or Lite probes</li><li>reflections</li></ul></div>
@@ -764,6 +788,7 @@ footer .wide-inner { gap: 10px; }
       <li data-en="<b>MegaLights</b> traces no hardware rays (WebGPU has none): beyond a 1 m screen trace, shadows come from shadow maps or coarse distance fields.">A <b>MegaLights</b> nem követ hardveres sugarakat (WebGPU-n nincs ilyen): az 1 m-es képtérbeli követésen túl az árnyékot árnyéktérképek vagy durva távolságmezők adják.</li>
       <li data-en="<b>Volumes</b> cast no shadows on the scene and Lumen does not see them; only the fire's light reaches the surroundings.">A <b>térfogatok</b> nem vetnek árnyékot a jelenetre, és a Lumen sem látja őket; csak a tűz fénye jut el a környezetbe.</li>
       <li data-en="<b>Substrate</b> has one slab per material; UE layers and mixes any number of them.">A <b>Substrate</b> anyagonként egyetlen réteget (slabot) kezel; az UE akárhányat egymásra rétegez és kever.</li>
+      <li data-en="<b>Tessellation</b> displaces along the normal by one texture channel; UE takes any material output, vector displacement included.">A <b>tesszelláció</b> egyetlen textúracsatorna szerint, a normál mentén mozdít el; az UE bármely anyagkimenetet elfogad, vektoros elmozdítást is.</li>
       <li data-en="<b>The editor</b> has no actors or hierarchy: a tree's trunk and foliage are two separate instances.">A <b>szerkesztőben</b> nincsenek aktorok és hierarchia: egy fa törzse és lombja két külön példány.</li>
     </ul>
   </div>
@@ -827,14 +852,16 @@ async function startEngine() {
                "This browser does not support WebGPU. The pictures and videos below still work; to run it live use Chrome, Edge 113+, Safari 26+ or Firefox 141+."), false);
     return;
   }
-  globalThis.heliosConfig = { scene: "valley", embedded: true };
+  // The engine writes its own (English) progress and errors into #engine-status; the page shows
+  // translated progress text and reads errors from there.
+  globalThis.heliosConfig = { scene: "valley", embedded: true, statusElement: "engine-status" };
   showVeil(t("A motor indul, a völgy épül a böngésződben…", "Starting the engine and building the valley in your browser…"));
   try {
     const m = await import("./pkg/helios_demo.js");
     await m.default();
     // The engine starts asynchronously; wait until it reports a scene.
     for (let i = 0; i < 600 && !m.heliosScene(); i++) await new Promise((r) => setTimeout(r, 100));
-    if (!m.heliosScene()) throw new Error(status.textContent || "timeout");
+    if (!m.heliosScene()) throw new Error($("#engine-status").textContent || "timeout");
     engine = m;
     poster.hidden = true;
     veil.hidden = true;
@@ -910,6 +937,8 @@ function hudStates(hud) {
   if (gi) { s.gi = gi[1] !== "off"; s["lumen lite"] = gi[1] === "Lumen Lite"; }
   const motion = /moving \(0\): \d+ props (moving|paused)/.exec(hud);
   if (motion) s.motion = motion[1] === "moving";
+  // The tessellation line is only printed while it runs; the valley is the scene with displaced materials.
+  if (!("tessellation" in s) && hud.startsWith("valley ")) s.tessellation = false;
   const local = /local lights with shadow maps: (\d+)/.exec(hud);
   if (local) s["local lights"] = Number(local[1]) > 0;
   return s;
@@ -919,7 +948,7 @@ function ensure(key, label, want) {
   const on = hudStates(engine.heliosHud())[label];
   if (on !== undefined && on !== want) engine.heliosKey(key);
 }
-const ENSURE = { megalights: ["Equal", "megalights"], lite: ["Semicolon", "lumen lite"], volumes: ["Quote", "volumes + particles"], substrate: ["PageUp", "substrate"] };
+const ENSURE = { megalights: ["Equal", "megalights"], lite: ["Semicolon", "lumen lite"], volumes: ["Quote", "volumes + particles"], substrate: ["PageUp", "substrate"], tessellation: ["PageDown", "tessellation"] };
 
 // Presets: scene (or glTF model), camera (eye/at, heights above ground), sun, debug view, and
 // features to switch on or off (`set`).
@@ -955,6 +984,10 @@ const PRESETS = {
   canopy: { scene: "forest", view: 0, sun: 18, eye: [0, 30, 0], at: [200, 0, -60] },
   "voxel-clusters": { scene: "forest", view: 22, eye: [0, 30, 0], at: [200, 0, -60] },
   "assembly-parts": { scene: "forest", view: 23 },
+  "tess-path": { scene: "valley", view: 0, sun: 28, eye: [-27, 1.2, 41], at: [-31, 0.1, 48], set: { tessellation: true } },
+  "tess-graze": { scene: "valley", view: 0, sun: 28, eye: [-27.5, 0.35, 41.5], at: [-31, 0.12, 49], set: { tessellation: true } },
+  "tess-boulder": { scene: "valley", view: 0, sun: 28, eye: [-35.5, 1.5, 57.5], at: [-41.3, 0.6, 55], set: { tessellation: true } },
+  "tess-view": { scene: "valley", view: 25, eye: [-27, 1.2, 41], at: [-31, 0.1, 48], set: { tessellation: true } },
   gallery: { scene: "gallery", view: 0 },
   "gallery-paint": { scene: "gallery", view: 0, eye: [-7.2, 1.9, 3.4], at: [-7.2, 1.5, 0] },
   "gallery-night": { scene: "gallery", view: 0, sun: -30, eye: [-1.9, 1.5, 1.8], at: [-1.45, 1.35, 0] },
@@ -989,7 +1022,7 @@ const CATS = [
   { id: "post", color: "#9fa8ba", hu: "Kép", en: "Image", match: /.*/ },
 ];
 // Live readouts in the chapters: GPU passes summed by name.
-const READOUTS = { "t-direct": /^(light culling|local light shadows|lighting|megalights)/, "t-gather": /final gather|^lumen lite/, "t-fx": /^volume |particle|^oit/ };
+const READOUTS = { "t-direct": /^(light culling|local light shadows|lighting|megalights)/, "t-gather": /final gather|^lumen lite/, "t-fx": /^volume |particle|^oit/, "t-tess-raster": /^raster sw/ };
 const fmt = (n, d = 1) => n.toLocaleString(lang === "en" ? "en-US" : "hu-HU", { minimumFractionDigits: d, maximumFractionDigits: d });
 function updateTelemetry() {
   if (!engine) return;
@@ -1003,6 +1036,8 @@ function updateTelemetry() {
   if (tris) $("#t-tris").textContent = fmt(Number(tris[1]), 2) + " M";
   const src = /([\d.]+) M source tris/.exec(hud);
   if (src) $("#t-src").textContent = fmt(Number(src[1]), 0) + " M";
+  const micro = /tessellation (?:on|off) \(PageDown\): ([\d.]+) M micro-triangles/.exec(hud);
+  $("#t-tess").textContent = micro ? fmt(Number(micro[1]), 2) + " M" : "–";
   // Feature states of the toggle buttons.
   const states = hudStates(hud);
   for (const b of $$("[data-toggle]")) {

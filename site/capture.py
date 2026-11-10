@@ -38,6 +38,8 @@ ML_AISLE = ['--scene', 'cathedral', '--lights', '1000'] + NIGHT + ['--eye', '15,
 CAMPFIRE = ['--scene', 'forest'] + NIGHT + ['--eye', '3.5,1.4,1.0', '--at', '7,1.0,-1']
 CANOPY = ['--scene', 'forest', '--eye', '0,30,0', '--at', '200,0,-60', '--fov', '18']
 PAINT = ['--scene', 'gallery', '--eye', '-7.2,1.9,3.4', '--at', '-7.2,1.5,0']
+STONE_PATH = ['--scene', 'valley', '--sun', '200,28', '--eye', '-27,1.2,41', '--at', '-31,0.1,48']
+STONE_GRAZE = ['--scene', 'valley', '--sun', '200,28', '--eye', '-27.5,0.35,41.5', '--at', '-31,0.12,49']
 
 # name: arguments. Pairs share a prefix and end in _off / _on.
 STILLS = {
@@ -121,6 +123,12 @@ STILLS = {
     'gallery': ['--scene', 'gallery'],
     'gallery_wax': ['--scene', 'gallery'] + NIGHT + ['--eye', '-1.9,1.5,1.8', '--at', '-1.45,1.35,0'],
     'gallery_features': ['--scene', 'gallery', '--view', '24'],
+    # Nanite tessellation (the valley's cobblestone path and displaced boulders)
+    'tess_path_off': STONE_PATH + ['--no-tessellation'],
+    'tess_path_on': STONE_PATH,
+    'tess_graze_off': STONE_GRAZE + ['--no-tessellation'],
+    'tess_graze_on': STONE_GRAZE,
+    'tess_depth': STONE_PATH + ['--view', '25'],
 }
 
 # name: (arguments, seconds). Recorded at 60 fps, encoded at 30.

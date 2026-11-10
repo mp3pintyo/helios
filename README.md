@@ -167,16 +167,21 @@ of the first clip.
 telemetry (GPU time, resolution, triangles, per-pass GPU time against a 16.7 ms frame) next to chapters whose
 buttons drive it (scene, camera, sun, debug views, feature toggles), before/after sliders, camera-tour videos and
 the story of how Helios was built. It talks to the engine through the page API in `crates/helios-demo/src/web.rs`:
-`globalThis.heliosConfig = { scene, embedded, screenPercentage, gpuBudgetMs, gi, megaLights, lights }` before loading
-the module, then `heliosLoadScene`, `heliosKey`, `heliosLookAt`, `heliosSetSun`, `heliosSetView`, `heliosSetPaused`,
-`heliosHud` and `heliosScene`. `embedded: true` keeps keyboard input on the focused canvas and leaves the mouse wheel to
-the page. The editor uses a second set of exports (`heliosEditor*`, `heliosMaterialNodes`; see *Editor*).
+`globalThis.heliosConfig = { scene, embedded, screenPercentage, gpuBudgetMs, gi, megaLights, lights, statusElement }`
+before loading the module, then `heliosLoadScene`, `heliosLoadModel(url)` (fetch a glTF model and make it the scene;
+a promise), `heliosSetCandleLights(n)` (the cathedral's candle lights from its next build; 0: the 33 fixture lights),
+`heliosKey`, `heliosLookAt`, `heliosSetSun`, `heliosSetView`, `heliosSetPaused`, `heliosHud` and `heliosScene`.
+`embedded: true` keeps keyboard input on the focused canvas and leaves the mouse wheel to the page; `statusElement`
+names the element the engine writes its (English) progress and errors into instead of `#status`, so a page can show
+its own, translated text. The editor uses a second set of exports (`heliosEditor*`, `heliosMaterialNodes`; see
+*Editor*), and `editor.html` ships next to the page.
 
 ```powershell
 ./build-web.ps1                     # web/pkg
 cargo build --release -p helios-demo
 python site/capture.py all          # stills + tour videos into site/media-src (needs ffmpeg; HELIOS_ASSETS = glTF samples)
-python site/build.py                # site/dist: page, pkg, the media the page references
+uv run --with playwright --with pillow python -I site/capture_editor.py   # editor stills + video (headless Chromium)
+python site/build.py                # site/dist: page, pkg, editor, the media the page references
 python serve.py 8080 site/dist      # open http://localhost:8080/preview.html
 ```
 
