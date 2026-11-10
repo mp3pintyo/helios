@@ -183,11 +183,19 @@ fn tess_rasterize(p0: vec4<f32>, p1: vec4<f32>, p2: vec4<f32>, l0: vec2<f32>, l1
                 if bits > atomicLoad(&sw_target[target_index]) {
                     atomicMax(&sw_target[target_index], bits);
                 }
-            } else if bits == atomicLoad(&sw_target[target_index]) {
+            } else if atomicLoad(&sw_target[target_index]) - bits <= 1u {
+                // (The depth pass stored the largest bits, this triangle's among them. One step
+                // of slack: this pass has code the depth pass lacks, and a compiler may round z
+                // differently next to it — a pixel that matched no triangle would keep a stale
+                // payload and stale barycentrics.)
                 atomicStore(&sw_target[payload_offset + target_index], id);
                 // Perspective-correct: the depth is near / w (reverse-Z, infinite far plane), so
-                // the weights times it are the weights over w, and their sum is z.
-                let lambda = ((l0 * (w0 * v0.z)) + (l2 * (w1 * v1.z)) + (l1 * (w2 * v2.z))) * (inv_area / z);
+                // the weights times it are the weights over w. (From the normalised weights, not
+                // from the products `z` is summed from: sharing them would let the compiler round
+                // this pass's z differently from the depth pass's, and the pixel would match
+                // neither.)
+                let over_w = (vec3<f32>(w0, w1, w2) * inv_area) * vec3<f32>(v0.z, v1.z, v2.z);
+                let lambda = ((l0 * over_w.x) + (l2 * over_w.y) + (l1 * over_w.z)) / (over_w.x + over_w.y + over_w.z);
                 textureStore(tess_lambda, pixel, vec4<u32>(tess_pack_lambda(lambda), 0u, 0u, 0u));
             }
         }
