@@ -87,7 +87,7 @@ const ALBEDO_BUDGET: usize = 4 << 20;
 /// Of that, texels for per-instance captures of materials that depend on the placement; further
 /// instances share their pair's capture (made at its first instance's placement).
 const PLACED_BUDGET: usize = 1 << 20;
-/// Texels whose material is captured per frame (at least one pair): 16 k workgroups, ~0.1 ms.
+/// Texels whose material is captured per frame (at least one pair): 16 k workgroups, at most ~0.3 ms.
 const CAPTURE_TEXELS_PER_FRAME: usize = 1 << 20;
 /// Tile records of a capture dispatch start on 256-byte boundaries (storage buffer offsets).
 const TILE_ALIGN: usize = 16;
