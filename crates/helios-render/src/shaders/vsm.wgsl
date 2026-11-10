@@ -270,6 +270,7 @@ fn info_begin(@builtin(global_invocation_id) gid: vec3<u32>) {
         for (var k = 0u; k < 2u * LOCAL_FACES; k++) {
             atomicStore(&info[o + LOCAL_INFO_FACE_REQUESTED + k], 0);
         }
+        atomicStore(&info[o + LOCAL_INFO_REQUESTED_ALL], 0);
         let texels_per_unit = local_vsm.slots[slot].params.z * f32(LOCAL_PAGES * vsm.page_texels) * 0.5;
         atomicStore(&info[o + 11u], bitcast<i32>(texels_per_unit));
     } else if i < MAX_LEVELS + LOCAL_SLOTS + LOCAL_SLOTS * LOCAL_FACES * LOCAL_MIPS {
@@ -380,6 +381,21 @@ fn dirty_info(@builtin(global_invocation_id) gid: vec3<u32>) {
         atomicStore(&info[INFO_PAGE_STATIC + physical], bitcast<i32>(INVALID_ID));
     }
     dirty_page(entry, state);
+}
+
+// Counts per slot the local pages requested this frame, resident or not: what a light's map
+// asks of the page pool (dirty_info counts only what it got). A pool too small for every
+// light's requests leaves new maps without pages, which then render nothing and would look
+// cheap (vsm_local.rs). One thread per local page cache entry.
+@compute @workgroup_size(64)
+fn count_local_requests(@builtin(global_invocation_id) gid: vec3<u32>) {
+    if gid.x >= LOCAL_SLOTS * LOCAL_FACES * LOCAL_FACE_ENTRIES {
+        return;
+    }
+    if requests[local_vsm.entry_base + gid.x] == vsm.frame {
+        let slot = gid.x / (LOCAL_FACES * LOCAL_FACE_ENTRIES);
+        atomicAdd(&info[LOCAL_INFO_SLOTS + slot * LOCAL_INFO_SLOT_WORDS + LOCAL_INFO_REQUESTED_ALL], 1);
+    }
 }
 
 // After dirty_info: appends the pages whose dynamic casters moved (vsm_invalidate.wgsl) and that

@@ -458,7 +458,7 @@ impl DemoApp {
         let moving = self.renderer.moving_light_stats();
         if moving.anchors.mapped + moving.anchors.fields > 0 {
             text.push_str(&format!(
-                "\nmoving lights: {} with shadow maps ({} at a coarser tolerance), {} on distance fields · {} faces re-anchored ({:.0} pages; held maps need {:.1} of {:.0} pages a frame) · local pages rendered in full: {} ({} of moving lights)",
+                "\nmoving lights: {} with shadow maps ({} at a coarser tolerance), {} on distance fields · {} faces re-anchored ({:.0} pages; held maps need {:.1} of {:.0} pages a frame) · local pages rendered in full: {} ({} of moving lights) · moving lights' pages rendered: {} (dynamic casters only: {})",
                 moving.anchors.mapped,
                 moving.anchors.relaxed,
                 moving.anchors.fields,
@@ -468,6 +468,8 @@ impl DemoApp {
                 s.moving_light_pages,
                 moving.full_pages,
                 moving.moving_full_pages,
+                moving.moving_pages,
+                moving.moving_pages.saturating_sub(moving.moving_full_pages),
             ));
         }
         if self.motion.instance_count() > 0 {

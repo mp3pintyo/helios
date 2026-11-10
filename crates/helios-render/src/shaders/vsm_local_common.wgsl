@@ -26,6 +26,9 @@ const LOCAL_INFO_SLOT_WORDS: u32 = 32u;
 // rendered in full (read back as the faces' costs, vsm_local.rs).
 const LOCAL_INFO_FACE_REQUESTED: u32 = 18u;
 const LOCAL_INFO_FACE_FULL: u32 = 24u;
+// Word of a slot's data counting the pages of all its faces requested this frame, whether the
+// page pool could hold them or not (vsm.wgsl, count_local_requests; read back, vsm_local.rs).
+const LOCAL_INFO_REQUESTED_ALL: u32 = 30u;
 const LOCAL_INFO_RECTS: u32 = 17544u;
 // Upper bound of filter radii in texels (sampling) and of the footprint marking requests.
 const LOCAL_MAX_FILTER_TEXELS: f32 = 10.0;

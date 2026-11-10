@@ -570,6 +570,8 @@ mod native {
         /// of moving lights re-anchored.
         local_full: f64,
         moving_full: f64,
+        /// Pages moving lights rendered (in full or their dynamic casters only).
+        moving_pages: f64,
         faces: f64,
         /// Moving lights wanting a shadow map: the fewest with one in a frame, the frames in
         /// which some kept distance-field shadows, and those in which some had a coarser
@@ -599,6 +601,7 @@ mod native {
             let moving = app.renderer.moving_light_stats();
             self.local_full += moving.full_pages as f64;
             self.moving_full += moving.moving_full_pages as f64;
+            self.moving_pages += moving.moving_pages as f64;
             self.faces += moving.anchors.faces as f64;
             let a = moving.anchors;
             if a.mapped + a.fields > 0 {
@@ -623,7 +626,7 @@ mod native {
             let passes: Vec<String> = self.passes.iter().map(|(label, ms)| format!("{label} {:.3}", ms / n)).collect();
             median
                 + &format!(
-                "frames {from}..{to} mean: GPU {:.2} ms (smoothed max {:.2}) · shadow pages rendered {:.1} ({:.1} dynamic casters only), {:.0} draws · local pages in full {:.1} ({:.1} of moving lights), {:.2} faces re-anchored · passes: {}",
+                "frames {from}..{to} mean: GPU {:.2} ms (smoothed max {:.2}) · shadow pages rendered {:.1} ({:.1} dynamic casters only), {:.0} draws · local pages in full {:.1} ({:.1} of moving lights), moving lights' pages {:.1}, {:.2} faces re-anchored · passes: {}",
                 self.gpu / n,
                 self.gpu_max,
                 self.pages / n,
@@ -631,6 +634,7 @@ mod native {
                 self.draws / n,
                 self.local_full / n,
                 self.moving_full / n,
+                self.moving_pages / n,
                 self.faces / n,
                 passes.join(" · ")
             )

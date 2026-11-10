@@ -225,6 +225,7 @@ pub struct VirtualShadowMap {
     volume_marking: bool,
     info_begin: wgpu::ComputePipeline,
     dirty_info: wgpu::ComputePipeline,
+    count_local_requests: wgpu::ComputePipeline,
     refresh: wgpu::ComputePipeline,
     expand: wgpu::ComputePipeline,
     expand_local: wgpu::ComputePipeline,
@@ -423,6 +424,7 @@ impl VirtualShadowMap {
             volume_marking: false,
             info_begin: vsm_pipeline("vsm info", "info_begin"),
             dirty_info: vsm_pipeline("vsm info", "dirty_info"),
+            count_local_requests: vsm_pipeline("vsm info", "count_local_requests"),
             refresh: vsm_pipeline("vsm refresh", "refresh"),
             expand: expand_pipeline("vsm expand", "expand"),
             expand_local: expand_pipeline("vsm expand local", "expand_local"),
@@ -712,6 +714,10 @@ impl VirtualShadowMap {
             pass.dispatch_workgroups(workgroups(INFO_ITEMS, 64), 1, 1);
             pass.set_pipeline(&self.dirty_info);
             pass.dispatch_workgroups(workgroups(self.cache.physical_count, 64), 1, 1);
+            if local {
+                pass.set_pipeline(&self.count_local_requests);
+                pass.dispatch_workgroups(workgroups(crate::vsm_local::ENTRIES, 64), 1, 1);
+            }
             pass.set_pipeline(&self.refresh);
             pass.dispatch_workgroups(workgroups(self.cache.physical_count, 64), 1, 1);
         }
