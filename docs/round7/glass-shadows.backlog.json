@@ -1,0 +1,26 @@
+[
+  {
+    "id": "glass-sun-transmission",
+    "title": "Színes napfény az ólomüvegen át: a napot az üvegtáblák színe szűri (áttetsző árnyéktérkép)",
+    "area": "Árnyékok",
+    "kind": "feature",
+    "status": "done",
+    "phase": "7. kör",
+    "summary": "A katedrális ólomüveg ablakain átsütő nap eddig fehér foltokat vetett a padlóra és a pillérekre: az üvegtáblák nem vetnek árnyékot (a virtuális árnyéktérkép átengedi a napot), és semmi sem színezte a fényt. Mostantól a látható Glass példányok a nap felől egy saját térképbe rajzolódnak (a napfény irányú ortografikus nézet a táblák befoglaló dobozaira illesztve, 256²–2048² texel, a katedrális 84 m-nyi ablakára 4,1 cm-es texelek). Minden texel a naphoz legközelebbi tábla áteresztését (alapszín × textúra, az ólomüveg-szorzó, Fresnel, az ólomkeret semmit) és a fény menti mélységét tartja. Ami egy tábla mögött van, annak a napfényét a tábla színe szűri: a közvetlen megvilágításban (a tábla mögötti távolsággal elmosva, 10 m-es magasságból ~10 cm), a volumetrikus ködben (színes fénysugarak) és a Lumen kártyák megvilágításában (színes visszaverődés).",
+    "details": "glass_shadow.rs: GlassShadowUniform::fit (napirányú ortho, x/y négyzetes, z 0..1 a táblák mélységtartományán), map_size (2 hatványa, 2 cm-es texelig, 256–2048), GlassShadow (rgba16f színtérkép + depth16, 1×1 fehér helyőrző; csak akkor rajzol újra, ha a vetítés, a jelenet verziói változtak vagy tábla mozdult). translucency.wgsl: vs_glass_shadow / fs_glass_shadow – a shade_glass áteresztése (a szórt rész is), alfa = mélység; surface_input_seen közös a nézeti surface_input-tal. glass_shadow.wgsl: glass_transmission (1 minta: köd, Lumen kártyák) és glass_transmission_soft (6 Vogel-minta, pixelenként és képkockánként forgatva, sugár a tábla mögötti távolság 1,2 %-a, 1–8 texel), 5 cm mélységeltolás. lighting.wgsl: a sun_light szorzódik vele (diffúz, spekuláris, Substrate, lomb). fog.wgsl, lumen_card_light.wgsl: egy-egy minta. RenderSettings::glass_shadows (alap be, árnyékok kellenek), End billentyű, --no-glass-shadows, szerkesztő: 'Coloured light through glass'. A pipeline a Translucency csoportban van, a böngésző háttérben fordítja, ha a jelenetben van üveg. Mérlegelt és elvetett: a VSM-be építés (texelenként csak egy mélység, nem szín), az összes réteg szorzása (a fény útján a fogadó MÖGÖTTI tábla is színezne), csak a 30 % közvetlen áteresztés vetítése (halvány derengés a valódi színes foltok helyett).",
+    "metrics": "RTX 3090, 2560×1440, katedrális déli mellékhajó, 3 váltakozó futás: GPU-képkocka ki 9,69/9,96/9,75 → be 9,87/9,92/9,78 ms; lighting 1,92–1,96 → 1,97–2,02 ms (~+0,05 ms), köd és Lumen kártyák mérhetetlen. A térkép egyszer rajzolódik; animált nappal 0,034 ms képkockánként. Memória: katedrális 2048² 40 MiB, völgy 256² 0,6 MiB, üveg nélkül semmi. Böngésző (headless Chromium, WebGPU): a Tint lefordítja, konzolhiba nincs, az End kapcsol.",
+    "showcase": "Katedrális, déli mellékhajó nyugat felé (--eye 45,1.7,10.3 --at 5,4,10.8): a pilléreken és a padlón az ablakok színes foltjai; End-del ki/be – docs/round7/glass-shadows/aisle-off-vs-on.jpg, browser-on.jpg / browser-off.jpg.",
+    "modules": [
+      "crates/helios-render/src/glass_shadow.rs",
+      "crates/helios-render/src/shaders/glass_shadow.wgsl",
+      "crates/helios-render/src/translucency.rs",
+      "crates/helios-render/src/shaders/translucency.wgsl",
+      "crates/helios-render/src/shaders/lighting.wgsl",
+      "crates/helios-render/src/shaders/fog.wgsl",
+      "crates/helios-render/src/shaders/lumen_card_light.wgsl",
+      "crates/helios-render/src/renderer.rs"
+    ],
+    "order": 198,
+    "updated": "2026-11-10"
+  }
+]

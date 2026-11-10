@@ -29,7 +29,8 @@
 //! * **Volumetric fog** – froxel-based lit height fog with shadowed light shafts.
 //! * **Translucency** – a forward pass for glass, water and alpha-blended surfaces after the
 //!   deferred lighting: refraction of the lit scene, absorption, screen-space and distance-field
-//!   reflections, fog.
+//!   reflections, fog. Sunlight through glass takes the panes' colour (a map of the panes seen
+//!   from the sun).
 //! * **Volumes and particles** – simulated smoke and fire or procedural mist in ray-marched
 //!   voxel boxes with a lighting cache; GPU particle emitters; both blended order-independently
 //!   around the translucent surfaces.
@@ -49,6 +50,7 @@ mod fog;
 mod context;
 mod dynamic_debug;
 mod effects;
+mod glass_shadow;
 mod gpu_scene;
 mod gpu_types;
 mod lights;

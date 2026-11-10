@@ -26,6 +26,7 @@ const SOURCES: &[(&str, &str)] = &[
     ("gbuffer.wgsl", include_str!("shaders/gbuffer.wgsl")),
     ("geometry.wgsl", include_str!("shaders/geometry.wgsl")),
     ("gi.wgsl", include_str!("shaders/gi.wgsl")),
+    ("glass_shadow.wgsl", include_str!("shaders/glass_shadow.wgsl")),
     ("hzb.wgsl", include_str!("shaders/hzb.wgsl")),
     ("light_cull.wgsl", include_str!("shaders/light_cull.wgsl")),
     ("lighting.wgsl", include_str!("shaders/lighting.wgsl")),

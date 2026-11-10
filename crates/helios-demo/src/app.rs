@@ -68,7 +68,7 @@ pub struct DemoApp {
 const SCREEN_PERCENTAGES: [f32; 4] = [50.0, 67.0, 75.0, 100.0];
 
 pub const HELP: &str = "WASD/QE fly · drag to look · wheel speed · Shift fast\n\
-N next scene · 0 demo motion · V debug view · Insert voxel LODs · PageDown tessellation · G GI · ; GI method (Lumen / Lumen Lite) · H shadows · 1 local light shadow maps · [ ] screen percentage (50/67/75/100 %) · \\ dynamic resolution · T TAA · O occlusion · K software raster · I texture streaming · - animation clip / pause · F fog · C clouds · U translucency · / translucency layers · ' volumes + particles · L wind · M motion blur · B depth of field · ` local exposure · = MegaLights · Z/X zoom · , . LOD error · PageUp Substrate materials · ←→↑↓ sun · P animate sun · J day/night cycle · Y camera tour · R reset · Tab editor tools (native)";
+N next scene · 0 demo motion · V debug view · Insert voxel LODs · PageDown tessellation · G GI · ; GI method (Lumen / Lumen Lite) · H shadows · 1 local light shadow maps · [ ] screen percentage (50/67/75/100 %) · \\ dynamic resolution · T TAA · O occlusion · K software raster · I texture streaming · - animation clip / pause · F fog · C clouds · U translucency · End coloured light through glass · / translucency layers · ' volumes + particles · L wind · M motion blur · B depth of field · ` local exposure · = MegaLights · Z/X zoom · , . LOD error · PageUp Substrate materials · ←→↑↓ sun · P animate sun · J day/night cycle · Y camera tour · R reset · Tab editor tools (native)";
 
 impl DemoApp {
     pub fn new(
@@ -238,6 +238,8 @@ impl DemoApp {
             "KeyC" => s.clouds = !s.clouds,
             "KeyU" => s.translucency = !s.translucency,
             "Slash" => s.translucency_layers = !s.translucency_layers,
+            // Sunlight through glass coloured by the panes / white.
+            "End" => s.glass_shadows = !s.glass_shadows,
             "KeyL" => s.wind = !s.wind,
             "Quote" => {
                 let on = !(s.volumes || s.particles);

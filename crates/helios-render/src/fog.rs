@@ -65,6 +65,8 @@ pub struct FogInputs<'a> {
     pub clouds: &'a crate::clouds::Clouds,
     pub lumen: &'a crate::lumen::Lumen,
     pub samplers: &'a crate::passes::Samplers,
+    /// Sunlight through glass (coloured shafts).
+    pub glass: &'a crate::glass_shadow::GlassShadow,
 }
 
 pub struct VolumetricFog {
@@ -109,6 +111,8 @@ impl VolumetricFog {
                 (18, bind::texture_3d(true)),
                 (19, bind::storage_texture_3d(FORMAT)),
                 (60, bind::uniform()),
+                (90, bind::uniform()),
+                (91, bind::texture(true)),
             ],
         );
         let integrate_layout = bind_group_layout(
@@ -203,6 +207,8 @@ impl VolumetricFog {
                 (18, TextureView(&v.scattering[1 - current])),
                 (19, TextureView(&v.scattering[current])),
                 (60, inputs.vsm.local.uniform.as_entire_binding()),
+                (90, inputs.glass.uniform.as_entire_binding()),
+                (91, TextureView(inputs.glass.view())),
             ],
         );
         let integrate = bind_group(

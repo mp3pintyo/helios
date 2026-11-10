@@ -18,6 +18,7 @@
 #include "clouds_common.wgsl"
 #include "fog_common.wgsl"
 #include "stars.wgsl"
+#include "glass_shadow.wgsl"
 
 @group(0) @binding(0) var<uniform> frame: Frame;
 @group(0) @binding(1) var depth_texture: texture_2d<f32>;
@@ -351,7 +352,8 @@ fn shade(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     let sun = normalize(frame.sun_direction.xyz);
     let sun_transmittance = sample_transmittance(transmittance_lut, lut_sampler, atmosphere_position(world_position), sun);
-    let sun_light = frame.sun_illuminance.rgb * sun_transmittance;
+    // Through glass, the panes' colour filters the sun (glass_shadow.wgsl).
+    let sun_light = frame.sun_illuminance.rgb * sun_transmittance * glass_transmission_soft(world_position, lut_sampler, noise);
     let n_dot_l = saturate(dot(n, sun));
     let surface_flags = surface_flags_of(motion.w);
 

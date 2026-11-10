@@ -48,6 +48,7 @@
 @group(0) @binding(20) var scattering: texture_3d<f32>;
 @group(0) @binding(21) var integrated_out: texture_storage_3d<rgba16float, write>;
 @group(0) @binding(60) var<uniform> local_vsm: LocalVsm;
+#include "glass_shadow.wgsl"
 
 fn henyey_greenstein(cos_theta: f32, g: f32) -> f32 {
     let g2 = g * g;
@@ -126,7 +127,9 @@ fn inject(@builtin(global_invocation_id) gid: vec3<u32>) {
         let visibility = sun_visibility(world) * cloud_shadow(world);
         if visibility > 0.0 && sun.y > -0.05 {
             let transmittance = sample_transmittance(transmittance_lut, lut_sampler, atmosphere_position(world), sun);
-            radiance += frame.sun_illuminance.rgb * transmittance * visibility * henyey_greenstein(dot(sun, view_dir), g);
+            // Coloured shafts behind stained glass.
+            let glass = glass_transmission(world, lut_sampler);
+            radiance += frame.sun_illuminance.rgb * transmittance * glass * visibility * henyey_greenstein(dot(sun, view_dir), g);
         }
         // Ambient: the radiance cache sees walls and windows (interiors stay dark); isotropic phase.
         let sky_up = sh_irradiance(sky_sh, vec3<f32>(0.0, 1.0, 0.0)) * frame.sun_illuminance.rgb;

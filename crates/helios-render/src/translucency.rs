@@ -50,6 +50,7 @@ use wgpu::BindingResource::{Sampler, TextureView};
 use wgpu::{BindingType, ShaderStages};
 
 use crate::camera::frustum_planes;
+use crate::glass_shadow::{GlassShadow, PaneDraw, PaneInputs};
 use crate::gpu_scene::GpuScene;
 use crate::motion::SceneChanges;
 use crate::passes::shading::LightingInputs;
@@ -455,10 +456,14 @@ pub struct Translucency {
     layer_ranges: wgpu::Buffer,
     /// The peel count `layer_ranges` was written for.
     ranges_written: Option<usize>,
+    /// The glass panes seen from the sun: coloured sunlight behind them (`glass_shadow.rs`).
+    glass_shadow: GlassShadow,
+    /// A glass pane moved since the glass shadow was last updated.
+    glass_moved: bool,
 }
 
 impl Translucency {
-    pub fn new(device: &wgpu::Device) -> Self {
+    pub fn new(device: &wgpu::Device, queue: &wgpu::Queue) -> Self {
         let module = create_module(device, "translucency.wgsl");
         let layout = layout(device);
         type Make = fn(&wgpu::Device, &wgpu::ShaderModule, &wgpu::BindGroupLayout, Shading) -> wgpu::RenderPipeline;
@@ -508,7 +513,14 @@ impl Translucency {
             unbounded: None,
             layer_ranges: uniform_buffer(device, "translucency layer ranges", LAYER_RANGE_STRIDE * MAX_LAYERS as u64),
             ranges_written: None,
+            glass_shadow: GlassShadow::new(device, queue, &module),
+            glass_moved: false,
         }
+    }
+
+    /// Sunlight through glass: the map the lighting, fog and Lumen read.
+    pub fn glass_shadow(&self) -> &GlassShadow {
+        &self.glass_shadow
     }
 
     /// Whether the camera was inside a water body at the last [`Translucency::update`].
@@ -521,11 +533,6 @@ impl Translucency {
         &self.water
     }
 
-    /// Mirrors the scene's translucent instances and water bodies (moved ones in place), culls
-    /// and sorts them for this frame's view, decides how many layers to peel (none with `layers`
-    /// false) and sizes the scene-colour copy and the layers. With `enabled` false nothing is
-    /// drawn (the water uniform is still written: lake beds need it).
-    #[allow(clippy::too_many_arguments)]
     /// Queues the pipelines of the translucent models the scene's visible instances use for the
     /// browser's background compile.
     pub fn prefetch(&self, scene: &Scene) {
@@ -536,9 +543,18 @@ impl Translucency {
             if shading == Shading::Water {
                 self.pipelines[Shading::Underwater as usize].prefetch();
             }
+            if shading == Shading::Glass {
+                self.glass_shadow.prefetch();
+            }
         }
     }
 
+    /// Mirrors the scene's translucent instances and water bodies (moved ones in place), culls
+    /// and sorts them for this frame's view, decides how many layers to peel (none with `layers`
+    /// false) and sizes the scene-colour copy and the layers. With `enabled` false nothing is
+    /// drawn (the water uniform is still written: lake beds need it). `glass_shadows`: the glass
+    /// panes colour the sunlight behind them ([`GlassShadow`]).
+    #[allow(clippy::too_many_arguments)]
     pub fn update(
         &mut self,
         device: &wgpu::Device,
@@ -550,6 +566,7 @@ impl Translucency {
         size: (u32, u32),
         enabled: bool,
         layers: bool,
+        glass_shadows: bool,
     ) {
         let versions = (scene.geometry_version, scene.material_version, scene.instance_version);
         if versions != self.versions || changes.structural {
@@ -558,6 +575,8 @@ impl Translucency {
         } else {
             self.move_instances(scene, changes);
         }
+        let panes = self.candidates.iter().filter(|c| c.shading == Shading::Glass).map(|c| c.aabb);
+        self.glass_shadow.update(device, queue, scene.sun.direction, panes, glass_shadows, std::mem::take(&mut self.glass_moved));
         self.draws = if enabled { sort_back_to_front(&self.candidates, eye, &frustum_planes(view_proj)) } else { Vec::new() };
         self.camera_body = if enabled { self.water_bodies.iter().position(|b| b.contains(eye)) } else { None };
         let uniform = WaterUniform::new(&scene.water, &self.water_bodies, self.camera_body);
@@ -606,6 +625,7 @@ impl Translucency {
             let decoded = self.decoded[mesh].expect("candidates have decoded meshes");
             *c = Candidate::of(scene, m.index as usize, c.shading, decoded);
             water_moved |= c.shading == Shading::Water;
+            self.glass_moved |= c.shading == Shading::Glass;
         }
         if water_moved {
             self.water_bodies = water_bodies(scene);
@@ -664,6 +684,31 @@ impl Translucency {
                 self.cpu_indices.len() / 3
             );
         }
+    }
+
+    /// Draws the glass panes into the glass shadow map if it needs it (before anything that
+    /// reads it: Lumen, fog, lighting).
+    pub fn record_glass_shadow(&mut self, rec: &mut Recorder, frame: &wgpu::Buffer, scene: &GpuScene, textures: &TextureLibrary, samplers: &crate::passes::Samplers) {
+        let (Some(vertices), Some(indices)) = (&self.vertices, &self.indices) else { return };
+        if !self.glass_shadow.active() {
+            return;
+        }
+        let panes: Vec<PaneDraw> = self
+            .candidates
+            .iter()
+            .filter(|c| c.shading == Shading::Glass)
+            .map(|c| PaneDraw { first_index: c.range.first_index, index_count: c.range.index_count, base_vertex: c.range.base_vertex, instance: c.instance })
+            .collect();
+        let inputs = PaneInputs {
+            frame,
+            instances: &scene.instances,
+            materials: &scene.materials,
+            textures,
+            samplers,
+            vertices,
+            indices,
+        };
+        self.glass_shadow.record(rec, &inputs, &panes, self.versions);
     }
 
     /// Records the layer peeling, the scene-colour copies and the translucent draws over
@@ -934,7 +979,7 @@ fn layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
 const VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 5] =
     wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2, 3 => Float32x2, 4 => Float32x4];
 
-fn mesh_buffer() -> wgpu::VertexBufferLayout<'static> {
+pub(crate) fn mesh_buffer() -> wgpu::VertexBufferLayout<'static> {
     wgpu::VertexBufferLayout {
         array_stride: std::mem::size_of::<TranslucentVertex>() as u64,
         step_mode: wgpu::VertexStepMode::Vertex,

@@ -69,6 +69,8 @@ mod native {
         pub occlusion: bool,
         pub sw_raster: bool,
         pub rvt: bool,
+        /// Sunlight through glass takes the panes' colour (`--no-glass-shadows`: white).
+        pub glass_shadows: bool,
         /// Stream image textures at native resolution (`--no-svt`: 512² texture arrays only).
         pub svt: bool,
         pub animate_sun: bool,
@@ -147,7 +149,7 @@ mod native {
 
     impl Options {
         pub fn parse(args: &[String]) -> Self {
-            let mut o = Options { screenshot: None, size: (1600, 900), frames: 90, view: None, detail: Detail::High, scene: SceneKind::Valley, camera: None, eye: None, at: None, occlusion: true, sw_raster: true, rvt: true, svt: true, animate_sun: false, lod: None, fov: None, pool_mb: None, texture_pool_mb: None, texture_compression: true, switch_to: None, dump_dir: None, dump_count: 16, keys: Vec::new(), keys_at: None, hold: Vec::new(), gltf: None, ground: true, bake_hvm: None, stream_from: None, io_latency_ms: 0, sun: None, move_light: false, full_invalidation: false, moving_lights: Default::default(), moving_light_pages: None, movers: None, static_motion: false, screen_percentage: None, gpu_budget_ms: None, local_exposure: Some(Default::default()), scene_file: None, select: Vec::new(), no_skinning: false, gi: None, megalights: false, tessellation: true, displacement_speed_bound: true, dice_rate: None, speed: None };
+            let mut o = Options { screenshot: None, size: (1600, 900), frames: 90, view: None, detail: Detail::High, scene: SceneKind::Valley, camera: None, eye: None, at: None, occlusion: true, sw_raster: true, rvt: true, glass_shadows: true, svt: true, animate_sun: false, lod: None, fov: None, pool_mb: None, texture_pool_mb: None, texture_compression: true, switch_to: None, dump_dir: None, dump_count: 16, keys: Vec::new(), keys_at: None, hold: Vec::new(), gltf: None, ground: true, bake_hvm: None, stream_from: None, io_latency_ms: 0, sun: None, move_light: false, full_invalidation: false, moving_lights: Default::default(), moving_light_pages: None, movers: None, static_motion: false, screen_percentage: None, gpu_budget_ms: None, local_exposure: Some(Default::default()), scene_file: None, select: Vec::new(), no_skinning: false, gi: None, megalights: false, tessellation: true, displacement_speed_bound: true, dice_rate: None, speed: None };
             let mut scene_given = false;
             let mut it = args.iter().skip(1);
             while let Some(arg) = it.next() {
@@ -179,6 +181,7 @@ mod native {
                     "--no-occlusion" => o.occlusion = false,
                     "--no-sw-raster" => o.sw_raster = false,
                     "--no-rvt" => o.rvt = false,
+                    "--no-glass-shadows" => o.glass_shadows = false,
                     "--no-svt" => o.svt = false,
                     "--no-texture-compression" => o.texture_compression = false,
                     "--animate-sun" => o.animate_sun = true,
@@ -318,6 +321,7 @@ mod native {
             }
             app.renderer.settings.occlusion_culling = self.occlusion;
             app.renderer.settings.virtual_texturing = self.rvt;
+            app.renderer.settings.glass_shadows = self.glass_shadows;
             app.renderer.settings.texture_streaming = self.svt;
             if let Some(lod) = self.lod {
                 app.renderer.settings.lod_threshold = lod;

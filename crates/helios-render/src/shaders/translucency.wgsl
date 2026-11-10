@@ -47,6 +47,7 @@
 #include "fog_common.wgsl"
 #include "stars.wgsl"
 #include "water.wgsl"
+#include "glass_shadow.wgsl"
 
 override SHADING: u32 = 0u;
 const SHADING_WATER: u32 = 0u;
@@ -154,11 +155,15 @@ struct FragmentOutput {
 // One draw per instance: `first_instance` is the instance index.
 @vertex
 fn vs_main(v: VertexInput, @builtin(instance_index) instance_index: u32) -> VertexOutput {
+    return transform_vertex(v, instance_index, frame.view_proj);
+}
+
+fn transform_vertex(v: VertexInput, instance_index: u32, view_proj: mat4x4<f32>) -> VertexOutput {
     let instance = instances[instance_index];
     let world = instance.world * vec4<f32>(v.position, 1.0);
     let normal_matrix = mat3x3<f32>(instance.normal_matrix_0.xyz, instance.normal_matrix_1.xyz, instance.normal_matrix_2.xyz);
     var out: VertexOutput;
-    out.position = frame.view_proj * world;
+    out.position = view_proj * world;
     out.world_position = world.xyz;
     out.object_position = v.position;
     out.previous_world = (instance.prev_world * vec4<f32>(v.position, 1.0)).xyz;
@@ -499,13 +504,17 @@ fn reflection(p: vec3<f32>, n: vec3<f32>, r: vec3<f32>, roughness: f32, noise: f
 // Material inputs from the interpolated attributes and screen derivatives (computed up front,
 // in uniform control flow).
 fn surface_input(in: VertexOutput, front_facing: bool) -> SurfaceInput {
+    // Derivatives per output pixel rather than per internal one: the mip bias of temporal
+    // super resolution (texture detail as at the output resolution; TSR resolves it).
+    return surface_input_seen(in, front_facing, frame.upscale.xy, normalize(frame.camera_position.xyz - in.world_position));
+}
+
+// `surface_input` for a view from direction `to_eye`, derivatives scaled by `gradient_scale`.
+fn surface_input_seen(in: VertexOutput, front_facing: bool, gradient_scale: vec2<f32>, to_eye: vec3<f32>) -> SurfaceInput {
     let instance = instances[in.instance];
     var s: SurfaceInput;
     s.object_position = in.object_position;
     s.world_position = in.world_position;
-    // Derivatives per output pixel rather than per internal one: the mip bias of temporal
-    // super resolution (texture detail as at the output resolution; TSR resolves it).
-    let gradient_scale = frame.upscale.xy;
     s.dpdx = dpdx(in.world_position) * gradient_scale.x;
     s.dpdy = dpdy(in.world_position) * gradient_scale.y;
     s.object_dpdx = dpdx(in.object_position) * gradient_scale.x;
@@ -523,7 +532,6 @@ fn surface_input(in: VertexOutput, front_facing: bool) -> SurfaceInput {
     if s.back_facing {
         n = -n;
     }
-    let to_eye = normalize(frame.camera_position.xyz - in.world_position);
     n = normalize(n + to_eye * max(0.0, -dot(n, to_eye) + 0.05));
     s.normal = n;
     // Cotangent frame from screen derivatives of the material texture's coordinates (no stored
@@ -1039,4 +1047,30 @@ fn fs_underwater(@builtin(position) position: vec4<f32>) -> FragmentOutput {
     let light = water_light_along(eye, eye + view_dir * dist, level);
     out.color = vec4<f32>(background * exp(-extinction * dist) + underwater_inscatter(eye, view_dir, dist, level, light, vec3<f32>(1.0)), 1.0);
     return out;
+}
+
+// ---- Sunlight through glass ------------------------------------------------------------------------
+
+// The glass panes seen from the sun (glass_shadow.rs): one draw per pane, as `vs_main`.
+@vertex
+fn vs_glass_shadow(v: VertexInput, @builtin(instance_index) instance_index: u32) -> VertexOutput {
+    return transform_vertex(v, instance_index, glass_shadow.view_proj);
+}
+
+// The fraction of the sunlight a pane passes, as `shade_glass` transmits it (the light the
+// hammered glass diffuses included: it still arrives, a little blurred - see
+// GLASS_SHADOW_SPREAD), and its depth along the sunlight. Lead came passes nothing.
+@fragment
+fn fs_glass_shadow(in: VertexOutput, @builtin(front_facing) front_facing: bool) -> @location(0) vec4<f32> {
+    let sun = normalize(frame.sun_direction.xyz);
+    let input = surface_input_seen(in, front_facing, vec2<f32>(1.0), sun);
+    var m = materials[instances[in.instance].material];
+    m.base_color *= in.color;
+    let g = evaluate_glass(m, input);
+    let coverage = saturate(g.emissive);
+    let stained = m.texture != NO_TEXTURE;
+    let cos_incidence = max(abs(dot(normalize(in.normal), sun)), 1e-4);
+    let fresnel = f_schlick(vec3<f32>(GLASS_F0), cos_incidence).x;
+    let tint = g.albedo * select(1.0, GLASS_TRANSMISSION, stained) * (1.0 - fresnel) * coverage;
+    return vec4<f32>(tint, in.position.z);
 }

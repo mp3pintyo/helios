@@ -264,6 +264,9 @@ pub struct RenderSettings {
     /// Composite overlapping translucent surfaces in per-pixel depth order (depth peeling where
     /// they overlap on screen, see `translucency.rs`). Off: in per-instance order only.
     pub translucency_layers: bool,
+    /// Sunlight through glass takes the panes' colour (`glass_shadow.rs`): stained glass throws
+    /// coloured light onto the floor, the walls and the fog. Off: it lands white.
+    pub glass_shadows: bool,
     /// Fraction of a frame the virtual shutter stays open for motion blur (0.5 = 180° shutter,
     /// 0 = off).
     pub motion_blur: f32,
@@ -339,6 +342,7 @@ impl Default for RenderSettings {
             volumetric_fog: true,
             translucency: true,
             translucency_layers: true,
+            glass_shadows: true,
             motion_blur: 0.5,
             depth_of_field: None,
             wind: true,
@@ -516,7 +520,7 @@ impl Renderer {
             gi: in_group(Group::GlobalIllumination, || GiPass::new(device)),
             lighting: LightingPass::new(device),
             megalights: MegaLights::new(device, queue),
-            translucency: in_group(Group::Translucency, || Translucency::new(device)),
+            translucency: in_group(Group::Translucency, || Translucency::new(device, queue)),
             effects: in_group(Group::Effects, || Effects::new(device)),
             tsr: TsrPass::new(device),
             post_fx: in_group(Group::CameraEffects, || PostFxPass::new(device)),
@@ -793,6 +797,7 @@ impl Renderer {
         s.clouds &= ready(Group::Clouds);
         s.volumetric_fog &= ready(Group::Fog);
         s.translucency &= ready(Group::Translucency);
+        s.glass_shadows &= ready(Group::Translucency);
         // The tessellator (and its pipelines) is created once the frame knows the scene has
         // displaced surfaces: until then its group is empty, not ready.
         s.tessellation &= ready(Group::Tessellation) && !(self.displaceable && self.culling.tessellation.is_none() && pipelines::deferring());
@@ -943,7 +948,8 @@ impl Renderer {
         let translucency = self.settings.translucency && self.settings.debug_view == DebugView::Lit;
         let layers = self.settings.translucency_layers;
         let changes = &self.motion.changes;
-        self.translucency.update(&self.device, &self.queue, scene, changes, camera.position, &unjittered_view_proj, capacity, translucency, layers);
+        let glass_shadows = self.settings.glass_shadows && self.settings.shadows;
+        self.translucency.update(&self.device, &self.queue, scene, changes, camera.position, &unjittered_view_proj, capacity, translucency, layers, glass_shadows);
 
         let lumen_lite = self.lumen_lite.as_ref().filter(|_| self.uses_lumen_lite());
         let device = self.device.clone();
@@ -987,6 +993,8 @@ impl Renderer {
         if self.settings.shadows {
             self.vsm.record(&mut rec, &self.culling, &self.scene, &self.frame_uniform, &self.targets, &self.lights);
         }
+        self.translucency.record_glass_shadow(&mut rec, &self.frame_uniform, &self.scene, &self.textures, &self.samplers);
+        let glass = self.translucency.glass_shadow();
         let displace = DisplaceInputs {
             scene: &self.scene,
             albedo: &self.textures.albedo,
@@ -1009,7 +1017,7 @@ impl Renderer {
                 current,
                 &self.lights,
                 &self.exposure.buffer,
-                &CardInputs { vsm: &self.vsm, textures: &self.textures, materials: &self.scene.materials, extended: &self.extended, queue: &self.queue },
+                &CardInputs { vsm: &self.vsm, glass, textures: &self.textures, materials: &self.scene.materials, extended: &self.extended, queue: &self.queue },
                 lumen_lite.is_none(),
             );
             if let Some(lite) = lumen_lite {
@@ -1030,6 +1038,7 @@ impl Renderer {
                 clouds: &self.clouds,
                 lumen: &self.lumen,
                 samplers: &self.samplers,
+                glass,
             };
             self.fog.record(&mut rec, &inputs, current);
         }
@@ -1064,6 +1073,7 @@ impl Renderer {
             megalights: self.megalights.output(current).filter(|_| self.settings.mega_lights),
             black: &self.black,
             substrate: lighting_slabs.as_ref(),
+            glass,
         };
         self.lighting.record(&mut rec, &lighting);
         if self.extended.subsurface && lit {
