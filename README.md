@@ -320,9 +320,11 @@ resolution.
 were taken while the GPU was shared with up to six other agents' builds and renders: they are minima (medians where
 stated) of interleaved on/off runs, whole-frame totals were at times swamped by the other load, and per-pass minima
 are the reliable numbers. The per-feature notes in [`docs/round4/`](docs/round4/) hold the full tables. Default views
-at 2560×1440, 100 % / 67 % screen percentage, round 3 → round 4 ([`perf-regressions.md`](docs/round4/perf-regressions.md)):
-valley 8.1 / 5.6 → 8.7 / 5.4 ms, cathedral 10.9 / 6.9 → 10.2 / 6.4 ms, forest 14.5 / 11.0 → 17.9 / 12.1 ms (the
-campfire's shadow-casting light and Nanite Foliage's assemblies).
+at 2560×1440, 100 % / 67 % screen percentage, round 3 → round 4 (final build on an idle GPU, minimum of 3 interleaved
+runs; [`perf-regressions.md`](docs/round4/perf-regressions.md)): valley 8.1 / 5.6 → 8.7 / 5.5 ms, cathedral
+10.9 / 6.9 → 10.3 / 6.4 ms, forest 14.5 / 11.0 → 18.3 / 12.2 ms (the campfire's shadow-casting light and Nanite
+Foliage's assemblies); new in round 4: gallery 8.0 / 5.0 ms (with the graph-displaced brick terrace in view), cathedral
+with 300 lights under MegaLights 15.3 / 9.2 ms.
 
 * **Streaming** (`streaming.rs`, `page_source/`). Cluster and page records are always resident; vertex/triangle data
   lives in a fixed GPU pool. Culling stamps "a resident parent wants to refine into this page" into a feedback buffer,
