@@ -617,6 +617,12 @@ impl Renderer {
         self.profiler.supported().then(|| self.profiler.total_ms())
     }
 
+    /// The GPU time of the most recently read-back frame (unsmoothed) and a sequence number
+    /// that changes with every read-back (headless statistics).
+    pub fn gpu_frame_ms(&self) -> Option<(u64, f32)> {
+        self.profiler.latest_frame()
+    }
+
     /// Moving instances in the latest frame: instances moved, distance-field bricks recomposed
     /// and still queued.
     pub fn dynamic_stats(&self) -> DynamicStats {

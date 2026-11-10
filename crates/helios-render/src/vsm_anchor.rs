@@ -34,11 +34,14 @@
 //!
 //! A moving light only gets a shadow map if the budget can keep up with it — its recent top
 //! speed tells how often each face will need a new origin, and the faces of the lights that hold
-//! maps must not need more pages per frame together than the budget allows — and one that
-//! outruns it all the same (beyond [`HARD_LIMIT`] tolerances from a face's origin) gives its map
-//! up. Such lights keep distance-field shadows until they rest, as do lights beyond the slot
-//! budget: a light is not flipped between the two kinds of shadow. At rest a light is
-//! re-anchored once more, at its own position.
+//! maps must not need more pages per frame together than the budget allows — at its tolerance,
+//! or else at twice or four times it ([`MAX_RELAX`]): the parallax correction keeps a map held
+//! further off far closer to the reference than distance fields. A held map whose faces fall
+//! behind all the same (beyond [`HARD_LIMIT`] tolerances from a face's origin, plus
+//! [`LAG_FRAMES`] of the light's motion) has its tolerance doubled in the same way, and only
+//! beyond four times it gives its map up. Lights without a map keep distance-field shadows
+//! until they rest, as do lights beyond the slot budget: a light is not flipped between the two
+//! kinds of shadow. At rest a light is re-anchored once more, at its own position.
 
 use glam::Vec3;
 

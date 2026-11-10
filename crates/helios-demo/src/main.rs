@@ -515,6 +515,9 @@ mod native {
             log::info!("{line}");
         }
         log::info!("{}", means.report(mean_from, options.frames));
+        if let Some(report) = means.moving_report(mean_from, options.frames) {
+            log::info!("{report}");
+        }
 
         let pixels = read_back(&ctx, &target, width, height);
         save_png(path, width, height, &pixels);
@@ -527,6 +530,10 @@ mod native {
         frames: u32,
         gpu: f64,
         gpu_max: f32,
+        /// Unsmoothed GPU frame times read back (one per read-back), for a median that other
+        /// processes' work on a shared GPU disturbs less than a mean.
+        gpu_frames: Vec<f32>,
+        last_sequence: Option<u64>,
         pages: f64,
         dynamic_pages: f64,
         draws: f64,
@@ -535,6 +542,12 @@ mod native {
         local_full: f64,
         moving_full: f64,
         faces: f64,
+        /// Moving lights wanting a shadow map: the fewest with one in a frame, the frames in
+        /// which some kept distance-field shadows, and those in which some had a coarser
+        /// tolerance.
+        mapped_min: Option<u32>,
+        fields_frames: u32,
+        relaxed_frames: u32,
         passes: Vec<(String, f64)>,
     }
 
@@ -545,6 +558,12 @@ mod native {
             self.frames += 1;
             self.gpu += gpu as f64;
             self.gpu_max = self.gpu_max.max(gpu);
+            if let Some((sequence, ms)) = app.renderer.gpu_frame_ms() {
+                if self.last_sequence != Some(sequence) {
+                    self.last_sequence = Some(sequence);
+                    self.gpu_frames.push(ms);
+                }
+            }
             self.pages += st.shadow_dirty_pages as f64;
             self.dynamic_pages += st.shadow_dynamic_pages as f64;
             self.draws += st.shadow_draws as f64;
@@ -552,6 +571,12 @@ mod native {
             self.local_full += moving.full_pages as f64;
             self.moving_full += moving.moving_full_pages as f64;
             self.faces += moving.anchors.faces as f64;
+            let a = moving.anchors;
+            if a.mapped + a.fields > 0 {
+                self.mapped_min = Some(self.mapped_min.map_or(a.mapped, |m| m.min(a.mapped)));
+                self.fields_frames += (a.fields > 0) as u32;
+                self.relaxed_frames += (a.relaxed > 0) as u32;
+            }
             for (label, ms) in app.renderer.gpu_timings() {
                 match self.passes.iter_mut().find(|(l, _)| l == label) {
                     Some(entry) => entry.1 += *ms as f64,
@@ -562,8 +587,13 @@ mod native {
 
         fn report(&self, from: u32, to: u32) -> String {
             let n = self.frames.max(1) as f64;
+            let mut frames = self.gpu_frames.clone();
+            frames.sort_by(f32::total_cmp);
+            let quantile = |q: f32| frames.get(((frames.len() as f32 - 1.0) * q).round() as usize).copied().unwrap_or(0.0);
+            let median = format!("GPU frame median {:.2} ms (p10 {:.2}, {} frames read back) · ", quantile(0.5), quantile(0.1), frames.len());
             let passes: Vec<String> = self.passes.iter().map(|(label, ms)| format!("{label} {:.3}", ms / n)).collect();
-            format!(
+            median
+                + &format!(
                 "frames {from}..{to} mean: GPU {:.2} ms (smoothed max {:.2}) · shadow pages rendered {:.1} ({:.1} dynamic casters only), {:.0} draws · local pages in full {:.1} ({:.1} of moving lights), {:.2} faces re-anchored · passes: {}",
                 self.gpu / n,
                 self.gpu_max,
@@ -575,6 +605,15 @@ mod native {
                 self.faces / n,
                 passes.join(" · ")
             )
+        }
+
+        /// What moving lights' shadows were over the frames (`None` without moving lights).
+        fn moving_report(&self, from: u32, to: u32) -> Option<String> {
+            let mapped = self.mapped_min?;
+            Some(format!(
+                "frames {from}..{to}: moving lights with shadow maps at least {mapped} in every frame; some on distance fields in {} frames, at a coarser tolerance in {}",
+                self.fields_frames, self.relaxed_frames
+            ))
         }
     }
 
