@@ -34,18 +34,23 @@ struct DisplacementInput {
     world_normal: vec3<f32>,  // unit world-space normal
     uv: vec2<f32>,            // mesh UV set 0
     time: f32,                // seconds (tess.time: this frame's, or the previous one's)
+    // The instance's linear part over its largest scale: object -> world for directions (a
+    // graph's TransformVector), at most unit stretch.
+    object_to_world: mat3x3<f32>,
 }
 
 // The undisplaced point `object` (unit normal `normal`, UV `uv`) of `instance` at time `time`.
 fn displacement_input(instance: Instance, object: vec3<f32>, normal: vec3<f32>, uv: vec2<f32>, time: f32) -> DisplacementInput {
     let normal_matrix = mat3x3<f32>(instance.normal_matrix_0.xyz, instance.normal_matrix_1.xyz, instance.normal_matrix_2.xyz);
-    return DisplacementInput(object, (instance.world * vec4<f32>(object, 1.0)).xyz, normal, normalize(normal_matrix * normal), uv, time);
+    let linear = mat3x3<f32>(instance.world[0].xyz, instance.world[1].xyz, instance.world[2].xyz) * (1.0 / max(instance.max_scale, 1e-12));
+    return DisplacementInput(object, (instance.world * vec4<f32>(object, 1.0)).xyz, normal, normalize(normal_matrix * normal), uv, time, linear);
 }
 
 // What a material displaces a point by: a height along the normal, or a vector.
 struct DisplacementValue {
     height: f32,          // in [0, 1]: the point moves (height - centre) * magnitude along its normal
     vector: vec3<f32>,    // world space, length <= 1, in units of magnitude * instance scale
+                          // (an object- or tangent-space vector arrives turned by the instance)
     is_vector: bool,
 }
 

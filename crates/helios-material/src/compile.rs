@@ -49,6 +49,7 @@ use std::fmt::Write as _;
 use serde::Serialize;
 
 use crate::graph::{MaterialGraph, Node, Op};
+use crate::motion::DisplacementMotion;
 use crate::nodes::{spec, InputDefault, DISPLACEMENT_PIN, OUTPUT_PINS, VECTOR_DISPLACEMENT_PIN};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -107,6 +108,9 @@ pub struct CompiledGraph {
     pub displacement_kind: DisplacementKind,
     /// The displacement reads the time: the displaced surface moves every frame.
     pub displacement_animated: bool,
+    /// The displacement function's nodes, for its speed bound
+    /// ([`CompiledGraph::displacement_speed`]).
+    pub displacement_motion: Option<DisplacementMotion>,
 }
 
 impl CompiledGraph {
@@ -122,6 +126,19 @@ impl CompiledGraph {
     /// FNV-1a of the displacement code and its kind: graphs that displace alike share it.
     pub fn displacement_hash(&self) -> Option<u64> {
         self.displacement.as_ref().map(|body| fnv1a(body.as_bytes()) ^ self.displacement_kind as u64)
+    }
+
+    /// Bound of how fast the displacement moves a point, in units of the material's magnitude
+    /// per second (a height's 0..1, a vector's length), for a material instance's parameter
+    /// values (`parameters`, by slot: [`CompiledGraph::parameters`] order; missing slots take
+    /// the defaults): 0 for a static displacement, `None` where the graph's time dependence
+    /// cannot be bounded (see [`crate::motion`]). The renderer refreshes cached shadow pages by
+    /// it.
+    pub fn displacement_speed(&self, parameters: &[[f32; 4]]) -> Option<f32> {
+        if !self.displacement_animated {
+            return Some(0.0);
+        }
+        self.displacement_motion.as_ref()?.speed(parameters)
     }
 }
 
@@ -168,6 +185,10 @@ pub fn compile(graph: &MaterialGraph) -> Result<CompiledGraph, Vec<GraphError>> 
     reachable.dedup();
     c.assign_parameters(&reachable);
     let eval = c.function(Context::Surface, &surface);
+    let motion = match (&displacement, root) {
+        (Some(order), Some(_)) => Some(c.motion(order, pin, kind)),
+        _ => None,
+    };
     let displacement = displacement.map(|order| {
         let mut body = c.function(Context::Displacement, &order);
         let value = c.input(output, pin);
@@ -192,8 +213,16 @@ pub fn compile(graph: &MaterialGraph) -> Result<CompiledGraph, Vec<GraphError>> 
     wgsl.push_str("    var o = defaults;\n");
     wgsl.push_str(&eval);
     wgsl.push_str("    return o;\n}\n");
-    let mut compiled =
-        CompiledGraph { wgsl, parameters: c.params, outputs: c.outputs, hash: 0, displacement, displacement_kind: kind, displacement_animated: c.animated };
+    let mut compiled = CompiledGraph {
+        wgsl,
+        parameters: c.params,
+        outputs: c.outputs,
+        hash: 0,
+        displacement,
+        displacement_kind: kind,
+        displacement_animated: c.animated,
+        displacement_motion: motion,
+    };
     if let Some(function) = compiled.displacement_function("graph_displacement") {
         let _ = writeln!(compiled.wgsl, "const GRAPH_DISPLACEMENT_VECTOR: bool = {};", kind == DisplacementKind::Vector);
         let _ = writeln!(compiled.wgsl, "const GRAPH_DISPLACEMENT_ANIMATED: bool = {};", compiled.displacement_animated);
@@ -219,6 +248,7 @@ struct Helpers {
     triplanar: &'static str,
     decode_normal: &'static str,
     blend_normals: &'static str,
+    transform: &'static str,
 }
 
 impl Context {
@@ -230,6 +260,7 @@ impl Context {
                 triplanar: "graph_triplanar",
                 decode_normal: "decode_tangent_normal",
                 blend_normals: "graph_blend_normals",
+                transform: "graph_transform_vector",
             },
             Context::Displacement => Helpers {
                 texture: "displacement_graph_texture",
@@ -237,6 +268,7 @@ impl Context {
                 triplanar: "displacement_graph_triplanar",
                 decode_normal: "displacement_decode_normal",
                 blend_normals: "displacement_blend_normals",
+                transform: "displacement_transform_vector",
             },
         }
     }
@@ -459,6 +491,33 @@ impl<'g> Compiler<'g> {
 
     fn slot(&self, name: &str) -> usize {
         self.params.iter().position(|p| p.name == name).unwrap_or(0)
+    }
+
+    /// The displacement function's nodes `order` (Output pin `pin`) for its speed bound.
+    fn motion(&self, order: &[u32], pin: &str, kind: DisplacementKind) -> DisplacementMotion {
+        let steps: Vec<(u32, Op, usize)> = order
+            .iter()
+            .map(|&id| {
+                let op = self.nodes[&id].op.clone();
+                let slot = match &op {
+                    Op::ScalarParameter { name, .. } | Op::VectorParameter { name, .. } => self.slot(name),
+                    _ => 0,
+                };
+                (id, op, slot)
+            })
+            .collect();
+        let source = |id: u32, pin: &str| -> Result<(u32, String), InputDefault> {
+            if let Some(s) = self.sources.get(&(id, pin.to_string())) {
+                return Ok(s.clone());
+            }
+            let node = self.nodes[&id];
+            match spec(&node.op).inputs.iter().find(|i| i.name == pin).map_or(InputDefault::Scalar(0.0), |i| i.default) {
+                InputDefault::Scalar(x) => Err(InputDefault::Scalar(node.values.get(pin).copied().unwrap_or(x))),
+                default => Err(default),
+            }
+        };
+        let defaults = self.params.iter().map(|p| p.default).collect();
+        DisplacementMotion::new(&steps, source, source(self.output, pin), kind, defaults)
     }
 
     /// Values feeding texture coordinates, triplanar positions and noise positions carry
@@ -818,6 +877,22 @@ impl<'g> Compiler<'g> {
                 let (xx, xy) = Self::d(&x, x.width);
                 let d = (pick(&xx), pick(&xy));
                 out(self.bind(id, 0, w, pick(&x.expr), Some(d)))
+            }
+            Op::TransformVector { source, destination } => {
+                let v = self.input(id, "In");
+                if v.width != 3 {
+                    return Err(format!("In must be a float3 direction, not a {}", ty(v.width)));
+                }
+                if source == destination {
+                    return out(v);
+                }
+                // A linear map: derivatives go through it too (the frame's own change across a
+                // pixel is left out, as for normal maps).
+                let f = self.context.helpers().transform;
+                let (s, d) = (source.code(), destination.code());
+                let call = |e: &str| format!("{f}(input, {e}, {s}u, {d}u)");
+                let (vx, vy) = Self::d(&v, 3);
+                out(self.bind(id, 0, 3, call(&v.expr), Some((call(&vx), call(&vy)))))
             }
             Op::Noise { scale, octaves } => {
                 let p = self.input(id, "Position");

@@ -71,6 +71,36 @@ pub struct Link {
     pub to: PinRef,
 }
 
+/// A coordinate space of [`Op::TransformVector`] (UE's Transform node: Tangent, Local, World).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum VectorSpace {
+    /// The world axes: what `VertexNormal`, `WorldPosition` and the VectorDisplacement pin use.
+    #[default]
+    World,
+    /// The instance's own axes (UE's Local space), normalised by its largest scale: a unit
+    /// vector stays at most unit length, and an object-space displacement scales with the
+    /// instance as a height does.
+    Object,
+    /// The surface's frame: x the tangent, y the bitangent, z the normal (see
+    /// [`Op::TransformVector`] for which frame each function uses).
+    Tangent,
+}
+
+impl VectorSpace {
+    /// The space's code in the generated WGSL (`*_transform_vector` helpers).
+    pub fn code(self) -> u32 {
+        match self {
+            VectorSpace::World => 0,
+            VectorSpace::Object => 1,
+            VectorSpace::Tangent => 2,
+        }
+    }
+}
+
+fn object_space() -> VectorSpace {
+    VectorSpace::Object
+}
+
 /// What a node computes. Values are floats or float vectors of 2–4 components; a scalar
 /// broadcasts wherever a vector is expected, as in UE. Angles are radians.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -155,6 +185,21 @@ pub enum Op {
     ComponentMask {
         channels: String,
     },
+    /// Re-expresses a float3 direction of space `source` in space `destination` (UE's
+    /// TransformVector; directions, not positions: no translation). Object → World turns a
+    /// vector with its instance, so a vector displacement built from constants follows a
+    /// rotating instance. The tangent frame differs by function: the surface function uses the
+    /// pixel's shading frame (the one normal maps and the Normal output use, from the UVs), the
+    /// displacement a frame the tessellator can evaluate identically on both sides of every
+    /// edge — the interpolated object normal with the object X axis projected into its plane (Z
+    /// where the normal runs along X). The two agree where U runs along object X (planes and
+    /// terrain).
+    TransformVector {
+        #[serde(default = "object_space")]
+        source: VectorSpace,
+        #[serde(default)]
+        destination: VectorSpace,
+    },
     // ---- Patterns and utilities ---------------------------------------------------------------
     /// Fractal gradient noise in [0, 1], filtered by the pixel footprint.
     Noise {
@@ -231,6 +276,7 @@ impl Op {
             Op::SmoothStep => "SmoothStep",
             Op::Append => "Append",
             Op::ComponentMask { .. } => "ComponentMask",
+            Op::TransformVector { .. } => "TransformVector",
             Op::Noise { .. } => "Noise",
             Op::Fresnel { .. } => "Fresnel",
             Op::Panner { .. } => "Panner",
@@ -283,6 +329,7 @@ impl Op {
             Op::SmoothStep,
             Op::Append,
             Op::ComponentMask { channels: named("rg") },
+            Op::TransformVector { source: VectorSpace::Object, destination: VectorSpace::World },
             Op::Noise { scale: 1.0, octaves: 4 },
             Op::Fresnel { exponent: 5.0, base_reflect: 0.04 },
             Op::Panner { speed: [0.1, 0.0] },

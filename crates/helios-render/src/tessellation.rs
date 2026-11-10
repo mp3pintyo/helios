@@ -45,8 +45,9 @@ use crate::gpu_scene::{GpuScene, MAX_MATERIALS};
 use crate::material_graphs::MaterialGraphHandle;
 use crate::passes::culling::CullView;
 use crate::profiler::Recorder;
-use crate::scene::{Material, Scene, TextureHandle};
-use helios_material::DisplacementKind;
+use crate::material_graphs::ParameterValue;
+use crate::scene::{Material, MaterialHandle, Scene, TextureHandle};
+use helios_material::{DisplacementKind, ParameterKind};
 use crate::shader::{compose_variant, create_module, create_module_from};
 use crate::util::{bind, bind_group, bind_group_layout, compute_pipeline, storage_buffer};
 use crate::wind::{wind_entry, wind_resource};
@@ -73,6 +74,9 @@ pub struct TessMaterial {
     /// Texture layer, channel; graph id ([`graphs::graph_id`], 0: none) and parameter offset,
     /// written by [`write_graph_source`].
     pub source: [u32; 4],
+    /// x: bound of the displacement's speed in object units per second (0: static; negative:
+    /// unbounded), written by [`write_graph_motion`] as parameters change; yzw: unused.
+    pub motion: Vec4,
 }
 
 /// The per-frame header of the tessellation uniform (`Tessellation` in displacement.wgsl).
@@ -82,7 +86,8 @@ pub struct TessView {
     /// Dice rate (pixels), main view pixels per world unit at distance 1, near plane, split passes.
     pub dice: Vec4,
     pub eye: Vec4,
-    /// The time animated displacement is evaluated at, and the previous frame's.
+    /// The time animated displacement is evaluated at, and the previous frame's; z: 1 to ignore
+    /// the displacements' speed bounds (shadow pages under them refresh every frame), w: unused.
     pub time: Vec4,
 }
 
@@ -138,6 +143,41 @@ pub fn displacement_bound(scene: &Scene, material: &Material) -> f32 {
     }
 }
 
+/// Bound of how fast the material's displacement moves a point, in object units per second (a
+/// world instance multiplies it by its largest scale): 0 if it does not move, `None` if its
+/// graph's time dependence has no bound (helios-material's `motion` analysis, for this material
+/// instance's parameter values). Cached shadow pages under an animated displacement are
+/// refreshed by it (`vsm_invalidate.wgsl`).
+pub fn displacement_speed(scene: &Scene, material: MaterialHandle) -> Option<f32> {
+    let m = scene.materials.get(material.0 as usize)?;
+    let (Some(d), Some(DisplacementSource::Graph(g))) = (m.displacement, displacement_source(scene, m)) else { return Some(0.0) };
+    let compiled = scene.compiled_material_graph(g)?;
+    if !compiled.displacement_animated {
+        return Some(0.0);
+    }
+    let values: Vec<[f32; 4]> = compiled
+        .parameters
+        .iter()
+        .map(|p| match scene.material_parameter(material, &p.name) {
+            Some(ParameterValue::Scalar(x)) if p.kind == ParameterKind::Scalar => [x, 0.0, 0.0, 0.0],
+            Some(ParameterValue::Vector(v)) if p.kind == ParameterKind::Vector => v,
+            _ => p.default,
+        })
+        .collect();
+    compiled.displacement_speed(&values).map(|speed| speed * d.magnitude.abs())
+}
+
+/// `TessMaterial::motion` of [`displacement_speed`].
+fn motion_entry(speed: Option<f32>) -> Vec4 {
+    Vec4::new(speed.map_or(-1.0, |s| s.min(f32::MAX)), 0.0, 0.0, 0.0)
+}
+
+/// Writes material `index`'s displacement speed bound (`TessMaterial::motion`).
+pub fn write_graph_motion(queue: &wgpu::Queue, scene: &GpuScene, index: usize, speed: Option<f32>) {
+    let at = std::mem::size_of::<TessView>() + index * std::mem::size_of::<TessMaterial>() + std::mem::offset_of!(TessMaterial, motion);
+    queue.write_buffer(&scene.tessellation, at as u64, bytemuck::bytes_of(&motion_entry(speed)));
+}
+
 /// TessMaterial::source.x of a material without a height layer (`DISPLACEMENT_NO_LAYER`).
 const NO_LAYER: u32 = u32::MAX;
 
@@ -147,13 +187,15 @@ pub fn material_table(scene: &Scene) -> Vec<TessMaterial> {
     let mut table: Vec<TessMaterial> = scene
         .materials
         .iter()
-        .map(|m| match (m.displacement, displacement_source(scene, m)) {
+        .enumerate()
+        .map(|(i, m)| match (m.displacement, displacement_source(scene, m)) {
             (Some(d), Some(source)) => TessMaterial {
                 params: Vec4::new(d.magnitude, d.center, displacement_bound(scene, m), d.uv_density),
                 source: match source {
                     DisplacementSource::Texture(layer) => [layer.0, d.channel.min(3), 0, 0],
                     DisplacementSource::Graph(_) => [NO_LAYER, 0, 0, 0],
                 },
+                motion: motion_entry(displacement_speed(scene, MaterialHandle(i as u32))),
             },
             _ => TessMaterial::default(),
         })
@@ -453,12 +495,13 @@ impl Tessellation {
 
     /// The tessellation uniform's header for this frame: dice rate (raised while lists overflow),
     /// the main view's pixel scale and near plane, the split pass count, the camera, and the time
-    /// of this frame and the previous one (animated displacement).
-    pub fn view(&self, dice_rate: f32, pixels_per_unit: f32, near: f32, eye: Vec3, time: [f32; 2]) -> TessView {
+    /// of this frame and the previous one (animated displacement), and whether shadow pages
+    /// follow the displacements' speed bounds ([`crate::RenderSettings::displacement_speed_bound`]).
+    pub fn view(&self, dice_rate: f32, pixels_per_unit: f32, near: f32, eye: Vec3, time: [f32; 2], speed_bounds: bool) -> TessView {
         TessView {
             dice: Vec4::new(dice_rate.max(0.25) * self.dice_scale, pixels_per_unit, near, self.passes as f32),
             eye: eye.extend(0.0),
-            time: Vec4::new(time[0], time[1], 0.0, 0.0),
+            time: Vec4::new(time[0], time[1], if speed_bounds { 0.0 } else { 1.0 }, 0.0),
         }
     }
 
@@ -637,12 +680,68 @@ mod tests {
         assert_eq!(next_pass_count(MIN_PASSES, 0), MIN_PASSES);
     }
 
+    /// CPU mirror of `displacement_tangent_frame` and `displacement_transform_vector`
+    /// (displacement_graph.wgsl) and of `displacement_offset` (displacement_height.wgsl): an
+    /// object- or tangent-space vector, turned into world space and back by the instance's normal
+    /// matrix, is the same object-space offset whatever the instance's rotation — the displaced
+    /// shape turns with the instance, in every pass and in the previous frame's pose (motion
+    /// vectors go through the previous transform). A world-space vector does not.
+    #[test]
+    fn object_and_tangent_space_vectors_turn_with_the_instance() {
+        use glam::{Mat3, Mat4, Quat};
+        let frame = |n: Vec3| {
+            let along_x = Vec3::X - n * n.x;
+            let along_z = Vec3::Z - n * n.z;
+            let t = if along_x.dot(along_x) > 1e-6 { along_x } else { along_z }.normalize();
+            Mat3::from_cols(t, n.cross(t), n)
+        };
+        // (world vector, object offset) of `v` in space `space` (1 object, 2 tangent, 0 world)
+        // on an instance placed by `world`, at a point of object normal `n`, magnitude 0.2.
+        let displace = |world: Mat4, n: Vec3, v: Vec3, space: u32| {
+            let linear = Mat3::from_mat4(world);
+            let max_scale = linear.x_axis.length().max(linear.y_axis.length()).max(linear.z_axis.length());
+            let object_to_world = linear * (1.0 / max_scale);
+            let world_vector = match space {
+                1 => object_to_world * v,
+                2 => object_to_world * (frame(n) * v),
+                _ => v,
+            };
+            let clamped = world_vector / world_vector.length().max(1.0);
+            let normal_matrix = linear.inverse().transpose() * max_scale;
+            // `(vector · magnitude) · N` in WGSL: N as a row transform, i.e. Nᵀ (vector · magnitude).
+            (world_vector, normal_matrix.transpose() * (clamped * 0.2))
+        };
+        let n = Vec3::new(0.3, 0.9, -0.2).normalize();
+        let v = Vec3::new(0.5, 0.1, 0.6);
+        let rest = Mat4::from_scale_rotation_translation(Vec3::splat(0.6), Quat::IDENTITY, Vec3::new(0.0, 0.1, 13.4));
+        let turned = Mat4::from_scale_rotation_translation(Vec3::splat(0.6), Quat::from_rotation_y(1.1), Vec3::new(0.0, 0.1, 13.4));
+        for space in [1, 2] {
+            let (a, offset_a) = displace(rest, n, v, space);
+            let (b, offset_b) = displace(turned, n, v, space);
+            assert!(offset_a.abs_diff_eq(offset_b, 1e-5), "space {space}: {offset_a} vs {offset_b}");
+            assert!((a.length() - b.length()).abs() < 1e-5 && !a.abs_diff_eq(b, 1e-3), "the world vector turns");
+        }
+        // Object space: the offset is the vector in object units times the magnitude.
+        assert!(displace(turned, n, v, 1).1.abs_diff_eq(v * 0.2, 1e-5));
+        // Tangent space: z runs along the normal (a height), x along object X in the normal's plane.
+        assert!(displace(turned, n, Vec3::Z, 2).1.abs_diff_eq(n * 0.2, 1e-5));
+        let tangent = displace(turned, Vec3::Y, Vec3::X, 2).1;
+        assert!(tangent.abs_diff_eq(Vec3::X * 0.2, 1e-5), "on a flat bed: object X, the mesh U ({tangent})");
+        // Along X the frame falls back to Z.
+        assert!(frame(Vec3::X).x_axis.abs_diff_eq(Vec3::Z, 1e-6) || frame(Vec3::X).x_axis.abs_diff_eq(-Vec3::Z, 1e-6));
+        // A world-space vector keeps its world direction: its object offset changes as it turns.
+        assert!(!displace(rest, n, v, 0).1.abs_diff_eq(displace(turned, n, v, 0).1, 1e-3));
+        // Non-uniform scale: an object-space vector still displaces by its object units.
+        let squashed = Mat4::from_scale_rotation_translation(Vec3::new(1.0, 0.25, 2.0), Quat::from_rotation_x(0.4), Vec3::ZERO);
+        assert!(displace(squashed, n, v * 0.5, 1).1.abs_diff_eq(v * 0.5 * 0.2, 1e-5));
+    }
+
     #[test]
     fn uniform_matches_the_shader_layout() {
-        // vec4 dice, vec4 eye, vec4 time, then 256 × (vec4 params, vec4<u32> source).
+        // vec4 dice, vec4 eye, vec4 time, then 256 × (vec4 params, vec4<u32> source, vec4 motion).
         assert_eq!(std::mem::size_of::<TessView>(), 48);
-        assert_eq!(std::mem::size_of::<TessMaterial>(), 32);
-        assert_eq!(UNIFORM_SIZE, 48 + 256 * 32);
+        assert_eq!(std::mem::size_of::<TessMaterial>(), 48);
+        assert_eq!(UNIFORM_SIZE, 48 + 256 * 48);
         let source = include_str!("shaders/tess_queue.wgsl");
         assert!(source.contains(&format!("const STATE_TOTAL_PATCHES: u32 = {PASS_WORDS}u;")));
     }

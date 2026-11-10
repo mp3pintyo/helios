@@ -138,13 +138,16 @@ mod native {
         pub megalights: bool,
         /// Nanite tessellation of displaced materials (`--no-tessellation`: undisplaced).
         pub tessellation: bool,
+        /// `--no-displacement-speed-bound`: shadow pages under animated displacement refresh
+        /// every frame (the reference).
+        pub displacement_speed_bound: bool,
         /// Micro-triangle edge length in pixels (`--dice-rate`).
         pub dice_rate: Option<f32>,
     }
 
     impl Options {
         pub fn parse(args: &[String]) -> Self {
-            let mut o = Options { screenshot: None, size: (1600, 900), frames: 90, view: None, detail: Detail::High, scene: SceneKind::Valley, camera: None, eye: None, at: None, occlusion: true, sw_raster: true, rvt: true, svt: true, animate_sun: false, lod: None, fov: None, pool_mb: None, texture_pool_mb: None, texture_compression: true, switch_to: None, dump_dir: None, dump_count: 16, keys: Vec::new(), keys_at: None, hold: Vec::new(), gltf: None, ground: true, bake_hvm: None, stream_from: None, io_latency_ms: 0, sun: None, move_light: false, full_invalidation: false, moving_lights: Default::default(), moving_light_pages: None, movers: None, static_motion: false, screen_percentage: None, gpu_budget_ms: None, local_exposure: Some(Default::default()), scene_file: None, select: Vec::new(), no_skinning: false, gi: None, megalights: false, tessellation: true, dice_rate: None, speed: None };
+            let mut o = Options { screenshot: None, size: (1600, 900), frames: 90, view: None, detail: Detail::High, scene: SceneKind::Valley, camera: None, eye: None, at: None, occlusion: true, sw_raster: true, rvt: true, svt: true, animate_sun: false, lod: None, fov: None, pool_mb: None, texture_pool_mb: None, texture_compression: true, switch_to: None, dump_dir: None, dump_count: 16, keys: Vec::new(), keys_at: None, hold: Vec::new(), gltf: None, ground: true, bake_hvm: None, stream_from: None, io_latency_ms: 0, sun: None, move_light: false, full_invalidation: false, moving_lights: Default::default(), moving_light_pages: None, movers: None, static_motion: false, screen_percentage: None, gpu_budget_ms: None, local_exposure: Some(Default::default()), scene_file: None, select: Vec::new(), no_skinning: false, gi: None, megalights: false, tessellation: true, displacement_speed_bound: true, dice_rate: None, speed: None };
             let mut scene_given = false;
             let mut it = args.iter().skip(1);
             while let Some(arg) = it.next() {
@@ -216,6 +219,7 @@ mod native {
                     "--gi" => o.gi = Some(value()),
                     "--megalights" => o.megalights = true,
                     "--no-tessellation" => o.tessellation = false,
+                    "--no-displacement-speed-bound" => o.displacement_speed_bound = false,
                     "--dice-rate" => o.dice_rate = value().parse().ok(),
                     "--lights" => helios_demo::scenes::candles::set_candle_lights(value().parse().unwrap_or(0)),
                     "--lantern" => helios_demo::scenes::cathedral::set_lantern(true),
@@ -341,6 +345,7 @@ mod native {
             }
             app.renderer.settings.mega_lights |= self.megalights;
             app.renderer.settings.tessellation = self.tessellation;
+            app.renderer.settings.displacement_speed_bound = self.displacement_speed_bound;
             if let Some(speed) = self.speed {
                 app.speed = speed;
             }
@@ -408,6 +413,8 @@ mod native {
     // ---- Headless ------------------------------------------------------------------------------
 
     const WARM_UP_FRAMES: usize = 10;
+    /// Frames the shadow work is averaged over.
+    const SHADOW_WORK_FRAMES: u32 = 60;
 
     pub fn screenshot(options: &Options, path: &str) {
         let ctx = pollster::block_on(GpuContext::new(GpuContext::create_instance(), None)).expect("GPU context");
@@ -441,6 +448,9 @@ mod native {
         // the HUD shows, averaged), shadow pages rendered and (cluster, page) draws.
         let mean_from = options.frames / 3;
         let mut means = FrameMeans::default();
+        // Shadow pages rendered and shadow micro-triangles per frame over the last frames (cached
+        // pages refresh every few frames: one frame's count says little).
+        let mut shadow_work: Vec<(u32, u32)> = Vec::new();
         for i in 0..options.frames {
             if let Some(kind) = options.switch_to.filter(|_| i == options.frames / 2) {
                 app.load_scene(kind);
@@ -468,6 +478,10 @@ mod native {
             if i >= mean_from {
                 means.add(&app);
             }
+            if i + SHADOW_WORK_FRAMES >= options.frames {
+                let tess = app.renderer.tessellation_stats().map_or(0, |t| t.shadow_micro_triangles);
+                shadow_work.push((app.renderer.stats().shadow_dirty_pages, tess));
+            }
             if app.renderer.settings.dynamic_resolution.is_some() && app.renderer.screen_percentage() != percentage {
                 percentage = app.renderer.screen_percentage();
                 let gpu = app.renderer.gpu_time_ms().unwrap_or(0.0);
@@ -493,6 +507,12 @@ mod native {
         }
         let elapsed = start.elapsed().as_secs_f64() * 1000.0 / timed_frames.max(1) as f64;
         log::info!("rendered {} frames, {:.2} ms/frame (incl. sync)", options.frames, elapsed);
+        if !shadow_work.is_empty() {
+            let n = shadow_work.len() as f64;
+            let pages = shadow_work.iter().map(|w| w.0 as f64).sum::<f64>() / n;
+            let micro = shadow_work.iter().map(|w| w.1 as f64).sum::<f64>() / n / 1e6;
+            log::info!("shadow work, mean of the last {} frames: {pages:.1} pages rendered, {micro:.2} M micro-triangles", shadow_work.len());
+        }
         // The first frames compile pipelines and synthesise textures.
         let mut cpu_ms = cpu_ms.split_off(cpu_ms.len().min(WARM_UP_FRAMES));
         cpu_ms.sort_by(f64::total_cmp);

@@ -57,6 +57,8 @@ pub fn state(editor: &Editor, world: &World) -> Value {
                 "displacement_graph": m.graph.is_some_and(|g| scene.material_graph_displaces(g)),
                 "displacement_mode": displacement_mode,
                 "displacement_animated": displacement_animated,
+                // m/s at unit scale; null: animated without a bound (refreshed every frame).
+                "displacement_speed": scene.displacement_speed(h),
             })
         })
         .collect();

@@ -115,6 +115,7 @@ pub fn spec(op: &Op) -> NodeSpec {
         Op::Normalize | Op::Length => ("Vector", vec![input("In", Vector3([0.0, 0.0, 1.0]))], vec!["Out"]),
         Op::Append => ("Vector", vec![scalar("A", 0.0), scalar("B", 0.0)], vec!["Out"]),
         Op::ComponentMask { .. } => ("Vector", vec![input("In", Vector3([0.0, 0.0, 0.0]))], vec!["Out"]),
+        Op::TransformVector { .. } => ("Vector", vec![input("In", Vector3([0.0, 0.0, 1.0]))], vec!["Out"]),
         Op::OneMinus | Op::Saturate | Op::Abs | Op::Sine | Op::Cosine | Op::Frac | Op::Floor => ("Math", vec![scalar("In", 0.0)], vec!["Out"]),
         Op::Step => ("Math", vec![scalar("Edge", 0.5), scalar("X", 0.0)], vec!["Out"]),
         Op::SmoothStep => ("Math", vec![scalar("Min", 0.0), scalar("Max", 1.0), scalar("X", 0.0)], vec!["Out"]),

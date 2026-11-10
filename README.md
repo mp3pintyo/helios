@@ -140,7 +140,7 @@ honouring `Range`, e.g. a CDN) streams pages on demand. Imported glTF models are
 | `valley` | Mountain valley, 600 boulders, a gold sculpture (turning once in 45 s) and a small lake with a log raft that drifts, bobs and rolls on it, procedural (not simulated) mist over the water; terrain textured through a runtime virtual texture; at the lake's north end, out of the initial view, a glass pane and two crossing tinted panels standing in the water (layered translucency test); behind the initial view a cobblestone path and displaced boulders (Nanite tessellation; one turning slowly on its plinth: a movable displaced instance), e.g. `--eye -26,1.8,39 --at -33,0.2,53` | 613 instances, 50 M (medium) / 199 M (high) source triangles |
 | `cathedral` | Gothic basilica: 11-bay nave with clustered piers, triforium, stained-glass clerestory and aisles, quadripartite rib vaults, flying buttresses, polygonal apse with half dome, west front with rose window and twin spired towers; pews, altar, candelabra and eleven chandeliers swinging on their 12 m chains (7 s pendulums, 1–3°, their candle lights moving along), 33 candle lights in all; dust motes in the clerestory's light shafts and incense rising from a censer before the altar; alpha-tested wrought-iron choir screens; at the west end of the north aisle, behind the initial view, a stained-glass screen and two crossing tinted glass panes (layered translucency test). **Candle-lit** with `--lights N` / `?lights=N`: every candle flame its own shadow-casting light (60 candelabrum, 88 chandelier and 2 altar candles) plus votive racks of tea lights against the aisle walls (858), the first N lit, up to 1008. With `--lantern` / `?lantern=1`: a hand lantern (iron frame, candle, a 2 cm flame light) carried down the central aisle and back at walking pace, swinging from the hand — a fast, sharp moving light | 458 instances, 4 M (medium) / 18 M (high) |
 | `forest` | Mixed broadleaf / conifer forest with real leaf geometry, bushes, ferns, grass, mossy boulders, fallen logs and mushrooms at golden hour, swaying in a gusty breeze; conifers built from shared needle-spray assemblies, foliage with voxel LODs; a campfire in the clearing in front of the initial view (simulated fire and smoke, sparks that bounce, embers that settle and cool, a flickering fire light; best at night, `--sun 200,-30 --eye 3.5,1.4,1.0 --at 7,1.0,-1`) | 8 278 instances (≈ 26 400 assembly parts when expanded), 82 M (medium) source triangles |
-| `gallery` | The material gallery: a paved courtyard at golden hour with a row of plinths — clear-coat car paint, velvet with sheen, subsurface skin, a lit wax candle and a marble egg, a bush whose leaves let a lamp's light through, an anisotropic brushed-metal pot, dielectrics of IOR 1.33 / 2.4 and a tinted specular, an unlit sign — and six material graphs: animated lava (a pool and an egg), stylised water (two instances of one graph with different parameters), a terrace of wet stone with puddles and, in front of it, three beds displaced by their graphs through Nanite tessellation: a brick terrace with carved mortar joints (`--eye 0.9,0.45,10.9 --at 0,0,9.2`), left of it a bed of mushrooms (a vector displacement: caps overhanging their stems, `--eye -5.9,0.3,10.4 --at -6.5,0.08,9.2`) and right of it a rippling cloth (an animated displacement, `--eye 4.4,0.6,10.9 --at 6.3,0.15,9.0`) | 48 instances |
+| `gallery` | The material gallery: a paved courtyard at golden hour with a row of plinths — clear-coat car paint, velvet with sheen, subsurface skin, a lit wax candle and a marble egg, a bush whose leaves let a lamp's light through, an anisotropic brushed-metal pot, dielectrics of IOR 1.33 / 2.4 and a tinted specular, an unlit sign — and seven material graphs: animated lava (a pool and an egg), stylised water (two instances of one graph with different parameters), a terrace of wet stone with puddles and, in front of it, three beds displaced by their graphs through Nanite tessellation: a brick terrace with carved mortar joints (`--eye 0.9,0.45,10.9 --at 0,0,9.2`), left of it a bed of mushrooms (a vector displacement: caps overhanging their stems, `--eye -5.9,0.3,10.4 --at -6.5,0.08,9.2`) and right of it a rippling cloth (an animated displacement, `--eye 4.4,0.6,10.9 --at 6.3,0.15,9.0`); behind the default view a platform of combed tufts turns on a drum (a tangent-space vector displacement that turns with it, `--eye 1.9,1.1,15.6 --at 0,0.1,13.4`) | 50 instances |
 
 These are procedural: meshes come from `helios_geometry::modeling` / `vegetation`, textures from GPU
 texture synthesis (`TexturePattern`). `0` pauses the moving props; `Y` tours each procedural scene, the gallery
@@ -398,7 +398,7 @@ with 300 lights under MegaLights 15.3 / 9.2 ms. Round 5 ([`docs/round5/`](docs/r
   other scenes pay for transforms, AO and the optional-attribute check only (Sponza resolve 0.28 → 0.31 ms, best of
   8 at 1600×900).
   Pixels are classified by shading model per 8×8 tile and each model (standard, rock,
-  terrain, metal, foliage) is resolved by its own pipeline over just its tiles (classification slots 0–7; slots 8–15
+  terrain, metal, foliage) is resolved by its own pipeline over just its tiles (classification slots 0–7; slots 8–23
   are the extended pipelines of *Substrate-lite* and *Material graphs*). UV mapping uses analytic
   barycentric derivatives for proper filtering; per-triangle tangent frames replace stored tangents; triplanar
   mapping is available in world or object space. The G-buffer resolve and the hardware shadow page raster
@@ -495,7 +495,11 @@ with 300 lights under MegaLights 15.3 / 9.2 ms. Round 5 ([`docs/round5/`](docs/r
   clock) is allowed: the compiler reports the displacement as animated (`CompiledGraph::displacement_animated`,
   next to `displacement_kind`), which makes the material's instances dynamic shadow casters, and reads the clock
   from the function's input so the renderer can evaluate the previous frame's surface for motion vectors; a
-  static graph pays for none of it. Still rejected, with an error on the node: `CameraVector` / `Fresnel` (every
+  static graph pays for none of it. Round 6: the compiler also bounds how fast an animated displacement moves
+  (`CompiledGraph::displacement_speed`, an interval and time-rate analysis of its nodes, `helios_material::motion`)
+  for each material instance's parameter values, and a **TransformVector** node (UE's Transform: World, Object =
+  Local, Tangent) turns directions between spaces in both functions (see *Nanite Tessellation*). Still rejected,
+  with an error on the node: `CameraVector` / `Fresnel` (every
   view must displace alike), vertex colours, UV set 1 and the triplanar tangent normal (the tessellator does not
   read them). Texture sample and triplanar nodes gained a `Height` output (a
   procedural texture's height). The node editor is part of the browser editor (see *Material graph editor*).
@@ -938,6 +942,36 @@ with 300 lights under MegaLights 15.3 / 9.2 ms. Round 5 ([`docs/round5/`](docs/r
   per frame: mushrooms 0.0002 %, bricks 0.0011 % (as before), around the cloth 0.0014 %. One trap was found by
   those dumps: the payload pass matched the depth pass's bits only while both compiled the same arithmetic — the
   barycentrics are computed apart from it and the match has one step of slack now.
+  **Speed bound and vector spaces** (round 6; `docs/round6/displacement-motion.md`). The material compiler bounds
+  how fast an animated displacement moves (`CompiledGraph::displacement_speed`, `helios_material::motion`): an
+  abstract interpretation of the displacement's nodes giving every value an interval and a bound of its time
+  derivative — products by the factors' largest magnitudes, `sin`/`cos` keep their argument's rate, a smoothstep's
+  slope is at most 1.5 / (max − min), a Panner adds |speed|, noise is Lipschitz (slope 4.7 for any gradients),
+  rotations keep a vector's speed; discontinuities in the time (`Frac`, `Floor`, `Step`, `If`), scrolled
+  textures and the like are unbounded. It is evaluated per material instance with its parameter values, carried in
+  the tessellation uniform (`TessMaterial::motion`, patched as parameters change) and turned per instance into the
+  footprint's per-frame motion (speed · Δt) by the invalidation's collect pass, so the cached pages under an
+  animated displacement refresh — as for the wind — once it may have moved two of their texels: the cloth's 1.64 ×
+  magnitude per second (26 cm/s) still refreshes the finest levels every frame but coarser ones every few frames.
+  Unbounded graphs keep the every-frame refresh; `--no-displacement-speed-bound` restores it as a reference. A
+  **TransformVector** node (UE's Transform: World, Object = Local, Tangent; two drop-downs in the graph editor)
+  re-expresses directions in either function: a vector built in object or tangent space and turned into world
+  space follows its instance. Object space is the instance's linear part over its largest scale, so the
+  tessellator's conversion back makes the offset exactly `vector · magnitude` in object units, whatever the
+  rotation — the tessellators, the shadow pages, the resolve at its stored barycentrics and the previous frame's
+  pose (motion vectors) agree. Meshes store no tangents and a per-triangle UV frame would crack, so the
+  displacement's tangent frame is the interpolated object normal with the object X axis projected into its plane
+  (the mesh's U direction on planes and terrain); the surface function's is the shading frame. The gallery's
+  *combed tufts* (`presets::combed_tufts`, a tangent-space vector) grow on a platform turning behind the default
+  view (`--eye 1.9,1.1,15.6 --at 0,0.1,13.4`); they made the gallery's ninth extended pipeline, so classification
+  now has 16 extended slots (8–23). Measured (2560×1440, minima of 3 interleaved runs against main;
+  pages and shadow micro-triangles averaged over the last 60 frames): cloth close-up 172 → 140 pages a frame, shadow
+  micro-triangles 9.95 → 9.55 M, shadow tessellation 2.07 → 2.04 ms (its finest levels' 2–4 mm thresholds are below
+  the cloth's 4.4 mm a frame, so they still refresh every frame); the cloth from 7 m 83 → 45 pages, 0.34 → 0.13 M,
+  0.17 → 0.12 ms; the gallery's default view 9 → 2 pages a frame. Against the every-frame reference, a static
+  camera's frames match at 64.5 dB (no pixel off by more than 24/255: no stale shadow); scenes without animated
+  displacement are unchanged (valley, cathedral, forest, gallery at 100 % and 67 %: every pass within noise). The
+  turning platform's own view: 1.79 M micro-triangles, 9.78 ms.
 * **Lumen-style GI** (`lumen.rs`). A 4-level global distance field (0.25–2 m voxels) is composited on the GPU from
   per-mesh SDFs; a voxel **surface cache** stores the radiance leaving nearby surfaces (sun with SDF soft shadows,
   sky with SDF occlusion, local lights, emission, one bounce from the **radiance cache** of world probes), so bounces
@@ -1486,7 +1520,10 @@ with 300 lights under MegaLights 15.3 / 9.2 ms. Round 5 ([`docs/round5/`](docs/r
   it) while one of the graph's displacement pins is linked: *Height* or *Vector* (no centre), marked *animated*
   when the graph reads the time; linking a node to such a pin re-dices the surface live. The Output node sets its
   two geometry pins (Displacement, VectorDisplacement) apart with a tooltip each, and the status line names what
-  the graph does to geometry ("vector displacement", "animated displacement").
+  the graph does to geometry ("vector displacement", "animated displacement"; round 6: the spaces a TransformVector
+  turns into world space — "tangent-space vector displacement" — and an animation's speed bound, "≤ 1.64 ×
+  magnitude/s", or "no speed bound"). TransformVector nodes pick their spaces from two drop-downs; the Details
+  panel's note on an animated material gives its speed bound in cm/s (or says its shadows refresh every frame).
 
 ### WebGPU constraints that shaped the design
 
@@ -1568,7 +1605,7 @@ Honest differences that remain:
    `BLEND`) ignore slabs. Unlit colours are scaled to a white surface in full sun. Devices limited to WebGPU's default
    16 sampled textures per stage render slab materials as their plain base. **Material graphs** run in the G-buffer
    resolve and, for their displacement (a height or a vector), in the tessellator: no graph-driven opacity mask, world position
-   offset, translucent or decal materials (raster and translucency shaders are fixed); at most 8 distinct (shading model, graph) pipelines per frame (further
+   offset, translucent or decal materials (raster and translucency shaders are fixed); at most 16 distinct (shading model, graph) pipelines per frame (further
    materials render without their graph, with a warning) and 1024 parameter slots in all; no custom HLSL/WGSL node,
    material functions, static switches, texture objects or per-node previews; noise and texture outputs carry no
    derivatives (a texture read at coordinates computed from another texture or from noise filters as if they were
@@ -1707,24 +1744,28 @@ Honest differences that remain:
     spawned instances are not individually editable. Native and wasm builds may differ in the last bits of `sin` /
     `cos`, so a point exactly at a filter threshold could flip between them; saved output sidesteps it.
 14. **Nanite Tessellation**: displacement is a height along the interpolated normal — a texture channel through
-    the material's mapping or a material graph's Displacement output — or a graph's vector, which is world space
-    only (no tangent- or object-space vector: the tessellator has no tangent frame and graphs no transform node,
-    so a vector built from constants does not turn with a rotating instance). Tessellation factors come from the
+    the material's mapping or a material graph's Displacement output — or a graph's world-space vector, which a
+    TransformVector node can build in object or tangent space (round 6). The displacement's tangent frame is not
+    UE's: meshes store no tangents, and a per-triangle UV frame would crack, so it is the interpolated normal with
+    the object X axis projected into its plane — the mesh's U direction on planes and terrain, elsewhere another
+    orientation, and it swirls around a curved surface's points facing ±X. Tessellation factors come from the
     undisplaced edges, so where a vector stretches the surface micro-triangles grow with it (silhouettes coarsen;
     shading stays smooth). Textures are read from the 512² texture array layer (streamed image tiles are not
     consulted) at a mip chosen from the dice segment size, so heights finer than the layer's texels are lost. A
-    graph's displacement may read the time but not the camera, vertex colours, UV set 1 or the tangent frame
-    (compile errors); an animated displacement has no speed bound, so every cached shadow page whose texels are
-    finer than its reach re-renders its dynamic casters every frame (UE re-renders WPO-animated casters likewise;
-    the wind here refreshes coarse levels less often). Lumen follows displacement through baked *variants*
-    (distance field and cards per mesh and displacement): accurate to the mesh's voxels and the cards' ~10 cm
-    texels, so relief finer than those (mortar joints, cobbles) only reaches it through screen traces; an
-    animated displacement is represented by its mean surface (8 s average), not the moving one; a variant takes a
-    few frames to bake after a displacement changes (0.5–1.3 s of CPU time per variant natively, on worker threads;
-    in the browser, which has no threads, one bake per frame, each a hitch of that length); a world-dependent
-    displacement of a moving instance keeps the variant baked where the instance stood; meshes baked without a
-    distance field (`SdfMode::None`) stay out of Lumen, displaced or not. A graph displaces
-    only while it has one of the 8 extended resolve pipelines (else its materials stay flat); every displacing
+    graph's displacement may read the time but not the camera, vertex colours, UV set 1 or the shading tangent
+    frame (Triplanar's TangentNormal; compile errors). An animated displacement's speed bound (round 6) is the
+    material compiler's conservative analysis of the graph: graphs it cannot bound (the time through `Frac` /
+    `Floor` / `Step` / `If`, scrolled textures, `Time` to a power) refresh every cached shadow page whose texels are
+    finer than their reach every frame, the bound is per instance rather than per page, and close up a fast surface
+    still refreshes its finest levels every frame (UE re-renders WPO-animated casters every frame). Lumen follows
+    displacement through baked *variants* (distance field and cards per mesh and displacement): accurate to the
+    mesh's voxels and the cards' ~10 cm texels, so relief finer than those (mortar joints, cobbles) only reaches it
+    through screen traces; an animated displacement is represented by its mean surface (8 s average), not the moving
+    one; a variant takes a few frames to bake after a displacement changes (0.5–1.3 s of CPU time per variant
+    natively, on worker threads; in the browser, which has no threads, one bake per frame, each a hitch of that
+    length); a world-dependent displacement of a moving instance keeps the variant baked where the instance stood;
+    meshes baked without a distance field (`SdfMode::None`) stay out of Lumen, displaced or not. A graph displaces
+    only while it has one of the 16 extended resolve pipelines (else its materials stay flat); every displacing
     graph of the scene runs in one dicing permutation behind a switch on the material, compiled when the set
     changes (a hitch while a graph is edited). Dicing uses a uniform 2^k grid per patch with
     snapped edges instead of UE's precomputed table of patterns for every factor triple (more micro-triangles for long

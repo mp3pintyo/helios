@@ -21,7 +21,9 @@
 //!   node it concerns. The generated code carries screen-space derivatives through the values
 //!   that feed textures and noise (see [`compile`]'s module docs); the displacement function
 //!   carries a dice segment's instead and rejects what is not a function of the point and the
-//!   time (the camera, attributes the tessellator does not read).
+//!   time (the camera, attributes the tessellator does not read). [`Op::TransformVector`] turns
+//!   vectors between world, object and tangent space, so a vector displacement can follow its
+//!   instance; an animated displacement gets a speed bound ([`motion`]).
 //! * **Parameters** ([`Parameter`]): scalar, vector and texture parameters get slots in a
 //!   parameter block that material instances fill — changing one never recompiles.
 //! * **Catalog** ([`catalog`]): pin layouts and default properties of every node type, which an
@@ -29,11 +31,13 @@
 
 mod compile;
 mod graph;
+pub mod motion;
 mod nodes;
 pub mod presets;
 
 pub use compile::{compile, CompiledGraph, DisplacementKind, GraphError, Parameter, ParameterKind};
-pub use graph::{GraphBuilder, Link, MaterialGraph, Node, Op, PinRef};
+pub use graph::{GraphBuilder, Link, MaterialGraph, Node, Op, PinRef, VectorSpace};
+pub use motion::DisplacementMotion;
 pub use nodes::{catalog, output_bit, spec, CatalogEntry, InputDefault, InputSpec, NodeSpec, DISPLACEMENT_PIN, OUTPUT_PINS, VECTOR_DISPLACEMENT_PIN};
 
 #[cfg(test)]
@@ -306,6 +310,40 @@ mod tests {
         b.link(noise, "Out", output, DISPLACEMENT_PIN).link(noise, "Out", output, VECTOR_DISPLACEMENT_PIN);
         let errors = compile(&b.build()).unwrap_err();
         assert!(errors[0].node == Some(output) && errors[0].message.contains("not both"), "{errors:?}");
+    }
+
+    #[test]
+    fn transform_vector_compiles_in_both_functions() {
+        // Object → World in the displacement, Tangent → Object in the surface function: each
+        // context calls its own helper with the spaces' codes.
+        let (mut b, output) = simple();
+        let lean = b.node(Op::Constant3 { value: [0.5, 1.0, 0.0] }, [0.0, 0.0]);
+        let turn = b.node(Op::TransformVector { source: VectorSpace::Object, destination: VectorSpace::World }, [0.0, 0.0]);
+        let local = b.node(Op::TransformVector { source: VectorSpace::Tangent, destination: VectorSpace::Object }, [0.0, 0.0]);
+        let same = b.node(Op::TransformVector { source: VectorSpace::World, destination: VectorSpace::World }, [0.0, 0.0]);
+        b.link(lean, "Out", turn, "In").link(turn, "Out", output, VECTOR_DISPLACEMENT_PIN);
+        b.link(lean, "Out", local, "In").link(local, "Out", same, "In").link(same, "Out", output, "Emissive");
+        let compiled = compile(&b.build()).unwrap();
+        let body = compiled.displacement.as_deref().unwrap();
+        assert!(body.contains("displacement_transform_vector(input, vec3<f32>(0.5f, 1.0f, 0.0f), 1u, 0u)"), "{body}");
+        let eval = &compiled.wgsl[..compiled.wgsl.find("fn graph_displacement").unwrap()];
+        assert!(eval.contains("graph_transform_vector(input, vec3<f32>(0.5f, 1.0f, 0.0f), 2u, 1u)"), "{eval}");
+        assert!(!eval.contains(&format!("v{same}_0")), "the same space is no transform: {eval}");
+        assert!(!compiled.displacement_animated && compiled.displacement_speed(&[]) == Some(0.0));
+        // Directions are float3.
+        let (mut b, output) = simple();
+        let uv = b.node(Op::TexCoord { set: 0, tiling: [1.0, 1.0] }, [0.0, 0.0]);
+        let turn = b.node(Op::TransformVector { source: VectorSpace::Tangent, destination: VectorSpace::World }, [0.0, 0.0]);
+        b.link(uv, "Out", turn, "In").link(turn, "Out", output, VECTOR_DISPLACEMENT_PIN);
+        let errors = compile(&b.build()).unwrap_err();
+        assert!(errors[0].message.contains("In must be a float3"), "{errors:?}");
+        // Spaces round-trip through JSON by name; the source defaults to Object, the destination
+        // to World (UE's Local → World).
+        let parsed: MaterialGraph = serde_json::from_str(r#"{"name":"t","nodes":[{"id":1,"type":"TransformVector","destination":"Tangent"},{"id":2,"type":"Output"}]}"#).unwrap();
+        assert_eq!(parsed.nodes[0].op, Op::TransformVector { source: VectorSpace::Object, destination: VectorSpace::Tangent });
+        let tufts = compile(&presets::combed_tufts()).unwrap();
+        assert_eq!((tufts.displacement_kind, tufts.displacement_animated), (DisplacementKind::Vector, false));
+        assert!(tufts.displacement.as_deref().unwrap().contains("displacement_transform_vector("));
     }
 
     #[test]

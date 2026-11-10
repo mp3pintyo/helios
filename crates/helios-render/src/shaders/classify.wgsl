@@ -1,15 +1,15 @@
 // Material classification: bins 8x8 screen tiles by the resolve pipelines their pixels need -
 // the shading models (slots 0-7, 7: sky) and the extended pipelines of Substrate-slab and
-// material-graph materials (slots 8-15, see passes/material.rs).
-// tiles buffer: [0, 16) per-slot counts, [16, 80) per-slot dispatch args, [80 + slot * capacity)
+// material-graph materials (slots 8-23, see passes/material.rs).
+// tiles buffer: [0, 24) per-slot counts, [24, 120) per-slot dispatch args, [120 + slot * capacity)
 // per-slot tile lists (tile = x | y << 16).
 
 #include "common.wgsl"
 
 const MATERIAL_SKY: u32 = 7u;
-const RESOLVE_SLOTS: u32 = 16u;
-const TILE_ARGS: u32 = 16u;
-const TILE_LISTS: u32 = 80u;
+const RESOLVE_SLOTS: u32 = 24u;
+const TILE_ARGS: u32 = 24u;
+const TILE_LISTS: u32 = 120u;
 
 @group(0) @binding(0) var<uniform> frame: Frame;
 @group(0) @binding(1) var<uniform> materials: array<Material, MAX_MATERIALS>;
@@ -60,8 +60,11 @@ fn classify(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id)
     }
 }
 
-@compute @workgroup_size(16)
+@compute @workgroup_size(32)
 fn prepare_tiles(@builtin(local_invocation_index) slot: u32) {
+    if slot >= RESOLVE_SLOTS {
+        return;
+    }
     let count = atomicLoad(&tiles[slot]);
     atomicStore(&tiles[TILE_ARGS + slot * 4u], min(count, 65535u));
     atomicStore(&tiles[TILE_ARGS + 1u + slot * 4u], (count + 65534u) / 65535u);

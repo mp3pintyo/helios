@@ -73,6 +73,7 @@ impl FrameTargets {
         };
         let view = |t: &wgpu::Texture| t.create_view(&Default::default());
         let storage = U::STORAGE_BINDING | U::TEXTURE_BINDING;
+        let slots = crate::passes::material::RESOLVE_SLOTS as u64;
 
         let hw_depth = make("hw depth", width, height, 1, DEPTH_FORMAT, U::RENDER_ATTACHMENT | U::TEXTURE_BINDING);
         let hw_visibility = make("hw visibility", width, height, 1, VISIBILITY_FORMAT, U::RENDER_ATTACHMENT | U::TEXTURE_BINDING);
@@ -111,7 +112,7 @@ impl FrameTargets {
                 device,
                 "material tiles",
                 // Counts and dispatch arguments, then a tile list per resolve slot (classify.wgsl).
-                (80 + 16 * (width.div_ceil(8) * height.div_ceil(8)) as u64) * 4,
+                (slots * 5 + slots * (width.div_ceil(8) * height.div_ceil(8)) as u64) * 4,
                 wgpu::BufferUsages::INDIRECT,
             ),
             gbuffer_albedo: view(&make("gbuffer albedo", width, height, 1, F::Rgba8Unorm, storage)),

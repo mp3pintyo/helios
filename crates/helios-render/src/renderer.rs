@@ -283,6 +283,10 @@ pub struct RenderSettings {
     /// Target length of micro-triangle edges in pixels (UE's dice rate, 2 by default): smaller is
     /// finer and costlier.
     pub dice_rate: f32,
+    /// Refresh the cached shadow pages under an animated displacement by its graph's speed bound
+    /// (`helios_material::motion`): coarse pages every few frames. Off: every page whose texels
+    /// can show the displacement is refreshed every frame (the reference, round 5's behaviour).
+    pub displacement_speed_bound: bool,
     /// Internal render resolution in percent of the output (UE's `r.ScreenPercentage`,
     /// 25–100); temporal super resolution reconstructs the output. Ignored while dynamic
     /// resolution is on.
@@ -342,6 +346,7 @@ impl Default for RenderSettings {
             voxel_lods: true,
             tessellation: true,
             dice_rate: 2.0,
+            displacement_speed_bound: true,
             screen_percentage: 100.0,
             dynamic_resolution: None,
             per_instance_invalidation: true,
@@ -1119,7 +1124,7 @@ impl Renderer {
         self.queue.write_buffer(&self.main_view.uniform, 0, bytemuck::bytes_of(&main));
         if let Some(tessellation) = self.culling.tessellation(&self.scene) {
             // Dice rate in internal pixels, like the software raster heuristic.
-            let view = tessellation.view(s.dice_rate, camera.lod_scale(h), camera.near, camera.position, [self.time, self.time - delta_time]);
+            let view = tessellation.view(s.dice_rate, camera.lod_scale(h), camera.near, camera.position, [self.time, self.time - delta_time], s.displacement_speed_bound);
             self.scene.write_tessellation_view(&self.queue, &view);
         }
         self.scene.assemblies.write_params(&self.queue);
