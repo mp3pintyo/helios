@@ -547,6 +547,9 @@ mod native {
         if let Some(report) = means.moving_report(mean_from, options.frames) {
             log::info!("{report}");
         }
+        if std::env::var_os("HELIOS_POOL_DEBUG").is_some() {
+            log::info!("local shadow slots (rank, light, resident/requested): {}", app.renderer.local_pool_report());
+        }
 
         let pixels = read_back(&ctx, &target, width, height);
         save_png(path, width, height, &pixels);
@@ -566,6 +569,9 @@ mod native {
         pages: f64,
         dynamic_pages: f64,
         draws: f64,
+        /// Shadow pages requested, and those without a physical page.
+        requested: f64,
+        unallocated: f64,
         /// Local light pages rendered in full, of them those of moving lights, and faces
         /// of moving lights re-anchored.
         local_full: f64,
@@ -598,6 +604,8 @@ mod native {
             self.pages += st.shadow_dirty_pages as f64;
             self.dynamic_pages += st.shadow_dynamic_pages as f64;
             self.draws += st.shadow_draws as f64;
+            self.requested += st.shadow_pages_requested as f64;
+            self.unallocated += st.shadow_page_overflow as f64;
             let moving = app.renderer.moving_light_stats();
             self.local_full += moving.full_pages as f64;
             self.moving_full += moving.moving_full_pages as f64;
@@ -626,9 +634,11 @@ mod native {
             let passes: Vec<String> = self.passes.iter().map(|(label, ms)| format!("{label} {:.3}", ms / n)).collect();
             median
                 + &format!(
-                "frames {from}..{to} mean: GPU {:.2} ms (smoothed max {:.2}) · shadow pages rendered {:.1} ({:.1} dynamic casters only), {:.0} draws · local pages in full {:.1} ({:.1} of moving lights), moving lights' pages {:.1}, {:.2} faces re-anchored · passes: {}",
+                "frames {from}..{to} mean: GPU {:.2} ms (smoothed max {:.2}) · shadow pages requested {:.0} ({:.1} unallocated), rendered {:.1} ({:.1} dynamic casters only), {:.0} draws · local pages in full {:.1} ({:.1} of moving lights), moving lights' pages {:.1}, {:.2} faces re-anchored · passes: {}",
                 self.gpu / n,
                 self.gpu_max,
+                self.requested / n,
+                self.unallocated / n,
                 self.pages / n,
                 self.dynamic_pages / n,
                 self.draws / n,

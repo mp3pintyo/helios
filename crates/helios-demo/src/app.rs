@@ -443,9 +443,10 @@ impl DemoApp {
             on(s.substrate),
         );
         text.push_str(&format!(
-            "\nshadow pages: {}/{} in use, {} rendered ({} dynamic casters only, {} split; {}/{} draws), {} unallocated · local lights with shadow maps: {} ({} moving, cached)",
+            "\nshadow pages: {}/{} in use, {} requested, {} rendered ({} dynamic casters only, {} split; {}/{} draws), {} unallocated · local lights with shadow maps: {} ({} moving, cached)",
             st.shadow_pages,
             st.shadow_page_capacity,
+            st.shadow_pages_requested,
             st.shadow_dirty_pages,
             st.shadow_dynamic_pages,
             st.shadow_split_pages,
@@ -455,6 +456,13 @@ impl DemoApp {
             self.renderer.shadow_mapped_lights(),
             self.renderer.shadow_held_lights(),
         ));
+        let pool = self.renderer.local_pool_stats();
+        if pool.requested > 0 {
+            text.push_str(&format!(
+                "\nlocal lights' shadow pages: {} of {} requested resident · maps without a resident page: {} · pool resolution bias {:.2} mips",
+                pool.resident, pool.requested, pool.starved, pool.bias
+            ));
+        }
         let moving = self.renderer.moving_light_stats();
         if moving.anchors.mapped + moving.anchors.fields > 0 {
             text.push_str(&format!(

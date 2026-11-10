@@ -108,6 +108,70 @@ pub(crate) fn map_work(rendered: f32, resident: f32, requested: f32) -> Option<f
         Some(rendered)
     }
 }
+/// Per slot, the rank of its light among the occupied slots (`(slot, influence on screen)`):
+/// 0 for the most influential, unused slots after all used ones. A full page pool serves the
+/// slots' pages in this order (`bucket` in page_cache.wgsl): the lights that matter most on
+/// screen keep their resolution, the faintest fall back to coarser pages first.
+pub(crate) fn slot_ranks(occupied: impl Iterator<Item = (usize, f32)>) -> [u32; LOCAL_SLOTS] {
+    let mut order: Vec<(usize, f32)> = occupied.collect();
+    order.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+    let mut ranks = [LOCAL_SLOTS as u32 - 1; LOCAL_SLOTS];
+    for (rank, &(slot, _)) in order.iter().enumerate() {
+        ranks[slot] = rank as u32;
+    }
+    ranks
+}
+
+/// The page pool's load (pages requested / pages in the pool) above which the local lights'
+/// maps get coarser ([`PoolPressure`]), and below which they get finer again.
+const POOL_FULL: f32 = 0.95;
+const POOL_ROOM: f32 = 0.7;
+/// Largest pool resolution bias (mips) and its step down per read-back with room to spare.
+const POOL_MAX_BIAS: f32 = 2.5;
+const POOL_RELAX: f32 = 0.05;
+/// Read-backs to wait after raising the bias before judging the load again: the frames in
+/// flight still request at the old resolution.
+const POOL_SETTLE: u32 = 4;
+
+/// Resolution bias that keeps the local lights' requests within the shadow page pool (UE's
+/// virtual shadow map dynamic resolution, `r.Shadow.Virtual.DynamicRes.MaxResolutionLodBias`).
+/// The pool serves requests by priority when they do not fit (page_cache.wgsl), but what it
+/// cuts falls back to a face's coarsest page: the lights below the cut lose all resolution at
+/// once. Requesting coarser mips instead loses a little everywhere, and most where it shows
+/// least: the bias is spread over the slots by rank, from none for the light that matters most
+/// on screen to twice it for the faintest. A mip coarser quarters a light's
+/// fine pages, so the bias rises by half the log₂ of the overload at once when requests exceed
+/// the pool, and falls slowly while the pool has room (with hysteresis between the two: the
+/// pages of a new resolution must be rendered, so it must not oscillate).
+#[derive(Debug, Default)]
+pub(crate) struct PoolPressure {
+    bias: f32,
+    wait: u32,
+}
+
+impl PoolPressure {
+    /// One read-back of the pool: `requested` pages (sun and local lights) of `capacity`.
+    pub(crate) fn update(&mut self, requested: u32, capacity: u32) {
+        if self.wait > 0 {
+            self.wait -= 1;
+            return;
+        }
+        let load = requested as f32 / capacity.max(1) as f32;
+        if load > POOL_FULL {
+            self.bias = (self.bias + (0.5 * (load / POOL_FULL).log2()).clamp(0.1, 0.5)).min(POOL_MAX_BIAS);
+            self.wait = POOL_SETTLE;
+        } else if load < POOL_ROOM {
+            self.bias = (self.bias - POOL_RELAX).max(0.0);
+        }
+    }
+
+    /// The mip bias of the slot ranked `rank` (0 = most influential) among `active` slots.
+    pub(crate) fn slot_bias(&self, rank: u32, active: usize) -> f32 {
+        let x = rank as f32 / (active.max(2) - 1) as f32;
+        self.bias * 2.0 * x.min(1.0)
+    }
+}
+
 /// A light that moved within this many frames counts as moving (see [`SlotAllocator::assign`]).
 const MOVING_FRAMES: u32 = 30;
 
@@ -398,6 +462,22 @@ struct Feedback {
     /// moving lights.
     full: u32,
     moving_full: u32,
+    /// The page pool's service of the slots in the latest read-back frame.
+    pool: LocalPoolStats,
+    /// Per slot in that frame: its light, the pages it requested and those resident.
+    slot_pages: [(usize, u32, u32); LOCAL_SLOTS],
+}
+
+/// How the shared page pool served the local lights' maps in a recent frame.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct LocalPoolStats {
+    /// Pages the maps requested, and those resident (the rest fall back to coarser mips).
+    pub requested: u32,
+    pub resident: u32,
+    /// Maps that requested pages but had none resident: their receivers get no shadow from them.
+    pub starved: u32,
+    /// The pool resolution bias ([`PoolPressure`]; mips, averaged over the slots).
+    pub bias: f32,
 }
 
 /// Moving lights in the latest frame (the HUD's `moving lights` line).
@@ -423,6 +503,9 @@ pub struct LocalShadows {
     view: CullView,
     /// Per light of the scene: its slot or `u32::MAX` (uploaded with the lights).
     light_slots: Vec<u32>,
+    /// Per slot: its light's rank by influence on screen among the slots (0 = most
+    /// influential; unused slots last), the order in which a full page pool serves them.
+    ranks: [u32; LOCAL_SLOTS],
     active: usize,
     /// Slots whose light is away from some face's origin.
     held: usize,
@@ -431,6 +514,7 @@ pub struct LocalShadows {
     any_stale: bool,
     info_base: u32,
     feedback: Feedback,
+    pressure: PoolPressure,
 }
 
 impl LocalShadows {
@@ -447,10 +531,12 @@ impl LocalShadows {
             gpu,
             view: CullView::new(device, "local vsm", capacity),
             light_slots: Vec::new(),
+            ranks: [LOCAL_SLOTS as u32 - 1; LOCAL_SLOTS],
             active: 0,
             held: 0,
             moving: Vec::new(),
             any_stale: false,
+            pressure: PoolPressure::default(),
             info_base,
             feedback: Feedback {
                 buffer: device.create_buffer(&wgpu::BufferDescriptor {
@@ -468,6 +554,8 @@ impl LocalShadows {
                 moving_rendered: 0,
                 full: 0,
                 moving_full: 0,
+                pool: LocalPoolStats::default(),
+                slot_pages: [(usize::MAX, 0, 0); LOCAL_SLOTS],
             },
         }
     }
@@ -482,6 +570,7 @@ impl LocalShadows {
         self.poll_feedback();
         let motion = self.motion.update(f.lights);
         let mut influence: Vec<f32> = f.lights.iter().map(|l| if f.enabled { screen_influence(l, f.eye, &f.planes) } else { 0.0 }).collect();
+        let influence_all = influence.clone();
         // Each face of a light's shadow map is rendered from its origin, which a moving light
         // leaves behind (vsm_anchor.rs). Lights without origins get no slot.
         let fb = &mut self.feedback;
@@ -541,6 +630,7 @@ impl LocalShadows {
             *slot = GpuSlot::zeroed();
             slot.flags[0] = assignment.stale[s] as u32;
         }
+        self.ranks = slot_ranks(self.allocator.occupied().map(|(s, index, _, _)| (s, influence_all[index])));
         self.active = 0;
         self.held = 0;
         for (s, index, light, origins) in self.allocator.occupied() {
@@ -603,6 +693,7 @@ impl LocalShadows {
             fb.full = 0;
             fb.moving_full = 0;
             fb.moving_rendered = 0;
+            fb.pool = LocalPoolStats::default();
             for (s, &light) in fb.lights.iter().enumerate() {
                 let slot = &words[s * SLOT_WORDS as usize..(s + 1) * SLOT_WORDS as usize];
                 let full: u32 = slot[FEEDBACK_FULL..FEEDBACK_FULL + FACES].iter().sum();
@@ -613,6 +704,13 @@ impl LocalShadows {
                     fb.moving_rendered += rendered;
                 }
                 let resident: u32 = slot[FEEDBACK_REQUESTED..FEEDBACK_REQUESTED + FACES].iter().sum();
+                let requested = slot[FEEDBACK_REQUESTED_ALL];
+                fb.slot_pages[s] = (light, requested, resident);
+                if light != usize::MAX {
+                    fb.pool.requested += requested;
+                    fb.pool.resident += resident;
+                    fb.pool.starved += (requested > 0 && resident == 0) as u32;
+                }
                 let sample = map_work(rendered as f32, resident as f32, slot[FEEDBACK_REQUESTED_ALL] as f32);
                 if let (Some(work), Some(sample)) = (fb.work.get_mut(light), sample) {
                     *work = if *work < 0.0 { sample } else { *work + (sample - *work) * WORK_SMOOTHING };
@@ -628,6 +726,11 @@ impl LocalShadows {
         fb.status.store(IDLE, Ordering::Release);
     }
 
+    /// Per slot: the rank of its light by influence on screen (see `ranks`).
+    pub fn slot_ranks(&self) -> [u32; LOCAL_SLOTS] {
+        self.ranks
+    }
+
     /// Per light of the scene: its shadow map slot, or `u32::MAX`.
     pub fn light_slots(&self) -> &[u32] {
         &self.light_slots
@@ -637,6 +740,11 @@ impl LocalShadows {
     pub fn update(&self, queue: &wgpu::Queue, lod_bias: f32, cull: &LocalCull) {
         let mut gpu = *self.gpu;
         gpu.lod_bias = lod_bias;
+        for (slot, &rank) in gpu.slots.iter_mut().zip(&self.ranks) {
+            if slot.params.x > 0.0 {
+                slot.params.w += self.pressure.slot_bias(rank, self.active);
+            }
+        }
         queue.write_buffer(&self.uniform, 0, bytemuck::bytes_of(&gpu));
         // Light positions, LOD scales and dirty-page boxes come from the info buffer
         // (cull.wgsl); the frustum test passes everything.
@@ -682,7 +790,33 @@ impl LocalShadows {
 
     /// What the moving lights' shadow maps did in a recent frame.
     pub fn moving_stats(&self) -> MovingLightStats {
-        MovingLightStats { anchors: self.anchors.stats, full_pages: self.feedback.full, moving_full_pages: self.feedback.moving_full, moving_pages: self.feedback.moving_rendered }
+        MovingLightStats {
+            anchors: self.anchors.stats,
+            full_pages: self.feedback.full,
+            moving_full_pages: self.feedback.moving_full,
+            moving_pages: self.feedback.moving_rendered,
+        }
+    }
+
+    /// How the page pool served the local lights' maps in a recent frame.
+    pub fn pool_stats(&self) -> LocalPoolStats {
+        LocalPoolStats { bias: self.pressure.bias, ..self.feedback.pool }
+    }
+
+    /// A read-back of the shadow page pool: `requested` pages (sun and local lights) of
+    /// `capacity` (see [`PoolPressure`]).
+    pub fn pool_load(&mut self, requested: u32, capacity: u32) {
+        self.pressure.update(requested, capacity);
+    }
+
+    /// Per slot in rank order, for diagnostics: light index, rank, pages requested and resident.
+    pub fn pool_report(&self) -> String {
+        let mut slots: Vec<(u32, usize, u32, u32)> = (0..LOCAL_SLOTS)
+            .filter(|&s| self.feedback.slot_pages[s].0 != usize::MAX)
+            .map(|s| (self.ranks[s], self.feedback.slot_pages[s].0, self.feedback.slot_pages[s].1, self.feedback.slot_pages[s].2))
+            .collect();
+        slots.sort();
+        slots.iter().map(|(rank, light, req, res)| format!("#{rank} L{light} {res}/{req}")).collect::<Vec<_>>().join(" ")
     }
 
     /// Some slot's cached pages must be dropped this frame.
@@ -792,6 +926,48 @@ mod tests {
         let mut a = SlotAllocator::default();
         let spare = a.assign(&lights[..LOCAL_SLOTS], &[], &influence[..LOCAL_SLOTS], &weights, false);
         assert_ne!(spare.light_slots[0], u32::MAX);
+    }
+
+    #[test]
+    fn pool_pressure_coarsens_on_overload_and_relaxes_slowly() {
+        let mut p = PoolPressure::default();
+        p.update(900, 1024);
+        assert_eq!(p.bias, 0.0, "room to spare: full resolution");
+        // Twice the pool: half the log2 of the overload at once (capped), then a pause while
+        // the frames in flight still request at the old resolution.
+        p.update(2048, 1024);
+        let raised = p.bias;
+        assert!(raised >= 0.4 && raised <= 0.5, "{raised}");
+        for _ in 0..POOL_SETTLE {
+            p.update(2048, 1024);
+        }
+        assert_eq!(p.bias, raised);
+        p.update(1100, 1024);
+        assert!(p.bias > raised && p.bias - raised <= 0.1 + 1e-6, "a little more for a little overload");
+        // In the band between room and full nothing changes; below it the bias falls slowly.
+        let held = p.bias;
+        for _ in 0..POOL_SETTLE + 10 {
+            p.update(850, 1024);
+        }
+        assert_eq!(p.bias, held);
+        p.update(500, 1024);
+        assert!((held - p.bias - POOL_RELAX).abs() < 1e-6);
+        for _ in 0..1000 {
+            p.update(500, 1024);
+        }
+        assert_eq!(p.bias, 0.0);
+        // Spread by rank: none for the most influential light, twice the bias for the faintest.
+        p.bias = 1.0;
+        assert_eq!(p.slot_bias(0, 32), 0.0);
+        assert!((p.slot_bias(31, 32) - 2.0).abs() < 1e-6);
+        assert!((p.slot_bias(1, 3) - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn slots_rank_by_influence() {
+        let ranks = slot_ranks([(3, 0.5), (0, 2.0), (7, 1.0)].into_iter());
+        assert_eq!((ranks[0], ranks[7], ranks[3]), (0, 1, 2));
+        assert_eq!(ranks[1], LOCAL_SLOTS as u32 - 1, "unused slots last");
     }
 
     #[test]

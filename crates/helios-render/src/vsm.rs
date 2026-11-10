@@ -569,6 +569,10 @@ impl VirtualShadowMap {
         let mut cache = self.cache.default_params(f.frame, RETAIN_FRAMES, 1);
         cache.level_pages = LEVEL_PAGES;
         cache.level_count = MAX_LEVELS as u32;
+        // A full pool serves each light's coarsest pages, then the sun's, then the local lights'
+        // by their rank on screen (page_cache.wgsl).
+        cache.local_base = MAX_LEVELS as u32 * LEVEL_PAGES * LEVEL_PAGES;
+        cache.ranks = self.local.slot_ranks();
         let sun_moved = (sun - self.last_sun).length() > 1e-5;
         cache.invalidate = (sun_moved || f.scene_changed) as u32;
         self.last_sun = sun;
@@ -1081,16 +1085,27 @@ impl PageInvalidation {
 mod tests {
     use super::*;
 
-    /// The value of `const NAME: u32 = ...u;` in a shader (with its includes).
+    /// The value of `const NAME: u32 = ...;` in a shader (with its includes): a literal or a
+    /// sum of literals and other such constants.
     fn shader_constant(shader: &str, name: &str) -> u32 {
         let source = crate::shader::compose(shader);
         let prefix = format!("const {name}: u32 = ");
         let line = source.lines().find_map(|l| l.trim().strip_prefix(prefix.as_str())).unwrap_or_else(|| panic!("{name} not in {shader}"));
-        let value = line.trim_end_matches(';').trim_end_matches('u');
-        match value.strip_prefix("0x") {
-            Some(hex) => u32::from_str_radix(hex, 16).unwrap(),
-            None => value.parse().unwrap(),
-        }
+        line.trim_end_matches(';')
+            .split('+')
+            .map(|term| {
+                let term = term.trim();
+                if term.starts_with(|c: char| c.is_ascii_digit()) {
+                    let value = term.trim_end_matches('u');
+                    match value.strip_prefix("0x") {
+                        Some(hex) => u32::from_str_radix(hex, 16).unwrap(),
+                        None => value.parse().unwrap(),
+                    }
+                } else {
+                    shader_constant(shader, term)
+                }
+            })
+            .sum()
     }
 
     #[test]
@@ -1103,6 +1118,7 @@ mod tests {
             ("INFO_PAGE_STATIC", INFO_PAGE_STATIC),
             ("INFO_PAGE_REFRESH", INFO_PAGE_STATIC + PHYSICAL_PAGES),
             ("INFO_PAGE_MOTION", INFO_PAGE_MOTION),
+            ("VSM_PHYSICAL_PAGES", PHYSICAL_PAGES),
             ("LOCAL_INFO_SLOTS", INFO_LOCAL_SLOTS),
             ("LOCAL_INFO_SLOT_WORDS", LOCAL_SLOT_WORDS),
             ("LOCAL_INFO_RECTS", INFO_LOCAL_RECTS),

@@ -42,7 +42,9 @@ pub struct RenderStats {
     /// cached static layer, and pages rendered in full to start one.
     pub shadow_dynamic_pages: u32,
     pub shadow_split_pages: u32,
-    /// Shadow page requests that found no free physical page.
+    /// Shadow pages requested in the frame (sun and local lights, resident or not), and those
+    /// that got no physical page.
+    pub shadow_pages_requested: u32,
     pub shadow_page_overflow: u32,
     /// (cluster, page) draws of the rendered shadow pages; beyond the capacity they are lost.
     pub shadow_draws: u32,
@@ -153,13 +155,14 @@ impl StatsReadback {
                 stats.shadow_voxels += view_word(v, 11);
             }
             // Page cache header: [0] entries queued for allocation, [1] free pages before
-            // allocating, [2] dirty pages, [4] allocations that found no free page.
+            // allocating, [2] dirty pages, [4] requests without a page, [5] requests.
             let header = |i: usize| view_word(self.views, i);
             let free = header(1).min(self.shadow_page_capacity);
             stats.shadow_page_capacity = self.shadow_page_capacity;
             stats.shadow_pages = self.shadow_page_capacity - free + header(0).min(free);
             stats.shadow_dirty_pages = header(2);
             stats.shadow_page_overflow = header(4);
+            stats.shadow_pages_requested = header(5);
             stats.shadow_draws = view_word(self.views + 1, 12);
             stats.shadow_dynamic_pages = view_word(self.views + 1, 13);
             stats.shadow_split_pages = view_word(self.views + 1, 14);
