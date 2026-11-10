@@ -32,6 +32,7 @@ use crate::effects::{Effects, EffectsFrame};
 use crate::fog::{FogInputs, VolumetricFog};
 use crate::lights::{LightCulling, MAX_LIGHTS};
 use crate::lumen::{CardInputs, Lumen};
+use crate::lumen_displaced::DisplaceInputs;
 use crate::picking::{PickResult, Picker};
 use crate::lumen_lite::{GiMethod, LiteFallback, LiteInputs, LumenLite};
 use crate::motion::MotionTracker;
@@ -741,7 +742,7 @@ impl Renderer {
         let size = (self.targets.width, self.targets.height);
         let capacity = self.targets.capacity;
         self.svt.sync(&self.device, &self.queue, scene, self.settings.texture_streaming, frame, size);
-        self.lumen.update(&self.device, &self.queue, scene, &self.motion.changes, camera.position, frame, &self.targets);
+        self.lumen.update(&self.device, &self.queue, scene, &self.motion.changes, camera.position, frame, &self.targets, self.settings.tessellation);
         if self.uses_lumen_lite() {
             let lite = self.lumen_lite.get_or_insert_with(|| LumenLite::new(&self.device));
             lite.update(&self.queue, scene, camera.position, frame);
@@ -848,6 +849,14 @@ impl Renderer {
         if self.settings.shadows {
             self.vsm.record(&mut rec, &self.culling, &self.scene, &self.frame_uniform, &self.targets, &self.lights);
         }
+        let displace = DisplaceInputs {
+            scene: &self.scene,
+            albedo: &self.textures.albedo,
+            data: &self.textures.data,
+            sampler: &self.samplers.material,
+            graph_parameters: self.extended.parameter_buffer(),
+        };
+        self.lumen.record_displacement(&mut rec, &self.queue, scene, &displace);
         self.lumen.record_distance_field(&mut rec, &self.textures, &self.scene.materials, &self.samplers);
         let lite_inputs = LiteInputs { frame: &self.frame_uniform, targets: &self.targets, sky: &self.sky, samplers: &self.samplers, exposure: &self.exposure.buffer };
         if self.settings.global_illumination {
@@ -976,6 +985,7 @@ impl Renderer {
         if let Some(tessellation) = self.culling.tessellation(&self.scene) {
             tessellation.after_submit(read_tessellation);
         }
+        self.lumen.after_submit();
         let _ = self.device.poll(wgpu::PollType::Poll);
 
         self.previous_view_proj = Some(unjittered_view_proj);

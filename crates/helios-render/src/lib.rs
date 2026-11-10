@@ -53,6 +53,7 @@ mod gpu_scene;
 mod gpu_types;
 mod lights;
 mod lumen;
+mod lumen_displaced;
 mod lumen_dynamic;
 mod lumen_lite;
 mod material_graphs;

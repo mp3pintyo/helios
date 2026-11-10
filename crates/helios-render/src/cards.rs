@@ -7,7 +7,8 @@
 //! * **Capture** (CPU, when the scene changes): every mesh with a volume distance field is
 //!   captured by up to 6 directions × 3 depth layers of orthographic cards — depth and normal
 //!   per texel, ~10 cm texels (coarser for very large meshes), rasterised from a LOD cut of the
-//!   virtual mesh ([`helios_geometry::cards`]). Captures are per mesh, packed into one capture
+//!   virtual mesh ([`helios_geometry::cards`]), or from the displaced surface of a displaced
+//!   variant (`lumen_displaced.rs`). Captures are per mesh (or variant), packed into one capture
 //!   atlas; materials contribute their average albedo (base colour × the texture's 1×1 mip,
 //!   as the global distance field does), since an instance has a single material and diffuse
 //!   bounce light is low-frequency anyway.
@@ -28,8 +29,10 @@ use bytemuck::{Pod, Zeroable};
 use glam::{Vec3, Vec4};
 use helios_geometry::cards::{CardConfig, CardVertex, MeshCards, CARD_AXES, MAX_CARD_LAYERS};
 use helios_geometry::{lod_cut_resident, LodView, SdfKind, VirtualMesh};
+use std::collections::{HashMap, HashSet};
 use wgpu::{TextureFormat as F, TextureUsages as U};
 
+use crate::lumen_displaced::Surface;
 use crate::scene::Scene;
 use crate::util::{storage_buffer, storage_buffer_init};
 
@@ -43,7 +46,7 @@ const PAGE_COUNT: usize = (ATLAS_PAGES * ATLAS_PAGES) as usize;
 /// Pages lit per frame: new allocations take up to three quarters, refreshes the rest.
 const UPDATE_BUDGET: usize = 1024;
 /// Target capture texel size (world metres) and the card side limit.
-const CARD_TEXEL: f32 = 0.1;
+pub(crate) const CARD_TEXEL: f32 = 0.1;
 const MAX_CARD_RESOLUTION: u32 = 256;
 /// Captured texels of all meshes at most (4 bytes each); texels grow to stay within it.
 const CAPTURE_BUDGET: f32 = 4.0e6;
@@ -236,8 +239,11 @@ pub struct CardCache {
     update_capacity: usize,
     /// Pages scheduled this frame.
     update_count: usize,
-    captures: Vec<Option<MeshCards>>,
+    /// Captures by [`capture_key`], the geometry version they were made at and the target texel
+    /// of the last full capture.
+    captures: HashMap<u64, MeshCards>,
     capture_version: u64,
+    capture_texel: f32,
     allocator: Allocator,
     uniform: CardUniform,
 }
@@ -263,8 +269,9 @@ impl CardCache {
             updates: storage_buffer(device, "card updates", 16, wgpu::BufferUsages::empty()),
             update_capacity: 1,
             update_count: 0,
-            captures: Vec::new(),
+            captures: HashMap::new(),
             capture_version: u64::MAX,
+            capture_texel: CARD_TEXEL,
             allocator: Allocator::default(),
             uniform: CardUniform::default(),
         }
@@ -292,29 +299,53 @@ impl CardCache {
     /// Captures the meshes (when the geometry changed) and lays out the cards of
     /// `instances` — the scene instances in the order of Lumen's distance-field instances,
     /// whose indices the shaders use — with their world `bounds`. Clears all allocations.
-    pub fn upload(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, scene: &Scene, instances: &[usize], bounds: &[(Vec3, Vec3)]) {
-        // The meshes to capture, with the largest scale they are instanced at (0: unused).
-        let mut mesh_scale = vec![0.0f32; scene.meshes.len()];
+    /// `surfaces` are what Lumen represents meshes with (scene meshes, then displaced variants),
+    /// `surface_of` every scene instance's.
+    #[allow(clippy::too_many_arguments)]
+    pub fn upload(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        scene: &Scene,
+        surfaces: &[Surface],
+        surface_of: &[usize],
+        instances: &[usize],
+        bounds: &[(Vec3, Vec3)],
+    ) {
+        // The surfaces to capture, with the largest scale they are instanced at (0: unused).
+        let mut mesh_scale = vec![0.0f32; surfaces.len()];
         for &i in instances {
             let instance = &scene.instances[i];
-            let m = instance.mesh.0 as usize;
-            if scene.meshes[m].sdf.as_ref().is_some_and(|s| s.kind == SdfKind::Volume) {
+            let m = surface_of[i];
+            if surfaces[m].sdf().is_some_and(|s| s.kind == SdfKind::Volume) {
                 mesh_scale[m] = mesh_scale[m].max(max_scale(instance.transform));
             }
         }
         let used: Vec<bool> = mesh_scale.iter().map(|&s| s > 0.0).collect();
-        let missing = used.iter().enumerate().any(|(m, &u)| u && self.captures.get(m).is_none_or(Option::is_none));
+        let key = |m: usize| capture_key(scene, surfaces, m);
+        // A newly used mesh recaptures them all (they share the texel budget); a new displaced
+        // variant is captured on its own at the current texel.
+        let missing = (0..scene.meshes.len()).any(|m| used[m] && !self.captures.contains_key(&key(m)));
         if self.capture_version != scene.geometry_version || missing {
             self.capture_version = scene.geometry_version;
-            self.captures = capture_meshes(scene, &mesh_scale);
+            let (captures, texel) = capture_meshes(surfaces, &mesh_scale);
+            self.captures = captures.into_iter().enumerate().filter_map(|(m, c)| Some((key(m), c?))).collect();
+            self.capture_texel = texel;
         }
+        for m in scene.meshes.len()..surfaces.len() {
+            if used[m] && !self.captures.contains_key(&key(m)) {
+                self.captures.insert(key(m), capture_surface(&surfaces[m], mesh_scale[m], self.capture_texel));
+            }
+        }
+        let keep: HashSet<u64> = (0..surfaces.len()).filter(|&m| m < scene.meshes.len() || used[m]).map(key).collect();
+        self.captures.retain(|k, _| keep.contains(k));
 
         // Card records and the capture atlas.
-        let mut mesh_index = vec![None; scene.meshes.len()];
+        let mut mesh_index = vec![None; surfaces.len()];
         let mut sizes = Vec::new();
         let mut meshes = Vec::new();
-        for (m, cards) in self.captures.iter().enumerate() {
-            let Some(cards) = cards.as_ref().filter(|_| used[m]) else { continue };
+        for m in 0..surfaces.len() {
+            let Some(cards) = self.captures.get(&key(m)).filter(|_| used[m]) else { continue };
             mesh_index[m] = Some(meshes.len());
             sizes.extend(cards.cards.iter().map(|c| c.resolution));
             meshes.push(MeshEntry::new(cards, (meshes.len() * CARD_SLOTS) as u32));
@@ -323,10 +354,10 @@ impl CardCache {
         let mut atlas = vec![u32::MAX; (CAPTURE_ATLAS_WIDTH * height.max(1)) as usize];
         let mut records = vec![[0u32; 4]; meshes.len() * CARD_SLOTS * CARD_VEC4S];
         let mut k = 0;
-        for (m, cards) in self.captures.iter().enumerate() {
+        for m in 0..surfaces.len() {
             let Some(entry) = mesh_index[m].map(|e| &meshes[e]) else { continue };
-            let sdf_voxel = scene.meshes[m].sdf.as_ref().map_or(0.0, |s| s.voxel_size);
-            for card in &cards.as_ref().unwrap().cards {
+            let sdf_voxel = surfaces[m].sdf().map_or(0.0, |s| s.voxel_size);
+            for card in &self.captures[&key(m)].cards {
                 let [x, y] = positions[k];
                 k += 1;
                 for row in 0..card.resolution[1] {
@@ -356,7 +387,7 @@ impl CardCache {
         let mut data: Vec<[u32; 4]> = Vec::with_capacity(instances.len() * INSTANCE_VEC4S + records.len());
         for (&i, &bounds) in instances.iter().zip(bounds) {
             let instance = &scene.instances[i];
-            let m = instance.mesh.0 as usize;
+            let m = surface_of[i];
             let world = instance.transform;
             let scale = max_scale(world);
             let entry = mesh_index[m].map(|e| &meshes[e]);
@@ -608,7 +639,7 @@ fn capture_texture(device: &wgpu::Device, width: u32, height: u32) -> wgpu::Text
 
 /// Capture texel size (mesh units) of a mesh with `extent`, instanced at up to `scale`, for a
 /// target world size of `texel`.
-fn capture_texel(extent: Vec3, scale: f32, texel: f32) -> f32 {
+pub(crate) fn capture_texel(extent: Vec3, scale: f32, texel: f32) -> f32 {
     (texel / scale).max(extent.max_element() / MAX_CARD_RESOLUTION as f32)
 }
 
@@ -618,16 +649,42 @@ fn max_scale(transform: glam::Mat4) -> f32 {
     linear.x_axis.length().max(linear.y_axis.length()).max(linear.z_axis.length()).max(1e-6)
 }
 
-/// Captures the meshes with a scale (`mesh_scale`, 0: unused) with world texels grown uniformly
-/// from [`CARD_TEXEL`] until all cards fit [`CAPTURE_BUDGET`] (estimated from the bounding boxes
-/// first, then checked).
-fn capture_meshes(scene: &Scene, mesh_scale: &[f32]) -> Vec<Option<MeshCards>> {
-    let used_meshes = || scene.meshes.iter().zip(mesh_scale).filter(|(_, &s)| s > 0.0);
+/// Key of surface `m`'s capture: a scene mesh by its index, a displaced variant by its serial.
+fn capture_key(scene: &Scene, surfaces: &[Surface], m: usize) -> u64 {
+    match surfaces[m] {
+        Surface::Displaced(variant) if m >= scene.meshes.len() => variant.serial | (1 << 63),
+        _ => m as u64,
+    }
+}
+
+/// Captures `surface`, instanced at up to `scale`, at a target world `texel`.
+fn capture_surface(surface: &Surface, scale: f32, texel: f32) -> MeshCards {
+    let aabb = surface.aabb();
+    let config = CardConfig {
+        texel_size: texel / scale,
+        max_resolution: MAX_CARD_RESOLUTION,
+        two_sided: surface.sdf().is_some_and(|s| s.two_sided),
+        ..Default::default()
+    };
+    match surface {
+        Surface::Mesh(mesh) => {
+            let size = capture_texel(aabb.extent(), scale, texel);
+            MeshCards::capture(&mesh_triangles(mesh, size * 0.5), aabb, &config)
+        }
+        Surface::Displaced(variant) => MeshCards::capture(&variant.triangles, aabb, &config),
+    }
+}
+
+/// Captures the surfaces with a scale (`mesh_scale`, 0: unused) with world texels grown
+/// uniformly from [`CARD_TEXEL`] until all cards fit [`CAPTURE_BUDGET`] (estimated from the
+/// bounding boxes first, then checked); returns the captures and the texel.
+fn capture_meshes(surfaces: &[Surface], mesh_scale: &[f32]) -> (Vec<Option<MeshCards>>, f32) {
+    let used_meshes = || surfaces.iter().zip(mesh_scale).filter(|(_, &s)| s > 0.0);
     // Texels of the bounding-box faces: about one layer per direction.
     let estimate = |texel: f32| -> f32 {
         used_meshes()
-            .map(|(mesh, &scale)| {
-                let e = mesh.aabb.extent().max(Vec3::splat(1e-3));
+            .map(|(surface, &scale)| {
+                let e = surface.aabb().extent().max(Vec3::splat(1e-3));
                 let t = capture_texel(e, scale, texel);
                 2.0 * (e.x * e.y + e.y * e.z + e.z * e.x) / (t * t)
             })
@@ -638,27 +695,12 @@ fn capture_meshes(scene: &Scene, mesh_scale: &[f32]) -> Vec<Option<MeshCards>> {
         texel *= 1.25;
     }
     loop {
-        let captures: Vec<Option<MeshCards>> = scene
-            .meshes
-            .iter()
-            .zip(mesh_scale)
-            .map(|(mesh, &scale)| {
-                (scale > 0.0).then(|| {
-                    let config = CardConfig {
-                        texel_size: texel / scale,
-                        max_resolution: MAX_CARD_RESOLUTION,
-                        two_sided: mesh.sdf.as_ref().is_some_and(|s| s.two_sided),
-                        ..Default::default()
-                    };
-                    let size = capture_texel(mesh.aabb.extent(), scale, texel);
-                    MeshCards::capture(&mesh_triangles(mesh, size * 0.5), mesh.aabb, &config)
-                })
-            })
-            .collect();
+        let captures: Vec<Option<MeshCards>> =
+            surfaces.iter().zip(mesh_scale).map(|(surface, &scale)| (scale > 0.0).then(|| capture_surface(surface, scale, texel))).collect();
         let texels: usize = captures.iter().flatten().map(MeshCards::texel_count).sum();
         if texels as f32 <= CAPTURE_BUDGET || texel >= 1.0 {
             log::debug!("lumen cards: {texels} texels captured (target texel {texel:.2} m)");
-            return captures;
+            return (captures, texel);
         }
         texel *= (texels as f32 / CAPTURE_BUDGET).sqrt() * 1.05;
     }

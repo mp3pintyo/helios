@@ -103,7 +103,13 @@ impl GpuScene {
             uv_extensions: false,
             material_uploads: 0,
             wind: crate::util::uniform_buffer(device, "wind", std::mem::size_of::<WindUniform>() as u64),
-            tessellation: crate::util::uniform_buffer(device, "tessellation", tessellation::UNIFORM_SIZE),
+            // Lumen's displaced variants copy its material table (lumen_displaced.rs).
+            tessellation: device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("tessellation"),
+                size: tessellation::UNIFORM_SIZE,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
+                mapped_at_creation: false,
+            }),
             displacement_table_hash: 0,
             tessellation_enabled: true,
             masks: AlphaMasks::new(device),
