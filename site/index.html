@@ -70,6 +70,8 @@ p { margin: 0; max-width: 64ch; }
 .hint { position: absolute; left: 10px; bottom: 10px; font: 12px/1.4 var(--mono); color: var(--muted); background: rgba(5,7,11,0.6); padding: 5px 8px; border-radius: 6px; pointer-events: none; }
 .live-badge { position: absolute; right: 10px; top: 10px; font: 500 11px/1 var(--mono); letter-spacing: 0.12em; color: var(--ink); background: var(--sun); padding: 5px 7px; border-radius: 4px; }
 .live-badge.off { background: var(--line); color: var(--muted); }
+.shader-note { position: absolute; left: 10px; top: 10px; max-width: calc(100% - 90px); font: 12px/1.4 var(--mono); color: var(--muted); background: rgba(5,7,11,0.6); padding: 5px 8px; border-radius: 6px; pointer-events: none; }
+.shader-note[hidden] { display: none; }
 
 /* Telemetry under the viewport */
 .telemetry { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
@@ -750,6 +752,7 @@ footer .wide-inner { gap: 10px; }
       <canvas id="helios-canvas" tabindex="0" aria-label="Helios élő renderelés"></canvas>
       <div class="veil" id="veil"><div><div class="spin"></div><span id="status" data-en="Starting the engine…">A motor indul…</span><span id="engine-status" hidden></span></div></div>
       <span class="live-badge off" id="badge">LIVE</span>
+      <span class="shader-note" id="shader-note" hidden></span>
       <span class="hint" id="hint" data-en="click · WASD/QE · drag">kattintás · WASD/QE · húzás</span>
     </div>
     <div class="telemetry">
@@ -937,8 +940,12 @@ async function startEngine() {
     for (let i = 0; i < 600 && !m.heliosScene(); i++) await new Promise((r) => setTimeout(r, 100));
     if (!m.heliosScene()) throw new Error($("#engine-status").textContent || "timeout");
     engine = m;
+    // The browser compiles the shaders of the first image (a few seconds; the rest of the
+    // shaders follow in the background while the scene already runs).
+    await waitForShaders(true);
     poster.hidden = true;
     veil.hidden = true;
+    watchShaders();
     badge.classList.remove("off");
     setSun(Number($("#sun").value));
     observeVisibility();
@@ -946,6 +953,46 @@ async function startEngine() {
   } catch (e) {
     showVeil(t("A motor nem indult el: ", "The engine did not start: ") + (e && e.message ? e.message : e), false);
   }
+}
+
+// Shows the engine's shader compile on the veil (`heliosBusy`, e.g. "Compiling GPU shaders… 4 s
+// (31 / 52)") until a frame is on the canvas (`first`) or the engine stops waiting.
+async function waitForShaders(first) {
+  if (!engine.heliosFrames) return;
+  for (;;) {
+    const busy = engine.heliosBusy();
+    if (first ? engine.heliosFrames() > 0 : !busy) return;
+    if (busy) {
+      const n = /(\d+) s(?: \((\d+) \/ (\d+)\))?/.exec(busy);
+      const count = n && n[2] ? ` ${n[2]}/${n[3]}` : "";
+      showVeil(t(`GPU-shaderek fordítása a böngészőben…${count}`, `Compiling GPU shaders in the browser…${count}`) + (n ? ` · ${n[1]} s` : ""));
+    }
+    await new Promise((r) => setTimeout(r, 250));
+  }
+}
+
+// While the rest of the shaders compile in the background, a note says which features are still
+// coming (they switch on one by one).
+const FEATURE_NAMES = {
+  "shadows": "árnyékok", "clouds": "felhők", "fog": "köd", "global illumination": "globális megvilágítás",
+  "translucency": "áttetszőség", "camera effects": "kamera-effektek", "tessellation": "tesszeláció",
+  "occlusion culling": "takarási szűrés", "volumes and particles": "térfogatok és részecskék",
+};
+function watchShaders() {
+  if (!engine.heliosShaders) return;
+  const note = $("#shader-note");
+  const timer = setInterval(() => {
+    const s = JSON.parse(engine.heliosShaders());
+    if (s.compiled >= s.total) {
+      note.hidden = true;
+      clearInterval(timer);
+      return;
+    }
+    const features = s.waiting.map((w) => t(FEATURE_NAMES[w] || w, w)).join(", ");
+    note.textContent = t(`Teljes minőség töltődik: ${s.compiled}/${s.total} shader · még: ${features}`,
+                         `Full quality loading: ${s.compiled}/${s.total} shaders · still to come: ${features}`);
+    note.hidden = false;
+  }, 500);
 }
 
 function setSun(deg) {
@@ -982,6 +1029,8 @@ async function loadScene(name, candleLights, lanternOn) {
   }
   engine.heliosLoadScene(name);
   await nextFrames();
+  // A new scene may need shaders the last one did not (its materials, say).
+  await waitForShaders(false);
   veil.hidden = true;
   busy = false;
   return true;
