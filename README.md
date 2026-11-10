@@ -8,7 +8,9 @@ lights), **Substrate**-style layered materials with material graphs, heterogeneo
 dynamic world of moving instances, with its material / lighting / post stack — running natively and in the
 browser, where a UE-style level editor with scene files and a PCG graph sits around the live viewport.
 
-**Live showcase:** https://mp3pintyo.github.io/helios/ (needs a WebGPU browser, e.g. recent Chrome or Edge).
+**Live showcase:** https://mp3pintyo.github.io/helios/ (needs a WebGPU browser: recent Chrome, Edge or Firefox; the
+browser first compiles the renderer's GPU shaders, which takes Firefox about 30–40 s on every visit and Chrome as long on the
+first one — the page stays responsive meanwhile, see gap 15).
 Redeploy with `python site/build.py` then `python site/deploy_pages.py`.
 Round 4's design notes, measurements and screenshots, one file per feature: [`docs/round4/`](docs/round4/).
 
@@ -178,7 +180,9 @@ the story of how Helios was built. It talks to the engine through the page API i
 `globalThis.heliosConfig = { scene, embedded, screenPercentage, gpuBudgetMs, gi, megaLights, lights, statusElement }`
 before loading the module, then `heliosLoadScene`, `heliosLoadModel(url)` (fetch a glTF model and make it the scene;
 a promise), `heliosSetCandleLights(n)` (the cathedral's candle lights from its next build; 0: the 33 fixture lights),
-`heliosKey`, `heliosLookAt`, `heliosSetSun`, `heliosSetView`, `heliosSetPaused`, `heliosHud` and `heliosScene`.
+`heliosKey`, `heliosLookAt`, `heliosSetSun`, `heliosSetView`, `heliosSetPaused`, `heliosHud`, `heliosScene` and
+`heliosBusy` (what the engine waits for — `Compiling GPU shaders… 12 s` while the browser compiles the pipelines of
+the first frame, a new scene or a feature switched on, the canvas keeping its last frame — or empty while it renders).
 `embedded: true` keeps keyboard input on the focused canvas and leaves the mouse wheel to the page; `statusElement`
 names the element the engine writes its (English) progress and errors into instead of `#status`, so a page can show
 its own, translated text. The editor uses a second set of exports (`heliosEditor*`, `heliosMaterialNodes`; see
@@ -1546,6 +1550,7 @@ culling), gallery 8.0 / 5.0 → 8.1 / 5.0 ms, cathedral with 300 lights under Me
 | Read-write storage textures only for 32-bit single-channel formats | Subsurface diffusion adds its result to the rgba16f scene colour with a full-screen pass and additive blending instead of a compute read-modify-write |
 | No hardware ray tracing | MegaLights' shadow rays march the depth buffer, the lights' virtual shadow maps and Lumen's distance fields |
 | No derivatives in compute shaders (the material resolve is compute over the visibility buffer) | Analytic barycentric UV derivatives; material graphs carry screen derivatives through their math by forward-mode differentiation |
+| Browsers compile every pipeline in their GPU process before running what follows it (Firefox one at a time, on every visit); wgpu has no asynchronous pipeline creation | The browser frame loop renders into its own texture and presents only frames that queued no compile, waiting for `onSubmittedWorkDone` otherwise, so the page never stalls behind a compile; pipelines for content a scene may not have are compiled on first use (`util::Lazy`) |
 ## Status vs. Unreal Engine 5 — what is still simpler
 
 Honest differences that remain:
@@ -1785,3 +1790,12 @@ Honest differences that remain:
     patch and micro-triangle); texture derivatives are the base plane's. Skinned, alpha-masked, translucent and
     voxel geometry is not tessellated; the wind does not
     rotate displaced normals.
+15. **Browser start-up** (round 6, `firefox-freeze`): the first frame waits until the browser has compiled every
+    pipeline it uses — about 160 for the valley, WGSL → HLSL → DXC in the GPU process on Windows: 27–58 s in Firefox on a Ryzen 5 7600X,
+    which compiles one pipeline at a time and keeps no cache between visits, and as long in Chrome on a first visit
+    (later visits hit its shader cache). UE ships precompiled shaders and a PSO cache. wgpu has no asynchronous
+    pipeline creation (Dawn compiles `create*PipelineAsync` calls in parallel: the valley's set in 5.4 s instead of
+    42 s), so the engine can only keep the page responsive — it presents no frame queued behind a compile and shows
+    the wait (`heliosBusy`) — and compile less: pipelines for content a scene may not have are made on first use,
+    and the frame that first needs one waits for it with the canvas holding its last frame (a debug view's material
+    permutation ≈ 10 s in Firefox). The scene bake still runs on the main thread (3–4 s for the valley).
