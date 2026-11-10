@@ -172,7 +172,7 @@ fn mesh_triangles(mesh: &VirtualMesh, error: f32) -> (Vec<[CardVertex; 3]>, Vec<
 pub(crate) type CornerSource = (Vec3, Vec2);
 
 /// A surface's mesh cards and the material inputs of their texels.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct SurfaceCapture {
     pub cards: MeshCards,
     /// Per card and texel (`attributes` in lumen_card_capture.wgsl): uv (2 × f32), the base
@@ -589,7 +589,7 @@ impl CardCache {
             let m = surface_of[i];
             let Some(c) = self.captures.get(&key(m)).filter(|_| used[m]) else { continue };
             let material = scene.instances[i].material.0;
-            let pipeline = capture_pipeline(scene, material, &mut self.graph_code);
+            let pipeline = capture_pipeline(scene, material, &mut self.graph_code).filter(|_| !c.surface.attributes.is_empty());
             let texels = c.surface.cards.texel_count();
             let placed = pipeline.is_some() && placement_dependent(scene, material) && placed_texels + texels <= PLACED_BUDGET;
             let pair = PairKey { capture: c.serial, material, placement: placed.then_some(i) };
@@ -758,7 +758,7 @@ impl CardCache {
         self.material_versions = versions;
         for (p, pair) in self.pairs.iter_mut().enumerate() {
             let placement = pair.key.placement.and_then(|i| scene.instances.get(i)).map(|i| i.transform);
-            pair.pipeline = capture_pipeline(scene, pair.key.material, &mut self.graph_code);
+            pair.pipeline = capture_pipeline(scene, pair.key.material, &mut self.graph_code).filter(|_| !pair.origins.is_empty());
             pair.content = material_content(scene, pair.key.material, placement);
             if pair.pipeline.is_some() && !pair.origins.is_empty() && pair.captured != Some(pair.content) && !self.pending.contains(&p) {
                 self.pending.push_back(p);
@@ -1219,7 +1219,8 @@ fn capture_surface(surface: &Surface, scale: f32, texel: f32) -> SurfaceCapture 
         }
         Surface::Displaced(variant) => match &variant.cards {
             Some((s, t, cards)) if *s == scale && *t == texel => cards.clone(),
-            _ => capture_cards(&variant.triangles, &variant.sources(), aabb, &config),
+            // (The base points are not kept: such a capture has no material inputs.)
+            _ => SurfaceCapture { cards: MeshCards::capture(&variant.triangles, aabb, &config), attributes: Vec::new() },
         },
     }
 }

@@ -104,24 +104,13 @@ pub(crate) struct DisplacedVariant {
     pub aabb: Aabb,
     /// The displaced surface (positions and normals), which the mesh cards capture.
     pub triangles: Vec<[CardVertex; 3]>,
-    /// What the cards' material capture evaluates at the triangles' corners: per refined point
-    /// its base point (before displacement) and texture coordinates, and per triangle its
-    /// points (`triangles` are those points displaced).
-    pub base_points: Vec<CornerSource>,
-    pub corners: Vec<[u32; 3]>,
-    /// Its cards and their texels' material inputs, captured with the bake for the instances'
-    /// largest scale at the default texel: (scale, texel, capture). Lumen's upload captures again
-    /// only if those differ.
+    /// Its cards and their texels' material inputs (evaluated at the base points the surface was
+    /// displaced from), captured with the bake for the instances' largest scale at the default
+    /// texel: (scale, texel, capture). Lumen's upload captures again only if those differ (then
+    /// without material inputs: the base points are not kept).
     pub cards: Option<(f32, f32, SurfaceCapture)>,
     /// Unique per bake: identifies its cached card capture.
     pub serial: u64,
-}
-
-impl DisplacedVariant {
-    /// The material sources of `triangles`' corners.
-    pub fn sources(&self) -> Vec<[CornerSource; 3]> {
-        self.corners.iter().map(|t| t.map(|i| self.base_points[i as usize])).collect()
-    }
 }
 
 /// What a displaced variant is of. `content` hashes everything the displacement reads (the
@@ -271,10 +260,11 @@ fn mesh_corners(mesh: &VirtualMesh, error: f32) -> Vec<[Corner; 3]> {
     triangles
 }
 
-/// The baked variant of displaced `positions` over a refinement's triangles (`refined`), with
-/// `base`'s kind of distance field at its voxel size.
-pub(crate) fn bake(base: &MeshSdf, refined: &[[u32; 3]], positions: &[Vec3], card_scale: f32, serial: u64) -> Option<DisplacedVariant> {
-    let soup: Vec<[Vec3; 3]> = refined.iter().map(|t| t.map(|i| positions[i as usize])).collect();
+/// The baked variant of displaced `positions` over a refinement's triangles (`refined`; its points
+/// are where the cards' material is evaluated), with `base`'s kind of distance field at its voxel
+/// size.
+pub(crate) fn bake(base: &MeshSdf, refined: &Refined, positions: &[Vec3], card_scale: f32, serial: u64) -> Option<DisplacedVariant> {
+    let soup: Vec<[Vec3; 3]> = refined.triangles.iter().map(|t| t.map(|i| positions[i as usize])).collect();
     let aabb = Aabb::from_points(positions.iter().copied());
     let extent = aabb.extent();
     let sdf = match base.kind {
@@ -290,17 +280,18 @@ pub(crate) fn bake(base: &MeshSdf, refined: &[[u32; 3]], positions: &[Vec3], car
     };
     if sdf.kind == SdfKind::Heightfield {
         // Heightfields get no cards.
-        return Some(DisplacedVariant { sdf, aabb, triangles: Vec::new(), base_points: Vec::new(), corners: Vec::new(), cards: None, serial });
+        return Some(DisplacedVariant { sdf, aabb, triangles: Vec::new(), cards: None, serial });
     }
     // Area-weighted normals of the welded displaced surface for the cards.
     let mut normals = vec![Vec3::ZERO; positions.len()];
-    for (t, p) in refined.iter().zip(&soup) {
+    for (t, p) in refined.triangles.iter().zip(&soup) {
         let n = (p[1] - p[0]).cross(p[2] - p[0]);
         for &i in t {
             normals[i as usize] += n;
         }
     }
     let triangles: Vec<[CardVertex; 3]> = refined
+        .triangles
         .iter()
         .zip(&soup)
         .map(|(t, p)| {
@@ -311,12 +302,11 @@ pub(crate) fn bake(base: &MeshSdf, refined: &[[u32; 3]], positions: &[Vec3], car
     // The material is evaluated at the base points (as the resolve does for displaced pixels).
     let base_points: Vec<CornerSource> =
         refined.points.iter().map(|p| (Vec3::from_slice(&p.object_u[..3]), Vec2::new(p.object_u[3], p.normal_v[3]))).collect();
-    let corners = refined.triangles.clone();
-    let sources: Vec<[CornerSource; 3]> = corners.iter().map(|t| t.map(|i| base_points[i as usize])).collect();
+    let sources: Vec<[CornerSource; 3]> = refined.triangles.iter().map(|t| t.map(|i| base_points[i as usize])).collect();
     let texel = crate::cards::CARD_TEXEL;
     let config = crate::cards::capture_config(sdf.two_sided, card_scale, texel);
     let cards = Some((card_scale, texel, crate::cards::capture_cards(&triangles, &sources, aabb, &config)));
-    Some(DisplacedVariant { sdf, aabb, triangles, base_points, corners, cards, serial })
+    Some(DisplacedVariant { sdf, aabb, triangles, cards, serial })
 }
 
 /// FNV-1a.
@@ -708,7 +698,7 @@ impl DisplacedSurfaces {
             self.serial += 1;
             let mesh = match corners {
                 Some(corners) => BakeMesh::Refine(corners, request.spacing),
-                None => BakeMesh::Triangles(refined.triangles),
+                None => BakeMesh::Refined(refined),
             };
             let work = Work::Bake { base, mesh, positions, card_scale: request.card_scale, serial: self.serial };
             self.bakes.push(Task::spawn(work, move |output| match output {
@@ -998,7 +988,7 @@ mod tests {
                 q + Vec3::Y * (0.2 * (1.0 - (q.x * q.x + q.z * q.z) / 0.09).max(0.0))
             })
             .collect();
-        let variant = bake(&base, &refined.triangles, &positions, 1.0, 1).unwrap();
+        let variant = bake(&base, &refined, &positions, 1.0, 1).unwrap();
         assert!((variant.aabb.max.y - 0.2).abs() < 1e-3);
         assert!(variant.sdf.voxel_size <= base.voxel_size * 1.01, "{} vs {}", variant.sdf.voxel_size, base.voxel_size);
         // The top of the bump: on the displaced surface (a sheet: a thin two-sided shell), far

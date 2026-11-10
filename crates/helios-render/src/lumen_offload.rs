@@ -23,9 +23,10 @@ use std::cell::RefCell;
 
 use bytemuck::Pod;
 use glam::{Vec2, Vec3};
-use helios_geometry::cards::{Card, MeshCards};
+use helios_geometry::cards::{Card, MeshCards, TexelSource};
 use helios_geometry::{Aabb, MeshSdf, SdfKind};
 
+use crate::cards::SurfaceCapture;
 use crate::lumen_displaced::{bake, refine, Corner, DisplacedVariant, Refined, SurfacePoint};
 
 /// A displaced variant's CPU work.
@@ -38,12 +39,13 @@ pub(crate) enum Work {
     Bake { base: MeshSdf, mesh: BakeMesh, positions: Vec<Vec3>, card_scale: f32, serial: u64 },
 }
 
-/// The triangles a bake connects its positions with.
+/// The refinement a bake connects its positions with (its triangles) and evaluates its cards'
+/// material at (its points' undisplaced positions and UVs).
 pub(crate) enum BakeMesh {
-    /// The refinement's.
-    Triangles(Vec<[u32; 3]>),
-    /// The refinement's, made again from its input (LOD cut, spacing): an offloaded bake gets these
-    /// few kilobytes instead of megabytes of triangles that would cross to the page and back.
+    /// The refinement itself.
+    Refined(Refined),
+    /// The refinement made again from its input (LOD cut, spacing): an offloaded bake gets these
+    /// few kilobytes instead of megabytes of points and triangles that would cross to the page and back.
     /// [`refine`] is deterministic, so the triangles are the same.
     Refine(Vec<[Corner; 3]>, f32),
 }
@@ -68,11 +70,11 @@ impl Work {
             }
             Work::Bake { base, mesh, positions, card_scale, serial } => {
                 let start = web_time::Instant::now();
-                let triangles = match mesh {
-                    BakeMesh::Triangles(triangles) => triangles,
-                    BakeMesh::Refine(corners, spacing) => refine(&corners, spacing).triangles,
+                let refined = match mesh {
+                    BakeMesh::Refined(refined) => refined,
+                    BakeMesh::Refine(corners, spacing) => refine(&corners, spacing),
                 };
-                let variant = bake(&base, &triangles, &positions, card_scale, serial);
+                let variant = bake(&base, &refined, &positions, card_scale, serial);
                 Output::Baked(variant, start.elapsed().as_secs_f32() * 1000.0)
             }
         }
@@ -83,7 +85,7 @@ impl Work {
         // Sized up front: a bake's positions are megabytes, which growing would copy again.
         let size = match self {
             Work::Refine { corners, .. } => corners.len() * 96,
-            Work::Bake { mesh: BakeMesh::Triangles(t), positions, .. } => t.len() * 12 + positions.len() * 12,
+            Work::Bake { mesh: BakeMesh::Refined(r), positions, .. } => r.triangles.len() * 12 + r.points.len() * 32 + positions.len() * 12,
             Work::Bake { mesh: BakeMesh::Refine(c, _), positions, .. } => c.len() * 96 + positions.len() * 12,
         };
         let mut w = Writer(Vec::with_capacity(size + 128));
@@ -98,9 +100,9 @@ impl Work {
                 w.u32(1);
                 w.sdf(base);
                 match mesh {
-                    BakeMesh::Triangles(triangles) => {
+                    BakeMesh::Refined(refined) => {
                         w.u32(0);
-                        w.array(triangles);
+                        w.refined(refined);
                     }
                     BakeMesh::Refine(corners, spacing) => {
                         w.u32(1);
@@ -124,7 +126,7 @@ impl Work {
             1 => {
                 let base = r.sdf()?;
                 let mesh = match r.u32()? {
-                    0 => BakeMesh::Triangles(r.array()?),
+                    0 => BakeMesh::Refined(r.refined()?),
                     1 => BakeMesh::Refine(r.corners()?, r.f32()?),
                     _ => return None,
                 };
@@ -154,10 +156,14 @@ impl Output {
                     let flat: Vec<[f32; 18]> = triangles.iter().map(|t| bytemuck::cast(t.map(|(p, n)| [p.x, p.y, p.z, n.x, n.y, n.z]))).collect();
                     w.array(&flat);
                     w.u32(cards.is_some() as u32);
-                    if let Some((scale, texel, cards)) = cards {
+                    if let Some((scale, texel, SurfaceCapture { cards, attributes })) = cards {
                         w.f32(*scale);
                         w.f32(*texel);
                         w.cards(cards);
+                        w.u32(attributes.len() as u32);
+                        for texels in attributes {
+                            w.array(texels);
+                        }
                     }
                     w.u64(*serial);
                 }
@@ -190,7 +196,7 @@ impl Output {
                             .collect();
                         let cards = match r.u32()? {
                             0 => None,
-                            _ => Some((r.f32()?, r.f32()?, r.cards()?)),
+                            _ => Some((r.f32()?, r.f32()?, r.capture()?)),
                         };
                         Some(DisplacedVariant { sdf, aabb, triangles, cards, serial: r.u64()? })
                     }
@@ -344,7 +350,7 @@ impl Writer {
     fn cards(&mut self, MeshCards { texel_size, cards }: &MeshCards) {
         self.f32(*texel_size);
         self.u32(cards.len() as u32);
-        for Card { axis, layer, origin, resolution, plane, depth_range, texels } in cards {
+        for Card { axis, layer, origin, resolution, plane, depth_range, texels, sources } in cards {
             self.u32(*axis);
             self.u32(*layer);
             self.f32(origin.x);
@@ -357,6 +363,8 @@ impl Writer {
                 self.f32(d);
             }
             self.array(texels);
+            let sources: Vec<[u32; 3]> = sources.iter().map(|&TexelSource { triangle, barycentrics: [b1, b2] }| [triangle, b1.to_bits(), b2.to_bits()]).collect();
+            self.array(&sources);
         }
     }
 }
@@ -444,9 +452,24 @@ impl Reader<'_> {
                 plane: self.f32()?,
                 depth_range: [self.f32()?, self.f32()?],
                 texels: self.array()?,
+                sources: self
+                    .array::<[u32; 3]>()?
+                    .into_iter()
+                    .map(|[triangle, b1, b2]| TexelSource { triangle, barycentrics: [f32::from_bits(b1), f32::from_bits(b2)] })
+                    .collect(),
             });
         }
         Some(MeshCards { texel_size, cards })
+    }
+
+    fn capture(&mut self) -> Option<SurfaceCapture> {
+        let cards = self.cards()?;
+        let count = self.u32()? as usize;
+        let mut attributes = Vec::with_capacity(count.min(1024));
+        for _ in 0..count {
+            attributes.push(self.array()?);
+        }
+        Some(SurfaceCapture { cards, attributes })
     }
 }
 
@@ -506,12 +529,12 @@ mod tests {
 
         let positions = bumped(&local);
         let bake = |mesh| Work::Bake { base: base.clone(), mesh, positions: positions.clone(), card_scale: 1.0, serial: 7 };
-        let a = variant(bake(BakeMesh::Triangles(local.triangles.clone())).run());
+        let a = variant(bake(BakeMesh::Refined(Refined { points: local.points.clone(), triangles: local.triangles.clone() })).run());
         let encoded = run_bake_task(&bake(BakeMesh::Refine(corners, spacing)).encode());
         let b = variant(Output::decode(&encoded).unwrap());
         // Everything baked is identical, to the bit (only the bake time differs).
         assert_eq!(a, b);
-        assert!(a.cards.as_ref().is_some_and(|c| !c.2.cards.is_empty()));
+        assert!(a.cards.as_ref().is_some_and(|c| !c.2.cards.cards.is_empty() && c.2.attributes.len() == c.2.cards.cards.len()));
         assert_eq!(b.serial, 7);
         assert_eq!(Output::decode(&encoded).unwrap().encode(), encoded);
     }
