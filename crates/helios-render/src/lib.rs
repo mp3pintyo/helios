@@ -56,6 +56,7 @@ mod lumen;
 mod lumen_displaced;
 mod lumen_dynamic;
 mod lumen_lite;
+mod lumen_offload;
 mod material_graphs;
 mod media;
 mod megalights;
@@ -102,6 +103,7 @@ pub use passes::post_fx::DepthOfField;
 pub use picking::PickResult;
 pub use renderer::{DebugView, DynamicStats, RenderSettings, Renderer, RendererConfig};
 pub use lumen_lite::{GiMethod, LiteFallback};
+pub use lumen_offload::{run_bake_task, set_bake_offload, BakeOffload, BakePoll};
 pub use resolution::{DynamicResolution, MAX_SCREEN_PERCENTAGE, MIN_SCREEN_PERCENTAGE};
 pub use scene::{
     AssemblyPart, CloudLayer, Displacement, FogVolume, Image, ImageTexture, InstanceHandle, Light, LightHandle, LightKind, Material, MaterialHandle, MaterialKind,
