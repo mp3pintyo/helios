@@ -91,7 +91,8 @@ Editor (`web/editor.html`, viewport focused, right mouse button not held): `W` /
 `WASD`/`QE` flies, the wheel dollies; `Shift` / `Ctrl` click adds / toggles; drag content into the viewport, drop a
 material onto an object to assign it.
 
-Headless flags: `--scene`, `--detail`, `--size WxH`, `--frames N`, `--view i` (debug view by index, 0–25; also
+Headless flags: `--scene`, `--detail`, `--size WxH`, `--frames N` (the log ends with means over the last two thirds
+of the frames: GPU and per-pass times, shadow pages and draws, moving lights' faces re-anchored), `--view i` (debug view by index, 0–25; also
 `heliosSetView(i)`; 14 = Lumen mesh cards, 15 = local light shadow pages, 16 = invalidation, 17 = skin weights,
 18 / 19 = MegaLights samples / samples | denoised, 20 = Lumen Lite probes, 21 = volume march steps and particle
 overdraw, 22 = voxel clusters, 23 = assembly parts, 24 = material features, 25 = tessellation depth and
@@ -116,7 +117,9 @@ lit, each a shadow-casting light), `--no-skinning` (import a glTF model's skinne
 cost comparisons), `--full-invalidation` (every move invalidates everything, as before per-instance invalidation),
 `--moving-light-maps` (moving local lights' shadow maps re-rendered every frame they move: the reference for the
 cached default), `--moving-light-fields` (distance-field shadows while they move, round 4's default),
-`--moving-light-renders N` (moving lights' shadow maps rendered in full per frame, default 1),
+`--moving-light-pages N` (pages of moving lights' shadow-map faces rendered from new origins per frame, default 32;
+round 5's `--moving-light-renders` counted whole lights), `--lantern` / `?lantern=1` (the cathedral with a lantern
+carried down the nave: a fast, sharp moving light; with `--movers 1` only the lantern moves),
 `--movers N` (only the first N moving prop groups move), `--static-motion` (the props move as `Mobility::Static`
 instances: the one-off edit path), `--no-tessellation`, `--dice-rate N` (pixels per micro-triangle edge, default 2),
 `--speed N` (fly speed in m/s for held keys, e.g. a slow dolly: `--hold KeyW --speed 0.3`). Next to the HUD (whose
@@ -135,7 +138,7 @@ honouring `Range`, e.g. a CDN) streams pages on demand. Imported glTF models are
 | Scene | What it shows | Size |
 |---|---|---|
 | `valley` | Mountain valley, 600 boulders, a gold sculpture (turning once in 45 s) and a small lake with a log raft that drifts, bobs and rolls on it, procedural (not simulated) mist over the water; terrain textured through a runtime virtual texture; at the lake's north end, out of the initial view, a glass pane and two crossing tinted panels standing in the water (layered translucency test); behind the initial view a cobblestone path and displaced boulders (Nanite tessellation; one turning slowly on its plinth: a movable displaced instance), e.g. `--eye -26,1.8,39 --at -33,0.2,53` | 613 instances, 50 M (medium) / 199 M (high) source triangles |
-| `cathedral` | Gothic basilica: 11-bay nave with clustered piers, triforium, stained-glass clerestory and aisles, quadripartite rib vaults, flying buttresses, polygonal apse with half dome, west front with rose window and twin spired towers; pews, altar, candelabra and eleven chandeliers swinging on their 12 m chains (7 s pendulums, 1–3°, their candle lights moving along), 33 candle lights in all; dust motes in the clerestory's light shafts and incense rising from a censer before the altar; alpha-tested wrought-iron choir screens; at the west end of the north aisle, behind the initial view, a stained-glass screen and two crossing tinted glass panes (layered translucency test). **Candle-lit** with `--lights N` / `?lights=N`: every candle flame its own shadow-casting light (60 candelabrum, 88 chandelier and 2 altar candles) plus votive racks of tea lights against the aisle walls (858), the first N lit, up to 1008 | 458 instances, 4 M (medium) / 18 M (high) |
+| `cathedral` | Gothic basilica: 11-bay nave with clustered piers, triforium, stained-glass clerestory and aisles, quadripartite rib vaults, flying buttresses, polygonal apse with half dome, west front with rose window and twin spired towers; pews, altar, candelabra and eleven chandeliers swinging on their 12 m chains (7 s pendulums, 1–3°, their candle lights moving along), 33 candle lights in all; dust motes in the clerestory's light shafts and incense rising from a censer before the altar; alpha-tested wrought-iron choir screens; at the west end of the north aisle, behind the initial view, a stained-glass screen and two crossing tinted glass panes (layered translucency test). **Candle-lit** with `--lights N` / `?lights=N`: every candle flame its own shadow-casting light (60 candelabrum, 88 chandelier and 2 altar candles) plus votive racks of tea lights against the aisle walls (858), the first N lit, up to 1008. With `--lantern` / `?lantern=1`: a hand lantern (iron frame, candle, a 2 cm flame light) carried down the central aisle and back at walking pace, swinging from the hand — a fast, sharp moving light | 458 instances, 4 M (medium) / 18 M (high) |
 | `forest` | Mixed broadleaf / conifer forest with real leaf geometry, bushes, ferns, grass, mossy boulders, fallen logs and mushrooms at golden hour, swaying in a gusty breeze; conifers built from shared needle-spray assemblies, foliage with voxel LODs; a campfire in the clearing in front of the initial view (simulated fire and smoke, sparks that bounce, embers that settle and cool, a flickering fire light; best at night, `--sun 200,-30 --eye 3.5,1.4,1.0 --at 7,1.0,-1`) | 8 278 instances (≈ 26 400 assembly parts when expanded), 82 M (medium) source triangles |
 | `gallery` | The material gallery: a paved courtyard at golden hour with a row of plinths — clear-coat car paint, velvet with sheen, subsurface skin, a lit wax candle and a marble egg, a bush whose leaves let a lamp's light through, an anisotropic brushed-metal pot, dielectrics of IOR 1.33 / 2.4 and a tinted specular, an unlit sign — and six material graphs: animated lava (a pool and an egg), stylised water (two instances of one graph with different parameters), a terrace of wet stone with puddles and, in front of it, three beds displaced by their graphs through Nanite tessellation: a brick terrace with carved mortar joints (`--eye 0.9,0.45,10.9 --at 0,0,9.2`), left of it a bed of mushrooms (a vector displacement: caps overhanging their stems, `--eye -5.9,0.3,10.4 --at -6.5,0.08,9.2`) and right of it a rippling cloth (an animated displacement, `--eye 4.4,0.6,10.9 --at 6.3,0.15,9.0`) | 48 instances |
 
@@ -1107,10 +1110,23 @@ with 300 lights under MegaLights 15.3 / 9.2 ms. Round 5 ([`docs/round5/`](docs/r
   map has it, and the PCSS filter, which knows t from its blocker search, moves its taps by as much (slid onto the
   receiver's plane; nothing at contact) — shadows follow the light every frame, and a re-render moves nothing
   visible. When the light leaves the tolerance its requested pages are rendered from a new origin placed 0.75
-  tolerances ahead on its path (a chandelier light: every ~60 frames), at most `moving_light_renders` lights per
-  frame (1), the furthest out first; a light gets a map only if the budget can keep up with its recent top speed,
-  and one that outruns it keeps distance-field shadows until it rests, so sharp, fast lights don't flip between the
-  two. A moving light's map is one mip coarser (UE's `ResolutionLodBiasLocalMoving`). Cathedral, 2560×1440: GPU
+  tolerances ahead on its path (a chandelier light: every ~60 frames), the furthest out first; a light gets a map
+  only if the budget can keep up with its recent top speed, and one that outruns it keeps distance-field shadows
+  until it rests, so lights don't flip between the two. A moving light's map is one mip coarser (UE's
+  `ResolutionLodBiasLocalMoving`). Round 6 ([`fast-light-shadows.md`](docs/round6/fast-light-shadows.md)) made the
+  budget fit fast, sharp lights: **every cube face has its own origin** and is re-anchored on its own, the budget is
+  **pages per frame** (`RenderSettings::moving_light_pages`, 32), a face costing the pages the view requests of it
+  (counted on the GPU by `dirty_info`, read back per face), so a face nobody looks at costs its one fallback page and
+  six faces due together spread over the next frames; a light that crosses its tolerance sphere every frame is
+  rendered every frame **from where it is** (the lead shrinks with the speed, to none); one the budget cannot follow
+  at its tolerance is held at twice or four times it rather than given up; and a moving light competes for a slot at
+  half its influence instead of only for the slots static lights leave. The lantern of `--lantern` (a 2 cm flame at
+  up to 1.6 m/s) is re-rendered every frame, ~17 pages at the moving mip bias (the reference at full resolution:
+  33): 44.8 dB against the every-frame reference — all of it the mip bias — where its distance-field shadows were
+  33.9 dB; with the chandeliers swinging too, all twelve moving lights keep their maps for 1000 frames (round 5:
+  the lantern took the one render a frame and 8 chandelier lights fell back to distance fields), ~28 pages
+  a frame rendered from new origins against 161 re-rendering every moving light every frame. HUD: `moving lights`
+  line. Cathedral, 2560×1440 (round 5): GPU
   frame 10.27 ms (distance fields, round 4) → 10.77 ms, against 13.75 ms re-rendered every frame (lighting +0.22 ms
   for ten more mapped lights, marking +0.08, page raster +0.06, culling and expansion +0.10; ~42 dynamic-only pages
   a frame); image against the every-frame reference 48.9 dB (distance fields 42.2 dB), from under a chandelier
@@ -1560,11 +1576,13 @@ Honest differences that remain:
    material's texture) or stored in scene files; time is the renderer's clock.
 4. **Local lights**: at most 32 lights per frame get virtual shadow maps, sharing the sun's 1024-page physical pool
    (UE's default pool is four times larger), so local lights request pages half a mip coarser than the screen
-   footprint; a moving light's shadow map is not re-rendered every frame as UE's is but held at an origin within
-   0.1 source radii and parallax-corrected in the soft-shadow filter: exact at contact and for occluders the blocker
-   search finds, while shadows of occluders right next to a large moving light stay where the origin casts them,
-   single-tap lookups (fog, lights beyond a pixel's four filtered ones) are uncorrected, the map is a mip coarser, and
-   sharp, fast lights beyond the render budget keep distance-field shadows until they rest. With the classic
+   footprint; a moving light's shadow map is not re-rendered every frame as UE's is but each cube face is held at an
+   origin within 0.1 source radii and parallax-corrected in the soft-shadow filter (lights faster than that are
+   re-rendered every frame, as in UE, while a budget of pages per frame pays for it): exact at contact and for
+   occluders the blocker search finds, while shadows of occluders right next to a large moving light stay where the
+   origin casts them, single-tap lookups (fog, lights beyond a pixel's four filtered ones) are uncorrected, the map is
+   a mip coarser, lights the budget cannot follow are held at up to four times their tolerance (beyond that,
+   distance fields until they rest), and the budget counts pages, not their cost in draws. With the classic
    clustered loop, the rest get distance-field
    shadows for the strongest few per pixel and no shadows beyond those (light leaks through walls), and shadow-map
    soft shadows are PCSS-filtered, not ray-marched. **MegaLights** shadows every light but traces no hardware rays

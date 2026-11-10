@@ -455,6 +455,21 @@ impl DemoApp {
             self.renderer.shadow_mapped_lights(),
             self.renderer.shadow_held_lights(),
         ));
+        let moving = self.renderer.moving_light_stats();
+        if moving.anchors.mapped + moving.anchors.fields > 0 {
+            text.push_str(&format!(
+                "\nmoving lights: {} with shadow maps ({} at a coarser tolerance), {} on distance fields · {} faces re-anchored ({:.0} pages; held maps need {:.1} of {:.0} pages a frame) · local pages rendered in full: {} ({} of moving lights)",
+                moving.anchors.mapped,
+                moving.anchors.relaxed,
+                moving.anchors.fields,
+                moving.anchors.faces,
+                moving.anchors.pages,
+                moving.anchors.load,
+                s.moving_light_pages,
+                moving.full_pages,
+                moving.moving_full_pages,
+            ));
+        }
         if self.motion.instance_count() > 0 {
             let d = self.renderer.dynamic_stats();
             text.push_str(&format!(

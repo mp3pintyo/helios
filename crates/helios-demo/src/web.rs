@@ -248,6 +248,10 @@ async fn run() -> Result<(), String> {
     if let Some(count) = option_string("lights", "lights").and_then(|v| v.parse().ok()) {
         crate::scenes::candles::set_candle_lights(count);
     }
+    // `?lantern=1`: a lantern carried down the cathedral's nave (a fast, sharp moving light).
+    if option_string("lantern", "lantern").is_some_and(|v| v != "0") {
+        crate::scenes::cathedral::set_lantern(true);
+    }
     let mut app = match query_param("stream") {
         // `?stream=URL_BASE`: the scene of the mesh library at URL_BASE (written by
         // `helios --bake-hvm`), its geometry streamed with HTTP range requests.

@@ -6,7 +6,12 @@
 //!
 //! Every stone surface is densely tessellated and chisel-displaced, so the cathedral is
 //! hundreds of millions of source triangles once instanced — the case virtual geometry exists for.
+//!
+//! `--lantern` (`?lantern=1`) adds a lantern carried down the nave's central aisle and back: a
+//! fast, sharp moving light (a 2 cm candle flame at up to 1.6 m/s) whose iron frame swings with
+//! it — the test case of shadow maps for fast moving lights (`helios_render::vsm_anchor`).
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use glam::{Mat4, Quat, Vec2, Vec3};
@@ -34,6 +39,13 @@ const VAULT_RISE: f32 = 9.0;
 const AISLE_SPRING: f32 = 10.0;
 const AISLE_RISE: f32 = 3.2;
 const SUN: (f32, f32, f32) = (1.15, 0.72, 10.0);
+
+/// The carried lantern is added to cathedrals built from now on (`--lantern`).
+static LANTERN: AtomicBool = AtomicBool::new(false);
+
+pub fn set_lantern(on: bool) {
+    LANTERN.store(on, Ordering::Relaxed);
+}
 
 pub fn floor_height(x: f32, z: f32) -> f32 {
     terrain_height(x, z).max(if inside_footprint(x, z) { 0.0 } else { f32::MIN })
@@ -982,7 +994,56 @@ fn build_scene(detail: Detail) -> (Scene, DemoMotion) {
             motion.attach_lights(b.scene, group, lights);
         }
     }
+
+    // A lantern carried down the central aisle and back (built last: mesh libraries baked
+    // without it stay valid). Its candle is a sharp light moving at walking pace.
+    if LANTERN.load(Ordering::Relaxed) {
+        let (iron, wax, flame, light_at) = lantern(detail);
+        let hand = Vec3::new(8.0, 0.9, 0.5);
+        let t = Mat4::from_translation(hand);
+        let iron = b.mesh("lantern", &iron);
+        let wax = b.mesh("lantern candle", &wax);
+        let flame = b.mesh("lantern flame", &flame);
+        let parts = [b.scene.add_instance(iron, m.iron, t), b.scene.add_instance(wax, m.wax, t), b.scene.add_instance(flame, m.flame, t)];
+        b.scene.set_cast_shadow(parts[2], false);
+        let light = b.scene.add_light(Light { source_radius: 0.02, ..Light::point(hand + light_at, warm, 12.0, 10.0) });
+        // 22 m in 22 s each way (up to 1.6 m/s), a quarter of the way down the aisle after the
+        // first 2.5 s.
+        let carry = Motion::Carry { from: hand, to: Vec3::new(30.0, 0.9, 0.5), period: 44.0, phase: 0.1, sway: 0.2 };
+        motion.add(b.scene, carry, &parts, &[light]);
+        // First in line: `--movers 1` keeps only the lantern moving (measurements).
+        motion.move_last_first();
+    }
     (scene, motion)
+}
+
+/// A hand lantern, its handle's top at the origin: an iron frame (base, cap, four corner posts,
+/// a rail below and above the flame, a bail handle), a candle and its flame, and the flame's
+/// centre (the light).
+fn lantern(detail: Detail) -> (Mesh, Mesh, Mesh, Vec3) {
+    let (half, bottom, top) = (0.065, -0.34, -0.1);
+    let corners = [Vec2::new(-half, -half), Vec2::new(half, -half), Vec2::new(half, half), Vec2::new(-half, half)];
+    let mut iron = vec![
+        cuboid(Vec3::new(-0.075, bottom - 0.02, -0.075), Vec3::new(0.075, bottom, 0.075)),
+        cuboid(Vec3::new(-0.08, top, -0.08), Vec3::new(0.08, top + 0.02, 0.08)),
+        cuboid(Vec3::new(-0.03, top + 0.02, -0.03), Vec3::new(0.03, top + 0.045, 0.03)),
+    ];
+    for (i, c) in corners.iter().enumerate() {
+        iron.push(tube(&[Vec3::new(c.x, bottom, c.y), Vec3::new(c.x, top, c.y)], &[0.007, 0.007], 6, true));
+        let next = corners[(i + 1) % 4];
+        for y in [-0.29, -0.15] {
+            iron.push(tube(&[Vec3::new(c.x, y, c.y), Vec3::new(next.x, y, next.y)], &[0.005, 0.005], 6, true));
+        }
+    }
+    let bail: Vec<Vec3> = (0..=detail.pick(8, 12)).map(|i| {
+        let a = i as f32 / detail.pick(8, 12) as f32 * std::f32::consts::PI;
+        Vec3::new(-a.cos() * 0.06, top + 0.045 + a.sin() * (-top - 0.045), 0.0)
+    }).collect();
+    let n = bail.len();
+    iron.push(tube(&bail, &vec![0.005; n], 6, false));
+    let (wax, flame) = candle(0.07);
+    let base = Mat4::from_translation(Vec3::Y * bottom);
+    (merge(&iron), wax.transformed(base), flame.transformed(base), Vec3::Y * (bottom + 0.13))
 }
 
 const CENSER_HEIGHT: f32 = 1.12;
