@@ -8,7 +8,7 @@
 //  * the wind (wind.wgsl) moves vegetation every frame, up to its disable distance;
 //  * animated skeletal meshes (skinning.wgsl) move whenever their pose changes;
 //  * a material graph that reads the time moves its displaced surfaces (displacement.wgsl) every
-//    frame, within the displacement's bound;
+//    frame, within the displacement's bound and, where the graph has one, at its speed bound;
 //  * Scene::set_transform moves an instance: vsm_motion.rs writes footprints covering its old and
 //    new bounds before the collect pass appends the others (the buffer then starts non-empty).
 // Pages keep their static casters in a static layer (vsm_common.wgsl): a footprint of a dynamic
@@ -33,7 +33,8 @@
 // A wind footprint bounds how far its geometry moved since the page was rendered by
 // min(2 · maximum displacement, speed bound · frames): pages of fine levels are refreshed every
 // frame, coarse levels (distant shadows, volumetric fog) every few frames, and levels whose texels
-// dwarf the displacement never — the cost stays bounded without visible lag. A move's footprint
+// dwarf the displacement never — the cost stays bounded without visible lag. An animated
+// displacement's footprint does the same with its graph's speed bound. A move's footprint
 // (vsm_motion.rs: per slice of a long caster) carries its recent speed the same way, and is padded
 // by the refresh distance, since the pages it skipped may show the caster that far off.
 // Local light pages (vsm_local.rs) apply the same rules in their light's terms: a footprint hits
@@ -148,12 +149,19 @@ fn collect(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
     if (instance.flags & INSTANCE_ANIMATED) != 0u {
         // An animated displacement: every point stays within the displacement's bound of its
-        // undisplaced place, and nothing bounds how fast it crosses that range, so the pages its
-        // texels can show a change in are refreshed every frame and coarser ones never.
+        // undisplaced place, and moves at most at the speed the material compiler derived from
+        // the graph, so like the wind's its pages are refreshed once the surface may have moved
+        // two of their texels — every frame at fine levels while it moves fast, every few frames
+        // further out, never where texels dwarf the reach. A graph without a speed bound crosses
+        // the whole range at once: the pages its texels can show a change in are refreshed every
+        // frame.
         let bound = displacement_reach(instance);
-        reach = max(reach, max(bound, 1e-6));
-        f.change = max(f.change, 2.0 * bound);
-        f.per_frame = max(f.per_frame, 2.0 * bound);
+        let speed = displacement_speed(instance);
+        // (In the wind too, both motions add up.)
+        reach = max(reach + bound, 1e-6);
+        f.change += 2.0 * bound;
+        let step = speed * max(tess.time.x - tess.time.y, 0.0);
+        f.per_frame += select(2.0 * bound, min(step, 2.0 * bound), speed >= 0.0);
     }
     if skin_dynamic(instance) {
         // A moving skin: every pose since the scene was loaded lies within the largest reach of

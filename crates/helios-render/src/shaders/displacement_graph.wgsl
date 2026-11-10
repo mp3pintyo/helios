@@ -26,6 +26,8 @@ struct DisplacementSurface {
     object_dpdy: vec3<f32>,
     normal: vec3<f32>,           // interpolated world normal
     time: f32,                   // seconds: what a Time node reads
+    object_normal: vec3<f32>,    // interpolated object normal (the tangent frame's)
+    object_to_world: mat3x3<f32>,  // directions: the instance's linear part over its largest scale
 }
 
 fn displacement_surface(material: u32, max_scale: f32, p: DisplacementInput) -> DisplacementSurface {
@@ -46,7 +48,50 @@ fn displacement_surface(material: u32, max_scale: f32, p: DisplacementInput) -> 
     s.object_dpdy = object_frame[1] * object_segment;
     s.normal = p.world_normal;
     s.time = p.time;
+    s.object_normal = p.normal;
+    s.object_to_world = p.object_to_world;
     return s;
+}
+
+// The displacement's tangent frame (object space; columns tangent, bitangent, normal): the
+// interpolated object normal with the object X axis projected into its plane, the Z axis where
+// the normal runs along X. A per-triangle frame from the UVs (the resolve's shading frame) would
+// differ on the two sides of an edge and crack the surface; this one is a function of the
+// interpolated normal, which both sides compute alike. Where U runs along object X (planes,
+// terrain) the two frames agree; around a curved surface's points facing ±X the tangent swirls.
+fn displacement_tangent_frame(n: vec3<f32>) -> mat3x3<f32> {
+    let along_x = vec3<f32>(1.0, 0.0, 0.0) - (n * n.x);
+    let along_z = vec3<f32>(0.0, 0.0, 1.0) - (n * n.z);
+    let t = normalize(select(along_z, along_x, dot(along_x, along_x) > 1e-6));
+    return mat3x3<f32>(t, cross(n, t), n);
+}
+
+// Inverse of a 3x3 matrix (columns a, b, c): its rows are b x c, c x a, a x b over the determinant.
+fn displacement_inverse(m: mat3x3<f32>) -> mat3x3<f32> {
+    let rows = mat3x3<f32>(cross(m[1], m[2]), cross(m[2], m[0]), cross(m[0], m[1]));
+    return transpose(rows) * (1.0 / dot(m[0], cross(m[1], m[2])));
+}
+
+// A graph's TransformVector: direction `v` from space `space_in` to `space_out` (0 world, 1
+// object, 2 tangent: helios-material's VectorSpace codes, constants the compiler folds). Through
+// object space, so the result is exact under the instance's rotation: an object- or tangent-space
+// vector times the instance's linear part over its scale, converted back to object space by the
+// tessellator (displacement_offset), is that vector in object units again.
+fn displacement_transform_vector(input: DisplacementSurface, v: vec3<f32>, space_in: u32, space_out: u32) -> vec3<f32> {
+    let frame = displacement_tangent_frame(input.object_normal);
+    var object = v;
+    if space_in == 0u {
+        object = displacement_inverse(input.object_to_world) * v;
+    } else if space_in == 2u {
+        object = frame * v;
+    }
+    if space_out == 0u {
+        return input.object_to_world * object;
+    }
+    if space_out == 2u {
+        return object * frame;
+    }
+    return object;
 }
 
 // The texture layer of texture parameter `slot` (unset: the material's own texture).

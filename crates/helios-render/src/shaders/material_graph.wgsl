@@ -84,6 +84,29 @@ fn graph_to_tangent(input: SurfaceInput, n: vec3<f32>) -> vec3<f32> {
     return vec3<f32>(dot(n, input.tangent), dot(n, input.bitangent), dot(n, input.normal));
 }
 
+// A graph's TransformVector in the surface function: direction `v` from space `space_in` to
+// `space_out` (0 world, 1 object, 2 tangent). Tangent space is the pixel's shading frame (the
+// Normal output's and normal maps'); object space the instance's axes over its largest scale,
+// whose inverse transpose is the normal matrix: object -> world is the normal matrix's inverse
+// transpose (b x c, c x a, a x b over its determinant), world -> object its transpose.
+fn graph_transform_vector(input: SurfaceInput, v: vec3<f32>, space_in: u32, space_out: u32) -> vec3<f32> {
+    let frame = mat3x3<f32>(input.tangent, input.bitangent, input.normal);
+    let n = input.normal_matrix;
+    var world = v;
+    if space_in == 1u {
+        world = (mat3x3<f32>(cross(n[1], n[2]), cross(n[2], n[0]), cross(n[0], n[1])) * v) * (1.0 / dot(n[0], cross(n[1], n[2])));
+    } else if space_in == 2u {
+        world = frame * v;
+    }
+    if space_out == 1u {
+        return transpose(n) * world;
+    }
+    if space_out == 2u {
+        return world * frame;
+    }
+    return world;
+}
+
 // What unconnected outputs keep: the material's constants and slab.
 fn graph_defaults(m: Material, slab: Slab, coat_roughness: f32) -> GraphOutput {
     var g: GraphOutput;

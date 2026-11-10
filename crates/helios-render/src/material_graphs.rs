@@ -172,6 +172,14 @@ impl Scene {
     pub fn material_parameter(&self, material: MaterialHandle, name: &str) -> Option<ParameterValue> {
         self.graphs.parameters.get(material.0 as usize).and_then(|p| p.get(name)).copied()
     }
+
+    /// Bound of how fast `material`'s displacement moves its surface, in object units per second
+    /// (an instance's scale multiplies it): 0 if it does not move, `None` if its graph animates it
+    /// without a bound — cached shadow pages under it then refresh every frame. Follows the
+    /// material's parameter values (helios-material's `motion` analysis).
+    pub fn displacement_speed(&self, material: MaterialHandle) -> Option<f32> {
+        crate::tessellation::displacement_speed(self, material)
+    }
 }
 
 #[cfg(test)]
