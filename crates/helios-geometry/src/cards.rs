@@ -14,7 +14,9 @@
 //! is cropped to the texels it covers.
 //!
 //! The capture is a CPU rasteriser over the mesh's triangles with square texels of one size per
-//! mesh, so all of a mesh's cards share their texel density.
+//! mesh, so all of a mesh's cards share their texel density. On request it also records which
+//! triangle each texel sees and where ([`TexelSource`]), so a renderer can interpolate the
+//! attributes a material needs (texture coordinates, ...) and capture the surface's albedo.
 
 use glam::{Vec2, Vec3};
 
@@ -46,16 +48,26 @@ pub struct CardConfig {
     pub min_layer_texels: u32,
     /// Capture back faces too, into the opposite cards (open meshes rendered from both sides).
     pub two_sided: bool,
+    /// Record each texel's [`TexelSource`] ([`Card::sources`]).
+    pub sources: bool,
 }
 
 impl Default for CardConfig {
     fn default() -> Self {
-        Self { texel_size: 0.1, max_resolution: 256, min_layer_texels: 16, two_sided: false }
+        Self { texel_size: 0.1, max_resolution: 256, min_layer_texels: 16, two_sided: false, sources: false }
     }
 }
 
 /// A captured vertex: position and normal in mesh space.
 pub type CardVertex = (Vec3, Vec3);
+
+/// The surface point a texel sees: the triangle (its index in the captured slice) and the
+/// barycentric weights of its corners 1 and 2 (corner 0's is the rest) at the texel's centre.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct TexelSource {
+    pub triangle: u32,
+    pub barycentrics: [f32; 2],
+}
 
 /// One card: an orthographic depth + normal image of the surfaces facing `axis`.
 #[derive(Clone, Debug, PartialEq)]
@@ -76,6 +88,9 @@ pub struct Card {
     /// Row-major texels: depth (16 bits) | octahedral normal (2 × 8 bits) << 16, or
     /// [`INVALID_TEXEL`].
     pub texels: Vec<u32>,
+    /// Per texel, the triangle point it sees (default where it sees none); empty unless
+    /// [`CardConfig::sources`] asked for them.
+    pub sources: Vec<TexelSource>,
 }
 
 impl Card {
@@ -139,14 +154,14 @@ impl MeshCards {
         let mut cards = Vec::new();
         for axis in 0..CARD_AXES as u32 {
             let mut capture = AxisCapture::new(axis, bounds, texel_size);
-            for triangle in triangles {
-                capture.add(triangle, false);
+            for (index, triangle) in triangles.iter().enumerate() {
+                capture.add(triangle, index as u32, false);
                 if config.two_sided {
-                    capture.add(triangle, true);
+                    capture.add(triangle, index as u32, true);
                 }
             }
             for layer in 0..MAX_CARD_LAYERS as u32 {
-                let Some(card) = capture.peel(layer, config.min_layer_texels.max(1)) else { break };
+                let Some(card) = capture.peel(layer, config.min_layer_texels.max(1), config.sources) else { break };
                 cards.push(card);
             }
         }
@@ -165,6 +180,8 @@ impl MeshCards {
 
 /// A triangle projected onto the card grid: texel-space (x, y), depth and normal per vertex.
 struct Projected {
+    /// Index of the source triangle.
+    index: u32,
     xy: [Vec2; 3],
     depth: [f32; 3],
     normal: [Vec3; 3],
@@ -201,7 +218,7 @@ impl AxisCapture {
     }
 
     /// Projects a triangle if it faces the card (its back face, flipped, if `back`).
-    fn add(&mut self, triangle: &[CardVertex; 3], back: bool) {
+    fn add(&mut self, triangle: &[CardVertex; 3], index: u32, back: bool) {
         let [a, b, c] = triangle.map(|v| v.0);
         let face = (b - a).cross(c - a);
         let flip = if back { -1.0 } else { 1.0 };
@@ -212,6 +229,7 @@ impl AxisCapture {
         let (k, u, v) = Card::coordinates(self.axis);
         let sign = Card::sign(self.axis);
         self.triangles.push(Projected {
+            index,
             xy: triangle.map(|(p, _)| (Vec2::new(p[u], p[v]) - self.origin) / self.texel_size),
             depth: triangle.map(|(p, _)| sign * (self.plane - p[k])),
             normal: triangle.map(|(_, n)| n * flip),
@@ -220,11 +238,13 @@ impl AxisCapture {
 
     /// The next layer: per texel, the nearest facing surface beyond the previous layer (by more
     /// than a texel, so the same sheet is not captured twice). `None` once it covers fewer than
-    /// `min_texels` texels (layer 0 is kept if it covers any).
-    fn peel(&mut self, layer: u32, min_texels: u32) -> Option<Card> {
+    /// `min_texels` texels (layer 0 is kept if it covers any). With `sources`, records the
+    /// triangle point each texel sees.
+    fn peel(&mut self, layer: u32, min_texels: u32, sources: bool) -> Option<Card> {
         let [w, h] = self.resolution;
         let mut depth = vec![f32::INFINITY; (w * h) as usize];
         let mut normal = vec![Vec3::ZERO; (w * h) as usize];
+        let mut source = vec![TexelSource::default(); if sources { (w * h) as usize } else { 0 }];
         for t in &self.triangles {
             let [p0, p1, p2] = t.xy;
             let area = (p1 - p0).perp_dot(p2 - p0);
@@ -249,6 +269,9 @@ impl AxisCapture {
                     if d < depth[i] && d > self.previous[i] + self.texel_size {
                         depth[i] = d;
                         normal[i] = b0 * t.normal[0] + b1 * t.normal[1] + b2 * t.normal[2];
+                        if sources {
+                            source[i] = TexelSource { triangle: t.index, barycentrics: [b1, b2] };
+                        }
                     }
                 }
             }
@@ -269,6 +292,7 @@ impl AxisCapture {
         let resolution = [x1 - x0 + 1, y1 - y0 + 1];
         let direction = Card::direction(self.axis);
         let mut texels = vec![INVALID_TEXEL; (resolution[0] * resolution[1]) as usize];
+        let mut card_sources = vec![TexelSource::default(); if sources { texels.len() } else { 0 }];
         for &i in &covered {
             let (x, y) = (i as u32 % w, i as u32 / w);
             let quantised = if d1 > d0 { ((depth[i] - d0) / (d1 - d0) * DEPTH_MAX).round() as u32 } else { 0 };
@@ -278,7 +302,11 @@ impl AxisCapture {
             if n.dot(direction) < 0.05 {
                 n = (n + direction * (0.05 - n.dot(direction))).normalize();
             }
-            texels[((x - x0) + (y - y0) * resolution[0]) as usize] = quantised.min(DEPTH_MAX as u32) | (encode_octahedral(n, NORMAL_BITS) << 16);
+            let k = ((x - x0) + (y - y0) * resolution[0]) as usize;
+            texels[k] = quantised.min(DEPTH_MAX as u32) | (encode_octahedral(n, NORMAL_BITS) << 16);
+            if sources {
+                card_sources[k] = source[i];
+            }
         }
         // Texels without a surface in this layer have none in later ones either.
         self.previous = depth;
@@ -290,6 +318,7 @@ impl AxisCapture {
             plane: self.plane,
             depth_range: [d0, d1],
             texels,
+            sources: card_sources,
         })
     }
 }
@@ -419,6 +448,34 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn sources_locate_the_texel_on_its_triangle() {
+        // Two stacked slabs: every texel's source interpolates its triangle's corners to the
+        // point the texel sees (layer 1 under the upper slab included).
+        let mut triangles = quad(Vec2::splat(-2.0), Vec2::splat(2.0), 0.0, false);
+        triangles.extend(quad(Vec2::splat(-1.0), Vec2::splat(1.0), 2.0, false));
+        let bounds = Aabb { min: Vec3::new(-2.0, 0.0, -2.0), max: Vec3::new(2.0, 2.0, 2.0) };
+        let config = CardConfig { texel_size: 0.25, sources: true, ..Default::default() };
+        let cards = MeshCards::capture(&triangles, bounds, &config);
+        assert_eq!(cards.layer_count(2), 2);
+        for card in &cards.cards {
+            assert_eq!(card.sources.len(), card.texels.len());
+            for y in 0..card.resolution[1] {
+                for x in 0..card.resolution[0] {
+                    let Some((p, _)) = card.texel_surface(x, y, cards.texel_size) else { continue };
+                    let s = card.sources[(x + y * card.resolution[0]) as usize];
+                    let t = &triangles[s.triangle as usize];
+                    let [b1, b2] = s.barycentrics;
+                    let q = t[0].0 * (1.0 - b1 - b2) + t[1].0 * b1 + t[2].0 * b2;
+                    assert!(q.distance(p) < 1e-3, "{q} vs {p}");
+                }
+            }
+        }
+        // Without the flag, nothing is recorded.
+        let plain = MeshCards::capture(&triangles, bounds, &CardConfig { texel_size: 0.25, ..Default::default() });
+        assert!(plain.cards.iter().all(|c| c.sources.is_empty()));
     }
 
     #[test]

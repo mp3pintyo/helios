@@ -5,7 +5,8 @@
 //                 texel's shadow page is resident, distance-field soft shadows otherwise), local
 //                 lights with global distance-field shadows, sky light with distance-field occlusion,
 //                 one bounce from the radiance cache (which is fed by the surface caches, so
-//                 bounces accumulate) and emission.
+//                 bounces accumulate) and emission, reflected with the texel's captured albedo
+//                 (lumen_card_capture.wgsl; the material's average until it is captured).
 //   debug_cards : the card lighting each pixel's surface would read (DebugView::SurfaceCards),
 //                 purple-tinted voxel lighting where no card matches.
 
@@ -49,6 +50,9 @@
 @group(0) @binding(25) var depth_texture: texture_2d<f32>;
 @group(0) @binding(26) var gbuffer_normal: texture_2d<f32>;
 @group(0) @binding(27) var debug_out: texture_storage_2d<rgba16float, write>;
+// Captured materials (cards.rs): rgb = sqrt(albedo), a = emission e / (1 + e) as a multiple of
+// the albedo; a card record's texels.z is its origin (0xffffffff: not captured).
+@group(0) @binding(28) var card_albedo: texture_2d<f32>;
 
 // Fraction of outside light a stained-glass window passes (as in lumen_light.wgsl).
 const GLASS_TRANSMISSION: f32 = 0.5;
@@ -131,10 +135,28 @@ fn sun_visibility(p: vec3<f32>, field: vec3<f32>, n: vec3<f32>, sun: vec3<f32>) 
     return min(visibility, sdf_soft_shadow_span(origin, sun, near, lumen.max_trace_distance, SUN_SOFTNESS));
 }
 
-// Radiance leaving a card texel's surface at world position `p` with normal `n`.
-fn card_texel_radiance(p: vec3<f32>, n: vec3<f32>, material: u32) -> vec3<f32> {
+// A card texel's reflectance and emitted radiance.
+struct TexelMaterial {
+    albedo: vec3<f32>,
+    emitted: vec3<f32>,
+}
+
+// The material's average (base colour x the texture's 1x1 mip, its emission).
+fn average_texel_material(material: u32) -> TexelMaterial {
     let raw = material_albedo_average(material);
-    let albedo = abs(raw);
+    var t: TexelMaterial;
+    t.albedo = abs(raw);
+    let m = materials[material];
+    t.emitted = m.emissive.rgb;
+    if raw.x < 0.0 {
+        t.emitted += t.albedo * m.emissive.w;
+    }
+    return t;
+}
+
+// Radiance leaving a card texel's surface at world position `p` with normal `n`.
+fn card_texel_radiance(p: vec3<f32>, n: vec3<f32>, material: u32, surface: TexelMaterial) -> vec3<f32> {
+    let albedo = surface.albedo;
     let m = materials[material];
     if m.kind == MATERIAL_GLASS {
         // Windows: the daylight outside, tinted by the glass (as the voxel cache).
@@ -170,11 +192,7 @@ fn card_texel_radiance(p: vec3<f32>, n: vec3<f32>, material: u32) -> vec3<f32> {
     }
     let sky = sky_irradiance(n) * sdf_occlusion(field, n);
     let bounce = radiance_cache_irradiance(field + n * 0.1, n, sky);
-    var emitted = m.emissive.rgb;
-    if raw.x < 0.0 {
-        emitted += albedo * m.emissive.w;
-    }
-    return albedo / PI * (direct + mix(sky, bounce, 0.85)) + emitted;
+    return albedo / PI * (direct + mix(sky, bounce, 0.85)) + surface.emitted;
 }
 
 @compute @workgroup_size(8, 8)
@@ -193,28 +211,45 @@ fn light_cards(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_
         return;
     }
     // A coarse texel covers 2^mip x 2^mip captured texels: light the first of up to four
-    // inside it that sees a surface.
+    // inside it that sees a surface, with the average captured material of those that do.
     let size = 1u << mip;
     var captured = 0xffffffffu;
     var source = vec2<u32>(0u);
+    let has_albedo = card.texels.z != 0xffffffffu;
+    var surface = TexelMaterial(vec3<f32>(0.0), vec3<f32>(0.0));
+    var surfaces = 0.0;
     for (var k = 0u; k < select(4u, 1u, mip == 0u); k++) {
         let offset = (vec2<u32>(k & 1u, k >> 1u) * 2u + 1u) * size / 4u;
         let candidate = min(texel * size + offset, resolution - 1u);
         let t = textureLoad(card_capture, card_unpack(card.texels.y) + candidate, 0).r;
         if (t & 0xffffu) != 0xffffu {
-            captured = t;
-            source = candidate;
-            break;
+            if (captured & 0xffffu) == 0xffffu {
+                captured = t;
+                source = candidate;
+            }
+            if has_albedo {
+                let a = textureLoad(card_albedo, card_unpack(card.texels.z) + candidate, 0);
+                let reflectance = a.rgb * a.rgb;
+                surface.albedo += reflectance;
+                surface.emitted += reflectance * (a.a / max(1.0 - a.a, 1.0 / 255.0));
+                surfaces += 1.0;
+            }
         }
     }
     if (captured & 0xffffu) == 0xffffu {
         textureStore(card_lighting_out, out_texel, vec4<f32>(0.0));
         return;
     }
+    if has_albedo {
+        surface.albedo = clamp(surface.albedo / surfaces, vec3<f32>(0.02), vec3<f32>(0.95));
+        surface.emitted /= surfaces;
+    } else {
+        surface = average_texel_material(inst.info.y);
+    }
     let q = card_texel_position(card, direction, vec2<f32>(source) + 0.5, captured);
     let p = card_point(q, inst.to_world);
     let n = card_normal(card_texel_normal(captured >> 16u), inst.to_local);
-    let radiance = card_texel_radiance(p, n, inst.info.y);
+    let radiance = card_texel_radiance(p, n, inst.info.y, surface);
     textureStore(card_lighting_out, out_texel, select(vec4<f32>(radiance, 1.0), vec4<f32>(0.0), any(radiance != radiance)));
 }
 

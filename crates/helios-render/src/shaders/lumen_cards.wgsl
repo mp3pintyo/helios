@@ -28,7 +28,7 @@ const CARD_DEPTH_STEPS: f32 = 65534.0;
 struct CardInstance {
     to_local: array<vec4<f32>, 3>,
     to_world: array<vec4<f32>, 3>,
-    // x: first card record (the mesh's 18 slots, direction-major), y: material,
+    // x: first card record (the 18 slots, direction-major, of its (surface, material) pair), y: material,
     // z: layer count per direction (2 bits each), w: world units per mesh unit (f32 bits).
     info: vec4<u32>,
 }
@@ -40,7 +40,8 @@ struct Card {
     frame: vec4<f32>,
     // x: depth of stored 0, y: depth per stored step, z: the mesh SDF's voxel size.
     depth: vec4<f32>,
-    // x: resolution (x | y << 16), y: texel (0, 0) in the capture atlas (x | y << 16).
+    // x: resolution (x | y << 16), y: texel (0, 0) in the capture atlas (x | y << 16), z: in the
+    // albedo atlas (0xffffffff: the material is not captured; light_cards only).
     texels: vec4<u32>,
 }
 

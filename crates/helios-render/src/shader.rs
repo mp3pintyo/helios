@@ -33,6 +33,7 @@ const SOURCES: &[(&str, &str)] = &[
     ("lights.wgsl", include_str!("shaders/lights.wgsl")),
     ("lumen_card_light.wgsl", include_str!("shaders/lumen_card_light.wgsl")),
     ("lumen_cards.wgsl", include_str!("shaders/lumen_cards.wgsl")),
+    ("lumen_card_capture.wgsl", include_str!("shaders/lumen_card_capture.wgsl")),
     ("lumen_common.wgsl", include_str!("shaders/lumen_common.wgsl")),
     ("lumen_displace.wgsl", include_str!("shaders/lumen_displace.wgsl")),
     ("lumen_gather.wgsl", include_str!("shaders/lumen_gather.wgsl")),
@@ -233,11 +234,10 @@ mod tests {
         assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 
-    /// Every preset graph and every node type compiles into a valid resolve pipeline. Each node
-    /// type is tested on a texture coordinate path, so its derivative code is generated too.
-    #[test]
-    fn material_graph_code_validates() {
-        use helios_material::{compile, presets, GraphBuilder, Op};
+    /// Every preset graph, and a graph per node type on a texture coordinate path (so its
+    /// derivative code is generated too).
+    fn test_graphs() -> Vec<helios_material::MaterialGraph> {
+        use helios_material::{presets, GraphBuilder, Op};
         let mut graphs: Vec<_> = presets::PRESETS.iter().map(|(id, _)| presets::preset(id).unwrap()).collect();
         for op in Op::palette().into_iter().filter(|op| *op != Op::Output) {
             let output_pin = helios_material::spec(&op).outputs[0];
@@ -262,12 +262,32 @@ mod tests {
                 .link(sample, "R", output, "Subsurface");
             graphs.push(g.build());
         }
+        graphs
+    }
+
+    /// Every test graph compiles into a valid resolve pipeline.
+    #[test]
+    fn material_graph_code_validates() {
         let mut failures = Vec::new();
-        for graph in &graphs {
-            match compile(graph) {
+        for graph in &test_graphs() {
+            match helios_material::compile(graph) {
                 Ok(compiled) => failures.extend(validate(&graph.name, &extended_resolve(Some(&compiled.wgsl), compiled.displacement.is_some())).err()),
                 Err(errors) => failures.push(format!("{}: {errors:?}", graph.name)),
             }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    /// Lumen's card material capture validates with every test graph's surface code (the
+    /// displacement function left out) and without a graph.
+    #[test]
+    fn card_capture_variants_validate() {
+        let mut failures: Vec<String> = validate("card capture", &crate::cards::capture_shader(None)).err().into_iter().collect();
+        for graph in &test_graphs() {
+            let compiled = helios_material::compile(graph).unwrap();
+            let code = crate::cards::graph_surface_code(&compiled.wgsl);
+            assert!(!code.contains("fn graph_displacement"), "{}", graph.name);
+            failures.extend(validate(&graph.name, &crate::cards::capture_shader(Some(code))).err());
         }
         assert!(failures.is_empty(), "{}", failures.join("\n"));
     }

@@ -38,10 +38,11 @@ use std::sync::Arc;
 
 use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Vec2, Vec3, Vec4};
-use helios_geometry::cards::{CardVertex, MeshCards};
+use helios_geometry::cards::CardVertex;
 use helios_geometry::{lod_cut_resident, Aabb, LodView, MeshSdf, SdfKind, VirtualMesh};
 use wgpu::BindingResource::{Sampler, TextureView};
 
+use crate::cards::{CornerSource, SurfaceCapture};
 use crate::gpu_scene::GpuScene;
 use crate::profiler::Recorder;
 use crate::scene::{Scene, TextureMapping};
@@ -96,11 +97,24 @@ pub(crate) struct DisplacedVariant {
     pub aabb: Aabb,
     /// The displaced surface (positions and normals), which the mesh cards capture.
     pub triangles: Vec<[CardVertex; 3]>,
-    /// Its cards, captured with the bake for the instances' largest scale at the default texel:
-    /// (scale, texel, cards). Lumen's upload captures again only if those differ.
-    pub cards: Option<(f32, f32, MeshCards)>,
+    /// What the cards' material capture evaluates at the triangles' corners: per refined point
+    /// its base point (before displacement) and texture coordinates, and per triangle its
+    /// points (`triangles` are those points displaced).
+    pub base_points: Vec<CornerSource>,
+    pub corners: Vec<[u32; 3]>,
+    /// Its cards and their texels' material inputs, captured with the bake for the instances'
+    /// largest scale at the default texel: (scale, texel, capture). Lumen's upload captures again
+    /// only if those differ.
+    pub cards: Option<(f32, f32, SurfaceCapture)>,
     /// Unique per bake: identifies its cached card capture.
     pub serial: u64,
+}
+
+impl DisplacedVariant {
+    /// The material sources of `triangles`' corners.
+    pub fn sources(&self) -> Vec<[CornerSource; 3]> {
+        self.corners.iter().map(|t| t.map(|i| self.base_points[i as usize])).collect()
+    }
 }
 
 /// What a displaced variant is of. `content` hashes everything the displacement reads (the
@@ -269,7 +283,7 @@ fn bake(base: &MeshSdf, refined: &Refined, positions: &[Vec3], card_scale: f32, 
     };
     if sdf.kind == SdfKind::Heightfield {
         // Heightfields get no cards.
-        return Some(DisplacedVariant { sdf, aabb, triangles: Vec::new(), cards: None, serial });
+        return Some(DisplacedVariant { sdf, aabb, triangles: Vec::new(), base_points: Vec::new(), corners: Vec::new(), cards: None, serial });
     }
     // Area-weighted normals of the welded displaced surface for the cards.
     let mut normals = vec![Vec3::ZERO; positions.len()];
@@ -288,10 +302,15 @@ fn bake(base: &MeshSdf, refined: &Refined, positions: &[Vec3], card_scale: f32, 
             std::array::from_fn(|k| (p[k], normals[t[k] as usize].try_normalize().unwrap_or(face)))
         })
         .collect();
+    // The material is evaluated at the base points (as the resolve does for displaced pixels).
+    let base_points: Vec<CornerSource> =
+        refined.points.iter().map(|p| (Vec3::from_slice(&p.object_u[..3]), Vec2::new(p.object_u[3], p.normal_v[3]))).collect();
+    let corners = refined.triangles.clone();
+    let sources: Vec<[CornerSource; 3]> = corners.iter().map(|t| t.map(|i| base_points[i as usize])).collect();
     let texel = crate::cards::CARD_TEXEL;
     let config = crate::cards::capture_config(sdf.two_sided, card_scale, texel);
-    let cards = Some((card_scale, texel, MeshCards::capture(&triangles, aabb, &config)));
-    Some(DisplacedVariant { sdf, aabb, triangles, cards, serial })
+    let cards = Some((card_scale, texel, crate::cards::capture_cards(&triangles, &sources, aabb, &config)));
+    Some(DisplacedVariant { sdf, aabb, triangles, base_points, corners, cards, serial })
 }
 
 /// FNV-1a.
