@@ -7,7 +7,9 @@ use std::sync::Arc;
 #[derive(Clone, Copy, Debug, Default)]
 pub struct RenderStats {
     pub instances: u32,
-    /// Pages that survived page culling for the main view.
+    /// Pages that survived page culling for the main view with a cluster workgroup each (small
+    /// pages list their clusters as candidates instead, cull.wgsl; beyond the candidates'
+    /// capacity they come back here, so this is what can overflow).
     pub pages: u32,
     pub clusters: u32,
     pub triangles: u32,

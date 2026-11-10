@@ -115,8 +115,9 @@ mod native {
         /// How moving local lights are shadowed (`--moving-light-maps`: shadow maps re-rendered
         /// every frame, `--moving-light-fields`: distance fields; for comparisons).
         pub moving_lights: helios_render::MovingLightShadows,
-        /// Moving lights' shadow maps rendered in full per frame (`--moving-light-renders`).
-        pub moving_light_renders: Option<u32>,
+        /// Pages of moving lights' shadow map faces rendered from new origins per frame
+        /// (`--moving-light-pages`).
+        pub moving_light_pages: Option<f32>,
         /// Moving prop groups kept moving (the rest stand still), for measurements.
         pub movers: Option<usize>,
         /// The props move as `Mobility::Static` instances (one-off edits), for measurements.
@@ -137,13 +138,16 @@ mod native {
         pub megalights: bool,
         /// Nanite tessellation of displaced materials (`--no-tessellation`: undisplaced).
         pub tessellation: bool,
+        /// `--no-displacement-speed-bound`: shadow pages under animated displacement refresh
+        /// every frame (the reference).
+        pub displacement_speed_bound: bool,
         /// Micro-triangle edge length in pixels (`--dice-rate`).
         pub dice_rate: Option<f32>,
     }
 
     impl Options {
         pub fn parse(args: &[String]) -> Self {
-            let mut o = Options { screenshot: None, size: (1600, 900), frames: 90, view: None, detail: Detail::High, scene: SceneKind::Valley, camera: None, eye: None, at: None, occlusion: true, sw_raster: true, rvt: true, svt: true, animate_sun: false, lod: None, fov: None, pool_mb: None, texture_pool_mb: None, texture_compression: true, switch_to: None, dump_dir: None, dump_count: 16, keys: Vec::new(), keys_at: None, hold: Vec::new(), gltf: None, ground: true, bake_hvm: None, stream_from: None, io_latency_ms: 0, sun: None, move_light: false, full_invalidation: false, moving_lights: Default::default(), moving_light_renders: None, movers: None, static_motion: false, screen_percentage: None, gpu_budget_ms: None, local_exposure: Some(Default::default()), scene_file: None, select: Vec::new(), no_skinning: false, gi: None, megalights: false, tessellation: true, dice_rate: None, speed: None };
+            let mut o = Options { screenshot: None, size: (1600, 900), frames: 90, view: None, detail: Detail::High, scene: SceneKind::Valley, camera: None, eye: None, at: None, occlusion: true, sw_raster: true, rvt: true, svt: true, animate_sun: false, lod: None, fov: None, pool_mb: None, texture_pool_mb: None, texture_compression: true, switch_to: None, dump_dir: None, dump_count: 16, keys: Vec::new(), keys_at: None, hold: Vec::new(), gltf: None, ground: true, bake_hvm: None, stream_from: None, io_latency_ms: 0, sun: None, move_light: false, full_invalidation: false, moving_lights: Default::default(), moving_light_pages: None, movers: None, static_motion: false, screen_percentage: None, gpu_budget_ms: None, local_exposure: Some(Default::default()), scene_file: None, select: Vec::new(), no_skinning: false, gi: None, megalights: false, tessellation: true, displacement_speed_bound: true, dice_rate: None, speed: None };
             let mut scene_given = false;
             let mut it = args.iter().skip(1);
             while let Some(arg) = it.next() {
@@ -182,7 +186,7 @@ mod native {
                     "--full-invalidation" => o.full_invalidation = true,
                     "--moving-light-maps" => o.moving_lights = helios_render::MovingLightShadows::EveryFrame,
                     "--moving-light-fields" => o.moving_lights = helios_render::MovingLightShadows::DistanceFields,
-                    "--moving-light-renders" => o.moving_light_renders = value().parse().ok(),
+                    "--moving-light-pages" => o.moving_light_pages = value().parse().ok(),
                     "--movers" => o.movers = value().parse().ok(),
                     "--static-motion" => o.static_motion = true,
                     "--lod" => o.lod = value().parse().ok(),
@@ -215,8 +219,10 @@ mod native {
                     "--gi" => o.gi = Some(value()),
                     "--megalights" => o.megalights = true,
                     "--no-tessellation" => o.tessellation = false,
+                    "--no-displacement-speed-bound" => o.displacement_speed_bound = false,
                     "--dice-rate" => o.dice_rate = value().parse().ok(),
                     "--lights" => helios_demo::scenes::candles::set_candle_lights(value().parse().unwrap_or(0)),
+                    "--lantern" => helios_demo::scenes::cathedral::set_lantern(true),
                     // Highlight contrast, shadow contrast and optionally the blurred luminance blend.
                     "--local-exposure" => {
                         let v: Vec<f32> = value().split(',').filter_map(|x| x.parse().ok()).collect();
@@ -328,8 +334,8 @@ mod native {
             app.renderer.settings.local_exposure = self.local_exposure;
             app.renderer.settings.per_instance_invalidation = !self.full_invalidation;
             app.renderer.settings.moving_light_shadows = self.moving_lights;
-            if let Some(renders) = self.moving_light_renders {
-                app.renderer.settings.moving_light_renders = renders;
+            if let Some(pages) = self.moving_light_pages {
+                app.renderer.settings.moving_light_pages = pages;
             }
             if let Some(count) = self.movers {
                 app.motion.limit(&mut app.scene, count);
@@ -339,6 +345,7 @@ mod native {
             }
             app.renderer.settings.mega_lights |= self.megalights;
             app.renderer.settings.tessellation = self.tessellation;
+            app.renderer.settings.displacement_speed_bound = self.displacement_speed_bound;
             if let Some(speed) = self.speed {
                 app.speed = speed;
             }
@@ -406,6 +413,8 @@ mod native {
     // ---- Headless ------------------------------------------------------------------------------
 
     const WARM_UP_FRAMES: usize = 10;
+    /// Frames the shadow work is averaged over.
+    const SHADOW_WORK_FRAMES: u32 = 60;
 
     pub fn screenshot(options: &Options, path: &str) {
         let ctx = pollster::block_on(GpuContext::new(GpuContext::create_instance(), None)).expect("GPU context");
@@ -435,6 +444,13 @@ mod native {
         if let Some(dir) = &options.dump_dir {
             std::fs::create_dir_all(dir).expect("create dump directory");
         }
+        // Means over the last two thirds of the frames: per-pass GPU times (the smoothed values
+        // the HUD shows, averaged), shadow pages rendered and (cluster, page) draws.
+        let mean_from = options.frames / 3;
+        let mut means = FrameMeans::default();
+        // Shadow pages rendered and shadow micro-triangles per frame over the last frames (cached
+        // pages refresh every few frames: one frame's count says little).
+        let mut shadow_work: Vec<(u32, u32)> = Vec::new();
         for i in 0..options.frames {
             if let Some(kind) = options.switch_to.filter(|_| i == options.frames / 2) {
                 app.load_scene(kind);
@@ -451,10 +467,21 @@ mod native {
                     app.key_pressed(key);
                 }
             }
+            if i == options.frames / 3 {
+                // Per-pass minima over the last two thirds (loading and warm-up excluded).
+                app.renderer.reset_gpu_minima();
+            }
             app.update(&mut input, 1.0 / 60.0);
             app.render(&view, 1.0 / 60.0);
             cpu_ms.push(cpu.elapsed().as_secs_f64() * 1000.0);
             let _ = ctx.device.poll(wgpu::PollType::wait_indefinitely());
+            if i >= mean_from {
+                means.add(&app);
+            }
+            if i + SHADOW_WORK_FRAMES >= options.frames {
+                let tess = app.renderer.tessellation_stats().map_or(0, |t| t.shadow_micro_triangles);
+                shadow_work.push((app.renderer.stats().shadow_dirty_pages, tess));
+            }
             if app.renderer.settings.dynamic_resolution.is_some() && app.renderer.screen_percentage() != percentage {
                 percentage = app.renderer.screen_percentage();
                 let gpu = app.renderer.gpu_time_ms().unwrap_or(0.0);
@@ -480,6 +507,12 @@ mod native {
         }
         let elapsed = start.elapsed().as_secs_f64() * 1000.0 / timed_frames.max(1) as f64;
         log::info!("rendered {} frames, {:.2} ms/frame (incl. sync)", options.frames, elapsed);
+        if !shadow_work.is_empty() {
+            let n = shadow_work.len() as f64;
+            let pages = shadow_work.iter().map(|w| w.0 as f64).sum::<f64>() / n;
+            let micro = shadow_work.iter().map(|w| w.1 as f64).sum::<f64>() / n / 1e6;
+            log::info!("shadow work, mean of the last {} frames: {pages:.1} pages rendered, {micro:.2} M micro-triangles", shadow_work.len());
+        }
         // The first frames compile pipelines and synthesise textures.
         let mut cpu_ms = cpu_ms.split_off(cpu_ms.len().min(WARM_UP_FRAMES));
         cpu_ms.sort_by(f64::total_cmp);
@@ -502,13 +535,115 @@ mod native {
                 s.throughput() / 1048576.0
             );
         }
+        let (minima, frame, frames) = app.renderer.gpu_minima();
+        if let Some(frame) = frame {
+            let passes: Vec<String> = minima.iter().map(|(label, ms)| format!("{label} {ms:.3}")).collect();
+            log::info!("GPU minima over {frames} frames: frame {frame:.2} ms · {}", passes.join(" · "));
+        }
         for line in app.hud().lines() {
             log::info!("{line}");
+        }
+        log::info!("{}", means.report(mean_from, options.frames));
+        if let Some(report) = means.moving_report(mean_from, options.frames) {
+            log::info!("{report}");
         }
 
         let pixels = read_back(&ctx, &target, width, height);
         save_png(path, width, height, &pixels);
         log::info!("saved {path}");
+    }
+
+    /// Per-frame means of a headless run (`frames a..b mean:` in the log).
+    #[derive(Default)]
+    struct FrameMeans {
+        frames: u32,
+        gpu: f64,
+        gpu_max: f32,
+        /// Unsmoothed GPU frame times read back (one per read-back), for a median that other
+        /// processes' work on a shared GPU disturbs less than a mean.
+        gpu_frames: Vec<f32>,
+        last_sequence: Option<u64>,
+        pages: f64,
+        dynamic_pages: f64,
+        draws: f64,
+        /// Local light pages rendered in full, of them those of moving lights, and faces
+        /// of moving lights re-anchored.
+        local_full: f64,
+        moving_full: f64,
+        faces: f64,
+        /// Moving lights wanting a shadow map: the fewest with one in a frame, the frames in
+        /// which some kept distance-field shadows, and those in which some had a coarser
+        /// tolerance.
+        mapped_min: Option<u32>,
+        fields_frames: u32,
+        relaxed_frames: u32,
+        passes: Vec<(String, f64)>,
+    }
+
+    impl FrameMeans {
+        fn add(&mut self, app: &DemoApp) {
+            let st = app.renderer.stats();
+            let gpu = app.renderer.gpu_time_ms().unwrap_or(0.0);
+            self.frames += 1;
+            self.gpu += gpu as f64;
+            self.gpu_max = self.gpu_max.max(gpu);
+            if let Some((sequence, ms)) = app.renderer.gpu_frame_ms() {
+                if self.last_sequence != Some(sequence) {
+                    self.last_sequence = Some(sequence);
+                    self.gpu_frames.push(ms);
+                }
+            }
+            self.pages += st.shadow_dirty_pages as f64;
+            self.dynamic_pages += st.shadow_dynamic_pages as f64;
+            self.draws += st.shadow_draws as f64;
+            let moving = app.renderer.moving_light_stats();
+            self.local_full += moving.full_pages as f64;
+            self.moving_full += moving.moving_full_pages as f64;
+            self.faces += moving.anchors.faces as f64;
+            let a = moving.anchors;
+            if a.mapped + a.fields > 0 {
+                self.mapped_min = Some(self.mapped_min.map_or(a.mapped, |m| m.min(a.mapped)));
+                self.fields_frames += (a.fields > 0) as u32;
+                self.relaxed_frames += (a.relaxed > 0) as u32;
+            }
+            for (label, ms) in app.renderer.gpu_timings() {
+                match self.passes.iter_mut().find(|(l, _)| l == label) {
+                    Some(entry) => entry.1 += *ms as f64,
+                    None => self.passes.push((label.clone(), *ms as f64)),
+                }
+            }
+        }
+
+        fn report(&self, from: u32, to: u32) -> String {
+            let n = self.frames.max(1) as f64;
+            let mut frames = self.gpu_frames.clone();
+            frames.sort_by(f32::total_cmp);
+            let quantile = |q: f32| frames.get(((frames.len() as f32 - 1.0) * q).round() as usize).copied().unwrap_or(0.0);
+            let median = format!("GPU frame median {:.2} ms (p10 {:.2}, {} frames read back) · ", quantile(0.5), quantile(0.1), frames.len());
+            let passes: Vec<String> = self.passes.iter().map(|(label, ms)| format!("{label} {:.3}", ms / n)).collect();
+            median
+                + &format!(
+                "frames {from}..{to} mean: GPU {:.2} ms (smoothed max {:.2}) · shadow pages rendered {:.1} ({:.1} dynamic casters only), {:.0} draws · local pages in full {:.1} ({:.1} of moving lights), {:.2} faces re-anchored · passes: {}",
+                self.gpu / n,
+                self.gpu_max,
+                self.pages / n,
+                self.dynamic_pages / n,
+                self.draws / n,
+                self.local_full / n,
+                self.moving_full / n,
+                self.faces / n,
+                passes.join(" · ")
+            )
+        }
+
+        /// What moving lights' shadows were over the frames (`None` without moving lights).
+        fn moving_report(&self, from: u32, to: u32) -> Option<String> {
+            let mapped = self.mapped_min?;
+            Some(format!(
+                "frames {from}..{to}: moving lights with shadow maps at least {mapped} in every frame; some on distance fields in {} frames, at a coarser tolerance in {}",
+                self.fields_frames, self.relaxed_frames
+            ))
+        }
     }
 
     fn read_back(ctx: &GpuContext, target: &wgpu::Texture, width: u32, height: u32) -> Vec<u8> {

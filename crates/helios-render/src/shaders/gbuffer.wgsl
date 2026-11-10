@@ -11,11 +11,11 @@
 //              previous frame's offset and palette.
 //
 // Materials with a Substrate slab or a material graph resolve in extended pipelines of their own
-// tiles (slots 8-15): the shader composed with resolve_extended.wgsl in place of
+// tiles (slots 8-23): the shader composed with resolve_extended.wgsl in place of
 // resolve_extended_off.wgsl. Plain pipelines compile that path out.
 //
-// tiles buffer: [0, 16) per-slot counts, [16, 80) per-slot dispatch args (x, y, z, -),
-// [80 + slot * tile_capacity ...) per-slot tile lists.
+// tiles buffer: [0, 24) per-slot counts, [24, 120) per-slot dispatch args (x, y, z, -),
+// [120 + slot * tile_capacity ...) per-slot tile lists.
 
 #include "common.wgsl"
 #include "noise.wgsl"
@@ -36,7 +36,7 @@
 #include "tess_resolve.wgsl"
 
 override MATERIAL_KIND: u32 = 0u;
-// The tile list this pipeline resolves: MATERIAL_KIND for plain pipelines, 8-15 for extended ones.
+// The tile list this pipeline resolves: MATERIAL_KIND for plain pipelines, 8-23 for extended ones.
 override RESOLVE_SLOT: u32 = 0u;
 // The scene has skinned instances (passes/material.rs): without them the skinning code is
 // compiled out, so it costs other scenes no registers.
@@ -49,8 +49,8 @@ override TESSELLATION: bool = true;
 // evaluation costs registers — the resolve ran 1.4x slower with it (cathedral, 1440p: 0.3 ms).
 override DEBUG_VIEWS: bool = true;
 
-const RESOLVE_SLOTS: u32 = 16u;
-const TILE_LISTS: u32 = 80u;
+const RESOLVE_SLOTS: u32 = 24u;
+const TILE_LISTS: u32 = 120u;
 
 @group(0) @binding(0) var<uniform> frame: Frame;
 @group(0) @binding(1) var<uniform> materials: array<Material, MAX_MATERIALS>;

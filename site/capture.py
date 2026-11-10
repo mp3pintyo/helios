@@ -40,6 +40,8 @@ CANOPY = ['--scene', 'forest', '--eye', '0,30,0', '--at', '200,0,-60', '--fov', 
 PAINT = ['--scene', 'gallery', '--eye', '-7.2,1.9,3.4', '--at', '-7.2,1.5,0']
 STONE_PATH = ['--scene', 'valley', '--sun', '200,28', '--eye', '-27,1.2,41', '--at', '-31,0.1,48']
 STONE_GRAZE = ['--scene', 'valley', '--sun', '200,28', '--eye', '-27.5,0.35,41.5', '--at', '-31,0.12,49']
+BRICKS = ['--scene', 'gallery', '--eye', '0.9,0.45,10.9', '--at', '0,0,9.2']
+MUSHROOMS = ['--scene', 'gallery', '--eye', '-5.9,0.3,10.4', '--at', '-6.5,0.08,9.2']
 
 # name: arguments. Pairs share a prefix and end in _off / _on.
 STILLS = {
@@ -129,6 +131,17 @@ STILLS = {
     'tess_graze_off': STONE_GRAZE + ['--no-tessellation'],
     'tess_graze_on': STONE_GRAZE,
     'tess_depth': STONE_PATH + ['--view', '25'],
+    # Rounds 5 and 6: graph displacement in the gallery, Lumen following it (the variants bake on
+    # worker threads after loading, hence the longer runs), the carried lantern. `lumen_disp_off`
+    # is the same view as `lumen_disp_on` rendered by a round-5 build (main 6eb1c4d).
+    'tess_bricks_off': BRICKS + ['--no-tessellation'],
+    'tess_bricks_on': BRICKS,
+    'tess_mushrooms_off': MUSHROOMS + ['--no-tessellation'],
+    'tess_mushrooms_on': MUSHROOMS,
+    'tess_cloth': ['--scene', 'gallery', '--eye', '4.4,0.6,10.9', '--at', '6.3,0.15,9.0'],
+    'tess_tufts': (['--scene', 'gallery', '--eye', '1.9,1.1,15.6', '--at', '0,0.1,13.4'], 300),
+    'lumen_disp_on': (MUSHROOMS + ['--view', '14'], 400),
+    'lantern_night': (['--scene', 'cathedral', '--lantern', '--sun', '200,-25', '--eye', '11.4,1.2,-0.6', '--at', '12.9,0.5,0.5'], 300),
 }
 
 # name: (arguments, seconds). Recorded at 60 fps, encoded at 30.

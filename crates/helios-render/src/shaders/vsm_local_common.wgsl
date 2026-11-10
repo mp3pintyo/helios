@@ -22,6 +22,10 @@ const LOCAL_LEVEL: u32 = 16u;
 // then 4 words per face mip.
 const LOCAL_INFO_SLOTS: u32 = 16520u;
 const LOCAL_INFO_SLOT_WORDS: u32 = 32u;
+// Words of a slot's data from which it counts per face the pages requested this frame and those
+// rendered in full (read back as the faces' costs, vsm_local.rs).
+const LOCAL_INFO_FACE_REQUESTED: u32 = 18u;
+const LOCAL_INFO_FACE_FULL: u32 = 24u;
 const LOCAL_INFO_RECTS: u32 = 17544u;
 // Upper bound of filter radii in texels (sampling) and of the footprint marking requests.
 const LOCAL_MAX_FILTER_TEXELS: f32 = 10.0;
@@ -34,12 +38,14 @@ struct LocalShadowSlot {
     // x: face count (0: unused slot, 1: spot, 6: point), y: near plane, z: focal length
     // (1 / tan(half field of view)), w: mip bias (soft lights need less resolution)
     params: vec4<f32>,
-    // x: 1 = cached pages are stale (the map's origin or shape changed, or the slot was reassigned)
+    // x: faces (bit per face) whose cached pages are stale (the face's origin or the map's shape
+    // changed, or the slot was reassigned); y: 1 = some face is held at an origin away from the
+    // light
     flags: vec4<u32>,
-    // xyz: the map's origin (position_range.xyz) minus the light's position. Zero unless the
-    // light moves: its map then stays at the origin it was rendered from while the light is
-    // near it (vsm_anchor.rs), and receivers correct the parallax (local_filter_follow).
-    anchor_offset: vec4<f32>,
+    // Per face, xyz: the origin its view_proj looks from minus the light's position. Zero unless
+    // the light moves: each face then stays at the origin it was rendered from while the light
+    // is near it (vsm_anchor.rs), and receivers correct the parallax (local_filter_follow).
+    face_offsets: array<vec4<f32>, 6>,
 }
 
 struct LocalVsm {
@@ -59,7 +65,7 @@ struct LocalAddress {
     depth: f32,
 }
 
-// Cube face whose frustum contains `world` (always 0 for spot lights).
+// Cube face whose frustum contains `world` (always 0 for spot lights): as seen from the light.
 fn local_face(slot: u32, world: vec3<f32>) -> u32 {
     if local_vsm.slots[slot].params.x < 6.0 {
         return 0u;
@@ -109,12 +115,22 @@ fn local_entry(slot: u32, face: u32, mip: u32, page: vec2<u32>) -> u32 {
     return face_base + local_mip_offset(mip) + page.y * local_mip_pages(mip) + page.x;
 }
 
+// Whether a point at face position `uv` and face depth `w` is in a face of `slot`. A cube's
+// faces have origins of their own while the light moves (a few centimetres apart at most), so a
+// point that the light-centred face choice (local_face) gives to a face may lie just beyond that
+// face's frustum - in a sliver between two faces as wide as their origins are apart, which
+// neither covers: it reads the face's edge texels (callers clamp `uv`).
+fn local_in_face(slot: u32, w: f32, uv: vec2<f32>) -> bool {
+    let inside = all(uv >= vec2<f32>(0.0)) && all(uv < vec2<f32>(1.0));
+    return w > 0.0 && (inside || local_vsm.slots[slot].params.x >= 6.0);
+}
+
 fn local_address(slot: u32, face: u32, world: vec3<f32>, mip: u32) -> LocalAddress {
     var a: LocalAddress;
     let clip = local_vsm.slots[slot].view_proj[face] * vec4<f32>(world, 1.0);
     let w = max(clip.w, 1e-6);
     let uv = vec2<f32>(clip.x, -clip.y) / w * 0.5 + 0.5;
-    a.valid = clip.w > 0.0 && all(uv >= vec2<f32>(0.0)) && all(uv < vec2<f32>(1.0));
+    a.valid = local_in_face(slot, clip.w, uv);
     let pages = f32(local_mip_pages(mip));
     let v = clamp(uv, vec2<f32>(0.0), vec2<f32>(1.0)) * pages;
     a.page = vec2<u32>(min(v, vec2<f32>(pages - 1.0)));

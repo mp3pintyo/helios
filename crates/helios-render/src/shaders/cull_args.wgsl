@@ -32,7 +32,9 @@ fn prepare_page_dispatch() {
 
 @compute @workgroup_size(1)
 fn prepare_cluster_dispatch() {
-    write_dispatch(4u, min(state[1], view.work_capacity));
+    // A workgroup per page work item, then one per 64 cluster candidates (cull.wgsl).
+    let candidates = min(state[12], view.work_capacity * 2u);
+    write_dispatch(4u, min(state[1], view.work_capacity) + (candidates + 63u) / 64u);
 }
 
 fn visible_counts() -> vec2<u32> {

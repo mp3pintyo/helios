@@ -32,6 +32,7 @@ use crate::effects::{Effects, EffectsFrame};
 use crate::fog::{FogInputs, VolumetricFog};
 use crate::lights::{LightCulling, MAX_LIGHTS};
 use crate::lumen::{CardInputs, Lumen};
+use crate::lumen_displaced::DisplaceInputs;
 use crate::picking::{PickResult, Picker};
 use crate::lumen_lite::{GiMethod, LiteFallback, LiteInputs, LumenLite};
 use crate::motion::MotionTracker;
@@ -202,13 +203,14 @@ pub struct RenderSettings {
     /// when off, get distance-field shadows).
     pub local_light_shadow_maps: bool,
     /// How local lights that move are shadowed (with shadow-map slots to spare; MegaLights
-    /// traces them in any case). By default their shadow maps stay cached around an origin near
-    /// the light and are re-rendered within `moving_light_renders` (`vsm_anchor.rs`).
+    /// traces them in any case). By default each face of their shadow maps stays cached around
+    /// an origin near the light and is re-rendered within `moving_light_pages` (`vsm_anchor.rs`).
     pub moving_light_shadows: MovingLightShadows,
-    /// Moving lights' shadow maps rendered in full per frame (a cube map's requested pages:
-    /// 0.35 ms for a chandelier light of the cathedral at 1440p). Lights that would need more
-    /// keep distance-field shadows until they rest.
-    pub moving_light_renders: u32,
+    /// Pages of moving lights' shadow map faces rendered from new origins per frame (a face
+    /// costs the pages the view requests of it: a chandelier light of the cathedral ~8 for all
+    /// six, a lantern near the camera ~40). Lights that would need more keep distance-field
+    /// shadows until they rest.
+    pub moving_light_pages: f32,
     /// MegaLights: stochastic, denoised direct lighting in which every local light casts soft
     /// shadows, at a cost that barely grows with the light count (`megalights.rs`). Off: the
     /// clustered light loop (shadow maps for the 32 most important lights, distance-field shadows
@@ -281,6 +283,10 @@ pub struct RenderSettings {
     /// Target length of micro-triangle edges in pixels (UE's dice rate, 2 by default): smaller is
     /// finer and costlier.
     pub dice_rate: f32,
+    /// Refresh the cached shadow pages under an animated displacement by its graph's speed bound
+    /// (`helios_material::motion`): coarse pages every few frames. Off: every page whose texels
+    /// can show the displacement is refreshed every frame (the reference, round 5's behaviour).
+    pub displacement_speed_bound: bool,
     /// Internal render resolution in percent of the output (UE's `r.ScreenPercentage`,
     /// 25–100); temporal super resolution reconstructs the output. Ignored while dynamic
     /// resolution is on.
@@ -308,7 +314,7 @@ impl Default for RenderSettings {
             shadows: true,
             local_light_shadow_maps: true,
             moving_light_shadows: MovingLightShadows::Cached,
-            moving_light_renders: 1,
+            moving_light_pages: DEFAULT_MOVING_LIGHT_PAGES,
             mega_lights: false,
             global_illumination: true,
             gi_method: GiMethod::ScreenProbes,
@@ -340,6 +346,7 @@ impl Default for RenderSettings {
             voxel_lods: true,
             tessellation: true,
             dice_rate: 2.0,
+            displacement_speed_bound: true,
             screen_percentage: 100.0,
             dynamic_resolution: None,
             per_instance_invalidation: true,
@@ -348,6 +355,8 @@ impl Default for RenderSettings {
     }
 }
 
+/// Default of [`RenderSettings::moving_light_pages`].
+pub const DEFAULT_MOVING_LIGHT_PAGES: f32 = 32.0;
 /// Capacities of the per-view GPU work lists.
 const MAIN_CAPACITY: CullCapacity = CullCapacity { batches: 1 << 16, pages: 1 << 18, clusters: 1 << 20, masked: 1 << 18 };
 
@@ -614,6 +623,22 @@ impl Renderer {
         self.profiler.supported().then(|| self.profiler.total_ms())
     }
 
+    /// Per-pass and whole-frame GPU minima over the frames read back since
+    /// [`Renderer::reset_gpu_minima`] (see [`GpuProfiler::minima`]).
+    pub fn gpu_minima(&self) -> (&[(String, f32)], Option<f32>, u32) {
+        self.profiler.minima()
+    }
+
+    pub fn reset_gpu_minima(&mut self) {
+        self.profiler.reset_minima();
+    }
+
+    /// The GPU time of the most recently read-back frame (unsmoothed) and a sequence number
+    /// that changes with every read-back (headless statistics).
+    pub fn gpu_frame_ms(&self) -> Option<(u64, f32)> {
+        self.profiler.latest_frame()
+    }
+
     /// Moving instances in the latest frame: instances moved, distance-field bricks recomposed
     /// and still queued.
     pub fn dynamic_stats(&self) -> DynamicStats {
@@ -642,6 +667,12 @@ impl Renderer {
         self.vsm.local.held_count()
     }
 
+    /// What moving lights' shadow maps did in a recent frame: lights with maps and on distance
+    /// fields, faces re-anchored and pages rendered.
+    pub fn moving_light_stats(&self) -> crate::vsm_local::MovingLightStats {
+        self.vsm.local.moving_stats()
+    }
+
     /// Local lights rendered into virtual shadow maps this frame.
     pub fn shadow_mapped_lights(&self) -> usize {
         self.vsm.local.active_count()
@@ -660,8 +691,7 @@ impl Renderer {
     fn update_lod_budget(&mut self) {
         let st = self.stats.latest;
         let capacity = self.main_view.capacity;
-        let fill = (st.clusters as f32 / capacity.clusters as f32).max(st.pages as f32 / capacity.pages as f32);
-        if st.overflow > 0 || fill > 0.9 {
+        let fill = (st.clusters as f32 / capacity.clusters as f32).max(st.pages as f32 / capacity.pages as f32);        if st.overflow > 0 || fill > 0.9 {
             // Projected error scales with 1/distance, so cluster counts fall roughly with the
             // square of the threshold: step proportionally to the excess.
             let step = (fill / 0.8).sqrt().clamp(1.1, 2.0);
@@ -704,8 +734,9 @@ impl Renderer {
         if sync.geometry_changed {
             self.history_valid = false;
         }
-        // Assembly parts each take a page batch in every culling view.
-        let parts = self.scene.assemblies.part_capacity();
+        // Expanded assemblies' culling records take a page batch per 64 (part, page) lanes in
+        // every culling view.
+        let parts = self.scene.assemblies.batch_demand();
         self.main_view.reserve_batches(&self.device, MAIN_CAPACITY.batches + parts);
         self.vsm.reserve_batches(&self.device, parts);
         // New geometry or instances invalidate every cached shadow page, and so does switching
@@ -741,7 +772,7 @@ impl Renderer {
         let size = (self.targets.width, self.targets.height);
         let capacity = self.targets.capacity;
         self.svt.sync(&self.device, &self.queue, scene, self.settings.texture_streaming, frame, size);
-        self.lumen.update(&self.device, &self.queue, scene, &self.motion.changes, camera.position, frame, &self.targets);
+        self.lumen.update(&self.device, &self.queue, scene, &self.motion.changes, camera.position, frame, &self.targets, self.settings.tessellation);
         if self.uses_lumen_lite() {
             let lite = self.lumen_lite.get_or_insert_with(|| LumenLite::new(&self.device));
             lite.update(&self.queue, scene, camera.position, frame);
@@ -755,7 +786,7 @@ impl Renderer {
             enabled: self.settings.shadows && self.settings.local_light_shadow_maps,
             scene_changed: self.scene_changed,
             moving: if self.settings.mega_lights { MovingLightShadows::DistanceFields } else { self.settings.moving_light_shadows },
-            moving_renders: self.settings.moving_light_renders as usize,
+            moving_pages: self.settings.moving_light_pages,
         });
         self.lights.upload(&self.queue, scene, self.vsm.local.light_slots());
         let clouds = self.settings.clouds.then_some(&scene.clouds);
@@ -848,6 +879,14 @@ impl Renderer {
         if self.settings.shadows {
             self.vsm.record(&mut rec, &self.culling, &self.scene, &self.frame_uniform, &self.targets, &self.lights);
         }
+        let displace = DisplaceInputs {
+            scene: &self.scene,
+            albedo: &self.textures.albedo,
+            data: &self.textures.data,
+            sampler: &self.samplers.material,
+            graph_parameters: self.extended.parameter_buffer(),
+        };
+        self.lumen.record_displacement(&mut rec, &self.queue, scene, &displace);
         self.lumen.record_distance_field(&mut rec, &self.textures, &self.scene.materials, &self.samplers);
         let lite_inputs = LiteInputs { frame: &self.frame_uniform, targets: &self.targets, sky: &self.sky, samplers: &self.samplers, exposure: &self.exposure.buffer };
         if self.settings.global_illumination {
@@ -954,7 +993,7 @@ impl Renderer {
 
         let mut states = vec![&self.main_view.state];
         states.extend(self.vsm.level_states());
-        let assembly_parts = self.scene.assemblies.cull_dispatch().map(|(counter, _)| counter);
+        let assembly_parts = self.scene.assemblies.part_counter();
         let read_stats = self.stats.record(&mut rec.encoder, &states, [&self.vsm.cache.lists, self.vsm.draws()], assembly_parts);
         let read_feedback = self.scene.record_feedback(&mut rec.encoder, frame);
         let read_texture_feedback = self.svt.record_feedback(&mut rec.encoder, frame);
@@ -964,6 +1003,7 @@ impl Renderer {
         self.queue.submit([commands]);
         self.profiler.after_submit(map_profiler);
         self.picker.after_submit();
+        self.vsm.local.after_submit();
         if read_stats {
             self.stats.map();
         }
@@ -976,6 +1016,7 @@ impl Renderer {
         if let Some(tessellation) = self.culling.tessellation(&self.scene) {
             tessellation.after_submit(read_tessellation);
         }
+        self.lumen.after_submit();
         let _ = self.device.poll(wgpu::PollType::Poll);
 
         self.previous_view_proj = Some(unjittered_view_proj);
@@ -1083,7 +1124,7 @@ impl Renderer {
         self.queue.write_buffer(&self.main_view.uniform, 0, bytemuck::bytes_of(&main));
         if let Some(tessellation) = self.culling.tessellation(&self.scene) {
             // Dice rate in internal pixels, like the software raster heuristic.
-            let view = tessellation.view(s.dice_rate, camera.lod_scale(h), camera.near, camera.position, [self.time, self.time - delta_time]);
+            let view = tessellation.view(s.dice_rate, camera.lod_scale(h), camera.near, camera.position, [self.time, self.time - delta_time], s.displacement_speed_bound);
             self.scene.write_tessellation_view(&self.queue, &view);
         }
         self.scene.assemblies.write_params(&self.queue);

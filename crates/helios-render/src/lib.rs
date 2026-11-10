@@ -53,6 +53,7 @@ mod gpu_scene;
 mod gpu_types;
 mod lights;
 mod lumen;
+mod lumen_displaced;
 mod lumen_dynamic;
 mod lumen_lite;
 mod material_graphs;
@@ -120,7 +121,8 @@ pub use stats::RenderStats;
 pub use streaming::StreamingStats;
 pub use svt::TextureStreamingStats;
 pub use tessellation::TessellationStats;
-pub use vsm_anchor::MovingLightShadows;
+pub use vsm_anchor::{AnchorStats, MovingLightShadows};
+pub use vsm_local::MovingLightStats;
 pub use wind::{Wind, WindResponse};
 
 pub use helios_geometry as geometry;

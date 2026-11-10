@@ -118,7 +118,11 @@ export function createGraphEditor(ed) {
     const g = current();
     const errors = g?.errors || [];
     // What the graph does to geometry, next to what it compiled to.
-    const displaces = !g?.displacement ? "" : ` · ${g.displacement_animated ? "animated " : ""}${g.displacement === "vector" ? "vector displacement" : "displacement"}`;
+    // Vector spaces the graph turns into world space, and an animation's speed bound.
+    const spaces = [...new Set((g?.graph?.nodes || []).filter((n) => n.type === "TransformVector" && n.source !== n.destination).map((n) => n.source.toLowerCase()))];
+    const vector = g?.displacement === "vector" ? `${spaces.length ? spaces.join("/") + "-space " : ""}vector displacement` : "displacement";
+    const pace = g?.displacement_animated ? (g.displacement_speed == null ? " (no speed bound)" : ` (≤ ${g.displacement_speed.toFixed(2)} × magnitude/s)`) : "";
+    const displaces = !g?.displacement ? "" : ` · ${g.displacement_animated ? "animated " : ""}${vector}${pace}`;
     statusEl.textContent = !g ? "" : errors.length ? `${errors.length} error${errors.length > 1 ? "s" : ""}` : `compiled · ${g.parameters.length} parameter${g.parameters.length === 1 ? "" : "s"}${displaces} · ${g.hash || ""}`;
     statusEl.className = "mg-status" + (errors.length ? " error" : "");
     errorsEl.replaceChildren(...errors.map((e) => h("div", { class: "mg-error", onclick: () => e.node && selectNode(e.node, true) }, e.node ? `#${e.node}: ${e.message}` : e.message)));
@@ -152,7 +156,7 @@ export function createGraphEditor(ed) {
   // node and explained on hover. A graph connects one of the two.
   const DISPLACEMENT_PINS = {
     Displacement: "Height 0..1 along the normal, around the material's displacement centre, scaled by its magnitude (float). Time animates it.",
-    VectorDisplacement: "World-space offset in units of the material's displacement magnitude, length up to 1 (float3): overhangs and sideways shifts. VertexNormal × height displaces as the Displacement pin does. Time animates it.",
+    VectorDisplacement: "World-space offset in units of the material's displacement magnitude, length up to 1 (float3): overhangs and sideways shifts. VertexNormal × height displaces as the Displacement pin does; build it in object or tangent space and turn it with TransformVector to follow a rotating instance. Time animates it.",
   };
 
   function nodeElement(node) {
@@ -251,6 +255,8 @@ export function createGraphEditor(ed) {
       });
       return field;
     };
+    // TransformVector's spaces (UE's Transform node: Tangent, Local = Object, World).
+    const space = (key) => stop(select([["World", "World"], ["Object", "Object (local)"], ["Tangent", "Tangent"]], node[key], (v) => ((node[key] = v), commit())));
     const line = (label, ...controls) => h("div", { class: "mg-prop" }, h("span", { class: "mg-prop-label" }, label), ...controls);
     const color = (key) => {
       const rgb = node[key].slice(0, 3);
@@ -270,6 +276,7 @@ export function createGraphEditor(ed) {
       case "Noise": out.push(line("scale", number("scale")), line("octaves", number("octaves", null, 1))); break;
       case "Fresnel": out.push(line("exponent", number("exponent")), line("base", number("base_reflect"))); break;
       case "Panner": out.push(line("speed", number("speed", 0), number("speed", 1))); break;
+      case "TransformVector": out.push(line("from", space("source")), line("to", space("destination"))); break;
     }
     return out;
   }

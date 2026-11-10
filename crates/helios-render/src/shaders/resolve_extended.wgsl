@@ -1,5 +1,5 @@
 // Extended resolve pipelines (passes/material.rs, substrate_gpu.rs): materials with a Substrate
-// slab, a material graph or both, resolved over tiles of their own (slots 8-15). Replaces
+// slab, a material graph or both, resolved over tiles of their own (slots 8-23). Replaces
 // resolve_extended_off.wgsl in gbuffer.wgsl; a graph material's compiled graph replaces
 // material_graph_off.wgsl.
 //

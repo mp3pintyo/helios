@@ -340,18 +340,28 @@ impl NearField {
     /// are left out: they must not occlude the light they represent. `card_instances` holds
     /// every scene instance's index in the mesh-card surface cache (`u32::MAX`: none, which also
     /// leaves out alpha-masked instances too sparse for Lumen), `coverage` the solid fraction of
-    /// its surface.
-    pub fn upload(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, scene: &Scene, card_instances: &[u32], coverage: &[f32]) {
-        let meshes: Vec<Option<&MeshSdf>> = scene.meshes.iter().map(|m| m.sdf.as_ref()).collect();
+    /// its surface. `meshes` are the distance fields of Lumen's surfaces (scene meshes, then
+    /// displaced variants: lumen_displaced.rs) and `surface_of` every scene instance's surface.
+    #[allow(clippy::too_many_arguments)]
+    pub fn upload(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        scene: &Scene,
+        meshes: &[Option<&MeshSdf>],
+        surface_of: &[usize],
+        card_instances: &[u32],
+        coverage: &[f32],
+    ) {
         let instances: Vec<NearInstance> = scene
             .instances
             .iter()
             .zip(card_instances.iter().zip(coverage))
             .enumerate()
             .filter(|(_, (i, (&card, _)))| i.cast_shadow && card != u32::MAX)
-            .map(|(index, (i, (&card, &coverage)))| NearInstance { index, mesh: i.mesh.0 as usize, world: i.transform, card, coverage })
+            .map(|(index, (i, (&card, &coverage)))| NearInstance { index, mesh: surface_of[index], world: i.transform, card, coverage })
             .collect();
-        let data = build_data(&meshes, &instances);
+        let data = build_data(meshes, &instances);
         let size = data.atlas.size;
         let atlas = atlas_texture(device, size);
         queue.write_texture(
@@ -381,14 +391,15 @@ impl NearField {
     }
 
     /// Re-places the records of moved scene instances `moved` (their atlas slots stay); the
-    /// culling grid is rebuilt only if one crossed into other cells.
-    pub fn move_instances(&mut self, queue: &wgpu::Queue, scene: &Scene, moved: impl Iterator<Item = usize>) {
+    /// culling grid is rebuilt only if one crossed into other cells. `meshes`: as for
+    /// [`NearField::upload`].
+    pub fn move_instances(&mut self, queue: &wgpu::Queue, scene: &Scene, meshes: &[Option<&MeshSdf>], moved: impl Iterator<Item = usize>) {
         for i in moved {
             let Some(&r) = self.record_of.get(i).filter(|&&r| r != u32::MAX) else { continue };
             let r = r as usize;
             let instance = &mut self.instances[r];
             instance.world = scene.instances[i].transform;
-            let Some(sdf) = scene.meshes[instance.mesh].sdf.as_ref() else { continue };
+            let Some(sdf) = meshes[instance.mesh] else { continue };
             let (atlas_offset, heightfield_word) = self.placements[r];
             let (record, bounds) = instance_record(sdf, instance, atlas_offset, heightfield_word);
             let range = r * RECORD_WORDS..(r + 1) * RECORD_WORDS;

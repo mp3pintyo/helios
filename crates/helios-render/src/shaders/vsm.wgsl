@@ -6,7 +6,8 @@
 //   mark_local : the same for local lights' shadow maps (vsm_local.rs): pixels request the
 //                pages of the lights in their light cluster (one pixel per 2x2 quad), and the
 //                coarsest page of each face they touch (a fallback for every receiver)
-//   invalidate_local : frees the pages of lights that moved or changed (before the page cache)
+//   invalidate_local : frees the pages of faces whose origin moved, of lights that changed (before
+//                the page cache)
 //   info_begin / dirty_info : per-level bounding rectangles and bit masks of the dirty pages
 //                (culling is restricted to them), dirty flags on entries, page-clear draw
 //                arguments; for local lights a world box around each light's dirty pages, its
@@ -32,7 +33,8 @@
 // local light slot from word LOCAL_INFO_SLOTS (32 words): dirty box min xyz, max xyz (fixed
 // point, LOCAL_BOX_SCALE units per metre), finest dirty mip, dirty count, light position and
 // mip-0 texels per unit at distance 1 (f32 bits) - what the single local light culling view
-// needs (cull.wgsl) - then the box (min xyz, max xyz) of its pages rendered in full; and per
+// needs (cull.wgsl) - then the box (min xyz, max xyz) of its pages rendered in full, and per
+// face its pages requested this frame and those rendered in full (read back); and per
 // local face mip from word LOCAL_INFO_RECTS (4 words): its dirty page rectangle. Then per
 // physical page its kind this frame, its static layer's entry and its pending refresh flag,
 // then the motion bounds of local light pages' swaying casters (two words per physical page).
@@ -151,7 +153,7 @@ fn mark_volume(@builtin(global_invocation_id) gid: vec3<u32>) {
 // the pages under its corners (which may lie on other cube faces). A light away from its map's
 // origin moves its filter by up to its search radius (local_filter_follow): twice the footprint.
 fn request_local(slot: u32, world: vec3<f32>, n: vec3<f32>, mip_bias: u32, taps: f32) {
-    let footprint = taps * select(1.0, 2.0, any(local_vsm.slots[slot].anchor_offset.xyz != vec3<f32>(0.0)));
+    let footprint = taps * select(1.0, 2.0, local_vsm.slots[slot].flags.y != 0u);
     let r = local_receiver(slot, world, n, mip_bias);
     let face = local_face(slot, r.p);
     let a = local_address(slot, face, r.p, r.mip);
@@ -219,8 +221,8 @@ fn invalidate_local(@builtin(global_invocation_id) gid: vec3<u32>) {
     if entry == INVALID_ID || entry < local_vsm.entry_base {
         return;
     }
-    let slot = (entry - local_vsm.entry_base) / (LOCAL_FACES * LOCAL_FACE_ENTRIES);
-    if local_vsm.slots[slot].flags.x != 0u {
+    let view = (entry - local_vsm.entry_base) / LOCAL_FACE_ENTRIES;
+    if ((local_vsm.slots[view / LOCAL_FACES].flags.x >> (view % LOCAL_FACES)) & 1u) != 0u {
         owner[gid.x] = INVALID_ID;
         entries[entry].x = INVALID_ID;
     }
@@ -265,6 +267,9 @@ fn info_begin(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
         atomicStore(&info[o + 6u], 0x7fffffff);
         atomicStore(&info[o + 7u], 0);
+        for (var k = 0u; k < 2u * LOCAL_FACES; k++) {
+            atomicStore(&info[o + LOCAL_INFO_FACE_REQUESTED + k], 0);
+        }
         let texels_per_unit = local_vsm.slots[slot].params.z * f32(LOCAL_PAGES * vsm.page_texels) * 0.5;
         atomicStore(&info[o + 11u], bitcast<i32>(texels_per_unit));
     } else if i < MAX_LEVELS + LOCAL_SLOTS + LOCAL_SLOTS * LOCAL_FACES * LOCAL_MIPS {
@@ -297,8 +302,9 @@ fn local_dirty_info(entry: u32, full: bool) {
 
     let light = local_vsm.slots[slot].position_range;
     let far_depth = local_vsm.slots[slot].params.y / light.w; // reverse-Z depth at face depth = range
-    var lo = light.xyz;
-    var hi = light.xyz;
+    let origin = light.xyz + local_vsm.slots[slot].face_offsets[face].xyz;
+    var lo = origin;
+    var hi = origin;
     for (var c = 0u; c < 4u; c++) {
         let uv = (vec2<f32>(page) + vec2<f32>(f32(c & 1u), f32(c >> 1u))) / f32(pages);
         let h = local_vsm.slots[slot].inv_view_proj[face] * vec4<f32>(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, far_depth, 1.0);
@@ -314,6 +320,7 @@ fn local_dirty_info(entry: u32, full: bool) {
     atomicAdd(&info[o + 7u], 1);
     if full {
         grow_box(o + 12u, a, b);
+        atomicAdd(&info[o + LOCAL_INFO_FACE_FULL + face], 1);
     }
 }
 
@@ -343,8 +350,18 @@ fn dirty_page(entry: u32, state: u32) {
 
 // The page cache's dirty pages (new, or invalidated with their static casters) are rendered in
 // full. A page's static layer belongs to its entry: rendering it in full drops it.
+// Also counts, per local light face, the pages requested this frame (all resident now): what
+// rendering the face from a new origin costs (read back, vsm_anchor.rs).
 @compute @workgroup_size(64)
 fn dirty_info(@builtin(global_invocation_id) gid: vec3<u32>) {
+    if gid.x < vsm.physical_count {
+        let owned = owner[gid.x];
+        if owned != INVALID_ID && owned >= local_vsm.entry_base && entries[owned].z == vsm.frame {
+            let view = (owned - local_vsm.entry_base) / LOCAL_FACE_ENTRIES;
+            let o = LOCAL_INFO_SLOTS + (view / LOCAL_FACES) * LOCAL_INFO_SLOT_WORDS;
+            atomicAdd(&info[o + LOCAL_INFO_FACE_REQUESTED + view % LOCAL_FACES], 1);
+        }
+    }
     let dirty = atomicLoad(&cache_lists[CACHE_DIRTY_COUNT]);
     if gid.x == 0u {
         atomicStore(&info[INFO_ARGS], 6);

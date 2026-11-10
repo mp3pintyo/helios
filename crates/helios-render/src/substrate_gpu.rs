@@ -3,7 +3,7 @@
 //! Every frame [`ExtendedMaterials::sync`] decides, from the scene's materials, which need an
 //! extended resolve pipeline — a slab with features (while [`crate::RenderSettings::substrate`]
 //! is on) or a graph that compiled — and gives each distinct (shading model, graph) pair one of
-//! the resolve slots 8–15 (`passes/material.rs`): material classification then bins their tiles
+//! the resolve slots 8–23 (`passes/material.rs`): material classification then bins their tiles
 //! apart, and plain materials keep the plain pipelines and cost. It writes
 //!
 //! * the **slab table** (one `GpuSlab` per material; uniform, 28 KiB),
@@ -12,7 +12,8 @@
 //! * the materials' resolve slots, patched into the material uniform after `GpuScene` uploads it,
 //! * the graph source of materials whose graph drives their displacement (graph id and parameter
 //!   offset), patched into the tessellation uniform likewise: such a material displaces by its
-//!   graph only while the graph has a resolve pipeline, so the tessellator and the resolve agree,
+//!   graph only while the graph has a resolve pipeline, so the tessellator and the resolve agree;
+//!   with it the speed bound of an animated displacement for the instance's parameter values,
 //!
 //! and owns the G-buffer's slab texels (rgba32uint, allocated only while some material is
 //! extended) and the subsurface light targets (only while some slab scatters beneath its
@@ -31,7 +32,7 @@ use crate::passes::material::{EXTENDED_SLOTS, PLAIN_SLOTS, SKY_SLOT};
 use crate::scene::{MaterialHandle, Scene};
 use crate::substrate::{features, GpuSlab};
 use crate::tessellation::graphs::graph_id;
-use crate::tessellation::{displacement_source, write_graph_source, DisplacementSource};
+use crate::tessellation::{displacement_source, displacement_speed, write_graph_motion, write_graph_source, DisplacementSource};
 use crate::util::{bind, bind_group, bind_group_layout, texture, uniform_buffer, TextureSpec};
 use helios_material::{output_bit, CompiledGraph, ParameterKind};
 
@@ -200,7 +201,7 @@ impl ExtendedMaterials {
                     slots.len() - 1
                 }
                 None => {
-                    self.warn("more than 8 distinct (shading model, graph) pairs: the rest render as plain materials");
+                    self.warn(&format!("more than {EXTENDED_SLOTS} distinct (shading model, graph) pairs: the rest render as plain materials"));
                     continue;
                 }
             };
@@ -235,9 +236,12 @@ impl ExtendedMaterials {
         let now: BTreeSet<usize> = graph_sources.iter().map(|s| s.0).collect();
         for &i in self.graph_displaced.difference(&now) {
             write_graph_source(queue, gpu, i, 0, 0);
+            write_graph_motion(queue, gpu, i, Some(0.0));
         }
+        // The speed bound follows the instance's parameters (a faster clock, a larger amplitude).
         for &(i, id, offset) in &graph_sources {
             write_graph_source(queue, gpu, i, id, offset);
+            write_graph_motion(queue, gpu, i, displacement_speed(scene, MaterialHandle(i as u32)));
         }
         self.graph_displaced = now;
         self.displacement_key = displacement_key.0;

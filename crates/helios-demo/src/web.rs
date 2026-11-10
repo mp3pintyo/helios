@@ -248,6 +248,10 @@ async fn run() -> Result<(), String> {
     if let Some(count) = option_string("lights", "lights").and_then(|v| v.parse().ok()) {
         crate::scenes::candles::set_candle_lights(count);
     }
+    // `?lantern=1`: a lantern carried down the cathedral's nave (a fast, sharp moving light).
+    if option_string("lantern", "lantern").is_some_and(|v| v != "0") {
+        crate::scenes::cathedral::set_lantern(true);
+    }
     let mut app = match query_param("stream") {
         // `?stream=URL_BASE`: the scene of the mesh library at URL_BASE (written by
         // `helios --bake-hvm`), its geometry streamed with HTTP range requests.
@@ -543,6 +547,13 @@ pub fn helios_set_view(index: u32) {
 #[wasm_bindgen(js_name = heliosSetCandleLights)]
 pub fn helios_set_candle_lights(count: u32) {
     crate::scenes::candles::set_candle_lights(count as usize);
+}
+
+/// Sets whether a lantern is carried down the cathedral's nave from its next build
+/// (`heliosLoadScene`; `?lantern=1` at start): a fast, sharp moving light.
+#[wasm_bindgen(js_name = heliosSetLantern)]
+pub fn helios_set_lantern(on: bool) {
+    crate::scenes::cathedral::set_lantern(on);
 }
 
 /// Fetches a glTF model (`.glb`, or `.gltf` with its files; relative to the page, as `?gltf=`)

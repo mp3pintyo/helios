@@ -155,6 +155,40 @@ fn vector_and_animated_displacement_graphs_round_trip() {
 }
 
 #[test]
+fn speed_bounds_and_vector_spaces_reach_the_editor_and_scene_files() {
+    use helios_render::material_graph::{presets, MaterialGraph, Op, VectorSpace};
+    let mut f = Fixture::new();
+    let mut editor = f.editor();
+    // The cloth's speed bound: per material (m/s, its magnitude times the graph's bound) and per
+    // graph (units of the magnitude per second).
+    let cloth = MaterialGraph { name: "Cloth".into(), ..presets::rippling_cloth() };
+    op(&mut editor, &mut f, json!({ "op": "graph", "name": "Cloth", "graph": cloth }));
+    op(&mut editor, &mut f, json!({ "op": "material", "name": "stone", "params": { "graph": "Cloth", "displacement": { "magnitude": 0.2, "center": 0.5 } } }));
+    let state = describe::state(&editor, &f.world());
+    let entry = state["materials"].as_array().unwrap().iter().find(|m| m["name"] == "stone").unwrap();
+    let graph = state["graphs"].as_array().unwrap().iter().find(|g| g["name"] == "Cloth").unwrap();
+    let (per_material, per_graph) = (entry["displacement_speed"].as_f64().unwrap(), graph["displacement_speed"].as_f64().unwrap());
+    assert!(per_graph > 0.0 && (per_material - per_graph * 0.2).abs() < 1e-5, "{per_material} {per_graph}");
+    // A tangent-space vector graph: its TransformVector node and spaces survive a scene file.
+    let tufts = MaterialGraph { name: "Tufts".into(), ..presets::combed_tufts() };
+    op(&mut editor, &mut f, json!({ "op": "graph", "name": "Tufts", "graph": tufts }));
+    op(&mut editor, &mut f, json!({ "op": "material", "name": "stone", "params": { "graph": "Tufts", "displacement": { "magnitude": 0.1, "center": 0.0 } } }));
+    let state = describe::state(&editor, &f.world());
+    let entry = state["materials"].as_array().unwrap().iter().find(|m| m["name"] == "stone").unwrap();
+    assert_eq!((&entry["displacement_mode"], &entry["displacement_speed"]), (&json!("vector"), &json!(0.0)));
+    let saved = editor.save(CameraDef { position: [0.0; 3], yaw_deg: 0.0, pitch_deg: 0.0, fov_deg: 60.0 });
+    let text = saved.to_json();
+    assert!(text.contains("\"TransformVector\"") && text.contains("\"Tangent\""), "spaces are saved by name");
+    let loaded = SceneDoc::parse(&text).unwrap();
+    assert_eq!(loaded.graphs["Tufts"], tufts);
+    assert!(loaded.graphs["Tufts"].nodes.iter().any(|n| n.op == Op::TransformVector { source: VectorSpace::Tangent, destination: VectorSpace::World }));
+    // The node palette (heliosMaterialNodes) offers it, Object → World by default.
+    let catalog = serde_json::to_value(helios_render::material_graph::catalog()).unwrap();
+    let entry = catalog.as_array().unwrap().iter().find(|n| n["type"] == "TransformVector").expect("in the palette");
+    assert_eq!((&entry["template"]["source"], &entry["template"]["destination"]), (&json!("Object"), &json!("World")));
+}
+
+#[test]
 fn transforms_undo_and_redo() {
     let mut f = Fixture::new();
     let mut editor = f.editor();
