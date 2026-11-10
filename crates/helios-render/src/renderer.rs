@@ -997,7 +997,7 @@ impl Renderer {
                 current,
                 &self.lights,
                 &self.exposure.buffer,
-                &CardInputs { vsm: &self.vsm, textures: &self.textures, materials: &self.scene.materials },
+                &CardInputs { vsm: &self.vsm, textures: &self.textures, materials: &self.scene.materials, extended: &self.extended, queue: &self.queue },
                 lumen_lite.is_none(),
             );
             if let Some(lite) = lumen_lite {

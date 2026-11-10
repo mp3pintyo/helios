@@ -1,0 +1,56 @@
+[
+ {
+  "id": "lumen-card-texel-albedo",
+  "title": "A Lumen mesh card-jai texelenként rögzítik az anyagot (albedó és emisszió)",
+  "area": "Globális megvilágítás",
+  "kind": "feature",
+  "summary": "A mesh card-ok eddig az anyag átlagos albedóját vitték (alapszín × a textúra 1×1-es mipje), így a visszavert fény mindenhol az átlag színét kapta, ahol az anyag színe változik: a galéria gombaágyása a piros kalapok alatt is mohazölden vert vissza. Mostantól – mint az UE5 felületcache-ében – a GPU minden card-texelen kiértékeli az anyagot úgy, ahogy a G-buffer resolve teszi (képtextúrák, procedurális textúrák, árnyalási modellek, anyaggráfok generált felületkódja a paramétereivel), és egy rgba8 albedó-atlaszba írja (albedó + emisszió); a card-megvilágítás ezzel veri vissza a fényt. A gomba kalapja pirosan, a katedrális festett üvege a táblái színeiben, a láva a saját izzásával világít vissza.",
+  "details": "CPU (a geometria-befogással együtt): a card-raszterizáló texelenként rögzíti, melyik háromszöget és hol látja (helios-geometry: CardConfig::sources, Card::sources); ebből a cards.rs kiszámolja a texel UV-jét, UV-lábnyomát és elmozdított változatnál az alappont eltolását (texelenként 16 bájt: uv 2×f32, eltolás 3×f16, lábnyom f16; SurfaceCapture). GPU (lumen_card_capture.wgsl): (felület, anyag) páronként – és példányonként, ha az anyag függ az elhelyezéstől (világtérbeli textúra, a szikla mohája, világpozíciót / normált olvasó gráf), legfeljebb 1 M texelig – felépíti a resolve SurfaceInput-ját (pozíció, normál, normálmátrix a befogó példányból, UV és lábnyom mint 'képernyő-derivált', így a mipek és a lábnyom-szűrt zaj a texelre átlagolnak), és az árnyalási modell szerinti pipeline-nal (MATERIAL_KIND) vagy gráfonként külön pipeline-nal (a gráf felületkódja a material_graph_off.wgsl helyén, az elmozdító függvény nélkül) értékeli ki. Elmozdított változatnál az anyag az alapponton értékelődik (mint a resolve-ban): a kalap texelje a kalappá vált alappont színét kapja. Ütemezés: jelenet-feltöltés után képkockánként legfeljebb 1 M texel, újra, ha egy gráf vagy paraméterértéke változik (tartalom-hash páronként); újrafeltöltéskor a változatlan párok albedója átmásolódik az új atlaszba. Amíg egy pár nincs befogva, az átlagos albedót kapja. A light_cards durva mipen a mintavételezett legfeljebb négy befogott texel átlagát használja. Memória: albedó-atlasz legfeljebb 16 MiB, a texelenkénti bemenetek a CPU-n maradnak (újrabefogáshoz). Elvetve: a card-ok renderelése a visibility-buffer útvonalon (külön culling-nézet card-onként, második renderelő-útvonal), az anyag kiértékelése a light_cards-ban (minden lapon minden képkockában, gráfonként pipeline), irradiancia tárolása és az albedóval mintavételkor szorzás (minden card-olvasó pass kötné az atlaszt). A web-bake-worker ággal összefésülve: a lumen_displaced::bake újra a teljes finomítást kapja (&Refined: a pontok alap-pozíciója és UV-ja), natívan helyben (BakeMesh::Refined), Web Workeren a finomítást újra elvégezve (BakeMesh::Refine, új bemenet nélkül); a változat SurfaceCapture-je (card-ok + texelattribútumok) az Output kódolásában utazik vissza.",
+  "metrics": "RTX 3090 három másik ügynökkel megosztva, 2560×1440, buildenként 6 váltott futás minimuma. Állandó állapot (a befogó pass ilyenkor nem fut): GPU-képkocka völgy 8,62 → 8,68 / 5,53 → 5,50 ms (100 / 67 %), katedrális 10,78 → 10,88 / 6,62 → 6,57, erdő 15,79 → 15,82 / 10,57 → 10,57, galéria 8,04 → 8,10 / 4,98 → 4,96 – mind zajon belül; a card-megvilágító pass +0,001–0,006 ms. Befogás: ~0,3 ns/texel, a katedrális 2,06 M texele ≈ 0,6 ms GPU-idő a betöltés utáni 3 képkockán; képkockánként legfeljebb 1 M texel (≤ ~0,3 ms). Feltöltés (CPU, natív): galéria 6 → 9 ms, völgy 83 → 116, katedrális 92 → 123, erdő 315 → 371 ms; böngészőben a katedrális 14,7 → 15,0 s. Memória: albedó-atlasz galéria 2,6, völgy 9,1, katedrális 10,7, erdő 12,7 MiB (legfeljebb 16 MiB); CPU-oldali befogási adat 1,2 / 19,8 / 19,2 / 30,8 MiB. Képek: gombák lit 50,6 dB (zaj 58,6), view 7 43,9 dB, a visszavert fény vörös/zöld aránya 0,800 → 0,833; galéria alapnézet 43,6 dB, 0,12 % pixel > 24/255; katedrális 55,9 dB (zaj 60,6), völgy 55,9 dB (zaj 54,7), erdő 41,3 dB (zaj 39,4). Tesztek: workspace zöld, a befogó shader minden presettel és node-típussal validál (naga + Tint-ellenőrzés), az offload round-trip bitre azonos az attribútumokkal együtt.",
+  "showcase": "Galéria, gombaágyás: --scene gallery --eye -5.9,0.3,10.4 --at -6.5,0.08,9.2, debug nézet 14 (előtte az ágyás card-jai egyenletesen mohazöldek, utána piros kalapok, fehér tönkök) és 7 (indirekt fény: a kalapok körül piros visszavert fény). Felülről: --eye -6.5,1.6,9.6 --at -6.5,0.0,9.2 --view 14. Katedrális (--scene cathedral --view 14): a festett üveg ablakok mintásan, a falak kőtömbjei textúrával. Láva: --scene gallery --eye 8.6,1.1,5.4 --at 6.75,0.4,3.0. Képek: docs/round6/card-albedo/*.jpg.",
+  "modules": [
+   "crates/helios-geometry/src/cards.rs",
+   "crates/helios-render/src/cards.rs",
+   "crates/helios-render/src/shaders/lumen_card_capture.wgsl",
+   "crates/helios-render/src/shaders/lumen_card_light.wgsl",
+   "crates/helios-render/src/shaders/lumen_cards.wgsl",
+   "crates/helios-render/src/lumen.rs",
+   "crates/helios-render/src/lumen_displaced.rs",
+   "crates/helios-render/src/substrate_gpu.rs",
+   "crates/helios-render/src/renderer.rs",
+   "crates/helios-render/src/shader.rs",
+   "crates/helios-render/src/lumen_offload.rs"
+  ]
+ },
+ {
+  "id": "lumen-card-depth-aware-filter",
+  "title": "Mélységérzékeny szűrés a card-megvilágításban: nincs fényszivárgás mélységugrásokon át",
+  "area": "Globális megvilágítás",
+  "kind": "fix",
+  "summary": "A card-mintavétel a négy legközelebbi megvilágított texel között bilineárisan szűrt, és csak a felület nélküli texeleket hagyta ki: a gomba melletti talaj a kalap (most már piros) fényét is bekeverte – piros glóriák minden kalap körül a 14-es nézetben –, a fal tövében a padló a falét. Most minden megvilágított texel eltárolja, milyen mélységű felületen világították meg, és a szűrő csak a találat érintősíkjára eső texeleket használja.",
+  "details": "A light_cards a megvilágítási atlasz alfájába írja: 1 + a tárolt mélység / 65534 (0: nincs felület; addig konstans 1 volt, így ingyenes). A card_sample minden tapnál összeveti ezt azzal a mélységgel, amelyet a találat síkja a tap közepén ad (a találat mélysége + a normálból számolt lejtés, ±4-re vágva), a találat tűrése + fél mezővoxel + fél megvilágítási texel tűréssel; a bizalom az egyező tapok súlyából jön (saturate(4·súly)). rgba16f-ben a mélység 10 bites a card mélységtartományán (3 m-es ágyás: 3 mm). Elvetve: a tapok befogott mélységének olvasása a capture atlaszból (taponként +1 textúraolvasás, durva mipen nem az a mélység, amelyen megvilágították), normálok összevetése (a kalap teteje és a talaj egyaránt felfelé néz).",
+  "metrics": "1280×720, gombák card-nézete (14): az előző buildhez képest 27,6 dB, a pixelek 14,3 %-a változik 24/255-nél többet – a kalapok körüli piros glória eltűnt; felülről 27,0 dB. Költség (2560×1440, buildenként 6 váltott futás minimuma): a final gather −0,21…+0,14 ms között mozog, ugyanannyit, mint main és az első card-albedo build között, ahol a kód azonos volt – zajon belül; a card-megvilágító pass változatlan (0,030 → 0,030, 0,071 → 0,069 ms).",
+  "showcase": "Galéria, gombaágyás: --scene gallery --eye -5.9,0.3,10.4 --at -6.5,0.08,9.2 --view 14 és felülről --eye -6.5,1.6,9.6 --at -6.5,0.0,9.2 --view 14: a kalapok körüli piros glória eltűnt, a kalapok egyenletesen pirosak. Képek: docs/round6/card-albedo/followup-mushrooms-cards.jpg, followup-bed-top-cards.jpg.",
+  "modules": [
+   "crates/helios-render/src/shaders/lumen_cards.wgsl",
+   "crates/helios-render/src/shaders/lumen_card_light.wgsl"
+  ]
+ },
+ {
+  "id": "lumen-voxel-captured-albedo",
+  "title": "A globális távolságmező és a voxel-felületcache a befogott card-albedót használja",
+  "area": "Globális megvilágítás",
+  "kind": "feature",
+  "summary": "A voxel-felületcache a globális távolságmező voxelenként tárolt albedójával világít, ami eddig a legközelebbi példány anyagának átlaga volt (alapszín × textúra 1×1 mip): egy gráf színei nem jutottak el hozzá. Most a befogás páronként összegzi a texeleket, és a mező a pár befogott átlagos albedóját tárolja – a gombaágyás voxeljei mohazöldből a kalapok, tönkök és moha átlagos színére váltanak.",
+  "details": "A lumen_card_capture.wgsl munkacsoportonként redukálja a befogott texelek 8 bites albedóját és emisszióját és a darabszámot, majd szavanként egy atomic add-dal a pár összegeihez adja (pair_sums, páronként 5 u32). Az SdfInstance _pad mezője pair lett (1 + a példány card-párja, a card-feltöltés után beírva, a lumen_dynamic CPU-másolatában is). A compose (és a compose_listed) a pár átlagát tárolja, ha befogott; az üveg és az önvilágító anyagok előjele megmarad. Amikor a függő befogások elfogynak (betöltés vagy anyagszerkesztés után), a Lumen egyszer újrakomponálja a szinteket, mint bármely jelenetváltozás után; újrafeltöltéskor a változatlan párok összegei átmásolódnak. Elvetve: voxelenkénti card-lekérés a compose-ban (a voxelek 0,25–2 m-esek: sok texelt kellene átlagolni, plusz kötések egy 8 tárolópuffer-határon lévő passban), az átlagok CPU-ra olvasása.",
+  "metrics": "Gombaágyás voxel-felületcache (view 11): a képalsó fél átlagszíne (122,6; 126,1; 87,2) → (164,1; 143,4; 113,6); az indirekt fény vörös/zöld aránya main 0,800 → card-albedó 0,833 → követő javításokkal 0,870. Állandó állapotban nincs költség (a 'lumen sdf' pass átlaga 0 mindkét buildben; GPU-képkocka völgy 8,69 → 8,71, katedrális 10,93 → 10,84, erdő 16,88 → 16,19, galéria 7,96 → 8,06 ms, zajon belül); befogások után egyszeri teljes újrakomponálás, mint jelenetváltozáskor. Memória: páronként 20 bájt.",
+  "showcase": "Galéria, gombaágyás: --scene gallery --eye -5.9,0.3,10.4 --at -6.5,0.08,9.2 --view 11 (voxel-felületcache: előtte mohazöld, utána a gombák átlagszíne) és --view 7 (indirekt fény). Képek: docs/round6/card-albedo/followup-mushrooms-voxels.jpg, followup-mushrooms-indirect-vs-main.jpg.",
+  "modules": [
+   "crates/helios-render/src/shaders/lumen_card_capture.wgsl",
+   "crates/helios-render/src/shaders/lumen_sdf.wgsl",
+   "crates/helios-render/src/cards.rs",
+   "crates/helios-render/src/lumen.rs",
+   "crates/helios-render/src/lumen_dynamic.rs"
+  ]
+ }
+]

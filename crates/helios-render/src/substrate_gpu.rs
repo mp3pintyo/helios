@@ -255,6 +255,11 @@ impl ExtendedMaterials {
         &self.params
     }
 
+    /// The slab table (Lumen's card capture reads the graphs' parameter offsets from it).
+    pub fn slab_buffer(&self) -> &wgpu::Buffer {
+        &self.slabs
+    }
+
     fn warn(&mut self, message: &str) {
         if !self.warned {
             log::warn!("{message}");

@@ -22,7 +22,9 @@ struct SdfInstance {
     material: u32,
     mesh: u32,
     has_cards: u32,
-    _pad: u32,
+    // 1 + its (surface, material) pair in the mesh cards, if that pair's material is captured
+    // (cards.rs); 0: none.
+    pair: u32,
 }
 
 struct MeshSdfDesc {
@@ -60,6 +62,28 @@ const BRICK_WORDS: u32 = 64u; // count + 63 instance indices
 // it was recomposed this frame (cleared by lumen_dynamic.rs).
 @group(0) @binding(10) var<storage, read> brick_list: array<u32>;
 @group(0) @binding(11) var<storage, read_write> brick_stamps: array<u32>;
+// Per card pair: the sums of its captured texels (lumen_card_capture.wgsl).
+@group(0) @binding(12) var<storage, read> pair_sums: array<u32>;
+
+const PAIR_SUM_WORDS: u32 = 5u;
+
+// The albedo the field stores for `material` (negative: glass and self-luminous surfaces), the
+// mean of its card pair's captured texels where the pair is captured (graphs' colours, textures'
+// true mean), else the material's average.
+fn voxel_albedo(material: u32, pair: u32) -> vec3<f32> {
+    let average = material_albedo_average(material);
+    if pair == 0u {
+        return average;
+    }
+    let base = (pair - 1u) * PAIR_SUM_WORDS;
+    let count = pair_sums[base + 4u];
+    if count == 0u {
+        return average;
+    }
+    let mean = vec3<f32>(f32(pair_sums[base]), f32(pair_sums[base + 1u]), f32(pair_sums[base + 2u])) / (255.0 * f32(count));
+    let albedo = clamp(mean, vec3<f32>(0.02), vec3<f32>(0.95));
+    return select(albedo, -albedo, average.x < 0.0);
+}
 
 fn brick_coords(b: u32) -> vec3<u32> {
     return vec3<u32>(b % BRICKS_PER_SIDE, (b / BRICKS_PER_SIDE) % BRICKS_PER_SIDE, b / (BRICKS_PER_SIDE * BRICKS_PER_SIDE));
@@ -160,6 +184,7 @@ fn compose_voxel(gid: vec3<u32>, b: u32) -> u32 {
     let count = bricks[b * BRICK_WORDS];
     var best = band;
     var best_material = 0xffffffffu;
+    var best_pair = 0u;
     var best_card = band;
     var best_instance = 0xffffu;
     for (var k = 0u; k < count; k++) {
@@ -170,6 +195,7 @@ fn compose_voxel(gid: vec3<u32>, b: u32) -> u32 {
         if d < best {
             best = d;
             best_material = inst.material;
+            best_pair = inst.pair;
         }
         if d < best_card && inst.has_cards != 0u {
             best_card = d;
@@ -178,7 +204,7 @@ fn compose_voxel(gid: vec3<u32>, b: u32) -> u32 {
     }
     var albedo = vec3<f32>(0.0);
     if best_material != 0xffffffffu {
-        albedo = material_albedo_average(best_material);
+        albedo = voxel_albedo(best_material, best_pair);
     }
     let texel = vec3<u32>(gid.xy, gid.z + params.level * u32(SDF_RES));
     textureStore(out_sdf, texel, vec4<f32>(clamp(best / band, -1.0, 1.0), albedo));
