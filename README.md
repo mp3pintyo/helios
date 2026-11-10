@@ -907,7 +907,20 @@ valley and gallery unchanged.
   surface. Presets *Mushrooms (vector displacement)* — a disc of ground around each cell centre wrapped over a
   cap, its underside and a stem — and *Rippling cloth (animated displacement)* — travelling sine waves and a
   scrolling noise, pinned at the edges —, both as 3 m beds in the gallery.
-  MEASURED
+  Measured (1600×900, RTX 3090 shared with another agent, minima of 3 interleaved runs against the previous
+  build): the stored barycentrics cost the payload pass about 0.1 ms per 2.9 M micro-triangles and save the
+  resolve three displacement evaluations per pixel — brick close-up raster 1.90 → 2.00 ms, resolve 0.91 → 0.69 ms,
+  frame 6.56 → 6.45 ms; valley path (texture height) raster 1.04 → 1.06 ms, resolve 0.49 → 0.48 ms, frame 5.01 →
+  5.04 ms; valley default view, forest and cathedral unchanged in every pass (±0.03 ms) and image (within
+  run-to-run noise). Mushrooms, low view (`--eye -5.9,0.3,10.4 --at -6.5,0.08,9.2`): 2.11 M micro-triangles, GPU
+  frame 3.77 ms (tessellation off) → 5.38 ms — raster 1.30 ms, resolve 0.41 → 0.48 ms, no shadow page rendered
+  (cached); 5.47 M and 10.58 ms at 2560×1440. Cloth (`--eye 4.4,0.6,10.9 --at 6.3,0.15,9.0`): 1.37 M
+  micro-triangles in the view and 3.99 M in the 90 shadow pages that re-render their dynamic casters every frame,
+  3.60 → 5.75 ms — raster 0.83 ms, shadow tessellation 0.88 ms, resolve 0.36 → 0.51 ms; the gallery's initial view
+  (all three beds at a distance) 3.77 → 4.40 ms with 9 pages a frame. Static camera, pixels changing by > 24/255
+  per frame: mushrooms 0.0002 %, bricks 0.0011 % (as before), around the cloth 0.0014 %. One trap was found by
+  those dumps: the payload pass matched the depth pass's bits only while both compiled the same arithmetic — the
+  barycentrics are computed apart from it and the match has one step of slack now.
 * **Lumen-style GI** (`lumen.rs`). A 4-level global distance field (0.25–2 m voxels) is composited on the GPU from
   per-mesh SDFs; a voxel **surface cache** stores the radiance leaving nearby surfaces (sun with SDF soft shadows,
   sky with SDF occlusion, local lights, emission, one bounce from the **radiance cache** of world probes), so bounces

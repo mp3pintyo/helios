@@ -85,6 +85,14 @@ pass. Concurrent writes to a texel are a race only between micro-triangles of ex
 corners can split. The world position still comes from the depth, so the quantisation only moves where attributes
 are sampled, by a fraction of a micro-triangle.
 
+*A trap on the way:* the payload pass writes where its recomputed depth equals the depth pass's bits. That held
+because both passes compiled the same expression. The barycentrics first reused the products the depth is summed
+from; the compiler then rounded the payload pass's z differently and about half the pixels matched no triangle —
+they kept a stale payload (harmless before: the same base triangle) and stale barycentrics (a speckle that TSR
+smeared into noise: 2–4 % of the brick terrace's pixels changing per frame with a static camera, against 0.001 %).
+The barycentrics are now computed from the normalised weights, and the payload pass accepts one step of slack
+below the stored depth, so the match no longer depends on how a compiler contracts the surrounding code.
+
 **Normal.** A height keeps round 4's formula (the interpolated normal tilted by the height's gradient, two taps a
 pixel apart along the edges). A vector's normal is the cross product of the displaced surface's tangents: the steps
 along both edges, taken in the plane of the interpolated normal (so an undisplaced point of a curved mesh keeps its
@@ -116,7 +124,9 @@ instance's bounds padded by the displacement's reach, with *change* = 2 · reach
 a cached page shows it). Pages under it re-render only their dynamic casters over the cached static layer, and
 only where the displacement can have changed them by two texels: clipmap levels (and local lights' mips) whose
 texels are larger than the reach are never refreshed for it; the others are refreshed every frame (see the limits:
-there is no speed bound). The pass runs while such a caster exists (`VsmFrame::animated_displacement`); a scene
+there is no speed bound). The footprint is not flagged as the wind's: local light pages judge the wind by the
+motion their last rendering measured per page, which knows nothing of displacement, so an animated caster
+invalidates them through its footprint, as a move does. The pass runs while such a caster exists (`VsmFrame::animated_displacement`); a scene
 without one records nothing new. A graph that starts or stops reading the time bumps the graphs' displacement
 version: instance flags are re-uploaded and the casters change layer.
 
@@ -170,7 +180,57 @@ apply to animated casters every frame rather than only while a displaced instanc
 
 ## Measurements
 
-MEASUREMENTS
+1600×900, RTX 3090 shared with one other agent's builds and renders; interleaved runs against main (11dfc7d),
+minima of 3. GPU pass times in ms.
+
+**Existing content** (base → this branch):
+
+| View | GPU frame | Raster sw + merge | Material resolve |
+|---|---|---|---|
+| gallery bricks close-up (graph height, 2.9 M micro-triangles) `--eye 0.9,0.45,10.9 --at 0,0,9.2` | 6.56 → 6.45 | 1.90 → 2.00 | 0.91 → 0.69 |
+| gallery bricks grazing `--eye 3.6,0.12,10.0 --at -1,0.02,8.6` | 5.82 → 5.89 | 1.73 → 1.83 | 0.67 → 0.53 |
+| valley path (texture height, 1.82 M) `--eye -26,1.8,39 --at -33,0.2,53` | 5.01 → 5.04 | 1.04 → 1.06 | 0.49 → 0.48 |
+| valley default view (displaced content off screen) | 4.74 → 4.74 | 0.12 → 0.12 | 0.37 → 0.37 |
+| forest (medium), no displacement | 7.99 → 8.00 | 1.10 → 1.10 | 0.44 → 0.44 |
+| cathedral, no displacement | 5.64 → 5.68 | 0.09 → 0.09 | 0.34 → 0.34 |
+
+The stored barycentrics cost the payload pass about 0.1 ms per 2.9 M micro-triangles (0.02 on the valley path) and
+save the resolve three displacement evaluations per pixel: a clear gain where the displacement is a graph
+(−0.2 ms), neutral where it is a texture tap. (The gallery views now also contain the two new beds; the grazing
+view's shadow pages under the cloth refresh, 28 a frame.) Scenes without displacement: every pass within ±0.03 ms,
+images within run-to-run noise (PSNR base vs new / base vs base: valley default 65.4 / 64.4 dB, forest 41.2 / 41.1
+dB — its wind —, cathedral 61.4 / 61.2 dB). Displaced surfaces differ from main by design (the material is
+evaluated at the undisplaced point; base triangles no longer flip displaced normals): valley path 38.7 dB.
+
+**New content** (tessellation off → on, this branch):
+
+| View | Micro-triangles (main / shadows) | GPU frame | Raster sw + merge | Resolve | Shadow tessellation | Shadow pages / frame |
+|---|---|---|---|---|---|---|
+| mushrooms, low `--eye -5.9,0.3,10.4 --at -6.5,0.08,9.2` | 2.11 M / 0 | 3.77 → 5.38 | 0.06 → 1.30 | 0.41 → 0.48 | 0.06 | 0 (cached) |
+| mushrooms, from above `--eye -4.2,1.1,11.6 --at -6.3,0.05,9.0` | 0.66 M / 0 | 3.85 → 4.75 | 0.05 → 0.58 | 0.40 → 0.46 | 0.06 | 0 (cached) |
+| rippling cloth `--eye 4.4,0.6,10.9 --at 6.3,0.15,9.0` | 1.37 M / 3.99 M | 3.60 → 5.75 | 0.05 → 0.83 | 0.36 → 0.51 | 0.88 | 90, dynamic casters only |
+| gallery initial view (all three beds, far) | 0.23 M / 0.02 M | 3.77 → 4.40 | 0.05 → 0.30 | 0.40 → 0.47 | 0.08 | 9, dynamic casters only |
+
+At 2560×1440: mushrooms low 5.47 M micro-triangles, 10.58 ms (raster 2.84, resolve 1.04); cloth 3.64 M + 9.67 M in
+168 shadow pages a frame, 11.78 ms (raster 1.98, resolve 1.08, shadow tessellation 2.08). The static vector
+displacement costs what a height costs per micro-triangle and nothing in shadows once cached. The animated cloth's
+shadows cost as much as its main view while it fills the screen: every page finer than its 8 cm reach under 9 m²
+of surface is re-diced every frame (the static layers of those pages stay cached; with full invalidation every
+caster on them would be redrawn).
+
+**Temporal stability** (static camera, 16 frames, pixels changing by more than 24/255 per frame): mushrooms
+0.0002 % (tessellation off 0.0002 %); brick terrace 0.0011 % (main 0.0011 %); valley path, sunlit 0.0026 % (main
+0.0034 %); the cloth view outside the cloth 0.0014 % (0.0016 % over the whole image: the waves move well under a
+pixel a frame, and TSR follows them by their motion vectors).
+
+**Motion vectors**: a temporary build wrote the resolve's motion into the albedo (`displacement/motion-vectors.jpg`):
+bands of opposite sign travel with the cloth's waves, zero at its pinned edges, peaks of about 0.3 pixels a frame
+(expected from the long wave: 4.3 cm · 1.9 rad/s at 3.5 m), and exactly zero on the static bricks.
+
+**Browser** (headless Chromium 1248, WebGPU on D3D11 via ANGLE's flag set of the brief): the gallery's mushroom,
+cloth and brick views, debug view 25 and the editor (graph editor with both presets, Details panel, the both-pins
+error) run without console, WGSL or validation errors; the cloth refreshes 66 shadow pages a frame there
+(1280×720). Screenshots in `displacement/`.
 
 ## Remaining limits
 

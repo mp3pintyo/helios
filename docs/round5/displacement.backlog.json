@@ -1,0 +1,107 @@
+[
+  {
+    "id": "vector-displacement",
+    "title": "Vektoros elmozdítás anyaggráfból (túlnyúlások)",
+    "area": "Virtuális geometria",
+    "kind": "feature",
+    "summary": "Az anyaggráf Output csomópontja új VectorDisplacement lábat kapott: a felület nem csak a normál mentén, hanem tetszőleges irányban mozdulhat, így oldalra tolódhat és önmaga fölé hajolhat (gombakalap a tönk fölött). A vektor világtérbeli, az anyag magnitúdójának egységében, hossza 1-re vágva, így a magnitúdó a vágási korlát.",
+    "details": "A fordító a Displacement (f32) vagy a VectorDisplacement (vec3) lábból fordítja a graph_displacement függvényt (CompiledGraph::displacement_kind); a kettő együtt hiba az Output csomóponton. Világtér, mert a gráf csomópontjai abban beszélnek (VertexNormal, WorldPosition): VertexNormal × magasság ugyanazt adja, mint a magasság-láb. UV-ból triangulumonként számolt tangenstér az él két oldalán eltérne (repedés), ezért nincs. A tesszellátor az objektumtérbeli eltolást a példány normálmátrixával mint sorvektor-transzformációval kapja (az inverz lineáris rész, mátrixinverz nélkül). A vágási korlát vektornál magnitude · skála (magasságnál magnitude · max(center, 1−center)): tessellation::displacement_bound. A kockázó permutáció switch-e gráfonként csomagolja az értéket (displacement_from_height / displacement_from_vector), így magasság és vektor egy dispatch-ben fut; DISPLACEMENT_VECTORS konstans fordítja ki a vektorágat azokból a pipeline-okból, ahol nincs vektoros gráf. A megosztott élek bitre azonosak maradnak (a CPU-tükör egy önmagára hajló gombamezővel is fut).",
+    "metrics": "1600×900, RTX 3090 egy másik ügynökkel megosztva, 3 futás minimuma. Gombák alacsony nézetből: 2,11 M mikroháromszög, GPU-képkocka 3,77 ms (tesszelláció ki) → 5,38 ms; raster sw + merge 0,06 → 1,30 ms, resolve 0,41 → 0,48 ms, árnyéklap nem renderelődik (cache). Felülről: 0,66 M, 3,85 → 4,75 ms. 2560×1440: 5,47 M, 10,58 ms. Álló kamera: képkockánként a pixelek 0,0002 %-a változik 24/255-nél többet (tesszelláció nélkül ugyanennyi). Elmozdítás nélküli jelenetek változatlanok (erdő 7,99 → 8,00 ms, katedrális 5,64 → 5,68 ms, képek zajon belül).",
+    "showcase": "Galéria, gombaágyás a téglaterasztól balra: --scene gallery --eye -5.9,0.3,10.4 --at -6.5,0.08,9.2 (alacsony nézet: a kalapok alja és a tönkök látszanak, a kalapok árnyéka a talajon) és --eye -4.2,1.1,11.6 --at -6.3,0.05,9.0 (felülről). Előtte/utána: PageDown (tesszelláció ki: lapos, festett korongok). Debug nézet 25.",
+    "modules": [
+      "crates/helios-material/src/compile.rs",
+      "crates/helios-material/src/nodes.rs",
+      "crates/helios-render/src/tessellation.rs",
+      "crates/helios-render/src/tessellation/graphs.rs",
+      "crates/helios-render/src/shaders/displacement_height.wgsl",
+      "crates/helios-render/src/shaders/displacement_graphs_off.wgsl",
+      "crates/helios-render/src/shaders/displacement_graph_resolve.wgsl",
+      "crates/helios-render/src/shaders/tess_resolve.wgsl",
+      "crates/helios-render/src/tessellation/crack_tests.rs"
+    ]
+  },
+  {
+    "id": "animated-displacement",
+    "title": "Animált elmozdítás: Time a Displacement ágon, dinamikus árnyékvetőkkel és mozgásvektorokkal",
+    "area": "Virtuális geometria",
+    "kind": "feature",
+    "summary": "A gráf elmozdítása mostantól olvashatja az időt (Time, illetve órán hagyott Panner). Az ilyen anyag példányai dinamikus árnyékvetők: csak az alattuk lévő árnyéklapok frissülnek, a statikus réteg cache-elve marad; a pixelek mozgásvektora az előző képkocka felületéből számolódik. A statikus gráfok változatlanul teljesen cache-eltek.",
+    "details": "A fordító az elmozdítás-függvényben a Time-ot input.time-ként adja ki és jelzi (CompiledGraph::displacement_animated); a tesszellációs uniform az aktuális és az előző képkocka idejét is hordozza. A példány INSTANCE_ANIMATED jelzőt kap; a dynamic_caster predikátum (vágás, lapkiterjesztés, invalidáció közös) dinamikus vetőként kezeli, mint a mozgatható vagy szélfútta példányt. Az invalidáció collect menete képkockánként hozzáfűzi a lábnyomát: a határoló gömb az elmozdítás hatósugarával növelve, change = 2 · hatósugár. Így csak azok a lapok frissülnek (csak a dinamikus vetőikkel, a statikus réteg fölé), amelyek texelein az elmozdítás két texelnyit változtathat: a durvább klipmap-szintek soha, a finomabbak minden képkockában (tetszőleges gráfnak nincs sebességkorlátja). A lábnyom nem 'szél' lábnyom, így a helyi fények lapjait is érvényteleníti (azok csak a szél mozgását mérik laponként). Az animált gráf resolve-ja (DISPLACEMENT_ANIMATED konstans) a pixel alappontját az előző idővel is kiértékeli: ez a mozgásvektor. Nem frissül: a Lumen távolságmezői, kártyái és felületi cache-e (az elmozdítás amúgy is a voxelméret alatt van); a képernyőtéri sugarak látják a mozgó felületet.",
+    "metrics": "Kendő közeli nézet, 1600×900: 1,37 M mikroháromszög a nézetben és 3,99 M a képkockánként frissülő 90 árnyéklapon (csak dinamikus vetők); GPU-képkocka 3,60 ms (tesszelláció ki) → 5,75 ms: raster 0,83 ms, árnyék-tesszelláció 0,88 ms, resolve 0,36 → 0,51 ms. 2560×1440: 168 lap, 11,78 ms. Galéria nyitónézet: 3,77 → 4,40 ms, 9 lap/képkocka. Statikus gráfok: 0 frissített lap, változatlan költség. Mozgásvektor: kb. 0,3 pixel/képkocka csúcs a hullámokon, pontosan nulla a rögzített széleken és a statikus téglákon. Álló kamera, a kendőn kívül: 0,0014 %.",
+    "showcase": "Galéria, hullámzó kendő a téglaterasztól jobbra: --scene gallery --eye 4.4,0.6,10.9 --at 6.3,0.15,9.0 (videó: a hullámok és az árnyékuk együtt mozog). Debug nézet 16 (Invalidation): csak a kendő alatti árnyéklapok csíkozottak. HUD: 'shadow pages: N rendered (N dynamic casters only)'.",
+    "modules": [
+      "crates/helios-material/src/compile.rs",
+      "crates/helios-render/src/shaders/vsm_invalidate.wgsl",
+      "crates/helios-render/src/shaders/dynamic_caster.wgsl",
+      "crates/helios-render/src/shaders/tess_resolve.wgsl",
+      "crates/helios-render/src/shaders/gbuffer.wgsl",
+      "crates/helios-render/src/gpu_scene.rs",
+      "crates/helios-render/src/gpu_types.rs",
+      "crates/helios-render/src/vsm.rs",
+      "crates/helios-render/src/tessellation.rs"
+    ]
+  },
+  {
+    "id": "tessellation-stored-barycentrics",
+    "title": "Tesszellált pixelek: tárolt baricentrikus koordináták a keresés helyett",
+    "area": "Virtuális geometria",
+    "kind": "feature",
+    "summary": "A fő nézet kockázója pixelenként eltárolja, hogy az alapháromszög melyik pontja mozdult a pixelre (két 16 bites baricentrikus koordináta, R32Uint célpont). A G-puffer resolve ezt olvassa ki, nem iterációval keresi az elmozdított pontot, ezért az önmagára hajló felületeken (túlnyúlás) is pontos, és gráf-vezérelt elmozdításnál olcsóbb.",
+    "details": "A korábbi resolve a mélységből kapott találatot vetítette iteratívan az alapsíkra; ez csak addig konvergál, amíg az elmozdított felület magasságmező az alapsík fölött. Túlnyúlásnál több alappont vetül ugyanoda, a keresés rossz ágon áll meg. Most a kockázó ismeri minden rácscsúcs baricentrikusát (tess_grid_lambda, az élekre pattintással együtt), a payload-menet perspektívahelyesen interpolálja a mikroháromszögön (reverse-Z, végtelen távoli sík: a mélység near/w) és textureStore-ral írja. A resolve-nak nincs szabad storage buffer kötése (8 a WebGPU-garancia), ezért textúra. A resolve pixelenként 3 elmozdítás-kiértékelést végez 6 helyett. A vektor normálja az elmozdított felület érintőinek keresztszorzata (a kalap alján is helyes), a magasságé a korábbi gradiens-döntés. Az anyag az el nem mozdított pontban értékelődik ki (WorldPosition, UV), ahogy az elmozdítás is, így a mintázat a geometrián marad.",
+    "metrics": "Téglaterasz közeli (gráf-magasság, 2,9 M mikroháromszög), alap → új: raster sw + merge 1,90 → 2,00 ms, resolve 0,91 → 0,69 ms, képkocka 6,56 → 6,45 ms; súroló nézet: raster 1,73 → 1,83, resolve 0,67 → 0,53 ms. Völgy ösvénye (textúra-magasság, 1,82 M): raster 1,04 → 1,06, resolve 0,49 → 0,48, képkocka 5,01 → 5,04 ms. Memória: +4 bájt/pixel (csak elmozdított jelenetekben). Álló kamera: téglák 0,0011 % (alap 0,0011 %), völgy 0,0026 % (alap 0,0034 %).",
+    "showcase": "Gombák alulról: a kalap alja helyes normállal és színnel árnyalódik (--eye -5.9,0.3,10.4 --at -6.5,0.08,9.2). Összehasonlítás: téglaterasz közeli, képe a korábbival zajon belül egyezik.",
+    "modules": [
+      "crates/helios-render/src/shaders/tess.wgsl",
+      "crates/helios-render/src/shaders/tess_core.wgsl",
+      "crates/helios-render/src/shaders/tess_resolve.wgsl",
+      "crates/helios-render/src/shaders/gbuffer.wgsl",
+      "crates/helios-render/src/targets.rs",
+      "crates/helios-render/src/passes/material.rs",
+      "crates/helios-render/src/tessellation.rs"
+    ]
+  },
+  {
+    "id": "tessellation-payload-depth-match",
+    "title": "Javítás: a payload-menet mélységegyezése nem függhet a menet saját kódjától",
+    "area": "Virtuális geometria",
+    "kind": "fix",
+    "summary": "A tesszellált payload-menet csak akkor ír, ha újraszámolt mélysége bitre egyezik a mélység-menetével. Az új, csak a payload-menetben lévő baricentrikus-számítás közös részkifejezései miatt a fordító másként kerekítette a z-t, így a pixelek kb. fele egyik háromszöggel sem egyezett és elavult adatot tartott meg: szikrázó zaj álló kameránál.",
+    "details": "A baricentrikusok most a normalizált súlyokból számolódnak (nem azokból a szorzatokból, amelyekből a z összege áll), és a payload-menet egy ulp eltérést elfogad (a mélység-menet a legnagyobb bitmintát tárolta, köztük ezét a háromszögét). A hibát a statikus kamerás képkocka-dump mutatta ki: a korábbi payload-írásnál ugyanez azért nem látszott, mert az elavult payload ugyanazt az alapháromszöget nevezte meg.",
+    "metrics": "Téglaterasz, álló kamera, 16 képkocka, 24/255-nél többet változó pixelek képkockánként: 2,1–4,2 % (hibás) → 0,0010 % (az alap build 0,0011 %).",
+    "showcase": "Nem bemutatandó; a stabilitási mérés a dokumentációban.",
+    "modules": [
+      "crates/helios-render/src/shaders/tess.wgsl"
+    ]
+  },
+  {
+    "id": "displacement-presets-gallery",
+    "title": "Galéria: gombaágyás (vektoros) és hullámzó kendő (animált) + presetek",
+    "area": "Jelenetek és demó",
+    "kind": "feature",
+    "summary": "Két új 3 m-es ágyás a téglaterasz két oldalán: balra gombák nőnek ki a sík mohás talajból (vektoros elmozdítás, kalap a tönk fölött), jobbra egy keretre feszített kendő hullámzik (animált elmozdítás). Mindkettő preset az anyaggráf-szerkesztőben.",
+    "details": "Mushrooms preset: világ-xz eltolt cellarács; minden cella közepe körül a talaj egy korongja a gomba sziluettjére tekeredik (kalap kupolája, alja vissza a tönkig, a tönk le, a maradék kinyújtva a talajra), így a felület folytonos és a korong peremén nulla az eltolás; cellánkénti véletlen méret, 'Stem Height' paraméter, a színek ugyanazokat a szakaszokat követik (pöttyös kalap, lemezek, tönk, moha); az ágyás szélei felé (UV) az eltolás elhal. Magnitúdó: 11 cm (MUSHROOM_MAGNITUDE). Rippling cloth preset: két haladó szinuszhullám és egy órán futó Pannerrel görgetett zaj, a szélek UV alapján rögzítve; magnitúdó 16 cm, közép 0,5.",
+    "metrics": "Galéria: 38 → 48 példány, 4 → 6 anyaggráf. Nyitónézet GPU-képkocka 4,40 ms (1600×900; tesszelláció nélkül 3,77). Egységtesztek: mindkét preset lefordul, mindkét tesszellációs menetben és a saját resolve-jában érvényes WGSL (naga + Tint bitwise-ellenőrzés), JSON-on és jelenetfájlon oda-vissza megy.",
+    "showcase": "Galéria nyitónézete (mindhárom elmozdított ágyás látszik), majd a két közeli nézet; szerkesztőben: Material Graph → New from preset → Mushrooms / Rippling cloth.",
+    "modules": [
+      "crates/helios-material/src/presets.rs",
+      "crates/helios-demo/src/scenes/gallery.rs"
+    ]
+  },
+  {
+    "id": "editor-displacement-modes",
+    "title": "Szerkesztő: VectorDisplacement láb, elmozdítási mód és animáció jelzése",
+    "area": "Platform és eszközök",
+    "kind": "feature",
+    "summary": "A gráfszerkesztő Output csomópontján a két geometria-láb (Displacement, VectorDisplacement) elkülönítve, súgószöveggel jelenik meg; az állapotsor kiírja, mit tesz a gráf a geometriával. A Details panel Displacement szakasza Height/Vector módot és 'animated' jelzést mutat, vektornál elrejti a közép csúszkát.",
+    "details": "A heliosEditorState anyagonként displacement_mode ('height' | 'vector') és displacement_animated, gráfonként displacement és displacement_animated mezőt ad. Mindkét láb bekötése fordítási hiba az Output csomóponton, amit a szerkesztő a csomóponton és a hibalistában jelez. A jelenetfájlok formátuma nem változott (a kötések lábnév szerint tárolódnak); teszt menti és visszatölti a vektoros és az animált presetet.",
+    "metrics": "Fej nélküli Chromium (WebGPU): galéria, gomba- és kendőnézet, debug nézet 25, szerkesztő gráf- és Details-panel: konzol-, WGSL- és validációs hiba nélkül.",
+    "showcase": "editor.html?scene=gallery → Material Graph → Mushrooms: a narancssárga VectorDisplacement láb és az állapotsor ('vector displacement'); a 'gallery/rippling cloth' anyag Details panelje ('Driven by graph · Rippling cloth · animated').",
+    "modules": [
+      "web/editor/graph.js",
+      "web/editor/details.js",
+      "web/editor/editor.css",
+      "crates/helios-demo/src/editor/describe.rs",
+      "crates/helios-demo/src/editor/materials.rs"
+    ]
+  }
+]
