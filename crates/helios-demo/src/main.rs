@@ -506,13 +506,13 @@ mod native {
                 s.throughput() / 1048576.0
             );
         }
-        for line in app.hud().lines() {
-            log::info!("{line}");
-        }
         let (minima, frame, frames) = app.renderer.gpu_minima();
         if let Some(frame) = frame {
             let passes: Vec<String> = minima.iter().map(|(label, ms)| format!("{label} {ms:.3}")).collect();
             log::info!("GPU minima over {frames} frames: frame {frame:.2} ms · {}", passes.join(" · "));
+        }
+        for line in app.hud().lines() {
+            log::info!("{line}");
         }
 
         let pixels = read_back(&ctx, &target, width, height);
