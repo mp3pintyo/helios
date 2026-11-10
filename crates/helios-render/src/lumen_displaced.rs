@@ -66,6 +66,11 @@ const MAX_JOB_POINTS: usize = 1 << 21;
 /// the bakes in one frame, so a job of one variant bounds that frame's copying (the GPU work of a
 /// job is small; a variant waits a few frames longer).
 const ONE_VARIANT_PER_JOB: bool = cfg!(target_arch = "wasm32");
+/// In the browser: an offloaded task without an answer for this long runs on the render thread
+/// (`bake_worker.js` itself fails a task its worker does not answer within 10 s; this only guards
+/// against the pool not answering at all, so it allows for tasks queued behind others).
+#[cfg(target_arch = "wasm32")]
+const REMOTE_LIMIT: std::time::Duration = std::time::Duration::from_secs(60);
 /// Segments per base triangle edge at most.
 const MAX_SEGMENTS: u32 = 64;
 /// Displacement filter of the job's `tess` header: a dice segment is `max(distance, FAR) ·
@@ -418,9 +423,9 @@ type Baked = (Request, Option<DisplacedVariant>, f32, f32);
 enum Task<T> {
     #[cfg(not(target_arch = "wasm32"))]
     Thread(std::sync::mpsc::Receiver<T>),
-    /// Offloaded; the work is kept to run here should the worker fail.
+    /// Offloaded (when); the work is kept to run here should the worker fail or not answer.
     #[cfg(target_arch = "wasm32")]
-    Remote(lumen_offload::Offloaded, Work, Box<dyn FnOnce(Output) -> T>),
+    Remote(lumen_offload::Offloaded, web_time::Instant, Work, Box<dyn FnOnce(Output) -> T>),
     #[cfg(target_arch = "wasm32")]
     Deferred(Work, Box<dyn FnOnce(Output) -> T>),
 }
@@ -437,7 +442,7 @@ impl<T: Send + 'static> Task<T> {
         }
         #[cfg(target_arch = "wasm32")]
         match lumen_offload::submit(&work) {
-            Some(id) => Task::Remote(id, work, Box::new(finish)),
+            Some(id) => Task::Remote(id, web_time::Instant::now(), work, Box::new(finish)),
             None => Task::Deferred(work, Box::new(finish)),
         }
     }
@@ -467,14 +472,21 @@ fn finished<T>(tasks: &mut Vec<Task<T>>, run: &mut bool) -> Vec<T> {
             // A worker's result is copied into the page's memory: one per frame too, like a
             // deferred task's run (a bed's bake is about 9 MB).
             #[cfg(target_arch = "wasm32")]
-            Task::Remote(task, ..) if *run => {
+            Task::Remote(task, since, ..) if *run => {
                 let result = match task.poll() {
+                    // The pool's watchdog fails a task its worker does not answer in seconds; this
+                    // is the engine's own backstop, should the pool itself stop answering.
+                    lumen_offload::BakePoll::Pending if since.elapsed() > REMOTE_LIMIT => {
+                        log::warn!("lumen: a bake worker did not answer in {} s; baking on the page", REMOTE_LIMIT.as_secs());
+                        Some(None)
+                    }
                     lumen_offload::BakePoll::Pending => None,
                     lumen_offload::BakePoll::Done(bytes) => Some(Output::decode(&bytes)),
                     lumen_offload::BakePoll::Failed => Some(None),
                 };
                 if let Some(output) = result {
-                    let Task::Remote(_, work, finish) = tasks.remove(i) else { unreachable!() };
+                    // (Dropping the offloaded task cancels it.)
+                    let Task::Remote(_, _, work, finish) = tasks.remove(i) else { unreachable!() };
                     match output {
                         Some(output) => {
                             *run = false;
@@ -667,6 +679,15 @@ impl DisplacedSurfaces {
     /// Takes a finished read-back: bakes its variants off the render thread. Returns whether there
     /// was one.
     fn take_job(&mut self) -> bool {
+        // A read-back that failed to map (back to IDLE once submitted) would hold the job forever:
+        // its variants are requested again instead.
+        if let Some(job) = self.job.take_if(|j| j.submitted && j.status.load(Ordering::Acquire) == IDLE) {
+            log::warn!("lumen: a displaced-variant read-back failed; displacing again");
+            for p in &job.pending {
+                self.in_flight.remove(&p.refinement.request.slot);
+            }
+            return true;
+        }
         let Some(job) = self.job.as_ref().filter(|j| j.status.load(Ordering::Acquire) == READY) else { return false };
         // Per variant its positions (xyz) and the largest motion (w). Read without a cast: the
         // mapped bytes need not be aligned for Vec4 (in the browser).

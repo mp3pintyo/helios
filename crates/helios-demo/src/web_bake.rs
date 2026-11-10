@@ -8,6 +8,10 @@
 //! compiled again — and [`helios_bake_task`] runs the work there with the same code as on the
 //! render thread. The render thread only copies the inputs out and the results in.
 //!
+//! A variant must never stay missing because of a worker: the pool fails a task whose worker
+//! errors, does not report its instance ready within seconds or does not answer within 10 s (and
+//! terminates that worker), and the engine then runs the task on the render thread itself.
+//!
 //! `?bake-workers=0` turns the workers off (the bakes then run on the render thread, as they also
 //! do when a worker cannot start).
 
