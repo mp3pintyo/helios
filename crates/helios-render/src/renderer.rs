@@ -614,6 +614,16 @@ impl Renderer {
         self.profiler.supported().then(|| self.profiler.total_ms())
     }
 
+    /// Per-pass and whole-frame GPU minima over the frames read back since
+    /// [`Renderer::reset_gpu_minima`] (see [`GpuProfiler::minima`]).
+    pub fn gpu_minima(&self) -> (&[(String, f32)], Option<f32>, u32) {
+        self.profiler.minima()
+    }
+
+    pub fn reset_gpu_minima(&mut self) {
+        self.profiler.reset_minima();
+    }
+
     /// Moving instances in the latest frame: instances moved, distance-field bricks recomposed
     /// and still queued.
     pub fn dynamic_stats(&self) -> DynamicStats {

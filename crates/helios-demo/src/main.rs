@@ -451,6 +451,10 @@ mod native {
                     app.key_pressed(key);
                 }
             }
+            if i == options.frames / 3 {
+                // Per-pass minima over the last two thirds (loading and warm-up excluded).
+                app.renderer.reset_gpu_minima();
+            }
             app.update(&mut input, 1.0 / 60.0);
             app.render(&view, 1.0 / 60.0);
             cpu_ms.push(cpu.elapsed().as_secs_f64() * 1000.0);
@@ -504,6 +508,11 @@ mod native {
         }
         for line in app.hud().lines() {
             log::info!("{line}");
+        }
+        let (minima, frame, frames) = app.renderer.gpu_minima();
+        if let Some(frame) = frame {
+            let passes: Vec<String> = minima.iter().map(|(label, ms)| format!("{label} {ms:.3}")).collect();
+            log::info!("GPU minima over {frames} frames: frame {frame:.2} ms · {}", passes.join(" · "));
         }
 
         let pixels = read_back(&ctx, &target, width, height);
