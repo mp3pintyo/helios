@@ -18,7 +18,7 @@
 //! evaluation, and the resolve ran 1.4x slower (cathedral at 1440p: 1.01 ms instead of 0.73).
 //!
 //! Materials with a Substrate slab or a material graph get **extended pipelines** in resolve
-//! slots 8–15 (`substrate_gpu.rs` assigns one per distinct shading model and graph): the
+//! slots 8–23 (`substrate_gpu.rs` assigns one per distinct shading model and graph): the
 //! resolve composed with `resolve_extended.wgsl` and the graph's generated code, bound to a
 //! second group (slab table, graph parameters, slab texels). Classification bins their tiles
 //! apart, so the plain pipelines stay exactly as they are. Modules are cached by graph hash and
@@ -57,10 +57,12 @@ const KINDS: [u32; 6] = [0, 1, 2, 3, 4, 7];
 /// The sky's slot; slots below `PLAIN_SLOTS` are the shading models'.
 pub const SKY_SLOT: u32 = 7;
 pub const PLAIN_SLOTS: u32 = 8;
-/// Extended pipelines a frame can use (slots 8–15; classify.wgsl's tile buffer layout).
-pub const EXTENDED_SLOTS: u32 = 8;
+/// Extended pipelines a frame can use (slots 8–23; classify.wgsl's tile buffer layout).
+pub const EXTENDED_SLOTS: u32 = 16;
+/// Resolve slots in all: the tile buffer's counts.
+pub const RESOLVE_SLOTS: u32 = PLAIN_SLOTS + EXTENDED_SLOTS;
 /// Word offset of the per-slot indirect dispatch arguments in the tile buffer.
-const TILE_ARGS: u64 = 16;
+const TILE_ARGS: u64 = RESOLVE_SLOTS as u64;
 
 /// An extended pipeline: slot, shading model, graph hash (0: none), permutation, Substrate on.
 type ExtendedKey = (u32, u32, u64, usize, bool);
@@ -267,7 +269,7 @@ impl MaterialPass {
                 (5, targets.material_tiles.as_entire_binding()),
             ],
         );
-        rec.encoder.clear_buffer(&targets.material_tiles, 0, Some(64));
+        rec.encoder.clear_buffer(&targets.material_tiles, 0, Some(RESOLVE_SLOTS as u64 * 4));
         let mut pass = rec.compute_pass("material classify + resolve");
         pass.set_bind_group(0, &classify_group, &[]);
         pass.set_pipeline(&self.classify);
