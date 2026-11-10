@@ -70,6 +70,9 @@ pub(crate) struct State {
     presented: u32,
     /// Serial compiles: the next rAF compiles the next background pipeline instead of rendering.
     compile_next: bool,
+    /// Background pipelines created per serial compile: doubled while the compiles are short,
+    /// halved when one takes long (fewer round trips, the page still updating often enough).
+    batch: u32,
 }
 
 /// A wait for the browser's GPU process to work through the pipelines created so far.
@@ -466,6 +469,7 @@ async fn run() -> Result<(), String> {
         compiling_frames: 0,
         presented: 0,
         compile_next: false,
+        batch: 1,
     }));
     STATE.with(|s| *s.borrow_mut() = Some(state.clone()));
     // Keep the context (instance/adapter/queue) alive for the page lifetime.
@@ -622,15 +626,18 @@ fn frame(st: &mut State, now: f64) {
         if !wait.background && st.presented > 0 {
             log::info!("a frame waited for compiles: {}", browser::take_created_labels().join(", "));
         }
+        if wait.background {
+            st.batch = if seconds < 0.15 { (st.batch * 2).min(16) } else if seconds > 0.5 { (st.batch / 2).max(1) } else { st.batch };
+        }
         st.compiling = None;
         set_busy("");
     }
 
-    // Firefox: compile the next background pipeline in a frame of its own, one after a presented
-    // frame (compiling right after presenting held the page's next paint until the compile was
-    // done: the canvas's presentation waits in the same GPU process queue). The frames after
-    // wait for it instead of presenting behind it.
-    if std::mem::take(&mut st.compile_next) && pipelines::make_next() {
+    // Firefox: compile the next background pipelines in a frame of their own, one after a
+    // presented frame (compiling right after presenting held the page's next paint until the
+    // compile was done: the canvas's presentation waits in the same GPU process queue). The
+    // frames after wait for them instead of presenting behind them.
+    if std::mem::take(&mut st.compile_next) && (0..st.batch).map(|_| pipelines::make_next()).fold(false, |any, made| any | made) {
         browser::take_created_labels();
         st.compiling = Some(wait_for_gpu(&st.queue, true));
         return;
@@ -672,7 +679,7 @@ fn frame(st: &mut State, now: f64) {
     if pipelines_created() != pipelines && st.compiling_frames < 8 {
         // This frame queued compiles: presenting it would stall the page until they finish.
         st.compiling_frames += 1;
-        st.compiling = Some(wait_for_gpu(&st.queue, st.presented > 0));
+        st.compiling = Some(wait_for_gpu(&st.queue, false));
         return;
     }
     st.compiling_frames = 0;
