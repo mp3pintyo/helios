@@ -1,0 +1,65 @@
+[
+  {
+    "id": "foliage-assembly-culling",
+    "title": "Nanite Foliage: hierarchikus assembly-vágás, fánként egy vágási rekorddal",
+    "area": "Virtuális geometria",
+    "kind": "fix",
+    "summary": "Az erdő kb. 26 000 tűlevél-ága (assembly-rész) eddig minden nézetben (fő nézet, 12 napárnyék-szint, helyi fények) külön példányként vágódott, ugyanazzal a fa-határoló gömbbel, részenként egy 64 szálas lapcsoporttal. Mostantól minden assembly-példány kap egy vágási rekordot, amely a részeit képviseli: a nézetek fánként egyszer tesztelnek, a rekord lapjai pedig a részek lapjai, 64-esével egy munkacsoportban. A részek vágási költsége kb. 0,67 ms-ról kb. 0,1 ms-ra csökkent, a kép változatlan.",
+    "details": "Profilozás szakaszonként és nézetenként (ideiglenes, szakaszonként külön időbélyeges menetek): egy tűlevél-ág 17 klaszter 6 lapon (4 LOD-szint), így egy rész lapcsoportja a lapvágó munkacsoport 64 szálából 6-ot, minden lapja a klaszter-vágó munkacsoport 64 szálából kb. 3-at foglalt (korai és késői menetben is); a részek rekordjai a fa határoló gömbjét hordozzák (a szél miatt), így fánként 176-szor futott ugyanaz a gömbteszt minden nézetben. Megoldás: a példánypuffer [jelenet | vágási rekordok | részhelyek] elrendezésű; a kiterjesztés (assembly.wgsl) a kiterjesztett assembly rekordjába a részek közös adatait írja (határoló gömb, szél, növény-origó, jelzők + INSTANCE_PART_LIST), page_offset = első rész példánya, cluster_offset = lépésköz (a részek legnagyobb lapszáma, CPU-ról), page_count = részek × lépésköz, max_scale = a részek skálájának felső korlátja; az alapot rajzoló assembly rekordja rejtett. A példányvágás a rekordot teszteli nézetenként egyszer, és ⌈részek × lépésköz / 64⌉ lapcsoportot ad ki; a lapvágás a rekord egy sávját (rész = sáv / lépésköz, lap = sáv mod lépésköz) a rész saját lapjára oldja fel, és a rész transzformációjával teszteli. Egy fenyő 17 lap-munkacsoport 176 helyett. Megszűnt a kiosztott részhelyekre szóló indirekt példány-dispatch és a finish menet; a nézetek a rekordok legrosszabb esetére foglalnak lapcsoportot részhelyenként egy helyett. Mellékhatás: a régi dispatch utolsó munkacsoportja a kiosztottakon túli, korábbi képkockából maradt részhelyeket is vághatta (elavult részek); ez megszűnt. Kipróbált és elvetett: munkacsoport-szintű foglalás a példányvágásban (nem mérhető), nézetenkénti tömör részlisták (a lapvágás már a rész transzformációjával tesztel), korábbi váltás az alapra (változtatja a képet).",
+    "metrics": "Erdő, 2560×1440, RTX 3090 három másik ügynökkel megosztva. Szakaszonként (fő / fő késői / nap + helyi, ms): példányok 0,02 / – / 0,30 → 0,01 / – / 0,14, lapok 0,05 / – / 0,23 → 0,03 / – / 0,18, klaszterek 0,26 / 0,22 / 0,35 → 0,07 / 0,05 / 0,21; összesen 1,47 → 0,73 ms (kiterjesztéssel). A részek saját költsége (részekkel mínusz minden alap megtartva): kb. 0,59 → 0,10 ms. Menetenkénti minimumok (új headless napló, 3 futás): cull + cull (late) 100 %: 0,971 + 0,214 → 0,511 + 0,045 ms (−0,63), 67 %: 0,922 + 0,214 → 0,469 + 0,048 ms (−0,62); a menet-minimumok összege 14,64 → 14,11 ms, illetve 10,19 → 9,57 ms. Völgy, katedrális, galéria (nincs assembly): a vágás +0,003…+0,009 ms vagy a futási szórásban, a többi menet változatlan. Böngésző (fej nélküli Chromium): cull 17,0–18,6 → 7,5–10,7 ms, cull (late) 2,3 → 0,2 ms. Kép (150. képkocka, PSNR / >24/255 pixelek): erdő 41,2–41,7 dB, 0,16–0,22 % (zaj: 40,4–41,8 dB, 0,17–0,26 %), völgy, katedrális, galéria 56–67 dB, ≤ 0,0006 % (zajon belül).",
+    "showcase": "Erdő nyitónézete: --scene forest, debug nézet 23 (V vagy --view 23): a részek színesek, ugyanazok a fák bomlanak részekre, mint korábban. HUD: 'cull' és 'cull (late)' a GPU-sorban; 'assembly parts drawn: 25915'.",
+    "modules": [
+      "crates/helios-render/src/assembly.rs",
+      "crates/helios-render/src/shaders/assembly.wgsl",
+      "crates/helios-render/src/shaders/cull.wgsl",
+      "crates/helios-render/src/shaders/common.wgsl",
+      "crates/helios-render/src/gpu_scene.rs",
+      "crates/helios-render/src/passes/culling.rs",
+      "crates/helios-render/src/renderer.rs"
+    ]
+  },
+  {
+    "id": "small-page-cluster-candidates",
+    "title": "Klaszter-jelöltek a kis lapokra: a klaszter-vágás munkacsoportjai nem maradnak üresen",
+    "area": "Virtuális geometria",
+    "kind": "fix",
+    "summary": "A klaszter-vágás minden túlélő lapra egy 64 szálas munkacsoportot indított, laponként egy szál klaszterenként. A legfeljebb 16 klaszteres lapok (assembly-részek, fű, páfrány, kis kellékek) mostantól klasztereiket egyenként, jelöltként listázzák, és ezek 64-esével kerülnek egy munkacsoportba. A fő nézet korai és késői klaszter-vágása az erdőben kb. negyedére esett.",
+    "details": "A lapvágás (cull.wgsl, cull_pages) a kis lapok klasztereit (példány, klaszter) párokként írja a nézet munkapufferének harmadik tartományába, a lapelemek után (vec4-enként kettő, legfeljebb a lapelem-kapacitás kétszerese); a foglalás munkacsoportonként egy globális atomikus művelet. A klaszter-vágás dispatch-e (cull_args.wgsl) lapelemenként egy munkacsoport, majd 64 jelöltenként egy; mindkettő ugyanazt a klaszter-tesztet és kimeneti aggregálást futtatja, a késői menet ugyanazokat a jelölteket vágja újra a HZB ellen. Ha a jelöltek nem férnek el, a lap a kapacitás alatti foglalt helyeit érvényteleníti (INVALID_ID, kihagyva) és lapelemet kap, mint korábban: semmi nem vész el. Küszöb: 8, 16, 32 és 64 klaszter mérve, a 16 minden szakaszban a legjobb vagy azzal egyenlő.",
+    "metrics": "Erdő, 2560×1440, szakaszonként: fő nézet klaszter-vágása 0,26 → 0,07 ms, késői menet 0,22 → 0,05 ms, árnyéknézetek klaszter-vágása 0,35 → 0,21 ms (a hierarchikus rekordokkal együtt mérve). Minden alap megtartva (részek nélkül) is: klaszter-vágás összesen 0,47 → 0,29 ms (fű, páfrány, rönkök, voxel-lapok). Küszöbök: 8 / 16 / 32 / 64 klaszter mérve, 16 a legjobb vagy azzal egyenlő minden szakaszban. Assembly nélküli jelenetekben a lapvágás munkacsoportonként két további barrierje +0,003…+0,009 ms.",
+    "showcase": "Nem bemutatandó önmagában; a mérés a docs/round6/foliage-culling.md táblázataiban.",
+    "modules": [
+      "crates/helios-render/src/shaders/cull.wgsl",
+      "crates/helios-render/src/shaders/cull_args.wgsl",
+      "crates/helios-render/src/passes/culling.rs"
+    ]
+  },
+  {
+    "id": "shadow-levels-shared-cull-work",
+    "title": "Az árnyék-klipmap szintjei egy közös vágási munkapuffert használnak",
+    "area": "Árnyékok",
+    "kind": "fix",
+    "summary": "A nap 16 klipmap-szintjének vágási nézete eddig 16 külön munkapuffert tartott, pedig egymás után vágódnak, és mindegyik lapjai a következő vágása előtt rajzolási listává bővülnek. Mostantól egy közös puffert használnak; ez bőven fedezi a klaszter-jelöltek miatti növekedést: a vágási munkapufferek összesen 36,5 MiB-ról 16,7 MiB-ra csökkentek.",
+    "details": "CullView::share_work: a nézet a forrás nézet munkapufferét (és kapacitásait) használja. vsm.rs: a szintek létrehozáskor és a lapcsoport-foglalás növelésekor a 0. szint pufferén osztoznak. Biztonságos, mert egy szint munkalistái a klaszterei vágása után már nem kellenek (a vsm expand a látható-klaszter listát olvassa, nem a munkapuffert), és a menetek egy parancskódolóban sorban futnak.",
+    "metrics": "Vágási munkapufferek, erdő: szintek 16 × 1,75 MiB → egy 2,6 MiB, fő nézet 5,5 → 9,3 MiB, helyi fények 3,0 → 4,8 MiB; összesen 36,5 → 16,7 MiB. Idő és kép változatlan (a mérések a fő tétel alatt).",
+    "showcase": "Nem bemutatandó.",
+    "modules": [
+      "crates/helios-render/src/vsm.rs",
+      "crates/helios-render/src/passes/culling.rs"
+    ]
+  },
+  {
+    "id": "headless-gpu-minima",
+    "title": "Headless mérés: menetenkénti GPU-minimumok a képkockák utolsó kétharmadán",
+    "area": "Platform és eszközök",
+    "kind": "tool",
+    "summary": "A HUD menetidői az utolsó képkockákon simítottak, így megosztott GPU-n egyetlen, a végén lelassult képkocka elrontja az egész futást. A headless futás mostantól a HUD mellett kiírja minden menet minimumát (és a legkisebb teljes képkockát) a képkockák utolsó kétharmadán: 'GPU minima over N frames'.",
+    "details": "GpuProfiler: címkénként minimum a reset_minima óta visszaolvasott képkockákon (egy képkockán belül azonos címkéjű menetek összegével), plusz a legkisebb képkocka-összeg és a képkockák száma; Renderer::gpu_minima / reset_gpu_minima. A headless screenshot a képkockák harmadánál nulláz (betöltés, bemelegítés kimarad), a végén naplóz. A teljes képkocka minimuma terhelés alatt nem megbízható (egy lassult menet elrontja), A/B-hez a menetminimumok összege konzisztens becslés.",
+    "metrics": "Erdő, 2560×1440, 90 %-ban foglalt GPU-n: a cull menet minimuma három futásban 0,971 / 0,974 / 1,000 ms (egy korábbi, a simított HUD-ot olvasó mérési körben ugyanez a menet 2,35–3,77 ms között szórt).",
+    "showcase": "Nem bemutatandó; a mérési módszer a docs/round6/foliage-culling.md-ben.",
+    "modules": [
+      "crates/helios-render/src/profiler.rs",
+      "crates/helios-render/src/renderer.rs",
+      "crates/helios-demo/src/main.rs"
+    ]
+  }
+]
