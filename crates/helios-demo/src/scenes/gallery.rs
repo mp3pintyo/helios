@@ -1,10 +1,11 @@
 //! The material gallery: specimens of the extended material model on plinths in a paved
 //! courtyard at golden hour — Substrate slabs (clear-coat car paint, velvet, skin, candle wax,
 //! marble, backlit leaves, brushed metal, IOR and specular colour, an unlit sign) and material
-//! graphs (animated lava, wet stone with puddles, stylised water, and a brick pavement whose
-//! graph displaces its mortar joints through Nanite tessellation). `PageUp` switches the slabs
-//! off for an A/B against the plain metallic-roughness base; debug view 24 shows each pixel's
-//! slab features, view 25 the tessellation.
+//! graphs (animated lava, wet stone with puddles, stylised water, and three beds displaced by
+//! their graphs through Nanite tessellation: a brick pavement with carved mortar joints, a bed of
+//! mushrooms — a vector displacement with overhangs — and a rippling cloth, whose displacement
+//! is animated). `PageUp` switches the slabs off for an A/B against the plain metallic-roughness
+//! base; debug view 24 shows each pixel's slab features, view 25 the tessellation.
 //!
 //! A low sun from the front left shows the skin's and the wax's soft terminators and the
 //! coats' reflections; a lamp behind the bush shines through its leaves, a candle burns on the
@@ -27,6 +28,12 @@ const SPACING: f32 = 2.7;
 const PLINTH_HEIGHT: f32 = 1.0;
 /// Height of the brick terrace's undisplaced surface (its bricks' tops; mortar sinks below).
 const BRICK_LEVEL: f32 = 0.03;
+/// The beds beside the brick terrace are 3 m squares centred at x = ±BED_X, z = BED_Z.
+const BED_X: f32 = 6.3;
+const BED_Z: f32 = 9.0;
+/// Height of the mushroom bed's ground and of the rippling cloth's rest surface.
+const MOSS_LEVEL: f32 = 0.02;
+const CLOTH_LEVEL: f32 = 0.16;
 
 fn floor(_: f32, _: f32) -> f32 {
     0.0
@@ -96,6 +103,11 @@ fn build_scene(detail: Detail) -> Scene {
     let mut terrace = primitives::terrain(8.0, 32, 0.0, 4);
     terrace.deform(|p| Vec3::new(p.x, BRICK_LEVEL, p.z * 0.375 + 9.0));
     let terrace = add_baked_with(&mut scene, "gallery/brick terrace", &terrace, BuildConfig { sdf: SdfMode::None, ..Default::default() });
+    // The beds: flat 3 m squares (their graphs do the modelling). The cloth's UVs span it (its
+    // graph pins the edges by them).
+    let mut bed = primitives::terrain(3.0, 12, 0.0, 5);
+    bed.deform(|p| Vec3::new(p.x, 0.0, p.z));
+    let bed = add_baked_with(&mut scene, "gallery/bed", &bed, BuildConfig { sdf: SdfMode::None, ..Default::default() });
     let kerb = add_baked_with(&mut scene, "gallery/kerb", &cuboid(Vec3::new(-0.5, 0.0, -0.5), Vec3::new(0.5, 1.0, 0.5)), volume(8));
     let mut pool = primitives::terrain(2.2, 24, 0.0, 3);
     pool.deform(|p| Vec3::new(p.x, 0.0, p.z));
@@ -223,6 +235,33 @@ fn build_scene(detail: Detail) -> Scene {
         (Vec3::new(4.05, 0.0, 9.0), Vec3::new(0.1, kerb_height, 3.0)),
     ] {
         g.scene.add_instance(kerb, kerb_material, Mat4::from_scale_rotation_translation(size, Quat::IDENTITY, center));
+    }
+
+    // Graph — mushrooms: a vector displacement (overhanging caps on stems) grows them out of a
+    // flat bed left of the bricks.
+    let mushroom_graph = g.scene.add_material_graph(presets::mushrooms());
+    let mushrooms = g.material(
+        "mushrooms",
+        Material { graph: Some(mushroom_graph), displacement: Some(Displacement::height(presets::MUSHROOM_MAGNITUDE, 0.0)), ..Material::standard(Vec3::new(0.1, 0.15, 0.05), 0.9, 0.0) },
+    );
+    g.scene.add_instance(bed, mushrooms, Mat4::from_translation(Vec3::new(-BED_X, MOSS_LEVEL, BED_Z)));
+    // Graph — a rippling cloth: an animated displacement (travelling waves) on a sheet stretched
+    // over a frame right of the bricks; a dynamic shadow caster.
+    let cloth_graph = g.scene.add_material_graph(presets::rippling_cloth());
+    let cloth = g.material(
+        "rippling cloth",
+        Material { graph: Some(cloth_graph), displacement: Some(Displacement::height(0.16, 0.5)), ..Material::standard(Vec3::new(0.08, 0.2, 0.55), 0.42, 0.0) },
+    );
+    g.scene.add_instance(bed, cloth, Mat4::from_translation(Vec3::new(BED_X, CLOTH_LEVEL, BED_Z)));
+    for (x, height) in [(-BED_X, MOSS_LEVEL + 0.03), (BED_X, CLOTH_LEVEL)] {
+        for (center, size) in [
+            (Vec3::new(x, 0.0, BED_Z - 1.55), Vec3::new(3.2, height, 0.1)),
+            (Vec3::new(x, 0.0, BED_Z + 1.55), Vec3::new(3.2, height, 0.1)),
+            (Vec3::new(x - 1.55, 0.0, BED_Z), Vec3::new(0.1, height, 3.0)),
+            (Vec3::new(x + 1.55, 0.0, BED_Z), Vec3::new(0.1, height, 3.0)),
+        ] {
+            g.scene.add_instance(kerb, kerb_material, Mat4::from_scale_rotation_translation(size, Quat::IDENTITY, center));
+        }
     }
 
     // An unlit sign behind the row (KHR_materials_unlit): the stained-glass pattern, unshaded.

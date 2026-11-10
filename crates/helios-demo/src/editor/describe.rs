@@ -39,6 +39,7 @@ pub fn state(editor: &Editor, world: &World) -> Value {
             let m = scene.material(h);
             let name = scene.material_name(h);
             let (graph, parameters) = materials::graph_value(scene, h);
+            let (displacement_mode, displacement_animated) = m.graph.map_or((Value::Null, false), |g| materials::graph_displacement(scene, g));
             json!({
                 "name": name,
                 "kind": kind_name(m.kind),
@@ -54,6 +55,8 @@ pub fn state(editor: &Editor, world: &World) -> Value {
                 "slab": materials::slab_value(m),
                 "displacement": materials::displacement_value(m),
                 "displacement_graph": m.graph.is_some_and(|g| scene.material_graph_displaces(g)),
+                "displacement_mode": displacement_mode,
+                "displacement_animated": displacement_animated,
             })
         })
         .collect();

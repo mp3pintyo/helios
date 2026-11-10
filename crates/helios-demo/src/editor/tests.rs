@@ -115,6 +115,7 @@ fn graphs_drive_displacement_and_are_saved() {
     let state = describe::state(&editor, &f.world());
     let entry = state["materials"].as_array().unwrap().iter().find(|m| m["name"] == "stone").unwrap().clone();
     assert_eq!(entry["displacement_graph"], true, "the Details panel shows the height as the graph's");
+    assert_eq!((&entry["displacement_mode"], &entry["displacement_animated"]), (&json!("height"), &json!(false)));
     // Unlinking the Displacement pin hands the height back to the texture channel.
     let mut unlinked = bricks.clone();
     unlinked.links.retain(|l| l.to.pin != "Displacement");
@@ -126,6 +127,31 @@ fn graphs_drive_displacement_and_are_saved() {
     let loaded = SceneDoc::parse(&saved.to_json()).unwrap();
     assert!(loaded.graphs["Bricks"].links.iter().any(|l| l.to.pin == "Displacement"));
     assert_eq!(loaded.materials["stone"].displacement.as_ref().and_then(|d| d.magnitude), Some(0.03));
+}
+
+#[test]
+fn vector_and_animated_displacement_graphs_round_trip() {
+    use helios_render::material_graph::{presets, MaterialGraph};
+    let mut f = Fixture::new();
+    let mut editor = f.editor();
+    let stone = f.scene.find_material("stone").unwrap();
+    for (preset, mode, animated, pin) in [(presets::mushrooms(), "vector", false, "VectorDisplacement"), (presets::rippling_cloth(), "height", true, "Displacement")] {
+        let graph = MaterialGraph { name: "Displacing".into(), ..preset };
+        op(&mut editor, &mut f, json!({ "op": "graph", "name": "Displacing", "graph": graph }));
+        op(&mut editor, &mut f, json!({ "op": "material", "name": "stone", "params": { "graph": "Displacing", "displacement": { "magnitude": 0.1, "center": 0.5 } } }));
+        assert!(f.scene.material_graph_displaces(f.scene.material(stone).graph.expect("assigned")));
+        // The Details panel and the graph editor's status line name the mode.
+        let state = describe::state(&editor, &f.world());
+        let entry = state["materials"].as_array().unwrap().iter().find(|m| m["name"] == "stone").unwrap();
+        assert_eq!((&entry["displacement_mode"], &entry["displacement_animated"]), (&json!(mode), &json!(animated)));
+        let listed = state["graphs"].as_array().unwrap().iter().find(|g| g["name"] == "Displacing").unwrap();
+        assert_eq!((&listed["displacement"], &listed["displacement_animated"]), (&json!(mode), &json!(animated)));
+        // Scene files keep the pin's link and reload to the same graph.
+        let saved = editor.save(CameraDef { position: [0.0; 3], yaw_deg: 0.0, pitch_deg: 0.0, fov_deg: 60.0 });
+        let loaded = SceneDoc::parse(&saved.to_json()).unwrap();
+        assert_eq!(loaded.graphs["Displacing"], graph);
+        assert!(loaded.graphs["Displacing"].links.iter().any(|l| l.to.pin == pin));
+    }
 }
 
 #[test]

@@ -12,20 +12,23 @@
 //! `GraphOutput`, the parameter block and the helpers the generated code uses). Outputs left
 //! unconnected keep `defaults` — the material's own values.
 //!
-//! **Displacement.** The output's `Displacement` pin compiles to a function of its own, from the
-//! nodes it depends on (sharing the node code generation and the parameter slots),
+//! **Displacement.** The output's `Displacement` pin (a height along the normal) or its
+//! `VectorDisplacement` pin (a world-space offset: overhangs) compiles to a function of its own,
+//! from the nodes it depends on (sharing the node code generation and the parameter slots),
 //!
 //! ```wgsl
-//! fn graph_displacement(m: Material, input: DisplacementSurface, params: u32) -> f32
+//! fn graph_displacement(m: Material, input: DisplacementSurface, params: u32) -> f32  // or vec3<f32>
 //! ```
 //!
 //! which Nanite tessellation calls per micro-triangle vertex — in the main view and the shadow
-//! pages — and the resolve where it finds the displaced point (`displacement_graph.wgsl`). The
-//! height must be a pure, static function of the undisplaced point, the same in every pass and
-//! on both sides of a shared edge, so in this context the compiler rejects what would break that:
-//! time (a displaced surface is static — cached shadow pages and the tessellator's geomorphing
-//! rely on it), the camera vector and fresnel (every view must displace a point alike), and the
+//! pages — and the resolve where it shades the displaced point (`displacement_graph.wgsl`). The
+//! value must be a pure function of the undisplaced point and the time, the same in every pass
+//! and on both sides of a shared edge, so in this context the compiler rejects what would break
+//! that: the camera vector and fresnel (every view must displace a point alike) and the
 //! attributes the tessellator does not read (vertex colours, UV set 1, the tangent frame).
+//! Time is allowed (`input.time`: the renderer evaluates the previous frame's too, for motion
+//! vectors) and reported as [`CompiledGraph::displacement_animated`]: the renderer then treats
+//! the graph's displaced instances as moving shadow casters, which static graphs never pay for.
 //! Texture and noise filtering use the size of a dice segment instead of a pixel.
 //!
 //! **Derivatives.** The resolve runs in a compute shader over a visibility buffer: there are no
@@ -46,7 +49,7 @@ use std::fmt::Write as _;
 use serde::Serialize;
 
 use crate::graph::{MaterialGraph, Node, Op};
-use crate::nodes::{spec, InputDefault, DISPLACEMENT_PIN, OUTPUT_PINS};
+use crate::nodes::{spec, InputDefault, DISPLACEMENT_PIN, OUTPUT_PINS, VECTOR_DISPLACEMENT_PIN};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -67,31 +70,58 @@ pub struct Parameter {
     pub range: [f32; 2],
 }
 
+/// What a graph's displacement function returns.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DisplacementKind {
+    /// A height (`f32`, 0..1) along the normal ([`DISPLACEMENT_PIN`]).
+    Height,
+    /// A world-space offset (`vec3<f32>`) in units of the magnitude ([`VECTOR_DISPLACEMENT_PIN`]).
+    Vector,
+}
+
+impl DisplacementKind {
+    /// The WGSL type of the displacement function's result.
+    pub fn wgsl_type(self) -> &'static str {
+        match self {
+            DisplacementKind::Height => "f32",
+            DisplacementKind::Vector => "vec3<f32>",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct CompiledGraph {
-    /// `graph_eval`, and `graph_displacement` if the Displacement output is connected.
+    /// `graph_eval`, and `graph_displacement` (with the constants `GRAPH_DISPLACEMENT_VECTOR` and
+    /// `GRAPH_DISPLACEMENT_ANIMATED`) if a displacement output is connected.
     pub wgsl: String,
     pub parameters: Vec<Parameter>,
     /// Bits of the connected [`OUTPUT_PINS`].
     pub outputs: u32,
     /// FNV-1a of `wgsl`: identical graphs share a compiled pipeline.
     pub hash: u64,
-    /// The body of the displacement function, if the Displacement output is connected (see
+    /// The body of the displacement function, if a displacement output is connected (see
     /// [`CompiledGraph::displacement_function`]).
     pub displacement: Option<String>,
+    /// What the displacement function returns ([`DisplacementKind::Height`] without one).
+    pub displacement_kind: DisplacementKind,
+    /// The displacement reads the time: the displaced surface moves every frame.
+    pub displacement_animated: bool,
 }
 
 impl CompiledGraph {
     /// The displacement function under `name`: `fn name(m: Material, input: DisplacementSurface,
-    /// params: u32) -> f32`, returning the raw height (the renderer clamps it to 0..1).
+    /// params: u32) -> f32` returning the raw height, or `-> vec3<f32>` the raw vector (the
+    /// renderer clamps the height to 0..1 and the vector's length to 1).
     pub fn displacement_function(&self, name: &str) -> Option<String> {
         let body = self.displacement.as_ref()?;
-        Some(format!("fn {name}(m: Material, input: DisplacementSurface, params: u32) -> f32 {{\n{body}}}\n"))
+        let result = self.displacement_kind.wgsl_type();
+        Some(format!("fn {name}(m: Material, input: DisplacementSurface, params: u32) -> {result} {{\n{body}}}\n"))
     }
 
-    /// FNV-1a of the displacement code: graphs that displace alike share it.
+    /// FNV-1a of the displacement code and its kind: graphs that displace alike share it.
     pub fn displacement_hash(&self) -> Option<u64> {
-        self.displacement.as_ref().map(|body| fnv1a(body.as_bytes()))
+        self.displacement.as_ref().map(|body| fnv1a(body.as_bytes()) ^ self.displacement_kind as u64)
     }
 }
 
@@ -119,9 +149,17 @@ pub fn compile(graph: &MaterialGraph) -> Result<CompiledGraph, Vec<GraphError>> 
         return Err(c.errors);
     }
     let output = c.output;
-    let surface = c.order(output, Some(DISPLACEMENT_PIN));
-    let height = c.sources.get(&(output, DISPLACEMENT_PIN.to_string())).map(|s| s.0);
-    let displacement = height.map(|root| c.order(root, None));
+    let surface = c.order(output, &[DISPLACEMENT_PIN, VECTOR_DISPLACEMENT_PIN]);
+    let source = |c: &Compiler, pin: &str| c.sources.get(&(output, pin.to_string())).map(|s| s.0);
+    let (pin, kind, root) = match (source(&c, DISPLACEMENT_PIN), source(&c, VECTOR_DISPLACEMENT_PIN)) {
+        (Some(_), Some(_)) => {
+            c.error(Some(output), format!("Output: connect {DISPLACEMENT_PIN} (a height along the normal) or {VECTOR_DISPLACEMENT_PIN} (an offset vector), not both"));
+            return Err(c.errors);
+        }
+        (None, Some(root)) => (VECTOR_DISPLACEMENT_PIN, DisplacementKind::Vector, Some(root)),
+        (root, None) => (DISPLACEMENT_PIN, DisplacementKind::Height, root),
+    };
+    let displacement = root.map(|root| c.order(root, &[]));
     if !c.errors.is_empty() {
         return Err(c.errors);
     }
@@ -132,12 +170,15 @@ pub fn compile(graph: &MaterialGraph) -> Result<CompiledGraph, Vec<GraphError>> 
     let eval = c.function(Context::Surface, &surface);
     let displacement = displacement.map(|order| {
         let mut body = c.function(Context::Displacement, &order);
-        let height = c.input(output, DISPLACEMENT_PIN);
-        if height.width != 1 {
-            c.error(Some(output), format!("Output: {DISPLACEMENT_PIN} takes a f32, not a {}", ty(height.width)));
+        let value = c.input(output, pin);
+        let width = if kind == DisplacementKind::Vector { 3 } else { 1 };
+        match widen(&value.expr, value.width, width) {
+            Some(expr) => {
+                let _ = writeln!(body, "    return {expr};");
+            }
+            None => c.error(Some(output), format!("Output: {pin} takes a {}, not a {}", ty(width), ty(value.width))),
         }
-        let _ = writeln!(body, "    return {};", height.expr);
-        c.outputs |= crate::nodes::output_bit(DISPLACEMENT_PIN);
+        c.outputs |= crate::nodes::output_bit(pin);
         body
     });
     if !c.errors.is_empty() {
@@ -151,8 +192,11 @@ pub fn compile(graph: &MaterialGraph) -> Result<CompiledGraph, Vec<GraphError>> 
     wgsl.push_str("    var o = defaults;\n");
     wgsl.push_str(&eval);
     wgsl.push_str("    return o;\n}\n");
-    let mut compiled = CompiledGraph { wgsl, parameters: c.params, outputs: c.outputs, hash: 0, displacement };
+    let mut compiled =
+        CompiledGraph { wgsl, parameters: c.params, outputs: c.outputs, hash: 0, displacement, displacement_kind: kind, displacement_animated: c.animated };
     if let Some(function) = compiled.displacement_function("graph_displacement") {
+        let _ = writeln!(compiled.wgsl, "const GRAPH_DISPLACEMENT_VECTOR: bool = {};", kind == DisplacementKind::Vector);
+        let _ = writeln!(compiled.wgsl, "const GRAPH_DISPLACEMENT_ANIMATED: bool = {};", compiled.displacement_animated);
         compiled.wgsl.push_str(&function);
     }
     compiled.hash = fnv1a(compiled.wgsl.as_bytes());
@@ -164,7 +208,7 @@ pub fn compile(graph: &MaterialGraph) -> Result<CompiledGraph, Vec<GraphError>> 
 enum Context {
     /// `graph_eval` in the G-buffer resolve: screen-space derivatives, every input.
     Surface,
-    /// `graph_displacement` in the tessellator: a static function of the undisplaced point.
+    /// `graph_displacement` in the tessellator: a function of the undisplaced point and the time.
     Displacement,
 }
 
@@ -198,8 +242,6 @@ impl Context {
     }
 }
 
-const STATIC_DISPLACEMENT: &str =
-    "the renderer's clock cannot drive Displacement: displaced surfaces are static (cached shadow pages and the tessellator's geomorphing rely on it)";
 const VIEW_DISPLACEMENT: &str = "depends on the camera, which cannot drive Displacement: every view and the shadow pages must displace a point alike";
 
 fn fnv1a(bytes: &[u8]) -> u64 {
@@ -284,6 +326,8 @@ struct Compiler<'g> {
     derivative: HashSet<u32>,
     outputs: u32,
     context: Context,
+    /// The displacement function reads the time.
+    animated: bool,
 }
 
 impl<'g> Compiler<'g> {
@@ -300,6 +344,7 @@ impl<'g> Compiler<'g> {
             derivative: HashSet::new(),
             outputs: 0,
             context: Context::Surface,
+            animated: false,
         }
     }
 
@@ -344,8 +389,8 @@ impl<'g> Compiler<'g> {
     }
 
     /// Nodes `root` depends on (`root` last), each after its inputs, not following the root's
-    /// input `skip`; reports cycles.
-    fn order(&mut self, root: u32, skip: Option<&str>) -> Vec<u32> {
+    /// inputs `skip`; reports cycles.
+    fn order(&mut self, root: u32, skip: &[&str]) -> Vec<u32> {
         #[derive(Clone, Copy, PartialEq)]
         enum Mark {
             Visiting,
@@ -360,7 +405,7 @@ impl<'g> Compiler<'g> {
             let inputs = spec(&self.nodes[&id].op).inputs;
             if let Some(input) = inputs.get(*next) {
                 *next += 1;
-                if id == root && skip == Some(input.name) {
+                if id == root && skip.contains(&input.name) {
                     continue;
                 }
                 let Some((source, _)) = self.sources.get(&(id, input.name.to_string())).cloned() else { continue };
@@ -456,6 +501,17 @@ impl<'g> Compiler<'g> {
         self.context == Context::Displacement
     }
 
+    /// The renderer's clock in seconds. The displacement reads it from its input, so the
+    /// renderer can evaluate the surface at the previous frame's time too (motion vectors).
+    fn time(&mut self) -> Value {
+        if self.displacement() {
+            self.animated = true;
+            Value::plain("input.time", 1)
+        } else {
+            Value::plain("frame.time", 1)
+        }
+    }
+
     fn line(&mut self, text: String) {
         self.code.push_str("    ");
         self.code.push_str(&text);
@@ -512,15 +568,7 @@ impl<'g> Compiler<'g> {
             InputDefault::TexCoord => Value::with_deriv("input.uv", 2, "input.duv_dx", "input.duv_dy"),
             InputDefault::WorldPosition => Value::with_deriv("input.world_position", 3, "input.dpdx", "input.dpdy"),
             InputDefault::VertexNormal => Value::plain("input.normal", 3),
-            InputDefault::Time if self.displacement() => {
-                let message = format!(
-                    "{}: its {pin} input defaults to the renderer's clock, which cannot drive Displacement (displaced surfaces are static): connect a constant",
-                    node.op.type_name()
-                );
-                self.error(Some(id), message);
-                Value::plain("0.0f", 1)
-            }
-            InputDefault::Time => Value::plain("frame.time", 1),
+            InputDefault::Time => self.time(),
             InputDefault::Material => Value::plain("0.0f", 1),
         }
     }
@@ -598,8 +646,7 @@ impl<'g> Compiler<'g> {
                 Err("vertex colours are not available to Displacement (the tessellator reads positions, normals and UV set 0)".into())
             }
             Op::VertexColor => out(Value::plain("vertex_color", 4)),
-            Op::Time if self.displacement() => Err(STATIC_DISPLACEMENT.into()),
-            Op::Time => out(Value::plain("frame.time", 1)),
+            Op::Time => out(self.time()),
             Op::CameraVector | Op::Fresnel { .. } if self.displacement() => Err(VIEW_DISPLACEMENT.into()),
             Op::CameraVector => out(self.bind(id, 0, 3, "normalize(frame.camera_position.xyz - input.world_position)".into(), None)),
             Op::Add | Op::Subtract | Op::Multiply | Op::Divide | Op::Min | Op::Max => {
@@ -883,7 +930,7 @@ impl<'g> Compiler<'g> {
             }
             Op::Output => {
                 for (pin, field, width) in OUTPUT_PINS {
-                    if pin == DISPLACEMENT_PIN || !self.sources.contains_key(&(id, pin.to_string())) {
+                    if pin == DISPLACEMENT_PIN || pin == VECTOR_DISPLACEMENT_PIN || !self.sources.contains_key(&(id, pin.to_string())) {
                         continue;
                     }
                     let v = self.input(id, pin);

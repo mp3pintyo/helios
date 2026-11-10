@@ -168,19 +168,31 @@ pub fn graph_value(scene: &Scene, handle: MaterialHandle) -> (Value, Value) {
     (json!(name), json!(parameters))
 }
 
-/// Every graph of the scene: its definition, compile errors and parameters.
+/// What a graph's displacement output is, for the editor: `"height"` (the Displacement pin),
+/// `"vector"` (VectorDisplacement) or null, and whether it is animated (reads the time).
+pub fn graph_displacement(scene: &Scene, graph: helios_render::MaterialGraphHandle) -> (Value, bool) {
+    match scene.compiled_material_graph(graph).filter(|c| c.displacement.is_some()) {
+        Some(c) => (json!(c.displacement_kind), c.displacement_animated),
+        None => (Value::Null, false),
+    }
+}
+
+/// Every graph of the scene: its definition, compile errors, parameters and displacement.
 pub fn graphs_value(scene: &Scene) -> Value {
     let graphs: Vec<Value> = (0..scene.material_graph_count() as u32)
         .filter_map(|i| scene.material_graph_handle(i))
         .map(|h| {
             let graph: &MaterialGraph = scene.material_graph(h);
             let compiled = scene.compiled_material_graph(h);
+            let (displacement, animated) = graph_displacement(scene, h);
             json!({
                 "name": graph.name,
                 "graph": graph,
                 "errors": scene.material_graph_errors(h),
                 "parameters": compiled.map(|c| json!(c.parameters)).unwrap_or(json!([])),
                 "hash": compiled.map(|c| format!("{:016x}", c.hash)),
+                "displacement": displacement,
+                "displacement_animated": animated,
             })
         })
         .collect();

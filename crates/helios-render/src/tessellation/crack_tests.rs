@@ -1,9 +1,11 @@
 //! A CPU mirror of the tessellator's patch splitting and dicing (`tess_core.wgsl`,
 //! `tess_queue.wgsl`) on the undisplaced surface, to check the properties the shaders rely on:
 //! the two triangles sharing an edge place exactly the same vertices on it, displaced and morphed
-//! (no cracks or T-junctions, whatever their other edges, split depths and grid levels), and the
-//! displaced edge moves continuously as the camera does (geomorphing: no pops when a factor
-//! crosses a power of two or an edge starts splitting).
+//! (no cracks or T-junctions, whatever their other edges, split depths and grid levels) — by a
+//! height along the normal or by a vector that folds the surface over itself —, the displaced
+//! edge moves continuously as the camera does (geomorphing: no pops when a factor crosses a power
+//! of two or an edge starts splitting), and the barycentrics the main view's raster stores for the
+//! resolve name the grid vertices' own points of the base triangle.
 
 use glam::Vec3;
 
@@ -157,28 +159,46 @@ fn children(c: [[u32; 3]; 3], mask: u32) -> Vec<[[u32; 3]; 3]> {
     }
 }
 
-/// A synthetic height: a pure function of the undisplaced point, as a texture's or a graph's is.
-type Height = fn(Vec3) -> f32;
+/// A synthetic displacement: a pure function of the undisplaced point, as a texture's height or
+/// a graph's height or vector is.
+type Offset = fn(Vec3) -> Vec3;
 
 /// Smooth waves (a texture-like height).
-fn waves(q: Vec3) -> f32 {
-    0.15 * (5.0 * q.x).sin() * (4.0 * q.z).cos()
+fn waves(q: Vec3) -> Vec3 {
+    Vec3::Y * (0.15 * (5.0 * q.x).sin() * (4.0 * q.z).cos())
+}
+
+/// A vector displacement with overhangs, as the mushroom preset's: around the centre of every
+/// cell of world xz a disc of the surface is wrapped over a cap on a stem — points move sideways
+/// (towards and away from the centre, past their neighbours: the surface folds over itself) and
+/// up; cells and the pieces of the silhouette make it non-smooth.
+fn mushrooms(q: Vec3) -> Vec3 {
+    let cell = 0.45;
+    let d = glam::Vec2::new((q.x / cell).fract().abs() - 0.5, (q.z / cell).fract().abs() - 0.5) * cell;
+    let r = d.length();
+    let s = r / 0.2;
+    let ramp = |lo: f32, hi: f32| ((s - lo) / (hi - lo)).clamp(0.0, 1.0);
+    let (dome, underside, stem, ground) = (ramp(0.0, 0.5), ramp(0.5, 0.7), ramp(0.7, 0.9), ramp(0.9, 1.0));
+    let angle = dome * std::f32::consts::FRAC_PI_2;
+    let rho = 0.17 * (angle.sin() - underside) + 0.04 * underside + ground * (r - 0.04);
+    let sideways = d * (rho / r.max(1e-5) - 1.0);
+    Vec3::new(sideways.x, 0.07 * angle.cos() + 0.14 * (1.0 - stem), sideways.y)
 }
 
 /// A material graph's kind of height: the brick pavement preset's running bond on world xz —
 /// floors, fractions and a steep bevelled step into the mortar, whose slope is discontinuous.
-fn bricks(q: Vec3) -> f32 {
+fn bricks(q: Vec3) -> Vec3 {
     let (x, z) = (q.x / 0.44, q.z / 0.22);
     let row = z.floor();
     let x = x + (row * 0.5).fract();
     let edge = (x.fract().min(1.0 - x.fract()) * 0.44).min(z.fract().min(1.0 - z.fract()) * 0.22);
     let t = ((edge - 0.02) / 0.03).clamp(0.0, 1.0);
     let brick = t * t * (3.0 - 2.0 * t);
-    0.12 * (brick * (1.0 - 0.3 * ((x.floor() * 0.613 + row * 0.37).sin() * 0.5 + 0.5)) - 0.9)
+    Vec3::Y * (0.12 * (brick * (1.0 - 0.3 * ((x.floor() * 0.613 + row * 0.37).sin() * 0.5 + 0.5)) - 0.9))
 }
 
-fn displaced(point: &Point, height: Height) -> Vec3 {
-    point.position + Vec3::Y * height(point.position)
+fn displaced(point: &Point, offset: Offset) -> Vec3 {
+    point.position + offset(point.position)
 }
 
 /// The grid point (i, j) of a diced patch, snapped to its edge's segments (tess_grid_point).
@@ -222,6 +242,27 @@ fn edge_grid_point(base: &[Vec3; 3], p: &Patch, e: usize, index: u32, edge_level
     patch_edge_point(base, lo, hi, index as f32 / (1 << edge_level) as f32)
 }
 
+/// The barycentrics on the base triangle of grid vertex (i, j) (tess_grid_lambda).
+fn grid_lambda(p: &Patch, i: u32, j: u32) -> [f32; 3] {
+    let levels = p.factors.map(level);
+    let finest = level(p.factors.iter().copied().fold(0.0, f32::max)).0;
+    let f = 1 << finest;
+    let c = p.corners.map(|c| c.map(|x| x as f32));
+    match grid_edge(i, j, f) {
+        Some((e, k)) if i < f && j < f && i + j > 0 => {
+            let canonical = if p.flipped[e] { f - k } else { k };
+            let (first, second) = (c[(e + 1) % 3], c[(e + 2) % 3]);
+            let (lo, hi) = if p.flipped[e] { (second, first) } else { (first, second) };
+            let t = (canonical >> (finest - levels[e].0)) as f32 / (1 << levels[e].0) as f32;
+            [0, 1, 2].map(|n| mix(lo[n], hi[n], t) / ONE as f32)
+        }
+        _ => {
+            let (u, v) = (i as f32 / f as f32, j as f32 / f as f32);
+            [0, 1, 2].map(|n| (c[0][n] + (c[1][n] - c[0][n]) * u + (c[2][n] - c[0][n]) * v) / ONE as f32)
+        }
+    }
+}
+
 /// The grid vertex at index k from the first corner of patch edge e (tess_edge_grid_vertex).
 fn edge_grid_vertex(e: usize, k: u32, f: u32) -> (u32, u32) {
     match e {
@@ -261,11 +302,10 @@ fn grid_morph(p: &Patch, i: u32, j: u32) -> Option<(f32, (u32, u32), (u32, u32))
 /// A micro-triangle vertex: its undisplaced point and displaced position.
 type MicroVertex = (Point, Vec3);
 
-/// Every micro-triangle of a base triangle.
-fn tessellate(view: &View, base: &[Vec3; 3], height: Height) -> Vec<[MicroVertex; 3]> {
-    let whole = [[ONE, 0, 0], [0, ONE, 0], [0, 0, ONE]];
-    let mut queue = vec![whole];
-    let mut triangles = Vec::new();
+/// The patches a base triangle is diced as, after the split passes.
+fn diced_patches(view: &View, base: &[Vec3; 3]) -> Vec<Patch> {
+    let mut queue = vec![[[ONE, 0, 0], [0, ONE, 0], [0, 0, ONE]]];
+    let mut diced = Vec::new();
     for pass in 0..=PASSES {
         let mut next = Vec::new();
         for corners in queue {
@@ -273,31 +313,40 @@ fn tessellate(view: &View, base: &[Vec3; 3], height: Height) -> Vec<[MicroVertex
             let mask = if pass == PASSES { 0 } else { split_mask(&p) };
             if mask != 0 {
                 next.extend(children(p.corners, mask));
-                continue;
-            }
-            let f = 1 << level(p.factors.iter().copied().fold(0.0, f32::max)).0;
-            let index = |i: u32, j: u32| (j * (f + 1) - (j * j.saturating_sub(1)) / 2 + i) as usize;
-            // Every grid vertex displaced once, then morphed from its neighbours' (tess.wgsl dice).
-            let grid: Vec<(u32, u32)> = (0..=f).flat_map(|j| (0..=f - j).map(move |i| (i, j))).collect();
-            let own: Vec<MicroVertex> = grid.iter().map(|&(i, j)| grid_point(base, &p, i, j)).map(|q| (q, displaced(&q, height))).collect();
-            let vertices: Vec<MicroVertex> = grid
-                .iter()
-                .zip(&own)
-                .map(|(&(i, j), &(q, position))| match grid_morph(&p, i, j) {
-                    Some((weight, a, c)) => (q, ((own[index(a.0, a.1)].1 + own[index(c.0, c.1)].1) * 0.5).lerp(position, weight)),
-                    None => (q, position),
-                })
-                .collect();
-            for j in 0..f {
-                for i in 0..f - j {
-                    triangles.push([vertices[index(i, j)], vertices[index(i + 1, j)], vertices[index(i, j + 1)]]);
-                    if i + 1 < f - j {
-                        triangles.push([vertices[index(i + 1, j)], vertices[index(i + 1, j + 1)], vertices[index(i, j + 1)]]);
-                    }
-                }
+            } else {
+                diced.push(p);
             }
         }
         queue = next;
+    }
+    diced
+}
+
+/// Every micro-triangle of a base triangle.
+fn tessellate(view: &View, base: &[Vec3; 3], height: Offset) -> Vec<[MicroVertex; 3]> {
+    let mut triangles = Vec::new();
+    for p in diced_patches(view, base) {
+        let f = 1 << level(p.factors.iter().copied().fold(0.0, f32::max)).0;
+        let index = |i: u32, j: u32| (j * (f + 1) - (j * j.saturating_sub(1)) / 2 + i) as usize;
+        // Every grid vertex displaced once, then morphed from its neighbours' (tess.wgsl dice).
+        let grid: Vec<(u32, u32)> = (0..=f).flat_map(|j| (0..=f - j).map(move |i| (i, j))).collect();
+        let own: Vec<MicroVertex> = grid.iter().map(|&(i, j)| grid_point(base, &p, i, j)).map(|q| (q, displaced(&q, height))).collect();
+        let vertices: Vec<MicroVertex> = grid
+            .iter()
+            .zip(&own)
+            .map(|(&(i, j), &(q, position))| match grid_morph(&p, i, j) {
+                Some((weight, a, c)) => (q, ((own[index(a.0, a.1)].1 + own[index(c.0, c.1)].1) * 0.5).lerp(position, weight)),
+                None => (q, position),
+            })
+            .collect();
+        for j in 0..f {
+            for i in 0..f - j {
+                triangles.push([vertices[index(i, j)], vertices[index(i + 1, j)], vertices[index(i, j + 1)]]);
+                if i + 1 < f - j {
+                    triangles.push([vertices[index(i + 1, j)], vertices[index(i + 1, j + 1)], vertices[index(i, j + 1)]]);
+                }
+            }
+        }
     }
     triangles
 }
@@ -385,7 +434,44 @@ fn shared_edges_agree_under_a_graph_height() {
     shared_edges_agree(bricks);
 }
 
-fn shared_edges_agree(height: Height) {
+/// A vector displacement that folds the surface over itself closes the edges just the same:
+/// both sides displace an edge's vertices by the same vectors.
+#[test]
+fn shared_edges_agree_under_a_vector_displacement() {
+    // The field does fold: somewhere a point moves sideways past where its neighbour stays.
+    let fold = (0..400).map(|i| Vec3::new(0.2 + i as f32 * 0.0005, 0.0, 0.2)).any(|q| (q + mushrooms(q)).x > (q + Vec3::X * 0.01 + mushrooms(q + Vec3::X * 0.01)).x);
+    assert!(fold, "the test field has no overhang");
+    shared_edges_agree(mushrooms);
+}
+
+/// The barycentrics the raster interpolates for the resolve are the grid vertices' own: they
+/// reproduce every vertex's undisplaced position, snapped edge vertices included, and survive
+/// their 16-bit packing to within half a step.
+#[test]
+fn grid_barycentrics_name_the_vertices_points() {
+    let (triangles, _) = grid();
+    for eye in [Vec3::new(0.3, 0.4, 0.2), Vec3::new(1.6, 0.25, 1.2), Vec3::new(-3.0, 2.0, 6.0)] {
+        let v = view(eye);
+        for base in &triangles {
+            for p in diced_patches(&v, base) {
+                let f = 1 << level(p.factors.iter().copied().fold(0.0, f32::max)).0;
+                for (i, j) in (0..=f).flat_map(|j| (0..=f - j).map(move |i| (i, j))) {
+                    let l = grid_lambda(&p, i, j);
+                    let position = base[0] * l[0] + base[1] * l[1] + base[2] * l[2];
+                    let expected = grid_point(base, &p, i, j).position;
+                    assert!(position.distance(expected) < 2e-6, "vertex ({i}, {j}) of an F = {f} grid: {position} vs {expected}");
+                    assert!((l[0] + l[1] + l[2] - 1.0).abs() < 1e-6);
+                    // tess_pack_lambda / tess_unpack_lambda.
+                    let packed = [l[1], l[2]].map(|x| (x.clamp(0.0, 1.0) * 65535.0).round() as u32);
+                    let unpacked = packed.map(|q| q as f32 / 65535.0);
+                    assert!((unpacked[0] - l[1]).abs() <= 0.5 / 65535.0 + 1e-7 && (unpacked[1] - l[2]).abs() <= 0.5 / 65535.0 + 1e-7);
+                }
+            }
+        }
+    }
+}
+
+fn shared_edges_agree(height: Offset) {
     let (triangles, shared) = grid();
     // Close to the surface (deep splits next to coarse dicing), far away, and in between.
     for eye in [Vec3::new(0.3, 0.4, 0.2), Vec3::new(1.6, 0.25, 1.2), Vec3::new(-3.0, 2.0, 6.0), Vec3::new(7.0, 3.0, -4.0)] {

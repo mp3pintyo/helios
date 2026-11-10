@@ -48,6 +48,8 @@ use crate::wind::{wind_entry, wind_resource};
 
 /// The merged visibility depth (voxel_resolve.wgsl finds the voxel a pixel hit from it).
 const BINDING_DEPTH: u32 = 91;
+/// Tessellated pixels' barycentrics on their base triangle (tess_resolve.wgsl).
+const BINDING_TESS_LAMBDA: u32 = 92;
 
 /// Shading models with a resolve pipeline (see `MATERIAL_*` in material.wgsl); 7 is the sky.
 /// Glass (5) is translucent: it never reaches the visibility buffer (see translucency.rs).
@@ -127,6 +129,7 @@ impl MaterialPass {
                 (BINDING_WATER, bind::uniform()),
                 (BINDING_DEPTH, bind::texture(false)),
                 tessellation_entry(),
+                (BINDING_TESS_LAMBDA, bind::texture_uint()),
             ],
         );
         let mut resolve: [Option<Vec<(u32, wgpu::ComputePipeline)>>; 16] = Default::default();
@@ -248,6 +251,7 @@ impl MaterialPass {
                 (BINDING_WATER, water.as_entire_binding()),
                 (BINDING_DEPTH, TextureView(&targets.depth)),
                 tessellation_resource(scene),
+                (BINDING_TESS_LAMBDA, TextureView(targets.tess_lambda())),
             ],
         );
         let classify_group = bind_group(

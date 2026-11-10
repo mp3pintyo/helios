@@ -162,24 +162,32 @@ export function createDetails(ed) {
     ], { open: on });
   }
 
-  // Displacement (Nanite tessellation): the surface moves along its normal by a height — a
-  // texture channel, or the material graph's Displacement output when it is connected — at
-  // render time, scaled by the magnitude around the centre.
+  // Displacement (Nanite tessellation): the surface moves at render time — along its normal by a
+  // height (a texture channel, or the material graph's Displacement output when it is connected),
+  // scaled by the magnitude around the centre, or by the graph's VectorDisplacement output, a
+  // vector in units of the magnitude (no centre: zero stays in place). A graph that reads the
+  // time animates it.
   function displacementSection(m, params, send) {
     const d = params.displacement;
     const field = (label, prop, opts) => row(label, slider(d[prop], { ...opts, onInput: (v) => ((d[prop] = v), send(false)), onCommit: (v) => ((d[prop] = v), send(true)) }));
-    const height = m.displacement_graph
-      ? row("Height", button(`Driven by graph · ${m.graph}`, () => ed.graphEditor.open(m.graph), { iconName: "material", title: "The graph's Displacement output gives the height: open it" }))
+    const vector = m.displacement_mode === "vector";
+    const what = vector ? "Vector" : "Height";
+    const pin = vector ? "VectorDisplacement" : "Displacement";
+    const driven = `Driven by graph · ${m.graph}` + (m.displacement_animated ? " · animated" : "");
+    const source = m.displacement_graph
+      ? row(what, button(driven, () => ed.graphEditor.open(m.graph), { iconName: "material", title: `The graph's ${pin} output gives the ${what.toLowerCase()}: open it` }))
       : row("Height channel", select([["0", "R"], ["1", "G"], ["2", "B"], ["3", "A (procedural height)"]], String(d.channel), (v) => ((d.channel = Number(v)), send(true))));
+    const toggles = "PageDown toggles tessellation; debug view 25 shows it";
     const note = m.displacement_graph && !(d.magnitude > 0)
-      ? "The graph drives the height: set a magnitude to displace. PageDown toggles tessellation; debug view 25 shows it"
-      : "Magnitude 0: none. PageDown toggles tessellation; debug view 25 shows it";
-    return section("Displacement", [
-      h("div", { class: "ed-note" }, note),
-      field("Magnitude (m)", "magnitude", { min: 0, max: 0.5, step: 0.005, precision: 3 }),
-      field("Centre", "center", { min: 0, max: 1, step: 0.01 }),
-      height,
-    ], { open: d.magnitude > 0 || m.displacement_graph });
+      ? `The graph drives the ${what.toLowerCase()}: set a magnitude to displace. ${toggles}`
+      : vector
+        ? `The graph's vector moves the surface by up to the magnitude in any direction (overhangs). ${toggles}`
+        : `Magnitude 0: none. ${toggles}`;
+    const rows = [h("div", { class: "ed-note" }, note), field("Magnitude (m)", "magnitude", { min: 0, max: 0.5, step: 0.005, precision: 3 })];
+    if (!vector) rows.push(field("Centre", "center", { min: 0, max: 1, step: 0.01 }));
+    rows.push(source);
+    if (m.displacement_graph && m.displacement_animated) rows.push(h("div", { class: "ed-note" }, "Animated: its instances' shadows are re-rendered as the surface moves"));
+    return section("Displacement", rows, { open: d.magnitude > 0 || m.displacement_graph });
   }
 
   // ---- Lights ------------------------------------------------------------------------------

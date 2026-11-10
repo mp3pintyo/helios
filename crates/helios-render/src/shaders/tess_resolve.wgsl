@@ -2,17 +2,20 @@
 // requires displacement.wgsl, displacement_height.wgsl and tess_core.wgsl).
 //
 // The visibility buffer names the base triangle (tess.wgsl), the merged depth where the pixel ray
-// hit its displaced micro-triangles: the point on the base triangle displaced to that hit is found
-// by projecting the hit onto the triangle's plane after taking off the displacement there — a
-// fixed-point iteration that converges in a few steps, since the displacement runs along the
-// (nearly face) normal. The pixel is then shaded with the base triangle's attributes at that
-// point and the normal of the displaced surface: the interpolated normal tilted by the surface
-// gradient of the displacement (finite differences of the height a pixel apart, the height
-// filtered as the tessellator filters it), so the shading is smooth across micro-triangles.
-// Payload of the visibility buffer: unchanged (cluster slot << 7 | triangle); the micro-triangle
-// itself is never needed.
+// hit its displaced micro-triangles, and `tess_lambda` the point of the base triangle that was
+// displaced to that hit (its barycentrics, interpolated over the micro-triangle by the rasteriser).
+// The pixel is shaded with the base triangle's attributes at that point and the normal of the
+// displaced surface:
+//  * a height: the interpolated normal tilted by the surface gradient of the displacement (finite
+//    differences of the height a pixel apart, the height filtered as the tessellator filters it);
+//  * a vector: the cross product of the displaced surface's tangents (finite differences of the
+//    displaced position a pixel apart), which also holds where the surface folds over itself.
+// Either way the shading is smooth across micro-triangles. An animated displacement is evaluated
+// again at the previous frame's time: the point's motion vector.
+// Payload of the visibility buffer: unchanged (cluster slot << 7 | triangle).
 
 @group(0) @binding(67) var<uniform> tess: Tessellation;
+@group(0) @binding(92) var tess_lambda: texture_2d<u32>;
 
 fn tess_fetch(slot: u32) -> vec2<u32> {
     return visible_clusters[slot].xy;
@@ -23,58 +26,67 @@ fn tess_pixels_per_unit(item: u32, world: vec3<f32>) -> f32 {
 }
 
 struct DisplacedHit {
-    lambda: vec3<f32>,   // barycentrics on the base triangle
-    object: vec3<f32>,   // displaced object-space position
+    lambda: vec3<f32>,     // barycentrics on the base triangle
+    object: vec3<f32>,     // displaced object-space position
+    previous: vec3<f32>,   // ... at the previous frame's time (animated displacement)
     world: vec3<f32>,
-    normal: vec3<f32>,   // world-space normal of the displaced surface
+    normal: vec3<f32>,     // world-space normal of the displaced surface
 }
 
 // The base triangle's point at barycentrics `l`.
-fn displaced_input(instance: Instance, objects: array<vec3<f32>, 3>, normals: array<vec3<f32>, 3>, uvs: array<vec2<f32>, 3>, l: vec3<f32>) -> DisplacementInput {
+fn displaced_input(instance: Instance, objects: array<vec3<f32>, 3>, normals: array<vec3<f32>, 3>, uvs: array<vec2<f32>, 3>, l: vec3<f32>, time: f32) -> DisplacementInput {
     let object = (objects[0] * l.x) + (objects[1] * l.y) + (objects[2] * l.z);
     let normal = normalize((normals[0] * l.x) + (normals[1] * l.y) + (normals[2] * l.z));
-    let normal_matrix = mat3x3<f32>(instance.normal_matrix_0.xyz, instance.normal_matrix_1.xyz, instance.normal_matrix_2.xyz);
-    let uv = (uvs[0] * l.x) + (uvs[1] * l.y) + (uvs[2] * l.z);
-    return DisplacementInput(object, (instance.world * vec4<f32>(object, 1.0)).xyz, normal, normalize(normal_matrix * normal), uv);
+    return displacement_input(instance, object, normal, (uvs[0] * l.x) + (uvs[1] * l.y) + (uvs[2] * l.z), time);
 }
 
 // `objects`, `normals`, `uvs`: the base corners (object space, unit normals); `worlds`: where they
 // were rasterised (wind included). `hit`: the pixel's world position from the merged depth.
-fn resolve_displaced(instance: Instance, objects: array<vec3<f32>, 3>, normals: array<vec3<f32>, 3>, uvs: array<vec2<f32>, 3>, worlds: array<vec3<f32>, 3>, hit: vec3<f32>) -> DisplacedHit {
+fn resolve_displaced(pixel: vec2<u32>, instance: Instance, objects: array<vec3<f32>, 3>, normals: array<vec3<f32>, 3>, uvs: array<vec2<f32>, 3>, worlds: array<vec3<f32>, 3>, hit: vec3<f32>) -> DisplacedHit {
     let e1 = worlds[1] - worlds[0];
     let e2 = worlds[2] - worlds[0];
+    let material = instance.material;
+    let scale = instance.max_scale;
+    let l = tess_unpack_lambda(textureLoad(tess_lambda, pixel, 0).r);
+    let p = displaced_input(instance, objects, normals, uvs, l, tess.time.x);
+    let value = displacement_value(material, scale, p);
+    var h: DisplacedHit;
+    h.lambda = l;
+    h.object = p.object + displacement_offset(instance, p, value);
+    h.previous = h.object;
+    if DISPLACEMENT_ANIMATED {
+        let before = displaced_input(instance, objects, normals, uvs, l, tess.time.y);
+        h.previous = before.object + displacement_offset(instance, before, displacement_value(material, scale, before));
+    }
+    h.world = hit;
+    // The displacement a pixel apart along both edges.
+    let footprint = max(distance(hit, tess.eye.xyz), tess.dice.z) / tess.dice.y;
+    let d1 = footprint / max(length(e1), 1e-6);
+    let d2 = footprint / max(length(e2), 1e-6);
+    let p1 = displaced_input(instance, objects, normals, uvs, l + vec3<f32>(-d1, d1, 0.0), tess.time.x);
+    let p2 = displaced_input(instance, objects, normals, uvs, l + vec3<f32>(-d2, 0.0, d2), tess.time.x);
+    let v1 = displacement_value(material, scale, p1);
+    let v2 = displacement_value(material, scale, p2);
+    let n = p.world_normal;
     let face = cross(e1, e2);
+    if value.is_vector {
+        // Tangents of the displaced surface: the steps along the edges, taken in the plane of the
+        // interpolated normal (so an undisplaced point keeps its smooth normal), plus how the
+        // offset changes over them.
+        let linear = mat3x3<f32>(instance.world[0].xyz, instance.world[1].xyz, instance.world[2].xyz);
+        let s1 = e1 * d1;
+        let s2 = e2 * d2;
+        let t1 = (s1 - (n * dot(n, s1))) + (linear * (displacement_offset(instance, p1, v1) - (h.object - p.object)));
+        let t2 = (s2 - (n * dot(n, s2))) + (linear * (displacement_offset(instance, p2, v2) - (h.object - p.object)));
+        let c = cross(t1, t2) * select(-1.0, 1.0, dot(face, n) >= 0.0);
+        h.normal = select(n, normalize(c), dot(c, c) > 1e-30);
+        return h;
+    }
     let inv = 1.0 / max(dot(face, face), 1e-30);
     // World gradients of the barycentrics λ1, λ2 in the triangle's plane.
     let grad1 = cross(e2, face) * inv;
     let grad2 = cross(face, e1) * inv;
-    let material = instance.material;
-    let linear = mat3x3<f32>(instance.world[0].xyz, instance.world[1].xyz, instance.world[2].xyz);
-
-    var l = vec3<f32>(0.0);
-    var goal = hit;
-    var p: DisplacementInput;
-    var height = 0.0;
-    for (var i = 0u; i < 4u; i++) {
-        let d = goal - worlds[0];
-        let l12 = vec2<f32>(dot(grad1, d), dot(grad2, d));
-        l = vec3<f32>(1.0 - l12.x - l12.y, l12);
-        p = displaced_input(instance, objects, normals, uvs, l);
-        height = displacement_height(material, instance.max_scale, p);
-        goal = hit - (linear * (p.normal * displacement_offset(material, height)));
-    }
-    var h: DisplacedHit;
-    h.lambda = l;
-    h.object = p.object + (p.normal * displacement_offset(material, height));
-    h.world = hit;
-    // Height differences a pixel apart along both edges give its surface gradient.
-    let footprint = max(distance(hit, tess.eye.xyz), tess.dice.z) / tess.dice.y;
-    let d1 = footprint / max(length(e1), 1e-6);
-    let d2 = footprint / max(length(e2), 1e-6);
-    let h1 = displacement_height(material, instance.max_scale, displaced_input(instance, objects, normals, uvs, l + vec3<f32>(-d1, d1, 0.0)));
-    let h2 = displacement_height(material, instance.max_scale, displaced_input(instance, objects, normals, uvs, l + vec3<f32>(-d2, 0.0, d2)));
-    let gradient = ((grad1 * ((h1 - height) / d1)) + (grad2 * ((h2 - height) / d2))) * (tess.materials[material].params.x * instance.max_scale);
-    let n = p.world_normal;
+    let gradient = ((grad1 * ((v1.height - value.height) / d1)) + (grad2 * ((v2.height - value.height) / d2))) * (tess.materials[material].params.x * scale);
     h.normal = normalize(n - (gradient - (n * dot(gradient, n))));
     return h;
 }

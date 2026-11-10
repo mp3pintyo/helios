@@ -711,6 +711,7 @@ impl Renderer {
         let substrate = self.settings.substrate;
         self.extended.sync(&self.device, &self.queue, scene, &self.scene, substrate, self.targets.capacity);
         self.culling.prepare_tessellation(&self.device, scene, &self.scene, &self.textures, &self.samplers.material, self.extended.parameter_buffer());
+        self.targets.prepare_tessellation(&self.device, self.scene.has_displacement());
         // Editing a displacement (magnitude, a displacing graph or its parameters) reshapes
         // static surfaces: their cached shadow pages are stale.
         let displacement = (self.scene.displacement_table_hash, self.extended.displacement_key);
@@ -1072,7 +1073,7 @@ impl Renderer {
         self.queue.write_buffer(&self.main_view.uniform, 0, bytemuck::bytes_of(&main));
         if let Some(tessellation) = self.culling.tessellation(&self.scene) {
             // Dice rate in internal pixels, like the software raster heuristic.
-            let view = tessellation.view(s.dice_rate, camera.lod_scale(h), camera.near, camera.position);
+            let view = tessellation.view(s.dice_rate, camera.lod_scale(h), camera.near, camera.position, [self.time, self.time - delta_time]);
             self.scene.write_tessellation_view(&self.queue, &view);
         }
         self.scene.assemblies.write_params(&self.queue);
@@ -1112,6 +1113,7 @@ impl Renderer {
                 scene_changed: self.scene_changed,
                 geometry_streamed: self.scene.streaming_stats().changed(),
                 wind: wind_moves_shadows,
+                animated_displacement: self.scene.animated_displacement_shadows(),
                 moves: self.scene.shadow_moves(),
                 instances_changed: !self.motion.changes.moved.is_empty(),
                 volume_distance: if self.fog.enabled() { scene.fog.distance } else { 0.0 },

@@ -11,9 +11,12 @@
 //            each thread rasterises one micro-triangle.
 //
 // The payload is the base triangle's, (visible cluster slot << 7 | triangle), as for any software
-// triangle: the G-buffer resolve finds the pixel's point on the displaced surface from the merged
-// depth (tess_resolve.wgsl), so every pass that reads the visibility buffer (material
-// classification, picking, Lumen) sees an ordinary triangle id.
+// triangle, so every pass that reads the visibility buffer (material classification, picking,
+// Lumen) sees an ordinary triangle id. Next to it the payload pass stores where on the base
+// triangle the pixel's point was displaced from — its barycentrics, interpolated over the
+// micro-triangle — in a texture of its own (`tess_lambda`): the G-buffer resolve shades that point
+// (tess_resolve.wgsl) without searching for it, which no search could do where a vector
+// displacement folds the surface over itself (overhangs).
 
 #include "common.wgsl"
 #include "geometry.wgsl"
@@ -36,6 +39,8 @@ override LEVEL: u32 = 0u;
 @group(0) @binding(6) var<storage, read> geometry: array<u32>;
 // [0, w*h): depth bits, [w*h, 2*w*h): payload (sw_raster.wgsl).
 @group(0) @binding(7) var<storage, read_write> sw_target: array<atomic<u32>>;
+// Per pixel: the barycentrics of the displaced point on its base triangle (tess_pack_lambda).
+@group(0) @binding(11) var tess_lambda: texture_storage_2d<r32uint, write>;
 @group(0) @binding(40) var<uniform> materials: array<Material, MAX_MATERIALS>;
 @group(0) @binding(43) var material_data: texture_2d_array<f32>;
 @group(0) @binding(44) var material_sampler: sampler;
@@ -126,8 +131,9 @@ fn is_top_left(a: vec2<f32>, b: vec2<f32>) -> bool {
     return (d.y == 0.0 && d.x > 0.0) || d.y < 0.0;
 }
 
-// Rasterises a micro-triangle (sw_raster.wgsl's edge functions, top-left rule and passes).
-fn tess_rasterize(p0: vec4<f32>, p1: vec4<f32>, p2: vec4<f32>, id: u32) {
+// Rasterises a micro-triangle (sw_raster.wgsl's edge functions, top-left rule and passes). `l0`,
+// `l1`, `l2`: its vertices' barycentrics on the base triangle (second and third).
+fn tess_rasterize(p0: vec4<f32>, p1: vec4<f32>, p2: vec4<f32>, l0: vec2<f32>, l1: vec2<f32>, l2: vec2<f32>, id: u32) {
     if min(min(p0.w, p1.w), p2.w) < 0.0 {
         return; // reaches behind the near plane (culled, as UE does)
     }
@@ -179,6 +185,10 @@ fn tess_rasterize(p0: vec4<f32>, p1: vec4<f32>, p2: vec4<f32>, id: u32) {
                 }
             } else if bits == atomicLoad(&sw_target[target_index]) {
                 atomicStore(&sw_target[payload_offset + target_index], id);
+                // Perspective-correct: the depth is near / w (reverse-Z, infinite far plane), so
+                // the weights times it are the weights over w, and their sum is z.
+                let lambda = ((l0 * (w0 * v0.z)) + (l2 * (w1 * v1.z)) + (l1 * (w2 * v2.z))) * (inv_area / z);
+                textureStore(tess_lambda, pixel, vec4<u32>(tess_pack_lambda(lambda), 0u, 0u, 0u));
             }
         }
     }
@@ -200,15 +210,19 @@ fn dice_patch(index: u32) {
         own[v] = tess_displaced(instance, tess_grid_point(b, p, d, ij.x, ij.y));
     }
     var screen: array<vec4<f32>, 6>;
+    var lambda: array<vec2<f32>, 6>;
     for (var v = 0u; v < vertices; v++) {
         let ij = tess_grid_vertex(v, f);
         let m = tess_grid_morph(p, d, ij.x, ij.y);
         let position = tess_morphed(own[v], own[tess_grid_index(m.a.x, m.a.y, f)], own[tess_grid_index(m.c.x, m.c.y, f)], m.weight);
         screen[v] = tess_project(instance, strength, position);
+        if PASS == 1u {
+            lambda[v] = tess_grid_lambda(p, d, ij.x, ij.y).yz;
+        }
     }
     for (var t = 0u; t < f * f; t++) {
         let tri = tess_grid_triangle(t, f);
-        tess_rasterize(screen[tri.x], screen[tri.y], screen[tri.z], record.x);
+        tess_rasterize(screen[tri.x], screen[tri.y], screen[tri.z], lambda[tri.x], lambda[tri.y], lambda[tri.z], record.x);
     }
 }
 
@@ -220,6 +234,7 @@ var<workgroup> wg_dice: array<TessDice, MAX_PATCHES>;
 var<workgroup> wg_item: array<u32, MAX_PATCHES>;
 var<workgroup> wg_displaced: array<vec3<f32>, 64>;
 var<workgroup> wg_screen: array<vec4<f32>, 64>;
+var<workgroup> wg_lambda: array<vec2<f32>, 64>;
 
 @compute @workgroup_size(64)
 fn dice(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) groups: vec3<u32>, @builtin(local_invocation_index) lid: u32) {
@@ -261,11 +276,14 @@ fn dice(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) groups: 
         let base = local_patch * vertices;
         let position = tess_morphed(wg_displaced[lid], wg_displaced[base + tess_grid_index(m.a.x, m.a.y, f)], wg_displaced[base + tess_grid_index(m.c.x, m.c.y, f)], m.weight);
         wg_screen[lid] = tess_project(instance, wind_strength(instance), position);
+        if PASS == 1u {
+            wg_lambda[lid] = tess_grid_lambda(wg_patch[local_patch], wg_dice[local_patch], ij.x, ij.y).yz;
+        }
     }
     workgroupBarrier();
     let triangle_patch = lid / (f * f);
     if first + triangle_patch < count {
         let tri = tess_grid_triangle(lid % (f * f), f) + (triangle_patch * vertices);
-        tess_rasterize(wg_screen[tri.x], wg_screen[tri.y], wg_screen[tri.z], wg_item[triangle_patch]);
+        tess_rasterize(wg_screen[tri.x], wg_screen[tri.y], wg_screen[tri.z], wg_lambda[tri.x], wg_lambda[tri.y], wg_lambda[tri.z], wg_item[triangle_patch]);
     }
 }

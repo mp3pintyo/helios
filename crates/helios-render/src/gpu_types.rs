@@ -163,6 +163,9 @@ pub mod instance_flags {
     /// The material displaces the surface and tessellation is on: its triangle clusters are
     /// tessellated (`tessellation.rs`) and its bounds padded by the displacement.
     pub const DISPLACED: u32 = 256;
+    /// Displaced by a material graph that reads the time: the surface moves every frame, so the
+    /// instance is a dynamic shadow caster (`dynamic_caster.wgsl`, `vsm_invalidate.wgsl`).
+    pub const ANIMATED: u32 = 512;
     // Bits 12..32: the skin palette index (`skin::INSTANCE_SKIN_SHIFT`).
 }
 

@@ -385,7 +385,7 @@ impl Culling {
         sw_entries.push((7, targets.sw_target.as_entire_binding()));
         let sw_group = bind_group(device, "sw raster", &self.sw_layout, &sw_entries);
         let tessellation = self.tessellation(scene);
-        let tess_groups = tessellation.map(|t| t.main_groups(device, view, scene, &targets.sw_target));
+        let tess_groups = tessellation.map(|t| t.main_groups(device, view, scene, &targets.sw_target, targets.tess_lambda()));
 
         if !late {
             // Only the depth half needs clearing; payloads are read where depth matched.

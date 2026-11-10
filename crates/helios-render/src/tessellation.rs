@@ -21,8 +21,17 @@
 //! `tess.wgsl`, `vsm_tess.wgsl`). The visibility payload stays the base triangle's: the G-buffer
 //! resolve recovers the displaced point and normal from the depth (`tess_resolve.wgsl`).
 //!
-//! The height is a texture channel, or a material graph's Displacement output: the dicing
-//! pipelines then run a permutation with the scene's displacing graphs ([`graphs`]).
+//! The height is a texture channel, or a material graph's Displacement output — or the graph's
+//! VectorDisplacement output moves the surface in any direction (overhangs): the dicing pipelines
+//! then run a permutation with the scene's displacing graphs ([`graphs`]). The main view's raster
+//! also stores, per pixel, the barycentrics of the displaced point on its base triangle: the
+//! resolve shades that point without searching for it, so folded surfaces resolve exactly.
+//!
+//! A graph may animate its displacement with the time. Its instances are then dynamic shadow
+//! casters ([`crate::gpu_types::instance_flags::ANIMATED`]): the pages under them re-render their
+//! dynamic casters over the cached static layer whenever the displacement can have changed them
+//! by two texels (`vsm_invalidate.wgsl`), and the resolve evaluates the previous frame's surface
+//! for motion vectors. Static displacement costs none of this.
 
 use glam::{Vec3, Vec4};
 use wgpu::BindingResource::{Sampler, TextureView};
@@ -37,6 +46,7 @@ use crate::material_graphs::MaterialGraphHandle;
 use crate::passes::culling::CullView;
 use crate::profiler::Recorder;
 use crate::scene::{Material, Scene, TextureHandle};
+use helios_material::DisplacementKind;
 use crate::shader::{compose_variant, create_module, create_module_from};
 use crate::util::{bind, bind_group, bind_group_layout, compute_pipeline, storage_buffer};
 use crate::wind::{wind_entry, wind_resource};
@@ -72,6 +82,8 @@ pub struct TessView {
     /// Dice rate (pixels), main view pixels per world unit at distance 1, near plane, split passes.
     pub dice: Vec4,
     pub eye: Vec4,
+    /// The time animated displacement is evaluated at, and the previous frame's.
+    pub time: Vec4,
 }
 
 /// Size of the tessellation uniform: the header, then [`TessMaterial`] per material.
@@ -101,6 +113,31 @@ pub fn displacement_source(scene: &Scene, material: &Material) -> Option<Displac
     }
 }
 
+/// What the material's displacement is, if a graph drives it: a height or a vector, and whether
+/// it moves with the time.
+pub fn graph_displacement(scene: &Scene, material: &Material) -> Option<(DisplacementKind, bool)> {
+    match displacement_source(scene, material)? {
+        DisplacementSource::Graph(g) => scene.compiled_material_graph(g).map(|c| (c.displacement_kind, c.displacement_animated)),
+        DisplacementSource::Texture(_) => None,
+    }
+}
+
+/// Whether the material's displacement moves with the time: its instances are dynamic shadow
+/// casters.
+pub fn displacement_animated(scene: &Scene, material: &Material) -> bool {
+    graph_displacement(scene, material).is_some_and(|(_, animated)| animated)
+}
+
+/// Largest object-space distance the material's displacement moves a point: a height's
+/// [`crate::Displacement::bound`], a vector's magnitude (its length is clamped to 1).
+pub fn displacement_bound(scene: &Scene, material: &Material) -> f32 {
+    match (material.displacement, graph_displacement(scene, material)) {
+        (Some(d), Some((DisplacementKind::Vector, _))) => d.magnitude.abs(),
+        (Some(d), _) => d.bound(),
+        (None, _) => 0.0,
+    }
+}
+
 /// TessMaterial::source.x of a material without a height layer (`DISPLACEMENT_NO_LAYER`).
 const NO_LAYER: u32 = u32::MAX;
 
@@ -112,7 +149,7 @@ pub fn material_table(scene: &Scene) -> Vec<TessMaterial> {
         .iter()
         .map(|m| match (m.displacement, displacement_source(scene, m)) {
             (Some(d), Some(source)) => TessMaterial {
-                params: Vec4::new(d.magnitude, d.center, d.bound(), d.uv_density),
+                params: Vec4::new(d.magnitude, d.center, displacement_bound(scene, m), d.uv_density),
                 source: match source {
                     DisplacementSource::Texture(layer) => [layer.0, d.channel.min(3), 0, 0],
                     DisplacementSource::Graph(_) => [NO_LAYER, 0, 0, 0],
@@ -132,6 +169,9 @@ pub fn write_graph_source(queue: &wgpu::Queue, scene: &GpuScene, index: usize, i
     let at = std::mem::size_of::<TessView>() + index * std::mem::size_of::<TessMaterial>() + std::mem::offset_of!(TessMaterial, source) + 8;
     queue.write_buffer(&scene.tessellation, at as u64, bytemuck::cast_slice(&[id, offset]));
 }
+
+/// Binding of the main view's per-pixel barycentrics in its dicing passes (`tess_lambda`).
+const BINDING_LAMBDA: u32 = 11;
 
 /// Patches per split queue and per dice list (16 bytes each: 32 MiB in all).
 const QUEUE_CAPACITY: u32 = 1 << 19;
@@ -311,7 +351,7 @@ impl Tessellation {
         let mut entries = vec![(0, bind::uniform()), read(1), read(2)];
         entries.extend(common);
         let main_generate_layout = bind_group_layout(device, "tessellation", c, &entries);
-        let mut entries = vec![(0, bind::uniform()), read(1), (7, bind::storage(false))];
+        let mut entries = vec![(0, bind::uniform()), read(1), (7, bind::storage(false)), (BINDING_LAMBDA, bind::storage_texture(wgpu::TextureFormat::R32Uint))];
         entries.extend(common);
         entries.extend(textures);
         let main_dice_layout = bind_group_layout(device, "tessellation dice", c, &entries);
@@ -412,9 +452,14 @@ impl Tessellation {
     }
 
     /// The tessellation uniform's header for this frame: dice rate (raised while lists overflow),
-    /// the main view's pixel scale and near plane, the split pass count, the camera.
-    pub fn view(&self, dice_rate: f32, pixels_per_unit: f32, near: f32, eye: Vec3) -> TessView {
-        TessView { dice: Vec4::new(dice_rate.max(0.25) * self.dice_scale, pixels_per_unit, near, self.passes as f32), eye: eye.extend(0.0) }
+    /// the main view's pixel scale and near plane, the split pass count, the camera, and the time
+    /// of this frame and the previous one (animated displacement).
+    pub fn view(&self, dice_rate: f32, pixels_per_unit: f32, near: f32, eye: Vec3, time: [f32; 2]) -> TessView {
+        TessView {
+            dice: Vec4::new(dice_rate.max(0.25) * self.dice_scale, pixels_per_unit, near, self.passes as f32),
+            eye: eye.extend(0.0),
+            time: Vec4::new(time[0], time[1], 0.0, 0.0),
+        }
     }
 
     pub fn stats(&self) -> TessellationStats {
@@ -431,8 +476,9 @@ impl Tessellation {
         ]
     }
 
-    /// Bind groups of the main view's passes.
-    pub fn main_groups(&self, device: &wgpu::Device, view: &CullView, scene: &GpuScene, sw_target: &wgpu::Buffer) -> MainGroups {
+    /// Bind groups of the main view's passes (`lambda`: the per-pixel barycentrics the payload
+    /// pass writes for the resolve).
+    pub fn main_groups(&self, device: &wgpu::Device, view: &CullView, scene: &GpuScene, sw_target: &wgpu::Buffer, lambda: &wgpu::TextureView) -> MainGroups {
         let common = || {
             [
                 (3, scene.instances.as_entire_binding()),
@@ -451,6 +497,7 @@ impl Tessellation {
         let mut entries = vec![(0, view.uniform.as_entire_binding()), (1, view.visible_clusters.as_entire_binding()), (7, sw_target.as_entire_binding())];
         entries.extend(common());
         entries.push((40, scene.materials.as_entire_binding()));
+        entries.push((BINDING_LAMBDA, TextureView(lambda)));
         entries.extend(self.texture_entries());
         MainGroups {
             generate,
@@ -592,10 +639,10 @@ mod tests {
 
     #[test]
     fn uniform_matches_the_shader_layout() {
-        // vec4 dice, vec4 eye, then 256 × (vec4 params, vec4<u32> source).
-        assert_eq!(std::mem::size_of::<TessView>(), 32);
+        // vec4 dice, vec4 eye, vec4 time, then 256 × (vec4 params, vec4<u32> source).
+        assert_eq!(std::mem::size_of::<TessView>(), 48);
         assert_eq!(std::mem::size_of::<TessMaterial>(), 32);
-        assert_eq!(UNIFORM_SIZE, 32 + 256 * 32);
+        assert_eq!(UNIFORM_SIZE, 48 + 256 * 32);
         let source = include_str!("shaders/tess_queue.wgsl");
         assert!(source.contains(&format!("const STATE_TOTAL_PATCHES: u32 = {PASS_WORDS}u;")));
     }

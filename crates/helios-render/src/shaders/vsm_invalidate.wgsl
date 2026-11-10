@@ -1,12 +1,14 @@
-// Local invalidation of cached shadow pages: geometry streaming, wind, skeletal animation and
-// moving instances.
+// Local invalidation of cached shadow pages: geometry streaming, wind, skeletal animation,
+// animated displacement and moving instances.
 //
-// Cached pages assume static geometry. Four things change it, but only inside the light-space
+// Cached pages assume static geometry. Five things change it, but only inside the light-space
 // footprint of the instances concerned, so only the cached pages there are re-rendered instead of
 // the whole cache:
 //  * streaming a page in or out changes the cluster cut of every instance of that mesh;
 //  * the wind (wind.wgsl) moves vegetation every frame, up to its disable distance;
 //  * animated skeletal meshes (skinning.wgsl) move whenever their pose changes;
+//  * a material graph that reads the time moves its displaced surfaces (displacement.wgsl) every
+//    frame, within the displacement's bound;
 //  * Scene::set_transform moves an instance: vsm_motion.rs writes footprints covering its old and
 //    new bounds before the collect pass appends the others (the buffer then starts non-empty).
 // Pages keep their static casters in a static layer (vsm_common.wgsl): a footprint of a dynamic
@@ -46,6 +48,7 @@
 #include "wind.wgsl"
 #include "skin_palette.wgsl"
 #include "dynamic_caster.wgsl"
+#include "displacement.wgsl"
 #include "vsm_local_common.wgsl"
 
 // Footprint capacity; set by vsm.rs.
@@ -100,6 +103,7 @@ struct Footprints {
 @group(0) @binding(8) var<storage, read_write> info: array<u32>;
 @group(0) @binding(65) var<uniform> wind: Wind;
 @group(0) @binding(66) var skin_palette: texture_2d<f32>;
+@group(0) @binding(67) var<uniform> tess: Tessellation;
 
 fn residency_changed(instance: Instance) -> bool {
     for (var p = instance.page_offset; p < instance.page_offset + instance.page_count; p++) {
@@ -130,6 +134,15 @@ fn collect(@builtin(global_invocation_id) gid: vec3<u32>) {
         reach = max(wind_bound, 1e-6);
         f.change = 2.0 * wind_bound;
         f.per_frame = wind_speed(instance, strength, instance.bounds) * max(wind.time.x - wind.time.y, 0.0);
+    }
+    if (instance.flags & INSTANCE_ANIMATED) != 0u {
+        // An animated displacement: every point stays within the displacement's bound of its
+        // undisplaced place, and nothing bounds how fast it crosses that range, so the pages its
+        // texels can show a change in are refreshed every frame and coarser ones never.
+        let bound = displacement_reach(instance);
+        reach = max(reach, max(bound, 1e-6));
+        f.change = max(f.change, 2.0 * bound);
+        f.per_frame = max(f.per_frame, 2.0 * bound);
     }
     if skin_dynamic(instance) {
         // A moving skin: every pose since the scene was loaded lies within the largest reach of

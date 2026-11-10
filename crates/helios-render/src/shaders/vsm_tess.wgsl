@@ -4,11 +4,12 @@
 //
 // Tessellation factors are measured in the page's texels (its level's or face mip's texel size at
 // the point), so a page is diced like the main view at the matching resolution; patches are culled
-// against the page. Heights are the main view's (displacement_height.wgsl), so shadows fall from
-// the surface the camera sees. Micro-triangles are rasterised as vsm_raster.wgsl does — 24.8
+// against the page. Displacements are the main view's (displacement_height.wgsl), so shadows fall
+// from the surface the camera sees. Micro-triangles are rasterised as vsm_raster.wgsl does — 24.8
 // fixed-point edge functions, clipped to the page, slope-scaled depth bias, one atomicMax of the
-// reverse-Z depth bits per texel into the atlas' u32 mirror (scratch tiles included: displacement
-// is static, so the static / dynamic page cache treats displaced instances like any other).
+// reverse-Z depth bits per texel into the atlas' u32 mirror (scratch tiles included: the static /
+// dynamic page cache treats displaced instances like any other — one whose displacement is
+// animated is a dynamic caster, re-rendered over the pages' static layers as it moves).
 
 #include "common.wgsl"
 #include "vsm_common.wgsl"

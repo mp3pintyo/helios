@@ -117,7 +117,9 @@ export function createGraphEditor(ed) {
   function renderStatus() {
     const g = current();
     const errors = g?.errors || [];
-    statusEl.textContent = !g ? "" : errors.length ? `${errors.length} error${errors.length > 1 ? "s" : ""}` : `compiled · ${g.parameters.length} parameter${g.parameters.length === 1 ? "" : "s"} · ${g.hash || ""}`;
+    // What the graph does to geometry, next to what it compiled to.
+    const displaces = !g?.displacement ? "" : ` · ${g.displacement_animated ? "animated " : ""}${g.displacement === "vector" ? "vector displacement" : "displacement"}`;
+    statusEl.textContent = !g ? "" : errors.length ? `${errors.length} error${errors.length > 1 ? "s" : ""}` : `compiled · ${g.parameters.length} parameter${g.parameters.length === 1 ? "" : "s"}${displaces} · ${g.hash || ""}`;
     statusEl.className = "mg-status" + (errors.length ? " error" : "");
     errorsEl.replaceChildren(...errors.map((e) => h("div", { class: "mg-error", onclick: () => e.node && selectNode(e.node, true) }, e.node ? `#${e.node}: ${e.message}` : e.message)));
     for (const el of world.querySelectorAll(".mg-node")) {
@@ -146,6 +148,13 @@ export function createGraphEditor(ed) {
 
   const linkInto = (node, pin) => state.graph.links.find((l) => l.to.node === node && l.to.pin === pin);
 
+  // Output pins that move geometry (Nanite tessellation) rather than shade it: set apart on the
+  // node and explained on hover. A graph connects one of the two.
+  const DISPLACEMENT_PINS = {
+    Displacement: "Height 0..1 along the normal, around the material's displacement centre, scaled by its magnitude (float). Time animates it.",
+    VectorDisplacement: "World-space offset in units of the material's displacement magnitude, length up to 1 (float3): overhangs and sideways shifts. VertexNormal × height displaces as the Displacement pin does. Time animates it.",
+  };
+
   function nodeElement(node) {
     const spec = specs.get(node.type) || { category: "Utility", inputs: [], outputs: [] };
     const label = node.name || node.parameter ? `${node.type} · ${node.name || node.parameter}` : node.type;
@@ -164,7 +173,9 @@ export function createGraphEditor(ed) {
       if (input) {
         const linked = linkInto(node.id, input.name);
         const pin = pinElement(node.id, input.name, "in", linked);
-        const parts = [pin, h("span", { class: "mg-pin-label" }, input.name)];
+        const hint = node.type === "Output" ? DISPLACEMENT_PINS[input.name] : undefined;
+        const parts = [pin, h("span", hint ? { class: "mg-pin-label", title: hint } : { class: "mg-pin-label" }, input.name)];
+        if (hint) row.classList.add("mg-row-geometry");
         if (!linked && input.default.kind === "scalar") parts.push(valueField(node, input));
         row.append(h("div", { class: "mg-in" }, parts));
       } else row.append(h("div", { class: "mg-in" }));

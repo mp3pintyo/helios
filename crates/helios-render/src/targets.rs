@@ -35,6 +35,9 @@ pub struct FrameTargets {
     /// Merged (hardware + software) reverse-Z depth and visibility used by all later passes.
     pub depth: wgpu::TextureView,
     pub visibility: wgpu::TextureView,
+    /// Tessellated pixels' barycentrics on their base triangle (`tess.wgsl`), allocated once a
+    /// scene has displaced instances ([`FrameTargets::prepare_tessellation`]).
+    tess_lambda: Option<wgpu::TextureView>,
     /// Full HZB mip chain (sampled) and one view per mip (storage).
     pub hzb: wgpu::TextureView,
     pub hzb_mips: Vec<wgpu::TextureView>,
@@ -101,6 +104,7 @@ impl FrameTargets {
             sw_target,
             depth: view(&depth),
             visibility: view(&visibility),
+            tess_lambda: None,
             hzb: view(&hzb),
             hzb_mips: (0..hzb_levels).map(|m| mip_view(&hzb, m)).collect(),
             material_tiles: crate::util::storage_buffer(
@@ -127,6 +131,22 @@ impl FrameTargets {
     }
 
     /// Sets the internal resolution of the next frame (clamped to the capacity).
+    /// Allocates the tessellation's per-pixel target if the scene has displaced instances.
+    pub fn prepare_tessellation(&mut self, device: &wgpu::Device, displaced: bool) {
+        if displaced && self.tess_lambda.is_none() {
+            let (width, height) = self.capacity;
+            let usage = U::STORAGE_BINDING | U::TEXTURE_BINDING;
+            let lambda = texture(device, TextureSpec { label: "tessellation barycentrics", width, height, layers: 1, mips: 1, format: VISIBILITY_FORMAT, usage });
+            self.tess_lambda = Some(lambda.create_view(&Default::default()));
+        }
+    }
+
+    /// The barycentrics of tessellated pixels; without displaced instances a stand-in of the
+    /// same type, which nothing reads (the resolve's tessellation is compiled out).
+    pub fn tess_lambda(&self) -> &wgpu::TextureView {
+        self.tess_lambda.as_ref().unwrap_or(&self.visibility)
+    }
+
     pub fn set_internal_size(&mut self, (width, height): (u32, u32)) {
         self.width = width.clamp(1, self.capacity.0);
         self.height = height.clamp(1, self.capacity.1);

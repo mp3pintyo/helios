@@ -3,12 +3,14 @@
 use crate::graph::{GraphBuilder, MaterialGraph, Op};
 
 /// Preset ids and labels, for editors.
-pub const PRESETS: [(&str, &str); 5] = [
+pub const PRESETS: [(&str, &str); 7] = [
     ("blank", "Blank (output only)"),
     ("lava", "Animated lava"),
     ("wet_stone", "Wet stone with puddles"),
     ("stylized_water", "Stylised water"),
     ("brick_pavement", "Brick pavement (displaced)"),
+    ("mushrooms", "Mushrooms (vector displacement)"),
+    ("rippling_cloth", "Rippling cloth (animated displacement)"),
 ];
 
 /// The preset graph `id`.
@@ -19,6 +21,8 @@ pub fn preset(id: &str) -> Option<MaterialGraph> {
         "wet_stone" => Some(wet_stone()),
         "stylized_water" => Some(stylized_water()),
         "brick_pavement" => Some(brick_pavement()),
+        "mushrooms" => Some(mushrooms()),
+        "rippling_cloth" => Some(rippling_cloth()),
         _ => None,
     }
 }
@@ -334,6 +338,358 @@ pub fn brick_pavement() -> MaterialGraph {
         .link(brick, "Out", roughness, "Alpha")
         .link(base, "Out", output, "BaseColor")
         .link(roughness, "Out", output, "Roughness")
+        .link(height, "Out", output, "Displacement");
+    g.build()
+}
+
+/// Mushrooms growing out of a flat, mossy ground: a **vector** displacement (the
+/// VectorDisplacement output) with real overhangs — caps wider than their stems, with an
+/// underside. World xz is divided into staggered cells; around each cell's centre a disc of the
+/// ground is wrapped over a mushroom's silhouette, from the middle outwards: the dome of the cap
+/// (a quarter ellipse), its underside back in to the stem, down the stem, and the rest of the
+/// disc stretched back out over the ground, so the surface stays continuous and the displacement
+/// is zero at the disc's rim. A point at distance r from the centre moves to radius ρ(r) and
+/// height y(r): sideways by its offset from the centre times (ρ / r − 1), and up by y. A
+/// per-cell random value sizes each mushroom; "Stem Height" raises the caps; the colours follow
+/// the same pieces of the silhouette (spotted cap, gills, stem, moss). Towards the edges of the
+/// bed (mesh UVs 0..1 across it) the whole displacement fades out, so the border stays put and no
+/// mushroom is cut in half.
+/// Its material needs a displacement magnitude of [`MUSHROOM_MAGNITUDE`] (the vector is in units
+/// of it; another magnitude scales the mushrooms) on a surface whose normal is +Y.
+pub fn mushrooms() -> MaterialGraph {
+    // Cell size, the disc's radius, cap and stem radius and the cap dome's height (metres).
+    const CELL: f32 = 0.26;
+    const DISC: f32 = 0.1;
+    const CAP: f32 = 0.085;
+    const STEM: f32 = 0.02;
+    const DOME: f32 = 0.035;
+    // The silhouette's pieces in r / DISC: dome up to A, underside to B, stem to C, then ground.
+    const A: f32 = 0.5;
+    const B: f32 = 0.7;
+    const C: f32 = 0.9;
+    let mut g = GraphBuilder::new("Mushrooms");
+    // Staggered cells and the offset from the cell's centre in metres.
+    let position = g.node(Op::WorldPosition, [-2300.0, 0.0]);
+    let xz = g.node(Op::ComponentMask { channels: "xz".into() }, [-2130.0, 0.0]);
+    let cells = g.node(Op::Multiply, [-1960.0, 0.0]);
+    let row = g.node(Op::ComponentMask { channels: "y".into() }, [-1790.0, 80.0]);
+    let row_index = g.node(Op::Floor, [-1620.0, 80.0]);
+    let half_row = g.node(Op::Multiply, [-1450.0, 80.0]);
+    let stagger = g.node(Op::Frac, [-1280.0, 80.0]);
+    let column = g.node(Op::ComponentMask { channels: "x".into() }, [-1790.0, -40.0]);
+    let shifted_column = g.node(Op::Add, [-1110.0, -40.0]);
+    let shifted = g.node(Op::Append, [-940.0, 0.0]);
+    let cell = g.node(Op::Floor, [-770.0, 200.0]);
+    let local = g.node(Op::Frac, [-770.0, 0.0]);
+    let centred = g.node(Op::Subtract, [-600.0, 0.0]);
+    let offset = g.node(Op::Multiply, [-430.0, 0.0]);
+    let radius = g.node(Op::Length, [-260.0, 60.0]);
+    let safe_radius = g.node(Op::Max, [-90.0, 140.0]);
+    let s = g.node(Op::Divide, [-90.0, 40.0]);
+    // The silhouette's pieces as ramps 0..1.
+    let dome_ramp = g.node(Op::Divide, [80.0, -160.0]);
+    let dome = g.node(Op::Saturate, [250.0, -160.0]);
+    let underside = g.node(Op::SmoothStep, [250.0, -60.0]);
+    let stem = g.node(Op::SmoothStep, [250.0, 60.0]);
+    let ground = g.node(Op::SmoothStep, [250.0, 180.0]);
+    let angle = g.node(Op::Multiply, [420.0, -160.0]);
+    let sine = g.node(Op::Sine, [590.0, -200.0]);
+    let cosine = g.node(Op::Cosine, [590.0, -120.0]);
+    // Per-cell size.
+    let seed = g.node(Op::Multiply, [-600.0, 200.0]);
+    let noise = g.node(Op::Noise { scale: 1.0, octaves: 1 }, [-430.0, 200.0]);
+    let random = g.node(Op::SmoothStep, [-260.0, 200.0]);
+    let size = g.node(Op::Lerp, [-90.0, 260.0]);
+    // ρ: the cap's dome out to its rim, the underside back in to the stem, the ground back out.
+    let cap_radius = g.node(Op::Multiply, [590.0, 260.0]);
+    let cap_shape = g.node(Op::Subtract, [760.0, -200.0]);
+    let cap_term = g.node(Op::Multiply, [930.0, -160.0]);
+    let stem_term = g.node(Op::Multiply, [760.0, -40.0]);
+    let beyond_stem = g.node(Op::Subtract, [590.0, 140.0]);
+    let ground_term = g.node(Op::Multiply, [760.0, 140.0]);
+    let rho_cap = g.node(Op::Add, [1100.0, -100.0]);
+    let rho = g.node(Op::Add, [1270.0, -40.0]);
+    let ratio = g.node(Op::Divide, [1440.0, -40.0]);
+    let stretch = g.node(Op::Subtract, [1610.0, -40.0]);
+    let sideways = g.node(Op::Multiply, [1780.0, 0.0]);
+    // y: the dome over the stem.
+    let stem_height = g.node(Op::ScalarParameter { name: "Stem Height".into(), default: 0.07, min: 0.02, max: 0.075 }, [590.0, 380.0]);
+    let dome_height = g.node(Op::Multiply, [760.0, 300.0]);
+    let up_stem = g.node(Op::OneMinus, [590.0, 480.0]);
+    let stem_part = g.node(Op::Multiply, [760.0, 420.0]);
+    let silhouette = g.node(Op::Add, [930.0, 360.0]);
+    let height = g.node(Op::Multiply, [1100.0, 360.0]);
+    let side_x = g.node(Op::ComponentMask { channels: "x".into() }, [1950.0, -60.0]);
+    let side_z = g.node(Op::ComponentMask { channels: "y".into() }, [1950.0, 40.0]);
+    let xy = g.node(Op::Append, [2120.0, 0.0]);
+    let xyz = g.node(Op::Append, [2290.0, 40.0]);
+    let vector = g.node(Op::Multiply, [2460.0, 40.0]);
+    // Fade towards the bed's edges.
+    let uv = g.node(Op::TexCoord { set: 0, tiling: [1.0, 1.0] }, [1610.0, 240.0]);
+    let far_side = g.node(Op::OneMinus, [1780.0, 300.0]);
+    let nearest = g.node(Op::Min, [1950.0, 240.0]);
+    let inside = g.node(Op::SmoothStep, [2120.0, 240.0]);
+    let inside_u = g.node(Op::ComponentMask { channels: "x".into() }, [2290.0, 200.0]);
+    let inside_v = g.node(Op::ComponentMask { channels: "y".into() }, [2290.0, 300.0]);
+    let fade = g.node(Op::Multiply, [2460.0, 240.0]);
+    let faded = g.node(Op::Multiply, [2630.0, 100.0]);
+    // Colours along the silhouette.
+    let cap_color = g.node(Op::VectorParameter { name: "Cap Color".into(), default: [0.5, 0.05, 0.03, 1.0] }, [930.0, -620.0]);
+    let cap_rgb = g.node(Op::ComponentMask { channels: "rgb".into() }, [1100.0, -620.0]);
+    let spots = g.node(Op::Noise { scale: 85.0, octaves: 2 }, [930.0, -500.0]);
+    let spot_mask = g.node(Op::SmoothStep, [1100.0, -500.0]);
+    let spot_color = g.node(Op::Constant3 { value: [0.9, 0.86, 0.74] }, [1100.0, -400.0]);
+    let spotted = g.node(Op::Lerp, [1270.0, -560.0]);
+    let gills = g.node(Op::Constant3 { value: [0.62, 0.52, 0.4] }, [1270.0, -440.0]);
+    let under = g.node(Op::SmoothStep, [1270.0, -340.0]);
+    let cap_or_gills = g.node(Op::Lerp, [1440.0, -500.0]);
+    let stem_color = g.node(Op::Constant3 { value: [0.82, 0.78, 0.66] }, [1440.0, -380.0]);
+    let to_stem = g.node(Op::Lerp, [1610.0, -460.0]);
+    let moss_noise = g.node(Op::Noise { scale: 7.0, octaves: 4 }, [1440.0, -260.0]);
+    let moss = g.node(Op::Lerp, [1610.0, -300.0]);
+    let moss_dark = g.node(Op::Constant3 { value: [0.05, 0.075, 0.025] }, [1440.0, -180.0]);
+    let moss_light = g.node(Op::Constant3 { value: [0.16, 0.22, 0.06] }, [1440.0, -100.0]);
+    let on_ground = g.node(Op::SmoothStep, [1610.0, -180.0]);
+    let base = g.node(Op::Lerp, [1780.0, -400.0]);
+    let roughness = g.node(Op::Lerp, [1780.0, -240.0]);
+    let output = g.node(Op::Output, [2840.0, -200.0]);
+    g.link(position, "Out", xz, "In")
+        .link(xz, "Out", cells, "A")
+        .value(cells, "B", 1.0 / CELL)
+        .link(cells, "Out", row, "In")
+        .link(row, "Out", row_index, "In")
+        .link(row_index, "Out", half_row, "A")
+        .value(half_row, "B", 0.5)
+        .link(half_row, "Out", stagger, "In")
+        .link(cells, "Out", column, "In")
+        .link(column, "Out", shifted_column, "A")
+        .link(stagger, "Out", shifted_column, "B")
+        .link(shifted_column, "Out", shifted, "A")
+        .link(row, "Out", shifted, "B")
+        .link(shifted, "Out", cell, "In")
+        .link(shifted, "Out", local, "In")
+        .link(local, "Out", centred, "A")
+        .value(centred, "B", 0.5)
+        .link(centred, "Out", offset, "A")
+        .value(offset, "B", CELL)
+        .link(offset, "Out", radius, "In")
+        .link(radius, "Out", safe_radius, "A")
+        .value(safe_radius, "B", 1e-5)
+        .link(radius, "Out", s, "A")
+        .value(s, "B", DISC)
+        .link(s, "Out", dome_ramp, "A")
+        .value(dome_ramp, "B", A)
+        .link(dome_ramp, "Out", dome, "In")
+        .value(underside, "Min", A)
+        .value(underside, "Max", B)
+        .link(s, "Out", underside, "X")
+        .value(stem, "Min", B)
+        .value(stem, "Max", C)
+        .link(s, "Out", stem, "X")
+        .value(ground, "Min", C)
+        .value(ground, "Max", 1.0)
+        .link(s, "Out", ground, "X")
+        .link(dome, "Out", angle, "A")
+        .value(angle, "B", std::f32::consts::FRAC_PI_2)
+        .link(angle, "Out", sine, "In")
+        .link(angle, "Out", cosine, "In")
+        .link(cell, "Out", seed, "A")
+        .value(seed, "B", 0.613)
+        .link(seed, "Out", noise, "Position")
+        .value(random, "Min", 0.3)
+        .value(random, "Max", 0.7)
+        .link(noise, "Out", random, "X")
+        .value(size, "A", 0.5)
+        .value(size, "B", 1.0)
+        .link(random, "Out", size, "Alpha")
+        .link(size, "Out", cap_radius, "A")
+        .value(cap_radius, "B", CAP)
+        .link(sine, "Out", cap_shape, "A")
+        .link(underside, "Out", cap_shape, "B")
+        .link(cap_shape, "Out", cap_term, "A")
+        .link(cap_radius, "Out", cap_term, "B")
+        .link(underside, "Out", stem_term, "A")
+        .value(stem_term, "B", STEM)
+        .link(radius, "Out", beyond_stem, "A")
+        .value(beyond_stem, "B", STEM)
+        .link(ground, "Out", ground_term, "A")
+        .link(beyond_stem, "Out", ground_term, "B")
+        .link(cap_term, "Out", rho_cap, "A")
+        .link(stem_term, "Out", rho_cap, "B")
+        .link(rho_cap, "Out", rho, "A")
+        .link(ground_term, "Out", rho, "B")
+        .link(rho, "Out", ratio, "A")
+        .link(safe_radius, "Out", ratio, "B")
+        .link(ratio, "Out", stretch, "A")
+        .value(stretch, "B", 1.0)
+        .link(offset, "Out", sideways, "A")
+        .link(stretch, "Out", sideways, "B")
+        .link(cosine, "Out", dome_height, "A")
+        .value(dome_height, "B", DOME)
+        .link(stem, "Out", up_stem, "In")
+        .link(up_stem, "Out", stem_part, "A")
+        .link(stem_height, "Out", stem_part, "B")
+        .link(dome_height, "Out", silhouette, "A")
+        .link(stem_part, "Out", silhouette, "B")
+        .link(silhouette, "Out", height, "A")
+        .link(size, "Out", height, "B")
+        .link(sideways, "Out", side_x, "In")
+        .link(sideways, "Out", side_z, "In")
+        .link(side_x, "Out", xy, "A")
+        .link(height, "Out", xy, "B")
+        .link(xy, "Out", xyz, "A")
+        .link(side_z, "Out", xyz, "B")
+        .link(xyz, "Out", vector, "A")
+        .value(vector, "B", 1.0 / MUSHROOM_MAGNITUDE)
+        .link(uv, "Out", far_side, "In")
+        .link(uv, "Out", nearest, "A")
+        .link(far_side, "Out", nearest, "B")
+        .value(inside, "Min", 0.01)
+        .value(inside, "Max", 0.1)
+        .link(nearest, "Out", inside, "X")
+        .link(inside, "Out", inside_u, "In")
+        .link(inside, "Out", inside_v, "In")
+        .link(inside_u, "Out", fade, "A")
+        .link(inside_v, "Out", fade, "B")
+        .link(vector, "Out", faded, "A")
+        .link(fade, "Out", faded, "B")
+        .link(cap_color, "Out", cap_rgb, "In")
+        .link(position, "Out", spots, "Position")
+        .value(spot_mask, "Min", 0.57)
+        .value(spot_mask, "Max", 0.63)
+        .link(spots, "Out", spot_mask, "X")
+        .link(cap_rgb, "Out", spotted, "A")
+        .link(spot_color, "Out", spotted, "B")
+        .link(spot_mask, "Out", spotted, "Alpha")
+        .value(under, "Min", A - 0.04)
+        .value(under, "Max", A + 0.02)
+        .link(s, "Out", under, "X")
+        .link(spotted, "Out", cap_or_gills, "A")
+        .link(gills, "Out", cap_or_gills, "B")
+        .link(under, "Out", cap_or_gills, "Alpha")
+        .link(cap_or_gills, "Out", to_stem, "A")
+        .link(stem_color, "Out", to_stem, "B")
+        .link(stem, "Out", to_stem, "Alpha")
+        .link(position, "Out", moss_noise, "Position")
+        .link(moss_dark, "Out", moss, "A")
+        .link(moss_light, "Out", moss, "B")
+        .link(moss_noise, "Out", moss, "Alpha")
+        .link(to_stem, "Out", base, "A")
+        .link(moss, "Out", base, "B")
+        .value(on_ground, "Min", C - 0.02)
+        .value(on_ground, "Max", C + 0.01)
+        .link(s, "Out", on_ground, "X")
+        .link(on_ground, "Out", base, "Alpha")
+        .value(roughness, "A", 0.4)
+        .value(roughness, "B", 0.9)
+        .link(under, "Out", roughness, "Alpha")
+        .link(base, "Out", output, "BaseColor")
+        .link(roughness, "Out", output, "Roughness")
+        .link(faded, "Out", output, "VectorDisplacement");
+    g.build()
+}
+
+/// The displacement magnitude [`mushrooms`] is modelled for: its tallest mushroom's top moves
+/// 10.5 cm.
+pub const MUSHROOM_MAGNITUDE: f32 = 0.11;
+
+/// A cloth stretched over a frame, rippling: an **animated** displacement (its height reads the
+/// time). Two sine waves travel across world xz in different directions, a scrolling noise (a
+/// Panner on the renderer's clock) wrinkles them, and the sheet is pinned along its edges (mesh
+/// UVs 0..1 across it). The colour follows the height, crests lighter.
+/// Its material needs a displacement magnitude (the gallery uses 16 cm, centre 0.5). Instances of
+/// an animated displacement are dynamic shadow casters.
+pub fn rippling_cloth() -> MaterialGraph {
+    let mut g = GraphBuilder::new("Rippling cloth");
+    let position = g.node(Op::WorldPosition, [-1200.0, 0.0]);
+    let xz = g.node(Op::ComponentMask { channels: "xz".into() }, [-1030.0, 0.0]);
+    let time = g.node(Op::Time, [-1030.0, 260.0]);
+    // Two travelling waves.
+    let long_direction = g.node(Op::Constant2 { value: [5.2, 2.9] }, [-860.0, -160.0]);
+    let long_phase = g.node(Op::Dot, [-690.0, -120.0]);
+    let long_clock = g.node(Op::Multiply, [-690.0, -20.0]);
+    let long_travel = g.node(Op::Subtract, [-520.0, -80.0]);
+    let long_wave = g.node(Op::Sine, [-350.0, -80.0]);
+    let long_height = g.node(Op::Multiply, [-180.0, -80.0]);
+    let short_direction = g.node(Op::Constant2 { value: [-4.5, 11.0] }, [-860.0, 100.0]);
+    let short_phase = g.node(Op::Dot, [-690.0, 120.0]);
+    let short_clock = g.node(Op::Multiply, [-690.0, 220.0]);
+    let short_travel = g.node(Op::Add, [-520.0, 160.0]);
+    let short_wave = g.node(Op::Sine, [-350.0, 160.0]);
+    let short_height = g.node(Op::Multiply, [-180.0, 160.0]);
+    // Scrolling wrinkles.
+    let scroll = g.node(Op::Panner { speed: [0.22, 0.09] }, [-860.0, 380.0]);
+    let wrinkles = g.node(Op::Noise { scale: 4.0, octaves: 3 }, [-690.0, 380.0]);
+    let wrinkle_centre = g.node(Op::Subtract, [-520.0, 380.0]);
+    let wrinkle_height = g.node(Op::Multiply, [-350.0, 380.0]);
+    let waves = g.node(Op::Add, [-10.0, 40.0]);
+    let moving = g.node(Op::Add, [160.0, 120.0]);
+    // Pinned edges.
+    let uv = g.node(Op::TexCoord { set: 0, tiling: [1.0, 1.0] }, [-520.0, 560.0]);
+    let far_side = g.node(Op::OneMinus, [-350.0, 620.0]);
+    let nearest = g.node(Op::Min, [-180.0, 560.0]);
+    let free = g.node(Op::SmoothStep, [-10.0, 560.0]);
+    let free_u = g.node(Op::ComponentMask { channels: "x".into() }, [160.0, 520.0]);
+    let free_v = g.node(Op::ComponentMask { channels: "y".into() }, [160.0, 620.0]);
+    let pin = g.node(Op::Multiply, [330.0, 560.0]);
+    let pinned = g.node(Op::Multiply, [500.0, 200.0]);
+    let height = g.node(Op::Add, [670.0, 200.0]);
+    // Colour by height.
+    let color = g.node(Op::VectorParameter { name: "Cloth Color".into(), default: [0.08, 0.2, 0.55, 1.0] }, [330.0, -260.0]);
+    let rgb = g.node(Op::ComponentMask { channels: "rgb".into() }, [500.0, -260.0]);
+    let shade = g.node(Op::Lerp, [670.0, -120.0]);
+    let base = g.node(Op::Multiply, [840.0, -200.0]);
+    let output = g.node(Op::Output, [1040.0, 0.0]);
+    g.link(position, "Out", xz, "In")
+        .link(xz, "Out", long_phase, "A")
+        .link(long_direction, "Out", long_phase, "B")
+        .link(time, "Out", long_clock, "A")
+        .value(long_clock, "B", 1.9)
+        .link(long_phase, "Out", long_travel, "A")
+        .link(long_clock, "Out", long_travel, "B")
+        .link(long_travel, "Out", long_wave, "In")
+        .link(long_wave, "Out", long_height, "A")
+        .value(long_height, "B", 0.27)
+        .link(xz, "Out", short_phase, "A")
+        .link(short_direction, "Out", short_phase, "B")
+        .link(time, "Out", short_clock, "A")
+        .value(short_clock, "B", 3.1)
+        .link(short_phase, "Out", short_travel, "A")
+        .link(short_clock, "Out", short_travel, "B")
+        .link(short_travel, "Out", short_wave, "In")
+        .link(short_wave, "Out", short_height, "A")
+        .value(short_height, "B", 0.1)
+        .link(xz, "Out", scroll, "UV")
+        .link(scroll, "Out", wrinkles, "Position")
+        .link(wrinkles, "Out", wrinkle_centre, "A")
+        .value(wrinkle_centre, "B", 0.5)
+        .link(wrinkle_centre, "Out", wrinkle_height, "A")
+        .value(wrinkle_height, "B", 0.24)
+        .link(long_height, "Out", waves, "A")
+        .link(short_height, "Out", waves, "B")
+        .link(waves, "Out", moving, "A")
+        .link(wrinkle_height, "Out", moving, "B")
+        .link(uv, "Out", far_side, "In")
+        .link(uv, "Out", nearest, "A")
+        .link(far_side, "Out", nearest, "B")
+        .value(free, "Min", 0.0)
+        .value(free, "Max", 0.12)
+        .link(nearest, "Out", free, "X")
+        .link(free, "Out", free_u, "In")
+        .link(free, "Out", free_v, "In")
+        .link(free_u, "Out", pin, "A")
+        .link(free_v, "Out", pin, "B")
+        .link(moving, "Out", pinned, "A")
+        .link(pin, "Out", pinned, "B")
+        .link(pinned, "Out", height, "A")
+        .value(height, "B", 0.5)
+        .link(color, "Out", rgb, "In")
+        .value(shade, "A", 0.7)
+        .value(shade, "B", 1.3)
+        .link(height, "Out", shade, "Alpha")
+        .link(rgb, "Out", base, "A")
+        .link(shade, "Out", base, "B")
+        .link(base, "Out", output, "BaseColor")
         .link(height, "Out", output, "Displacement");
     g.build()
 }

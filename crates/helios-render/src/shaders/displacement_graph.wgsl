@@ -2,7 +2,7 @@
 // tessellation/graphs.rs): the undisplaced point, its texture filtering and the helpers the
 // generated `graph_displacement` code calls. Shared by the tessellation passes (through the
 // generated dispatch module) and the extended G-buffer resolve of a displacing graph
-// (displacement_graph_resolve.wgsl), so every pass computes the same height.
+// (displacement_graph_resolve.wgsl), so every pass computes the same displacement.
 // Requires common.wgsl, displacement.wgsl, displacement_height.wgsl and the bindings
 // `materials`, `material_albedo`, `material_data`, `material_sampler` and
 //   graph_params: array<vec4<f32>, 1024> (uniform: the material instances' parameter values).
@@ -25,6 +25,7 @@ struct DisplacementSurface {
     object_dpdx: vec3<f32>,
     object_dpdy: vec3<f32>,
     normal: vec3<f32>,           // interpolated world normal
+    time: f32,                   // seconds: what a Time node reads
 }
 
 fn displacement_surface(material: u32, max_scale: f32, p: DisplacementInput) -> DisplacementSurface {
@@ -44,6 +45,7 @@ fn displacement_surface(material: u32, max_scale: f32, p: DisplacementInput) -> 
     s.object_dpdx = object_frame[0] * object_segment;
     s.object_dpdy = object_frame[1] * object_segment;
     s.normal = p.world_normal;
+    s.time = p.time;
     return s;
 }
 

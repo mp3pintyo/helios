@@ -36,9 +36,10 @@ pub struct NodeSpec {
 }
 
 /// Output pins of the [`Op::Output`] node: name, WGSL field of `GraphOutput`, components. The
-/// last, [`DISPLACEMENT_PIN`], is not a `GraphOutput` field: it compiles to a function of its own
-/// (see [`crate::CompiledGraph::displacement`]).
-pub const OUTPUT_PINS: [(&str, &str, u8); 15] = [
+/// last two, [`DISPLACEMENT_PIN`] and [`VECTOR_DISPLACEMENT_PIN`], are not `GraphOutput` fields:
+/// the one that is connected compiles to a function of its own (see
+/// [`crate::CompiledGraph::displacement`]).
+pub const OUTPUT_PINS: [(&str, &str, u8); 16] = [
     ("BaseColor", "base_color", 3),
     ("Metallic", "metallic", 1),
     ("Roughness", "roughness", 1),
@@ -54,11 +55,19 @@ pub const OUTPUT_PINS: [(&str, &str, u8); 15] = [
     ("Transmission", "transmission", 1),
     ("Anisotropy", "anisotropy", 1),
     (DISPLACEMENT_PIN, "displacement", 1),
+    (VECTOR_DISPLACEMENT_PIN, "vector_displacement", 3),
 ];
 
 /// The output pin whose height (0..1 around the material's displacement centre, scaled by its
-/// magnitude) displaces the surface through Nanite tessellation.
+/// magnitude) displaces the surface along its normal through Nanite tessellation.
 pub const DISPLACEMENT_PIN: &str = "Displacement";
+
+/// The output pin whose vector displaces the surface in any direction (overhangs, undercuts,
+/// sideways shifts): a world-space offset in units of the material's displacement magnitude,
+/// (0, 0, 0) leaving the point in place; its length is clamped to 1, so the magnitude bounds the
+/// displacement. `VertexNormal` is the world normal, so `VertexNormal * height` displaces as the
+/// height pin does. A graph connects this pin or [`DISPLACEMENT_PIN`], not both.
+pub const VECTOR_DISPLACEMENT_PIN: &str = "VectorDisplacement";
 
 /// Bit of [`OUTPUT_PINS`] entry `name` in [`crate::CompiledGraph::outputs`].
 pub fn output_bit(name: &str) -> u32 {

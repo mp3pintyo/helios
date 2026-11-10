@@ -269,6 +269,8 @@ body.ed-active #hud, body.ed-active #help, body.ed-active .title { display: none
 .mg-pin.linked { background: #9fb2c8; }
 .mg-pin:hover { border-color: var(--ed-orange); }
 .mg-pin-label { color: var(--ed-text); }
+.mg-row-geometry .mg-pin-label { color: #e0a050; cursor: help; }
+.mg-row-geometry:not(.mg-row-geometry + .mg-row-geometry) { border-top: 1px solid rgba(255, 255, 255, 0.12); margin-top: 3px; padding-top: 3px; }
 .mg-value, .mg-text { width: 46px; height: 16px; padding: 0 4px; font: 11px var(--ed-font); color: var(--ed-text-strong); background: var(--ed-input); border: 1px solid var(--ed-line-2); border-radius: 3px; }
 .mg-text { width: 96px; }
 .mg-palette { position: absolute; z-index: 5; width: 210px; max-height: 300px; display: flex; flex-direction: column; background: var(--ed-panel-2); border: 1px solid var(--ed-line-2); border-radius: 6px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.6); }

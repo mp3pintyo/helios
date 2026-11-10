@@ -52,9 +52,15 @@ pub(crate) struct GraphEntry {
 }
 
 impl GraphEntry {
-    /// The graph compiles with a Displacement output.
+    /// The graph compiles with a displacement output.
     fn displaces(&self) -> bool {
-        self.compiled.as_ref().is_ok_and(|c| c.displacement.is_some())
+        self.displacement().is_some()
+    }
+
+    /// What the graph's displacement is to its instances: a height or a vector (another bound),
+    /// animated or not (dynamic shadow casters).
+    fn displacement(&self) -> Option<(helios_material::DisplacementKind, bool)> {
+        self.compiled.as_ref().ok().filter(|c| c.displacement.is_some()).map(|c| (c.displacement_kind, c.displacement_animated))
     }
 }
 
@@ -68,7 +74,8 @@ pub(crate) struct GraphStore {
     pub version: u64,
     /// Bumped when a parameter value changes (the parameter block is rewritten).
     pub parameter_version: u64,
-    /// Bumped when a graph starts or stops driving displacement (instances' displaced flags).
+    /// Bumped when a graph starts or stops driving displacement, or its displacement becomes a
+    /// height or a vector, animated or static (instances' flags, the materials' bounds).
     pub displacement_version: u64,
 }
 
@@ -89,10 +96,10 @@ impl Scene {
     pub fn set_material_graph(&mut self, handle: MaterialGraphHandle, graph: MaterialGraph) {
         let entry = &mut self.graphs.entries[handle.0 as usize];
         if entry.graph != graph {
-            let displaced = entry.displaces();
+            let displacement = entry.displacement();
             entry.compiled = helios_material::compile(&graph);
             entry.graph = graph;
-            if entry.displaces() != displaced {
+            if entry.displacement() != displacement {
                 self.graphs.displacement_version = next_version();
             }
             self.graphs.version = next_version();

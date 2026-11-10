@@ -273,50 +273,75 @@ mod tests {
 
     /// The dicing permutation of displacing graphs (tessellation/graphs.rs) validates in both
     /// tessellation passes, with every node type the displacement context allows on a path to a
-    /// texture coordinate (so its filtering code is generated too); the others are rejected.
+    /// texture coordinate (so its filtering code is generated too), as a height and as a vector;
+    /// the others are rejected. The resolve of each such graph validates too (its normal and, for
+    /// the animated ones, its previous position).
     #[test]
     fn displacement_graph_permutations_validate() {
-        use helios_material::{compile, presets, GraphBuilder, Op};
-        let mut graphs = vec![presets::brick_pavement()];
-        for op in Op::palette().into_iter().filter(|op| *op != Op::Output) {
-            let output_pin = helios_material::spec(&op).outputs[0];
-            let mut g = GraphBuilder::new(op.type_name());
-            let node = g.node(op, [0.0, 0.0]);
-            let length = g.node(Op::Length, [0.0, 0.0]);
-            let scale = g.node(Op::Multiply, [0.0, 0.0]);
-            let uv = g.node(Op::TexCoord { set: 0, tiling: [2.0, 2.0] }, [0.0, 0.0]);
-            let shifted = g.node(Op::Add, [0.0, 0.0]);
-            let sample = g.node(Op::TextureSample { parameter: "Height".into() }, [0.0, 0.0]);
-            let height = g.node(Op::Add, [0.0, 0.0]);
-            let output = g.node(Op::Output, [0.0, 0.0]);
-            g.link(node, output_pin, length, "In")
-                .link(length, "Out", scale, "A")
-                .value(scale, "B", 0.01)
-                .link(uv, "Out", shifted, "A")
-                .link(scale, "Out", shifted, "B")
-                .link(shifted, "Out", sample, "UV")
-                .link(sample, "Height", height, "A")
-                .link(scale, "Out", height, "B")
-                .link(height, "Out", output, "Displacement");
-            graphs.push(g.build());
+        use helios_material::{compile, presets, GraphBuilder, Op, DISPLACEMENT_PIN, VECTOR_DISPLACEMENT_PIN};
+        let mut graphs: Vec<_> = presets::PRESETS.iter().map(|(id, _)| presets::preset(id).unwrap()).filter(|g| compile(g).is_ok_and(|c| c.displacement.is_some())).collect();
+        assert!(graphs.len() >= 3, "the height, vector and animated presets");
+        for pin in [DISPLACEMENT_PIN, VECTOR_DISPLACEMENT_PIN] {
+            for op in Op::palette().into_iter().filter(|op| *op != Op::Output) {
+                let output_pin = helios_material::spec(&op).outputs[0];
+                let mut g = GraphBuilder::new(&format!("{} ({pin})", op.type_name()));
+                let node = g.node(op, [0.0, 0.0]);
+                let length = g.node(Op::Length, [0.0, 0.0]);
+                let scale = g.node(Op::Multiply, [0.0, 0.0]);
+                let uv = g.node(Op::TexCoord { set: 0, tiling: [2.0, 2.0] }, [0.0, 0.0]);
+                let shifted = g.node(Op::Add, [0.0, 0.0]);
+                let sample = g.node(Op::TextureSample { parameter: "Height".into() }, [0.0, 0.0]);
+                let height = g.node(Op::Add, [0.0, 0.0]);
+                let normal = g.node(Op::VertexNormal, [0.0, 0.0]);
+                let along = g.node(Op::Multiply, [0.0, 0.0]);
+                let output = g.node(Op::Output, [0.0, 0.0]);
+                g.link(node, output_pin, length, "In")
+                    .link(length, "Out", scale, "A")
+                    .value(scale, "B", 0.01)
+                    .link(uv, "Out", shifted, "A")
+                    .link(scale, "Out", shifted, "B")
+                    .link(shifted, "Out", sample, "UV")
+                    .link(sample, "Height", height, "A")
+                    .link(scale, "Out", height, "B")
+                    .link(normal, "Out", along, "A")
+                    .link(height, "Out", along, "B");
+                if pin == DISPLACEMENT_PIN {
+                    g.link(height, "Out", output, pin);
+                } else {
+                    g.link(along, "Out", output, pin);
+                }
+                graphs.push(g.build());
+            }
         }
-        let (mut functions, mut rejected) = (Vec::new(), Vec::new());
+        let (mut functions, mut rejected, mut animated, mut failures) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
         for (i, graph) in graphs.iter().enumerate() {
             let id = i as u32 + 1;
             match compile(graph) {
-                Ok(compiled) => functions.push((id, compiled.displacement_function(&format!("displacement_graph_{id}")).unwrap())),
+                Ok(compiled) => {
+                    functions.push((id, compiled.displacement_kind, compiled.displacement_function(&format!("displacement_graph_{id}")).unwrap()));
+                    if compiled.displacement_animated {
+                        animated.push(graph.name.clone());
+                    }
+                    failures.extend(validate(&graph.name, &extended_resolve(Some(&compiled.wgsl), true)).err());
+                }
                 Err(errors) => rejected.push((graph.name.clone(), errors[0].message.clone())),
             }
         }
         let names: Vec<&str> = rejected.iter().map(|r| r.0.as_str()).collect();
-        assert_eq!(names, ["VertexColor", "Time", "CameraVector", "Fresnel", "Panner"], "{rejected:?}");
+        let expected = ["VertexColor", "CameraVector", "Fresnel"];
+        let both: Vec<String> = [DISPLACEMENT_PIN, VECTOR_DISPLACEMENT_PIN].iter().flat_map(|pin| expected.map(|n| format!("{n} ({pin})"))).collect();
+        assert_eq!(names, both, "{rejected:?}");
+        for pin in [DISPLACEMENT_PIN, VECTOR_DISPLACEMENT_PIN] {
+            for node in ["Time", "Panner"] {
+                assert!(animated.contains(&format!("{node} ({pin})")), "{animated:?}");
+            }
+        }
         let code = crate::tessellation::graphs::dispatch_module(&functions);
-        let mut failures = Vec::new();
+        assert!(code.contains("displacement_from_height(displacement_graph_") && code.contains("displacement_from_vector(displacement_graph_"));
         for name in ["tess.wgsl", "vsm_tess.wgsl"] {
             failures.extend(validate(name, &compose_variant(name, &[("displacement_graphs_off.wgsl", &code)])).err());
         }
-        assert!(failures.is_empty(), "{}", failures.join("
-"));
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 
     /// WGSL's grammar gives bitwise (`& | ^`) and shift (`<< >>`) operators no precedence

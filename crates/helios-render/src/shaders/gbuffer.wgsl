@@ -355,16 +355,19 @@ fn resolve(
     b.ddx *= frame.upscale.x;
     b.ddy *= frame.upscale.y;
     // Tessellated: the pixel's point on the displaced surface (position, normal; the barycentrics
-    // of the base point it was displaced from). Texture derivatives stay those of the base plane.
+    // of the base point it was displaced from). The material is evaluated at that base point —
+    // positions, UVs and their derivatives are the undisplaced surface's — as the displacement
+    // itself is, so one pattern can drive a material's displacement and its colours and stays
+    // attached to the surface however far a vector displacement moves it.
     let displaced = TESSELLATION && is_tessellated(instance.flags, cluster);
     var hit: DisplacedHit;
     if displaced {
         let depth_hit = world_from_depth(uv, textureLoad(scene_depth, pixel, 0).r, frame.inv_view_proj);
-        hit = resolve_displaced(instance, object_positions, normals, uvs, world_positions, depth_hit);
+        hit = resolve_displaced(pixel, instance, object_positions, normals, uvs, world_positions, depth_hit);
         b.lambda = hit.lambda;
     }
     var input: SurfaceInput;
-    input.object_position = select(interpolate3(object_positions, b.lambda), hit.object, displaced);
+    input.object_position = interpolate3(object_positions, b.lambda);
     // The wind offset varies smoothly: evaluated at the pixel, it matches the interpolated corners
     // to far below a pixel, which is all motion vectors need. Skinning is affine per triangle: the
     // corners' previous positions interpolate exactly. (Resolved here, before the material, so
@@ -374,11 +377,15 @@ fn resolve(
         previous_world = interpolate3(previous_worlds, b.lambda);
     }
     if displaced {
-        // The hit's own motion: the solved point is a hair off the micro-triangle the depth came
-        // from, which must not read as motion (TSR and motion blur would smear a still surface).
-        previous_world += hit.world - wind_world_position(instance, wind_force, hit.object);
+        // The hit's own motion: where its point of the surface was a frame ago (an animated
+        // displacement moves it). The displaced point is a hair off the micro-triangle the depth
+        // came from, which must not read as motion (TSR and motion blur would smear a still
+        // surface).
+        previous_world = wind_previous_world_position(instance, wind_force, hit.previous) + (hit.world - wind_world_position(instance, wind_force, hit.object));
     }
-    input.world_position = select(interpolate3(world_positions, b.lambda), hit.world, displaced);
+    input.world_position = interpolate3(world_positions, b.lambda);
+    // Where the pixel's surface is.
+    let surface_position = select(input.world_position, hit.world, displaced);
     input.dpdx = interpolate3(world_positions, b.ddx);
     input.dpdy = interpolate3(world_positions, b.ddy);
     input.object_dpdx = interpolate3(object_positions, b.ddx);
@@ -395,9 +402,11 @@ fn resolve(
     input.normal_matrix = normal_matrix;
     var normal = select(normalize(normal_matrix * interpolate3(normals, b.lambda)), hit.normal, displaced);
     let eye = frame.camera_position.xyz;
-    let to_eye = normalize(eye - input.world_position);
+    let to_eye = normalize(eye - surface_position);
     let face = cross(world_positions[1] - world_positions[0], world_positions[2] - world_positions[0]);
-    input.back_facing = dot(face, to_eye) < 0.0;
+    // (Displaced surfaces are single-sided: the tessellator culls back-facing micro-triangles, and
+    // a displaced surface may face the viewer where its base triangle does not.)
+    input.back_facing = !displaced && dot(face, to_eye) < 0.0;
     if input.back_facing {
         normal = -normal; // two-sided geometry (leaves) seen from behind
     }
@@ -470,7 +479,7 @@ fn resolve(
         }
     }
 
-    let motion = clip_to_uv(frame.unjittered_view_proj * vec4<f32>(input.world_position, 1.0))
+    let motion = clip_to_uv(frame.unjittered_view_proj * vec4<f32>(surface_position, 1.0))
         - clip_to_uv(frame.prev_unjittered_view_proj * vec4<f32>(previous_world, 1.0));
 
     // Albedo is stored with a sqrt curve to spend 8-bit precision on dark values.

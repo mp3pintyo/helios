@@ -4,8 +4,9 @@
 //! node sets a surface's attributes — base colour, metallic, roughness, specular, normal,
 //! emission, ambient occlusion and the Substrate slab parameters (clear coat, sheen,
 //! subsurface, transmission, anisotropy) — compiled to a WGSL function the renderer's G-buffer
-//! resolve calls per pixel, and a displacement height compiled to a second function that Nanite
-//! tessellation calls per micro-triangle vertex (UE: the material's Displacement output).
+//! resolve calls per pixel, and a displacement (a height along the normal or an offset vector,
+//! static or animated by the time) compiled to a second function that Nanite tessellation calls
+//! per micro-triangle vertex (UE: the material's Displacement output).
 //!
 //! ```text
 //! WorldPosition ─ ComponentMask(xz) ─ Panner ─ Append ─ Noise ─ SmoothStep ─┬─ Lerp ─ BaseColor
@@ -19,8 +20,8 @@
 //!   checked, value widths inferred (scalars broadcast), and every problem reported with the
 //!   node it concerns. The generated code carries screen-space derivatives through the values
 //!   that feed textures and noise (see [`compile`]'s module docs); the displacement function
-//!   carries a dice segment's instead and rejects what is not a static function of the point
-//!   (time, the camera, attributes the tessellator does not read).
+//!   carries a dice segment's instead and rejects what is not a function of the point and the
+//!   time (the camera, attributes the tessellator does not read).
 //! * **Parameters** ([`Parameter`]): scalar, vector and texture parameters get slots in a
 //!   parameter block that material instances fill — changing one never recompiles.
 //! * **Catalog** ([`catalog`]): pin layouts and default properties of every node type, which an
@@ -31,9 +32,9 @@ mod graph;
 mod nodes;
 pub mod presets;
 
-pub use compile::{compile, CompiledGraph, GraphError, Parameter, ParameterKind};
+pub use compile::{compile, CompiledGraph, DisplacementKind, GraphError, Parameter, ParameterKind};
 pub use graph::{GraphBuilder, Link, MaterialGraph, Node, Op, PinRef};
-pub use nodes::{catalog, output_bit, spec, CatalogEntry, InputDefault, InputSpec, NodeSpec, DISPLACEMENT_PIN, OUTPUT_PINS};
+pub use nodes::{catalog, output_bit, spec, CatalogEntry, InputDefault, InputSpec, NodeSpec, DISPLACEMENT_PIN, OUTPUT_PINS, VECTOR_DISPLACEMENT_PIN};
 
 #[cfg(test)]
 mod tests {
@@ -182,11 +183,13 @@ mod tests {
         assert_eq!(names, ["Mortar Width", "Brick Variation", "Brick Color"], "one slot table for both functions");
         let body = bricks.displacement.as_deref().unwrap();
         assert!(body.contains("graph_params[params + 0u].x") && body.contains("fbm("), "{body}");
-        // A pure function of the undisplaced point: no clock, view, vertex colour or screen
-        // derivatives — only its input, the parameter block and the displacement helpers.
-        for forbidden in ["frame.", "vertex_color", "graph_sample", "graph_texture", "input.uv1", "input.tangent"] {
+        // A pure function of the undisplaced point: no frame uniform, view, vertex colour or
+        // screen derivatives — only its input, the parameter block and the displacement helpers.
+        for forbidden in ["frame.", "input.time", "vertex_color", "graph_sample", "graph_texture", "input.uv1", "input.tangent"] {
             assert!(!body.contains(forbidden), "{forbidden} in {body}");
         }
+        assert_eq!((bricks.displacement_kind, bricks.displacement_animated), (DisplacementKind::Height, false));
+        assert!(bricks.wgsl.contains("const GRAPH_DISPLACEMENT_VECTOR: bool = false;") && bricks.wgsl.contains("const GRAPH_DISPLACEMENT_ANIMATED: bool = false;"));
         // Noise is filtered by the dice segment the tessellator passes as derivatives.
         assert!(body.contains("input.dpdx"), "{body}");
         assert_eq!(bricks.displacement_function("f").unwrap().lines().next().unwrap(), "fn f(m: Material, input: DisplacementSurface, params: u32) -> f32 {");
@@ -205,34 +208,104 @@ mod tests {
     }
 
     #[test]
-    fn displacement_rejects_what_is_not_static() {
+    fn displacement_rejects_what_the_tessellator_cannot_evaluate() {
         let check = |op: Op, pin: &str, expected: &str| {
-            let (mut b, output) = simple();
-            let node = b.node(op, [0.0, 0.0]);
-            let length = b.node(Op::Length, [0.0, 0.0]);
-            b.link(node, pin, length, "In").link(length, "Out", output, "Displacement");
-            let errors = compile(&b.build()).unwrap_err();
-            assert!(errors.iter().any(|e| e.node == Some(node) && e.message.contains(expected)), "{errors:?}");
+            for output_pin in [DISPLACEMENT_PIN, VECTOR_DISPLACEMENT_PIN] {
+                let (mut b, output) = simple();
+                let node = b.node(op.clone(), [0.0, 0.0]);
+                let length = b.node(Op::Length, [0.0, 0.0]);
+                b.link(node, pin, length, "In").link(length, "Out", output, output_pin);
+                let errors = compile(&b.build()).unwrap_err();
+                assert!(errors.iter().any(|e| e.node == Some(node) && e.message.contains(expected)), "{errors:?}");
+            }
         };
-        check(Op::Time, "Out", "displaced surfaces are static");
-        check(Op::Panner { speed: [0.1, 0.0] }, "Out", "its Time input defaults to the renderer's clock");
         check(Op::CameraVector, "Out", "depends on the camera");
         check(Op::Fresnel { exponent: 5.0, base_reflect: 0.04 }, "Out", "depends on the camera");
         check(Op::VertexColor, "Out", "vertex colours are not available");
         check(Op::TexCoord { set: 1, tiling: [1.0, 1.0] }, "Out", "UV set 1");
         check(Op::Triplanar { parameter: "T".into(), scale: 1.0 }, "TangentNormal", "TangentNormal is not available to Displacement");
-        // The same nodes are fine for the surface, next to a static displacement.
+        // The same nodes are fine for the surface, next to a static displacement: the clock
+        // there does not make the displacement animated.
         let (mut b, output) = simple();
         let time = b.node(Op::Time, [0.0, 0.0]);
         let noise = b.node(Op::Noise { scale: 2.0, octaves: 2 }, [0.0, 0.0]);
         b.link(time, "Out", output, "Roughness").link(noise, "Out", output, "Displacement");
-        assert!(compile(&b.build()).unwrap().displacement.is_some());
+        let compiled = compile(&b.build()).unwrap();
+        assert!(compiled.displacement.is_some() && !compiled.displacement_animated);
         // A height is a float.
         let (mut b, output) = simple();
         let color = b.node(Op::Constant3 { value: [1.0, 0.0, 0.0] }, [0.0, 0.0]);
         b.link(color, "Out", output, "Displacement");
         let errors = compile(&b.build()).unwrap_err();
         assert!(errors[0].message.contains("Displacement takes a f32, not a vec3<f32>"), "{errors:?}");
+    }
+
+    #[test]
+    fn time_animates_the_displacement() {
+        // The clock reaches the displacement through its input, so the renderer can evaluate
+        // the previous frame's surface; the surface function keeps reading the frame uniform.
+        let (mut b, output) = simple();
+        let time = b.node(Op::Time, [0.0, 0.0]);
+        let sine = b.node(Op::Sine, [0.0, 0.0]);
+        b.link(time, "Out", sine, "In").link(sine, "Out", output, "Displacement").link(sine, "Out", output, "Roughness");
+        let compiled = compile(&b.build()).unwrap();
+        assert!(compiled.displacement_animated);
+        let body = compiled.displacement.as_deref().unwrap();
+        assert!(body.contains("sin(input.time)") && !body.contains("frame.time"), "{body}");
+        let eval = &compiled.wgsl[..compiled.wgsl.find("fn graph_displacement").unwrap()];
+        assert!(eval.contains("sin(frame.time)") && eval.contains("const GRAPH_DISPLACEMENT_ANIMATED: bool = true;"), "{eval}");
+        // A Panner on its default clock scrolls the displacement too.
+        let (mut b, output) = simple();
+        let panner = b.node(Op::Panner { speed: [0.1, 0.0] }, [0.0, 0.0]);
+        let noise = b.node(Op::Noise { scale: 2.0, octaves: 2 }, [0.0, 0.0]);
+        b.link(panner, "Out", noise, "Position").link(noise, "Out", output, "Displacement");
+        let scrolling = compile(&b.build()).unwrap();
+        assert!(scrolling.displacement_animated && scrolling.displacement.as_deref().unwrap().contains("input.time"));
+        // ... and not with a constant connected.
+        let (mut b, output) = simple();
+        let panner = b.node(Op::Panner { speed: [0.1, 0.0] }, [0.0, 0.0]);
+        let still = b.node(Op::Constant { value: 2.0 }, [0.0, 0.0]);
+        let noise = b.node(Op::Noise { scale: 2.0, octaves: 2 }, [0.0, 0.0]);
+        b.link(still, "Out", panner, "Time").link(panner, "Out", noise, "Position").link(noise, "Out", output, "Displacement");
+        assert!(!compile(&b.build()).unwrap().displacement_animated);
+        // Animated and static variants of one graph are different code.
+        assert_ne!(compiled.displacement_hash(), scrolling.displacement_hash());
+    }
+
+    #[test]
+    fn vector_displacement_compiles_to_a_vector_function() {
+        let (mut b, output) = simple();
+        let normal = b.node(Op::VertexNormal, [0.0, 0.0]);
+        let noise = b.node(Op::Noise { scale: 2.0, octaves: 2 }, [0.0, 0.0]);
+        let lift = b.node(Op::Multiply, [0.0, 0.0]);
+        b.link(normal, "Out", lift, "A").link(noise, "Out", lift, "B").link(lift, "Out", output, VECTOR_DISPLACEMENT_PIN);
+        let compiled = compile(&b.build()).unwrap();
+        assert_eq!(compiled.displacement_kind, DisplacementKind::Vector);
+        assert_eq!(compiled.outputs, output_bit(VECTOR_DISPLACEMENT_PIN));
+        assert!(compiled.wgsl.contains("fn graph_displacement(m: Material, input: DisplacementSurface, params: u32) -> vec3<f32> {"), "{}", compiled.wgsl);
+        assert!(compiled.wgsl.contains("const GRAPH_DISPLACEMENT_VECTOR: bool = true;"));
+        assert!(!compiled.wgsl[..compiled.wgsl.find("fn graph_displacement").unwrap()].contains("o.vector_displacement"), "not a surface output");
+        // The same code as a height is a different displacement.
+        let (mut h, output) = simple();
+        let noise = h.node(Op::Noise { scale: 2.0, octaves: 2 }, [0.0, 0.0]);
+        h.link(noise, "Out", output, DISPLACEMENT_PIN);
+        let (mut v, output) = simple();
+        let noise = v.node(Op::Noise { scale: 2.0, octaves: 2 }, [0.0, 0.0]);
+        v.link(noise, "Out", output, VECTOR_DISPLACEMENT_PIN);
+        let (h, v) = (compile(&h.build()).unwrap(), compile(&v.build()).unwrap());
+        assert_ne!(h.displacement_hash(), v.displacement_hash());
+        assert!(v.displacement.as_deref().unwrap().contains("return vec3<f32>("), "a scalar broadcasts");
+        // A vector is three components; one displacement output at a time.
+        let (mut b, output) = simple();
+        let uv = b.node(Op::TexCoord { set: 0, tiling: [1.0, 1.0] }, [0.0, 0.0]);
+        b.link(uv, "Out", output, VECTOR_DISPLACEMENT_PIN);
+        let errors = compile(&b.build()).unwrap_err();
+        assert!(errors[0].message.contains("VectorDisplacement takes a vec3<f32>, not a vec2<f32>"), "{errors:?}");
+        let (mut b, output) = simple();
+        let noise = b.node(Op::Noise { scale: 2.0, octaves: 2 }, [0.0, 0.0]);
+        b.link(noise, "Out", output, DISPLACEMENT_PIN).link(noise, "Out", output, VECTOR_DISPLACEMENT_PIN);
+        let errors = compile(&b.build()).unwrap_err();
+        assert!(errors[0].node == Some(output) && errors[0].message.contains("not both"), "{errors:?}");
     }
 
     #[test]

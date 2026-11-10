@@ -381,6 +381,36 @@ fn tess_grid_point(b: TessBase, p: TessPatch, d: TessDice, i: u32, j: u32) -> Te
     return tess_interior_point(b, l);
 }
 
+// The barycentrics on the base triangle of grid vertex (i, j), placed as tess_grid_point places
+// it. (A vertex that morphs keeps them: it is the midpoint of the segment it grows out of.)
+fn tess_grid_lambda(p: TessPatch, d: TessDice, i: u32, j: u32) -> vec3<f32> {
+    let f = 1u << d.level;
+    let c0 = vec3<f32>(p.corners[0]);
+    let edge = tess_grid_edge(i, j, f);
+    if edge.x < 3u && i < f && j < f && (i + j) > 0u {
+        let flipped = p.flipped[edge.x];
+        let canonical = select(edge.y, f - edge.y, flipped);
+        let edge_level = d.edges[edge.x];
+        let first = vec3<f32>(p.corners[(edge.x + 1u) % 3u]);
+        let second = vec3<f32>(p.corners[(edge.x + 2u) % 3u]);
+        let t = f32(canonical >> (d.level - edge_level)) / f32(1u << edge_level);
+        return mix(select(first, second, flipped), select(second, first, flipped), t) / f32(TESS_ONE);
+    }
+    return (c0 + ((vec3<f32>(p.corners[1]) - c0) * (f32(i) / f32(f))) + ((vec3<f32>(p.corners[2]) - c0) * (f32(j) / f32(f)))) / f32(TESS_ONE);
+}
+
+// Barycentrics packed for the main view's raster (tess.wgsl) and the resolve: the second and third
+// as 16-bit fractions.
+fn tess_pack_lambda(l: vec2<f32>) -> u32 {
+    let q = vec2<u32>(round(saturate(l) * 65535.0));
+    return q.x | (q.y << 16u);
+}
+
+fn tess_unpack_lambda(packed: u32) -> vec3<f32> {
+    let l = vec2<f32>(f32(packed & 0xffffu), f32(packed >> 16u)) / 65535.0;
+    return vec3<f32>(1.0 - l.x - l.y, l);
+}
+
 // The grid vertex (i, j) on patch edge e at index k from the edge's first corner e + 1 (the inverse
 // of tess_grid_edge).
 fn tess_edge_grid_vertex(e: u32, k: u32, f: u32) -> vec2<u32> {
@@ -436,10 +466,7 @@ fn tess_grid_morph(p: TessPatch, d: TessDice, i: u32, j: u32) -> TessMorph {
 
 // The displaced object-space position of an undisplaced point of instance `instance`.
 fn tess_displaced(instance: Instance, point: TessPoint) -> vec3<f32> {
-    let normal_matrix = mat3x3<f32>(instance.normal_matrix_0.xyz, instance.normal_matrix_1.xyz, instance.normal_matrix_2.xyz);
-    let input = DisplacementInput(point.object, tess_world(instance, point.object), point.normal, normalize(normal_matrix * point.normal), point.uv);
-    let height = displacement_height(instance.material, instance.max_scale, input);
-    return point.object + (point.normal * displacement_offset(instance.material, height));
+    return displacement_position(instance, displacement_input(instance, point.object, point.normal, point.uv, tess.time.x));
 }
 
 // The final object-space position of a grid vertex from the displaced positions of the vertex

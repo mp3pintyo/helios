@@ -79,6 +79,8 @@ pub struct GpuScene {
     voxels: bool,
     /// Some instance is displaced (the tessellator runs), and the setting its flags were made with.
     displaced: bool,
+    /// Some shadow caster's displacement is animated (its shadow pages refresh every frame).
+    animated_shadows: bool,
     tessellation_uploaded: bool,
     /// Scene versions last uploaded: geometry, materials, instances, textures.
     versions: (u64, u64, u64, u64),
@@ -117,6 +119,7 @@ impl GpuScene {
             wind_shadows: false,
             voxels: false,
             displaced: false,
+            animated_shadows: false,
             tessellation_uploaded: true,
             versions: (u64::MAX, u64::MAX, u64::MAX, u64::MAX),
             displacement_graphs_version: u64::MAX,
@@ -145,6 +148,11 @@ impl GpuScene {
     /// Whether some instance is displaced and tessellated.
     pub fn has_displacement(&self) -> bool {
         self.displaced
+    }
+
+    /// Whether some shadow caster is displaced by a graph that reads the time.
+    pub fn animated_displacement_shadows(&self) -> bool {
+        self.animated_shadows
     }
 
     /// Writes the tessellation uniform's per-frame header.
@@ -355,6 +363,9 @@ impl GpuScene {
         }
         if self.tessellation_enabled && displaced(scene, instance) && flags & (instance_flags::HIDDEN | instance_flags::ALPHA_MASKED) == 0 {
             flags |= instance_flags::DISPLACED;
+            if tessellation::displacement_animated(scene, &scene.materials[instance.material.0 as usize]) {
+                flags |= instance_flags::ANIMATED;
+            }
         }
         GpuInstance {
             world,
@@ -415,6 +426,8 @@ impl GpuScene {
         self.instance_count = count as u32;
         self.wind_shadows = wind_shadows;
         self.displaced = instances.iter().any(|i| i.flags & instance_flags::DISPLACED != 0);
+        let animated_caster = instance_flags::ANIMATED | instance_flags::CAST_SHADOW;
+        self.animated_shadows = instances.iter().any(|i| i.flags & animated_caster == animated_caster);
         self.tessellation_uploaded = self.tessellation_enabled;
         self.records = instances;
     }

@@ -176,6 +176,8 @@ pub struct VsmFrame<'a> {
     /// The wind or skeletal animation moves shadow casters: cached pages under them re-render
     /// these (dynamic) casters as they move.
     pub wind: bool,
+    /// Animated displacement moves shadow casters (`instance_flags::ANIMATED`): likewise.
+    pub animated_displacement: bool,
     /// Shadow casters moved this frame (only the pages under them are re-rendered).
     pub moves: &'a [ShadowMove],
     /// Some instance moved or changed mobility (casters may change layer).
@@ -239,6 +241,8 @@ pub struct VirtualShadowMap {
     residency_changed: bool,
     /// The wind moves shadow casters this frame.
     wind: bool,
+    /// Animated displacement moves shadow casters this frame.
+    animated_displacement: bool,
     /// Instances moved, stopped or changed mobility this frame: their footprints are in the list
     /// already.
     instances_changed: bool,
@@ -479,6 +483,7 @@ impl VirtualShadowMap {
             last_sun: Vec3::ZERO,
             residency_changed: true,
             wind: false,
+            animated_displacement: false,
             instances_changed: false,
             wind_collected: false,
             enabled: false,
@@ -493,6 +498,7 @@ impl VirtualShadowMap {
         self.volume_marking = f.volume_distance > 0.0;
         self.residency_changed |= f.geometry_streamed;
         self.wind = f.wind;
+        self.animated_displacement = f.animated_displacement;
         let sun = f.sun_direction.normalize();
         let up = if sun.y.abs() > 0.99 { Vec3::Z } else { Vec3::Y };
         let light_view = look_to_mat4(Vec3::ZERO, -sun, up);
@@ -671,7 +677,7 @@ impl VirtualShadowMap {
             }
         }
         let residency_changed = std::mem::take(&mut self.residency_changed);
-        if residency_changed || self.wind || self.wind_collected || self.instances_changed {
+        if residency_changed || self.wind || self.wind_collected || self.instances_changed || self.animated_displacement {
             let inputs = InvalidationInputs { uniform: &self.uniform, local: &self.local.uniform, cache: &self.cache, info: &self.info };
             let switched = self.wind != self.wind_collected;
             self.invalidation.record(rec, &inputs, scene, residency_changed, switched, self.instances_changed);
@@ -933,6 +939,7 @@ impl PageInvalidation {
         entries.extend((3..=8).map(|b| (b, bind::storage(false))));
         entries.push(wind_entry());
         entries.push(skin_entry());
+        entries.push(crate::tessellation::tessellation_entry());
         entries.push((60, bind::uniform()));
         let layout = bind_group_layout(device, "vsm invalidate", ShaderStages::COMPUTE, &entries);
         let pipeline = |entry: &str, residency: bool, abrupt: bool| {
@@ -1010,6 +1017,7 @@ impl PageInvalidation {
                 (8, inputs.info.as_entire_binding()),
                 wind_resource(scene),
                 skin_resource(scene),
+                crate::tessellation::tessellation_resource(scene),
                 (60, inputs.local.as_entire_binding()),
             ],
         );
