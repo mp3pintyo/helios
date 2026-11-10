@@ -24,6 +24,12 @@
 //! apart, so the plain pipelines stay exactly as they are. Modules are cached by graph hash and
 //! pipelines by slot, model, graph, permutation and the Substrate switch: editing a graph
 //! compiles one module; changing a parameter compiles nothing.
+//!
+//! Only the shading models the scene's materials use get a pipeline (and a dispatch: the others'
+//! tile lists are empty), each a compile of the 24 KB resolve of 0.6–1.1 s in the browser. In the
+//! browser the pipelines are compiled in the background ([`crate::pipelines`]); the
+//! `TESSELLATION` permutation a scene with displaced surfaces will need is queued while the first
+//! frames still resolve the undisplaced surfaces.
 
 use std::collections::HashMap;
 
@@ -36,7 +42,7 @@ use crate::passes::culling::CullView;
 use crate::profiler::Recorder;
 use crate::rvt::RuntimeVirtualTexture;
 use crate::shader::{create_module, create_module_from, extended_resolve};
-use crate::substrate_gpu::ExtendedMaterials;
+use crate::substrate_gpu::{ExtendedMaterials, ExtendedSlot};
 use crate::svt::StreamingVirtualTexture;
 use crate::targets::FrameTargets;
 use crate::textures::TextureLibrary;
@@ -45,6 +51,7 @@ use crate::water::BINDING_WATER;
 use crate::skin::{skin_entry, skin_resource};
 use crate::tessellation::{tessellation_entry, tessellation_resource};
 use crate::wind::{wind_entry, wind_resource};
+use crate::pipelines::{in_group, Group, Lazy};
 
 /// The merged visibility depth (voxel_resolve.wgsl finds the voxel a pixel hit from it).
 const BINDING_DEPTH: u32 = 91;
@@ -71,16 +78,18 @@ pub struct MaterialPass {
     module: wgpu::ShaderModule,
     layout: wgpu::BindGroupLayout,
     classify_layout: wgpu::BindGroupLayout,
-    classify: wgpu::ComputePipeline,
-    prepare: wgpu::ComputePipeline,
-    /// Resolve pipelines per shading model and permutation ([`permutation`]), compiled when first
+    classify: Lazy<wgpu::ComputePipeline>,
+    prepare: Lazy<wgpu::ComputePipeline>,
+    /// Resolve pipelines by permutation ([`permutation`]) and shading model, created when first
     /// needed.
-    resolve: [Option<Vec<(u32, wgpu::ComputePipeline)>>; 16],
+    resolve: HashMap<(usize, u32), Lazy<wgpu::ComputePipeline>>,
     /// The permutation in use.
     permutation: usize,
+    /// The shading models the scene's materials use (the sky's always), in [`KINDS`] order.
+    kinds: Vec<u32>,
     /// Extended resolve modules by graph hash (0: slab materials without a graph) and pipelines.
     extended_modules: HashMap<u64, wgpu::ShaderModule>,
-    extended_pipelines: HashMap<ExtendedKey, wgpu::ComputePipeline>,
+    extended_pipelines: HashMap<ExtendedKey, Lazy<wgpu::ComputePipeline>>,
     /// The extended pipelines of this frame, by slot.
     extended: Vec<(u32, ExtendedKey)>,
 }
@@ -134,8 +143,9 @@ impl MaterialPass {
                 (BINDING_TESS_LAMBDA, bind::texture_uint()),
             ],
         );
-        let mut resolve: [Option<Vec<(u32, wgpu::ComputePipeline)>>; 16] = Default::default();
-        resolve[0] = Some(resolve_pipelines(device, &module, &layout, 0));
+        // None compiled yet: the first frame's `sync` compiles the permutation the scene needs
+        // (the valley's tessellation one, say, never the plain one) for the models it uses.
+        let resolve = HashMap::new();
         let classify_module = create_module(device, "classify.wgsl");
         let classify_layout = bind_group_layout(
             device,
@@ -158,6 +168,7 @@ impl MaterialPass {
             layout,
             classify_layout,
             permutation: 0,
+            kinds: Vec::new(),
             extended_modules: HashMap::new(),
             extended_pipelines: HashMap::new(),
             extended: Vec::new(),
@@ -166,38 +177,39 @@ impl MaterialPass {
 
     /// Selects the resolve permutation the scene's materials and instances (and a debug view)
     /// need and the extended pipelines of its slab and graph materials (in the same permutation),
-    /// compiling them on first use.
+    /// creating them on first use, for the shading models in `kinds` (bit per model, from
+    /// [`GpuScene::resolve_kinds`]). `tessellation_wanted`: the scene's displaced surfaces will
+    /// be tessellated once the browser has compiled tessellation ([`Group::Tessellation`]); that
+    /// permutation is created (queued) now.
     #[allow(clippy::too_many_arguments)]
-    pub fn sync(&mut self, device: &wgpu::Device, uv_extensions: bool, skinning: bool, tessellation: bool, debug_views: bool, extended: &ExtendedMaterials, substrate: bool) {
+    pub fn sync(
+        &mut self,
+        device: &wgpu::Device,
+        uv_extensions: bool,
+        skinning: bool,
+        tessellation: bool,
+        tessellation_wanted: bool,
+        debug_views: bool,
+        kinds: u32,
+        extended: &ExtendedMaterials,
+        substrate: bool,
+    ) {
         self.permutation = permutation(uv_extensions, skinning, tessellation, debug_views);
-        let slot = &mut self.resolve[self.permutation];
-        if slot.is_none() {
-            *slot = Some(resolve_pipelines(device, &self.module, &self.layout, self.permutation));
-        }
+        self.kinds = KINDS.iter().copied().filter(|&k| k == SKY_SLOT || kinds & (1 << k) != 0).collect();
+        self.create_resolve(device, self.permutation);
         self.extended.clear();
         for s in &extended.slots {
-            let hash = s.graph.as_ref().map_or(0, |g| g.0);
-            let key = (s.slot, s.kind, hash, self.permutation, substrate);
-            if !self.extended_pipelines.contains_key(&key) {
-                let module = self.extended_modules.entry(hash).or_insert_with(|| {
-                    let code = s.graph.as_ref().map(|g| g.1.as_str());
-                    create_module_from(device, if code.is_some() { "graph material resolve" } else { "slab material resolve" }, extended_resolve(code, s.displaces))
-                });
-                let flag = |bit: usize| ((self.permutation >> bit) & 1) as f64;
-                let constants = [
-                    ("MATERIAL_KIND", s.kind as f64),
-                    ("RESOLVE_SLOT", s.slot as f64),
-                    ("UV_EXTENSIONS", flag(0)),
-                    ("SKINNING", flag(1)),
-                    ("TESSELLATION", flag(2)),
-                    ("DEBUG_VIEWS", flag(3)),
-                    ("SUBSTRATE", substrate as u32 as f64),
-                ];
-                let layouts = [&self.layout, &extended.resolve_layout];
-                let pipeline = compute_pipeline_with(device, "extended material resolve", module, "resolve", &layouts, &constants);
-                self.extended_pipelines.insert(key, pipeline);
-            }
+            let key = self.create_extended(device, extended, s, self.permutation, substrate);
             self.extended.push((s.slot, key));
+        }
+        if tessellation_wanted && !tessellation {
+            let wanted = permutation(uv_extensions, skinning, true, debug_views);
+            in_group(Group::Tessellation, || {
+                self.create_resolve(device, wanted);
+                for s in &extended.slots {
+                    self.create_extended(device, extended, s, wanted, substrate);
+                }
+            });
         }
     }
 
@@ -278,9 +290,9 @@ impl MaterialPass {
         pass.dispatch_workgroups(1, 1, 1);
         pass.set_bind_group(0, &group, &[]);
         let args = |slot: u32| (TILE_ARGS + slot as u64 * 4) * 4;
-        for (kind, pipeline) in self.resolve[self.permutation].iter().flatten() {
-            pass.set_pipeline(pipeline);
-            pass.dispatch_workgroups_indirect(&targets.material_tiles, args(*kind));
+        for &kind in &self.kinds {
+            pass.set_pipeline(&self.resolve[&(self.permutation, kind)]);
+            pass.dispatch_workgroups_indirect(&targets.material_tiles, args(kind));
         }
         if let Some(group) = extended {
             pass.set_bind_group(1, group, &[]);
@@ -292,14 +304,41 @@ impl MaterialPass {
     }
 }
 
-/// One resolve pipeline per shading model.
-fn resolve_pipelines(device: &wgpu::Device, module: &wgpu::ShaderModule, layout: &wgpu::BindGroupLayout, permutation: usize) -> Vec<(u32, wgpu::ComputePipeline)> {
-    KINDS
-        .iter()
-        .map(|&kind| {
+impl MaterialPass {
+    /// Creates the extended pipeline of slot `s` in `permutation` (if new); returns its key.
+    fn create_extended(&mut self, device: &wgpu::Device, extended: &ExtendedMaterials, s: &ExtendedSlot, permutation: usize, substrate: bool) -> ExtendedKey {
+        let hash = s.graph.as_ref().map_or(0, |g| g.0);
+        let key = (s.slot, s.kind, hash, permutation, substrate);
+        if !self.extended_pipelines.contains_key(&key) {
+            let module = self.extended_modules.entry(hash).or_insert_with(|| {
+                let code = s.graph.as_ref().map(|g| g.1.as_str());
+                create_module_from(device, if code.is_some() { "graph material resolve" } else { "slab material resolve" }, extended_resolve(code, s.displaces))
+            });
             let flag = |bit: usize| ((permutation >> bit) & 1) as f64;
-            let constants = [("MATERIAL_KIND", kind as f64), ("RESOLVE_SLOT", kind as f64), ("UV_EXTENSIONS", flag(0)), ("SKINNING", flag(1)), ("TESSELLATION", flag(2)), ("DEBUG_VIEWS", flag(3))];
-            (kind, compute_pipeline(device, "material resolve", module, "resolve", layout, &constants))
-        })
-        .collect()
+            let constants = [
+                ("MATERIAL_KIND", s.kind as f64),
+                ("RESOLVE_SLOT", s.slot as f64),
+                ("UV_EXTENSIONS", flag(0)),
+                ("SKINNING", flag(1)),
+                ("TESSELLATION", flag(2)),
+                ("DEBUG_VIEWS", flag(3)),
+                ("SUBSTRATE", substrate as u32 as f64),
+            ];
+            let layouts = [&self.layout, &extended.resolve_layout];
+            let pipeline = compute_pipeline_with(device, "extended material resolve", module, "resolve", &layouts, &constants);
+            self.extended_pipelines.insert(key, pipeline);
+        }
+        key
+    }
+
+    /// Creates the resolve pipelines of `permutation` for the scene's shading models.
+    fn create_resolve(&mut self, device: &wgpu::Device, permutation: usize) {
+        for &kind in &self.kinds {
+            self.resolve.entry((permutation, kind)).or_insert_with(|| {
+                let flag = |bit: usize| ((permutation >> bit) & 1) as f64;
+                let constants = [("MATERIAL_KIND", kind as f64), ("RESOLVE_SLOT", kind as f64), ("UV_EXTENSIONS", flag(0)), ("SKINNING", flag(1)), ("TESSELLATION", flag(2)), ("DEBUG_VIEWS", flag(3))];
+                compute_pipeline(device, "material resolve", &self.module, "resolve", &self.layout, &constants)
+            });
+        }
+    }
 }

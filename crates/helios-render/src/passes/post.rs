@@ -8,6 +8,7 @@ use crate::profiler::Recorder;
 use crate::shader::create_module;
 use crate::targets::FrameTargets;
 use crate::util::{self, bind, bind_group, bind_group_layout, compute_pipeline, storage_buffer, workgroups};
+use crate::pipelines::Lazy;
 
 const C: ShaderStages = ShaderStages::COMPUTE;
 const HDR: TextureFormat = TextureFormat::Rgba16Float;
@@ -15,7 +16,7 @@ const HDR: TextureFormat = TextureFormat::Rgba16Float;
 // ---- Eye adaptation -----------------------------------------------------------------------------
 
 pub struct ExposurePass {
-    pipeline: wgpu::ComputePipeline,
+    pipeline: Lazy<wgpu::ComputePipeline>,
     layout: wgpu::BindGroupLayout,
     /// [exposure, average luminance, -, -]
     pub buffer: wgpu::Buffer,
@@ -66,9 +67,9 @@ impl ExposurePass {
 // ---- Bloom -------------------------------------------------------------------------------------
 
 pub struct BloomPass {
-    downsample_first: wgpu::ComputePipeline,
-    downsample: wgpu::ComputePipeline,
-    upsample: wgpu::ComputePipeline,
+    downsample_first: Lazy<wgpu::ComputePipeline>,
+    downsample: Lazy<wgpu::ComputePipeline>,
+    upsample: Lazy<wgpu::ComputePipeline>,
     down_layout: wgpu::BindGroupLayout,
     up_layout: wgpu::BindGroupLayout,
 }
@@ -151,7 +152,7 @@ impl BloomPass {
 // ---- Tone mapping ------------------------------------------------------------------------------
 
 pub struct TonemapPass {
-    pipeline: wgpu::RenderPipeline,
+    pipeline: Lazy<wgpu::RenderPipeline>,
     layout: wgpu::BindGroupLayout,
 }
 
@@ -170,29 +171,34 @@ impl TonemapPass {
                 (4, bind::storage(true)),
             ],
         );
-        let pipeline_layout = util::pipeline_layout(device, "tonemap", &[&layout]);
-        let constants = [("OUTPUT_SRGB", if output_format.is_srgb() { 1.0 } else { 0.0 })];
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("tonemap"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &module,
-                entry_point: Some("vs_main"),
-                compilation_options: Default::default(),
-                buffers: &[],
-            },
-            primitive: Default::default(),
-            depth_stencil: None,
-            multisample: Default::default(),
-            fragment: Some(wgpu::FragmentState {
-                module: &module,
-                entry_point: Some("fs_main"),
-                compilation_options: wgpu::PipelineCompilationOptions { constants: &constants, ..Default::default() },
-                targets: &[Some(wgpu::ColorTargetState { format: output_format, blend: None, write_mask: wgpu::ColorWrites::ALL })],
-            }),
-            multiview_mask: None,
-            cache: None,
-        });
+        let pipeline = {
+            let (device, module, layout) = (device.clone(), module.clone(), layout.clone());
+            Lazy::background(move || {
+                let pipeline_layout = util::pipeline_layout(&device, "tonemap", &[&layout]);
+                let constants = [("OUTPUT_SRGB", if output_format.is_srgb() { 1.0 } else { 0.0 })];
+                device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some("tonemap"),
+                    layout: Some(&pipeline_layout),
+                    vertex: wgpu::VertexState {
+                        module: &module,
+                        entry_point: Some("vs_main"),
+                        compilation_options: Default::default(),
+                        buffers: &[],
+                    },
+                    primitive: Default::default(),
+                    depth_stencil: None,
+                    multisample: Default::default(),
+                    fragment: Some(wgpu::FragmentState {
+                        module: &module,
+                        entry_point: Some("fs_main"),
+                        compilation_options: wgpu::PipelineCompilationOptions { constants: &constants, ..Default::default() },
+                        targets: &[Some(wgpu::ColorTargetState { format: output_format, blend: None, write_mask: wgpu::ColorWrites::ALL })],
+                    }),
+                    multiview_mask: None,
+                    cache: None,
+                })
+            })
+        };
         Self { pipeline, layout }
     }
 

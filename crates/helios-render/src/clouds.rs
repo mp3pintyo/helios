@@ -16,6 +16,7 @@ use crate::util::{
     bind, bind_group, bind_group_layout, compute_pipeline, texture, uniform_buffer, workgroups,
     TextureSpec,
 };
+use crate::pipelines::Lazy;
 
 const SHAPE_SIZE: u32 = 128;
 const DETAIL_SIZE: u32 = 32;
@@ -99,11 +100,11 @@ pub struct Clouds {
     targets: Option<Targets>,
     /// Texels of the targets this frame's internal resolution covers.
     extent: (u32, u32),
-    build_shape: wgpu::ComputePipeline,
-    build_detail: wgpu::ComputePipeline,
-    march: wgpu::ComputePipeline,
-    temporal: wgpu::ComputePipeline,
-    shadow_pipeline: wgpu::ComputePipeline,
+    build_shape: Lazy<wgpu::ComputePipeline>,
+    build_detail: Lazy<wgpu::ComputePipeline>,
+    march: Lazy<wgpu::ComputePipeline>,
+    temporal: Lazy<wgpu::ComputePipeline>,
+    shadow_pipeline: Lazy<wgpu::ComputePipeline>,
     layouts: Layouts,
 }
 

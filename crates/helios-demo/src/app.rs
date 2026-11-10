@@ -95,8 +95,14 @@ impl DemoApp {
         config: RendererConfig,
         model: Option<Model>,
     ) -> Self {
+        Self::build(Renderer::with_config(device, queue, format, width, height, config), kind, detail, model)
+    }
+
+    /// Builds the scene for a renderer made beforehand (the browser creates the renderer first,
+    /// so its GPU process compiles shaders while the scene bakes).
+    pub fn build(renderer: Renderer, kind: SceneKind, detail: Detail, model: Option<Model>) -> Self {
         let setup = scenes::build(kind, detail, model.as_ref());
-        Self::from_setup(Renderer::with_config(device, queue, format, width, height, config), setup, kind, detail, model)
+        Self::from_setup(renderer, setup, kind, detail, model)
     }
 
     /// Builds the library's scene with its pre-baked meshes, streaming their pages on demand.
@@ -108,9 +114,14 @@ impl DemoApp {
         library: Library,
         config: RendererConfig,
     ) -> Self {
+        Self::build_from_library(Renderer::with_config(device, queue, format, width, height, config), library)
+    }
+
+    /// [`DemoApp::from_library`] for a renderer made beforehand.
+    pub fn build_from_library(renderer: Renderer, library: Library) -> Self {
         let (kind, detail) = (library.manifest.scene, library.manifest.detail);
         let (setup, _) = scenes::build_with(kind, detail, None, MeshStore::Stream(library));
-        Self::from_setup(Renderer::with_config(device, queue, format, width, height, config), setup, kind, detail, None)
+        Self::from_setup(renderer, setup, kind, detail, None)
     }
 
     fn from_setup(renderer: Renderer, setup: SceneSetup, kind: SceneKind, detail: Detail, model: Option<Model>) -> Self {
@@ -443,9 +454,10 @@ impl DemoApp {
             on(s.substrate),
         );
         text.push_str(&format!(
-            "\nshadow pages: {}/{} in use, {} rendered ({} dynamic casters only, {} split; {}/{} draws), {} unallocated · local lights with shadow maps: {} ({} moving, cached)",
+            "\nshadow pages: {}/{} in use, {} requested, {} rendered ({} dynamic casters only, {} split; {}/{} draws), {} unallocated · local lights with shadow maps: {} ({} moving, cached)",
             st.shadow_pages,
             st.shadow_page_capacity,
+            st.shadow_pages_requested,
             st.shadow_dirty_pages,
             st.shadow_dynamic_pages,
             st.shadow_split_pages,
@@ -455,10 +467,17 @@ impl DemoApp {
             self.renderer.shadow_mapped_lights(),
             self.renderer.shadow_held_lights(),
         ));
+        let pool = self.renderer.local_pool_stats();
+        if pool.requested > 0 {
+            text.push_str(&format!(
+                "\nlocal lights' shadow pages: {} of {} requested resident · maps without a resident page: {} · pool resolution bias {:.2} mips",
+                pool.resident, pool.requested, pool.starved, pool.bias
+            ));
+        }
         let moving = self.renderer.moving_light_stats();
         if moving.anchors.mapped + moving.anchors.fields > 0 {
             text.push_str(&format!(
-                "\nmoving lights: {} with shadow maps ({} at a coarser tolerance), {} on distance fields · {} faces re-anchored ({:.0} pages; held maps need {:.1} of {:.0} pages a frame) · local pages rendered in full: {} ({} of moving lights)",
+                "\nmoving lights: {} with shadow maps ({} at a coarser tolerance), {} on distance fields · {} faces re-anchored ({:.0} pages; held maps need {:.1} of {:.0} pages a frame) · local pages rendered in full: {} ({} of moving lights) · moving lights' pages rendered: {} (dynamic casters only: {})",
                 moving.anchors.mapped,
                 moving.anchors.relaxed,
                 moving.anchors.fields,
@@ -468,6 +487,8 @@ impl DemoApp {
                 s.moving_light_pages,
                 moving.full_pages,
                 moving.moving_full_pages,
+                moving.moving_pages,
+                moving.moving_pages.saturating_sub(moving.moving_full_pages),
             ));
         }
         if self.motion.instance_count() > 0 {

@@ -70,6 +70,8 @@ p { margin: 0; max-width: 64ch; }
 .hint { position: absolute; left: 10px; bottom: 10px; font: 12px/1.4 var(--mono); color: var(--muted); background: rgba(5,7,11,0.6); padding: 5px 8px; border-radius: 6px; pointer-events: none; }
 .live-badge { position: absolute; right: 10px; top: 10px; font: 500 11px/1 var(--mono); letter-spacing: 0.12em; color: var(--ink); background: var(--sun); padding: 5px 7px; border-radius: 4px; }
 .live-badge.off { background: var(--line); color: var(--muted); }
+.shader-note { position: absolute; left: 10px; top: 10px; max-width: calc(100% - 90px); font: 12px/1.4 var(--mono); color: var(--muted); background: rgba(5,7,11,0.6); padding: 5px 8px; border-radius: 6px; pointer-events: none; }
+.shader-note[hidden] { display: none; }
 
 /* Telemetry under the viewport */
 .telemetry { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
@@ -750,6 +752,7 @@ footer .wide-inner { gap: 10px; }
       <canvas id="helios-canvas" tabindex="0" aria-label="Helios élő renderelés"></canvas>
       <div class="veil" id="veil"><div><div class="spin"></div><span id="status" data-en="Starting the engine…">A motor indul…</span><span id="engine-status" hidden></span></div></div>
       <span class="live-badge off" id="badge">LIVE</span>
+      <span class="shader-note" id="shader-note" hidden></span>
       <span class="hint" id="hint" data-en="click · WASD/QE · drag">kattintás · WASD/QE · húzás</span>
     </div>
     <div class="telemetry">
@@ -825,6 +828,10 @@ footer .wide-inner { gap: 10px; }
       <article class="story"><span class="round-tag" data-en="Round 4 · bisect">4. kör · felezéses keresés</span><h3 data-en="A debug view every pixel paid for">Egy debug nézet, amit minden pixel megfizetett</h3><p data-en="After the merges every scene's material pass got slower, though no feature had changed it. Bisecting merge by merge led to one new case in the resolve's debug-view switch: it kept many values alive through the whole material evaluation. The debug colouring now lives in a separate shader variant that only runs while a debug view is on.">Az összefésülések után minden jelenet anyagmenete lassabb lett, pedig egyik funkció sem nyúlt hozzá. Az összefésülésenkénti felezéses keresés (bisect) egyetlen új ágig vezetett a feloldó debugnézet-switch-ében: sok értéket életben tartott a teljes anyagkiértékelésen át. A debug színezés most külön shaderváltozatban él, amely csak bekapcsolt debug nézetnél fut.</p><div class="delta" data-en="material pass 1.01 → 0.73 ms (cathedral, 1440p)">anyagmenet 1,01 → 0,73 ms (katedrális, 1440p)</div></article>
       <article class="story"><span class="round-tag" data-en="Round 4 · bisect">4. kör · felezéses keresés</span><h3 data-en="A chandelier the size of a house">Egy ház méretű csillár</h3><p data-en="A swinging chandelier is a 2.8 m ring on a 12 m chain, so its moving bounds were a sphere of 6.3 m, and every candle light around it redrew 820 shadow pages a frame. The bounds are now cut into slices along the chain, each refreshed only once it may have moved two texels.">A lengő csillár egy 2,8 m-es gyűrű 12 m-es láncon, így a mozgó befoglalója 6,3 m-es gömb lett, és körülötte minden gyertyafény képkockánként 820 árnyéklapot rajzolt újra. A befoglaló most a lánc mentén szeletekre bomlik, és mindegyik szelet csak akkor frissül, ha már két texelnyit elmozdulhatott.</p><div class="delta" data-en="822 → 25 pages per frame · 0.68 → 0.23 ms">822 → 25 lap képkockánként · 0,68 → 0,23 ms</div></article>
       <article class="story"><span class="round-tag" data-en="Round 6">6. kör</span><h3 data-en="Six lanes out of sixty-four">Hat sáv a hatvannégyből</h3><p data-en="The forest's culling cost 0.75 ms more than it should, and round 5 found no cause. Timestamps around every stage showed it: a needle spray of 17 clusters on 6 pages kept 6 of a workgroup's 64 lanes busy, in the early and the late pass, and each of the 14 views tested the same tree 176 times. One record per tree and cluster candidates for small pages fill the lanes again.">Az erdő láthatósági vágása 0,75 ms-mal többe került a kelleténél, és az 5. kör nem találta az okát. Az egyes fázisok köré tett időbélyegek megmutatták: egy 6 lapon elférő, 17 klaszteres tűlevélág egy munkacsoport 64 sávjából csak 6-ot foglalt le, a korai és a késői menetben is, a 14 nézet pedig mindegyike 176-szor tesztelte ugyanazt a fát. A fánkénti egy rekord és a kis lapok klaszterjelöltjei újra megtöltik a sávokat.</p><div class="delta" data-en="1.19 → 0.56 ms culling · image unchanged">1,19 → 0,56 ms vágás · a kép változatlan</div></article>
+      <article class="story"><span class="round-tag" data-en="Round 6 · Firefox">6. kör · Firefox</span><h3 data-en="The browser that stopped">A böngésző, amely megállt</h3><p data-en="In Firefox nothing moved for 40–57 seconds after opening the page, as if the whole browser had frozen. The engine asked for about 200 shaders at start, Firefox compiles them one at a time, and the first image waited at the end of the queue. Now only the first image's ~50 shaders compile up front, the rest arrive in the background and the features switch on one by one; the progress shows on the image.">Firefoxban az oldal megnyitása után 40–57 másodpercig semmi sem mozdult, mintha az egész böngésző lefagyott volna. A motor induláskor kb. 200 shadert fordíttatott, a Firefox ezeket egyenként fordítja, és az első kép a sor végén várt. Most előre csak az első kép kb. 50 shadere fordul le, a többi a háttérben érkezik, és a funkciók egyenként kapcsolnak be; a fordítás állása a képen látszik.</p><div class="delta" data-en="first image: Firefox 45–50 → 11–15 s · Chromium 31–41 → 9–10 s">első kép: Firefox 45–50 → 11–15 s · Chromium 31–41 → 9–10 s</div></article>
+      <article class="story"><span class="round-tag" data-en="Round 6">6. kör</span><h3 data-en="Baking on the render thread">Sütés a megjelenítő szálon</h3><p data-en="At load the browser baked the displaced surfaces' Lumen variants on the render thread, and single frames took almost a second. Now Web Workers bake them; when a worker does not answer, a watchdog hands its task back to the main thread, so no variant goes missing.">Betöltéskor az elmozdított felületek Lumen-változatait a böngésző a megjelenítő szálon sütötte, és egy-egy képkocka majdnem egy másodpercig tartott. Most Web Workerek sütnek; ha egy worker nem válaszol, egy őrfolyamat a feladatát visszaadja a főszálnak, így egyetlen változat sem marad ki.</p><div class="delta" data-en="worst frame 718–920 → 6–31 ms">legrosszabb képkocka 718–920 → 6–31 ms</div></article>
+      <article class="story"><span class="round-tag" data-en="Round 6">6. kör</span><h3 data-en="Green light from red mushrooms">Piros gombák zöld fénye</h3><p data-en="The mushroom bed's red bounced back green, because Lumen's cards carried each material's average colour, and the moss dominated it. The cards now capture colour per texel, their filtering respects depth so the caps' light does not bleed onto the ground, and the voxel cache gets the captured colour too.">A gombaágyás vöröse zölden verődött vissza, mert a Lumen-kártyák az anyag átlagszínét hordozták, abban pedig a moha dominált. A kártyák most texelenként rögzítik a színt, a szűrésük figyeli a mélységet, így a kalapok fénye nem szivárog át a talajra, és a voxeles gyorsítótár is a rögzített színt kapja.</p><div class="delta" data-en="red/green ratio of the bounced light 0.800 → 0.870">vörös/zöld arány a visszavert fényben 0,800 → 0,870</div></article>
+      <article class="story"><span class="round-tag" data-en="Round 6">6. kör</span><h3 data-en="Six candles without shadows">Hat gyertya árnyék nélkül</h3><p data-en="In the 300-candle cathedral the moving candles redrew more shadow pages than they should, and the full page pool was handed out in queue order: the six candles nearest the camera got no page at all. Now moving lights claim slots by what their maps cost, a full pool serves requests by importance, and fainter lights' resolution adapts to the load, as with UE's VSM dynamic resolution.">A 300 gyertyás katedrálisban a mozgó gyertyák több árnyéklapot rajzoltak újra, mint kellett volna, és a betelt lapkészletet sorrendben osztották ki: a kamerához legközelebbi hat gyertya egyetlen lapot sem kapott. Most a mozgó fények annyi helyet igényelnek, amennyibe a térképük kerül, telített készletnél a kérések fontosság szerint kapnak lapot, és a halványabb fények felbontása a terheléshez igazodik, mint az UE VSM dinamikus felbontásánál.</p><div class="delta" data-en="16.0 → 14.7 ms · lights without a page 6 → 0">16,0 → 14,7 ms · lap nélküli fények 6 → 0</div></article>
     </div>
   </div>
 </section>
@@ -853,8 +860,9 @@ footer .wide-inner { gap: 10px; }
     <div class="eyebrow" data-en="Honest limits">Őszinte korlátok</div>
     <h2 data-en="What Unreal still does better">Amit az Unreal még jobban csinál</h2>
     <ul class="limits">
-      <li data-en="<b>Lumen cards</b> are axis-aligned and carry each material's average colour, not its texture.">A <b>Lumen-kártyák</b> tengelyhez igazítottak, és az anyag átlagszínét hordozzák, nem a textúráját.</li>
-      <li data-en="<b>Shadow pages</b> share a 1024-page pool, a quarter of UE's default.">Az <b>árnyéklapok</b> egy közös, 1024 lapos készletből jönnek, ami az UE alapértékének negyede.</li>
+      <li data-en="<b>Lumen cards</b> are axis-aligned; they carry the texture's colour, but the voxel cache gets one average colour per instance and material.">A <b>Lumen-kártyák</b> tengelyhez igazítottak; a textúra színét hordozzák, de a voxeles gyorsítótár példányonként és anyagonként csak egy átlagszínt kap.</li>
+      <li data-en="<b>Shadow pages</b> share a 1024-page pool, a quarter of UE's default: with hundreds of shadowed lights the fainter ones get coarser pages.">Az <b>árnyéklapok</b> egy közös, 1024 lapos készletből jönnek, ami az UE alapértékének negyede: több száz árnyékoló fénynél a halványabbak durvább lapokat kapnak.</li>
+      <li data-en="<b>The first visit</b> compiles the shaders in the browser: the first image takes about 10 s, and in Firefox full quality arrives after 35–50 s.">Az <b>első látogatáskor</b> a böngésző fordítja a shadereket: az első kép kb. 10 s, Firefoxban a teljes minőség 35–50 s múlva érkezik.</li>
       <li data-en="<b>Water</b> is a flat sheet with per-pixel waves; under water there are no light shafts.">A <b>víz</b> lapos felület pixelenkénti hullámokkal; víz alatt nincsenek fénynyalábok.</li>
       <li data-en="<b>Mobile GPUs</b> get uncompressed texture tiles: there is no ASTC or ETC2 encoder yet.">A <b>mobil GPU-k</b> tömörítetlen textúracsempéket kapnak: ASTC- és ETC2-kódoló még nincs.</li>
       <li data-en="<b>Translucency</b> is exact up to four layers; particles are blended order-independently, which only approximates the order of layers at similar depths.">Az <b>átlátszóság</b> négy rétegig pontos; a részecskék sorrendfüggetlen keverése a hasonló mélységű rétegek sorrendjét csak közelíti.</li>
@@ -937,8 +945,12 @@ async function startEngine() {
     for (let i = 0; i < 600 && !m.heliosScene(); i++) await new Promise((r) => setTimeout(r, 100));
     if (!m.heliosScene()) throw new Error($("#engine-status").textContent || "timeout");
     engine = m;
+    // The browser compiles the shaders of the first image (a few seconds; the rest of the
+    // shaders follow in the background while the scene already runs).
+    await waitForShaders(true);
     poster.hidden = true;
     veil.hidden = true;
+    watchShaders();
     badge.classList.remove("off");
     setSun(Number($("#sun").value));
     observeVisibility();
@@ -946,6 +958,46 @@ async function startEngine() {
   } catch (e) {
     showVeil(t("A motor nem indult el: ", "The engine did not start: ") + (e && e.message ? e.message : e), false);
   }
+}
+
+// Shows the engine's shader compile on the veil (`heliosBusy`, e.g. "Compiling GPU shaders… 4 s
+// (31 / 52)") until a frame is on the canvas (`first`) or the engine stops waiting.
+async function waitForShaders(first) {
+  if (!engine.heliosFrames) return;
+  for (;;) {
+    const busy = engine.heliosBusy();
+    if (first ? engine.heliosFrames() > 0 : !busy) return;
+    if (busy) {
+      const n = /(\d+) s(?: \((\d+) \/ (\d+)\))?/.exec(busy);
+      const count = n && n[2] ? ` ${n[2]}/${n[3]}` : "";
+      showVeil(t(`GPU-shaderek fordítása a böngészőben…${count}`, `Compiling GPU shaders in the browser…${count}`) + (n ? ` · ${n[1]} s` : ""));
+    }
+    await new Promise((r) => setTimeout(r, 250));
+  }
+}
+
+// While the rest of the shaders compile in the background, a note says which features are still
+// coming (they switch on one by one).
+const FEATURE_NAMES = {
+  "shadows": "árnyékok", "clouds": "felhők", "fog": "köd", "global illumination": "globális megvilágítás",
+  "translucency": "áttetszőség", "camera effects": "kamera-effektek", "tessellation": "tesszeláció",
+  "occlusion culling": "takarási szűrés", "volumes and particles": "térfogatok és részecskék",
+};
+function watchShaders() {
+  if (!engine.heliosShaders) return;
+  const note = $("#shader-note");
+  const timer = setInterval(() => {
+    const s = JSON.parse(engine.heliosShaders());
+    if (s.compiled >= s.total) {
+      note.hidden = true;
+      clearInterval(timer);
+      return;
+    }
+    const features = s.waiting.map((w) => t(FEATURE_NAMES[w] || w, w)).join(", ");
+    note.textContent = t(`Teljes minőség töltődik: ${s.compiled}/${s.total} shader · még: ${features}`,
+                         `Full quality loading: ${s.compiled}/${s.total} shaders · still to come: ${features}`);
+    note.hidden = false;
+  }, 500);
 }
 
 function setSun(deg) {
@@ -982,6 +1034,8 @@ async function loadScene(name, candleLights, lanternOn) {
   }
   engine.heliosLoadScene(name);
   await nextFrames();
+  // A new scene may need shaders the last one did not (its materials, say).
+  await waitForShaders(false);
   veil.hidden = true;
   busy = false;
   return true;

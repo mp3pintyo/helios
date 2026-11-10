@@ -1,5 +1,6 @@
 //! Small, explicit helpers that keep pass code focused on *what* it binds, not boilerplate.
 
+pub use crate::pipelines::{Lazy, MakeFn};
 use wgpu::{
     BindGroupLayoutEntry, BindingType, BufferBindingType, SamplerBindingType, ShaderStages,
     StorageTextureAccess, TextureFormat, TextureSampleType, TextureViewDimension,
@@ -114,6 +115,8 @@ pub fn pipeline_layout(device: &wgpu::Device, label: &str, layouts: &[&wgpu::Bin
     })
 }
 
+/// A compute pipeline over one bind group, made in the background in the browser (see
+/// [`crate::pipelines`]): compiled with the rest of its [`crate::pipelines::Group`].
 pub fn compute_pipeline(
     device: &wgpu::Device,
     label: &str,
@@ -121,11 +124,12 @@ pub fn compute_pipeline(
     entry_point: &str,
     layout: &wgpu::BindGroupLayout,
     constants: &[(&str, f64)],
-) -> wgpu::ComputePipeline {
+) -> Lazy<wgpu::ComputePipeline> {
     compute_pipeline_with(device, label, module, entry_point, &[layout], constants)
 }
 
-/// A compute pipeline over several bind groups (group `i` = `layouts[i]`).
+/// A compute pipeline over several bind groups (group `i` = `layouts[i]`), made in the
+/// background in the browser.
 pub fn compute_pipeline_with(
     device: &wgpu::Device,
     label: &str,
@@ -133,19 +137,50 @@ pub fn compute_pipeline_with(
     entry_point: &str,
     layouts: &[&wgpu::BindGroupLayout],
     constants: &[(&str, f64)],
-) -> wgpu::ComputePipeline {
-    let layout = pipeline_layout(device, label, layouts);
-    device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-        label: Some(label),
-        layout: Some(&layout),
-        module,
-        entry_point: Some(entry_point),
-        compilation_options: wgpu::PipelineCompilationOptions {
-            constants,
-            zero_initialize_workgroup_memory: true,
-        },
-        cache: None,
-    })
+) -> Lazy<wgpu::ComputePipeline> {
+    Lazy::background(compute_pipeline_maker(device, label, module, entry_point, layouts, constants))
+}
+
+/// [`compute_pipeline`], compiled when a frame first uses it (or once the scene is known to need
+/// it: [`Lazy::prefetch`]).
+pub fn lazy_compute_pipeline(
+    device: &wgpu::Device,
+    label: &str,
+    module: &wgpu::ShaderModule,
+    entry_point: &str,
+    layout: &wgpu::BindGroupLayout,
+    constants: &[(&str, f64)],
+) -> Lazy<wgpu::ComputePipeline> {
+    Lazy::new(compute_pipeline_maker(device, label, module, entry_point, &[layout], constants))
+}
+
+/// The constructor of a compute pipeline: owns what the descriptor refers to, so it can run
+/// later (and twice in the browser: once to warm the compile, once to make the pipeline).
+fn compute_pipeline_maker(
+    device: &wgpu::Device,
+    label: &str,
+    module: &wgpu::ShaderModule,
+    entry_point: &str,
+    layouts: &[&wgpu::BindGroupLayout],
+    constants: &[(&str, f64)],
+) -> impl MakeFn<wgpu::ComputePipeline> {
+    let (device, module) = (device.clone(), module.clone());
+    let layouts: Vec<wgpu::BindGroupLayout> = layouts.iter().map(|&l| l.clone()).collect();
+    let (label, entry_point) = (label.to_string(), entry_point.to_string());
+    let constants: Vec<(String, f64)> = constants.iter().map(|&(name, value)| (name.to_string(), value)).collect();
+    move || {
+        let constants: Vec<(&str, f64)> = constants.iter().map(|(name, value)| (name.as_str(), *value)).collect();
+        let layouts: Vec<&wgpu::BindGroupLayout> = layouts.iter().collect();
+        let layout = pipeline_layout(&device, &label, &layouts);
+        device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some(&label),
+            layout: Some(&layout),
+            module: &module,
+            entry_point: Some(&entry_point),
+            compilation_options: wgpu::PipelineCompilationOptions { constants: &constants, zero_initialize_workgroup_memory: true },
+            cache: None,
+        })
+    }
 }
 
 pub struct TextureSpec<'a> {

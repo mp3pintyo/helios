@@ -20,7 +20,8 @@ use crate::profiler::Recorder;
 use crate::scene::InstanceHandle;
 use crate::shader::create_module;
 use crate::targets::FrameTargets;
-use crate::util::{bind, bind_group, bind_group_layout, compute_pipeline, storage_buffer, uniform_buffer};
+use crate::util::{bind, bind_group, bind_group_layout, lazy_compute_pipeline, storage_buffer, uniform_buffer};
+use crate::pipelines::Lazy;
 
 const RESULT_BYTES: u64 = 48;
 const IDLE: u32 = 0;
@@ -41,7 +42,7 @@ pub struct PickResult {
 }
 
 pub struct Picker {
-    pipeline: wgpu::ComputePipeline,
+    pipeline: Lazy<wgpu::ComputePipeline>,
     layout: wgpu::BindGroupLayout,
     request_uniform: wgpu::Buffer,
     output: wgpu::Buffer,
@@ -74,7 +75,7 @@ impl Picker {
             ],
         );
         Self {
-            pipeline: compute_pipeline(device, "pick", &module, "pick", &layout, &[]),
+            pipeline: lazy_compute_pipeline(device, "pick", &module, "pick", &layout, &[]),
             layout,
             request_uniform: uniform_buffer(device, "pick request", 16),
             output: storage_buffer(device, "pick result", RESULT_BYTES, wgpu::BufferUsages::COPY_SRC),

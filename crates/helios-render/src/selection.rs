@@ -11,10 +11,11 @@ use crate::profiler::Recorder;
 use crate::scene::InstanceHandle;
 use crate::shader::create_module;
 use crate::targets::FrameTargets;
-use crate::util::{self, bind, bind_group, bind_group_layout, storage_buffer};
+use crate::util::{self, bind, bind_group, bind_group_layout, storage_buffer, Lazy};
 
 pub struct SelectionOutline {
-    pipeline: wgpu::RenderPipeline,
+    /// Compiled when something is first selected (an editor tool: no compile for the viewer).
+    pipeline: Lazy<wgpu::RenderPipeline>,
     layout: wgpu::BindGroupLayout,
     bits: wgpu::Buffer,
     /// The selection to upload (`None`: uploaded).
@@ -31,28 +32,10 @@ impl SelectionOutline {
             ShaderStages::FRAGMENT,
             &[(0, bind::uniform()), (1, bind::texture_uint()), (2, bind::storage(true)), (3, bind::storage(true)), (4, bind::storage(true))],
         );
-        let pipeline_layout = util::pipeline_layout(device, "selection outline", &[&layout]);
-        let constants = [("OUTPUT_SRGB", if output_format.is_srgb() { 1.0 } else { 0.0 })];
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("selection outline"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState { module: &module, entry_point: Some("vs_main"), compilation_options: Default::default(), buffers: &[] },
-            primitive: Default::default(),
-            depth_stencil: None,
-            multisample: Default::default(),
-            fragment: Some(wgpu::FragmentState {
-                module: &module,
-                entry_point: Some("fs_main"),
-                compilation_options: wgpu::PipelineCompilationOptions { constants: &constants, ..Default::default() },
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: output_format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            multiview_mask: None,
-            cache: None,
-        });
+        let pipeline = {
+            let (device, module, layout) = (device.clone(), module.clone(), layout.clone());
+            Lazy::new(move || outline_pipeline(&device, &module, &layout, output_format))
+        };
         Self { pipeline, layout, bits: storage_buffer(device, "selection", 16, wgpu::BufferUsages::empty()), changed: None, count: 0 }
     }
 
@@ -119,4 +102,29 @@ impl SelectionOutline {
         pass.set_bind_group(0, &group, &[]);
         pass.draw(0..3, 0..1);
     }
+}
+
+fn outline_pipeline(device: &wgpu::Device, module: &wgpu::ShaderModule, layout: &wgpu::BindGroupLayout, output_format: TextureFormat) -> wgpu::RenderPipeline {
+    let pipeline_layout = util::pipeline_layout(device, "selection outline", &[layout]);
+    let constants = [("OUTPUT_SRGB", if output_format.is_srgb() { 1.0 } else { 0.0 })];
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("selection outline"),
+        layout: Some(&pipeline_layout),
+        vertex: wgpu::VertexState { module, entry_point: Some("vs_main"), compilation_options: Default::default(), buffers: &[] },
+        primitive: Default::default(),
+        depth_stencil: None,
+        multisample: Default::default(),
+        fragment: Some(wgpu::FragmentState {
+            module,
+            entry_point: Some("fs_main"),
+            compilation_options: wgpu::PipelineCompilationOptions { constants: &constants, ..Default::default() },
+            targets: &[Some(wgpu::ColorTargetState {
+                format: output_format,
+                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        multiview_mask: None,
+        cache: None,
+    })
 }

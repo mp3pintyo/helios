@@ -9,6 +9,7 @@ use crate::profiler::Recorder;
 use crate::scene::FogVolume;
 use crate::shader::create_module;
 use crate::util::{bind, bind_group, bind_group_layout, compute_pipeline, uniform_buffer, workgroups};
+use crate::pipelines::Lazy;
 
 /// Screen pixels per froxel column (horizontally and vertically).
 const TILE: u32 = 16;
@@ -70,8 +71,8 @@ pub struct VolumetricFog {
     pub uniform: wgpu::Buffer,
     enabled: bool,
     volumes: Option<Volumes>,
-    inject: wgpu::ComputePipeline,
-    integrate: wgpu::ComputePipeline,
+    inject: Lazy<wgpu::ComputePipeline>,
+    integrate: Lazy<wgpu::ComputePipeline>,
     inject_layout: wgpu::BindGroupLayout,
     integrate_layout: wgpu::BindGroupLayout,
     /// A 1x1x1 empty volume bound to the lighting while fog is off.

@@ -58,6 +58,7 @@ use crate::skin::{skin_entry, skin_resource};
 use crate::vsm_motion::{self, MoveFootprints, ShadowMove};
 use crate::wind::{wind_entry, wind_resource};
 use crate::Camera;
+use crate::pipelines::Lazy;
 
 pub const MAX_LEVELS: usize = 16;
 const PAGE_TEXELS: u32 = 128;
@@ -217,32 +218,33 @@ pub struct VirtualShadowMap {
     draw_layout: wgpu::BindGroupLayout,
     sw_layout: wgpu::BindGroupLayout,
     resolve_layout: wgpu::BindGroupLayout,
-    mark: wgpu::ComputePipeline,
-    mark_volume: wgpu::ComputePipeline,
-    mark_local: wgpu::ComputePipeline,
-    invalidate_local: wgpu::ComputePipeline,
+    mark: Lazy<wgpu::ComputePipeline>,
+    mark_volume: Lazy<wgpu::ComputePipeline>,
+    mark_local: Lazy<wgpu::ComputePipeline>,
+    invalidate_local: Lazy<wgpu::ComputePipeline>,
     /// Volumetric fog samples the shadow map this frame.
     volume_marking: bool,
-    info_begin: wgpu::ComputePipeline,
-    dirty_info: wgpu::ComputePipeline,
-    refresh: wgpu::ComputePipeline,
-    expand: wgpu::ComputePipeline,
-    expand_local: wgpu::ComputePipeline,
+    info_begin: Lazy<wgpu::ComputePipeline>,
+    dirty_info: Lazy<wgpu::ComputePipeline>,
+    count_local_requests: Lazy<wgpu::ComputePipeline>,
+    refresh: Lazy<wgpu::ComputePipeline>,
+    expand: Lazy<wgpu::ComputePipeline>,
+    expand_local: Lazy<wgpu::ComputePipeline>,
     /// Local lights' shadow maps (pages of this cache and atlas).
     pub local: LocalShadows,
-    draw_args: wgpu::ComputePipeline,
-    raster_sw: wgpu::ComputePipeline,
+    draw_args: Lazy<wgpu::ComputePipeline>,
+    raster_sw: Lazy<wgpu::ComputePipeline>,
     /// The software rasteriser specialised for alpha-masked clusters.
-    raster_sw_masked: wgpu::ComputePipeline,
+    raster_sw_masked: Lazy<wgpu::ComputePipeline>,
     /// Voxel clusters' page items (vsm_voxel_raster.wgsl).
-    raster_voxels: wgpu::ComputePipeline,
-    resolve: wgpu::RenderPipeline,
+    raster_voxels: Lazy<wgpu::ComputePipeline>,
+    resolve: Lazy<wgpu::RenderPipeline>,
     /// Hardware page raster without and with skinning (`SKINNING` in vsm_page.wgsl): scenes
     /// without skinned instances use the leaner one.
-    raster: [wgpu::RenderPipeline; 2],
+    raster: [Lazy<wgpu::RenderPipeline>; 2],
     static_layout: wgpu::BindGroupLayout,
-    clear_static: wgpu::ComputePipeline,
-    capture_static: wgpu::ComputePipeline,
+    clear_static: Lazy<wgpu::ComputePipeline>,
+    capture_static: Lazy<wgpu::ComputePipeline>,
     invalidation: PageInvalidation,
     /// Footprints of moved instances, with their recent speeds.
     moves: MoveFootprints,
@@ -376,33 +378,36 @@ impl VirtualShadowMap {
         // Clip page draws to their tile where the device can (see vsm_draw_clipped.wgsl).
         let clipped = device.features().contains(wgpu::Features::CLIP_DISTANCES);
         let clipped_module = clipped.then(|| create_module(device, "vsm_draw_clipped.wgsl"));
-        let render = |label: &str,
+        let render = |label: &'static str,
                       layout: &wgpu::PipelineLayout,
                       module: &wgpu::ShaderModule,
-                      (vs, constants): (&str, &[(&str, f64)]),
-                      fs: &str,
+                      (vs, constants): (&'static str, &[(&'static str, f64)]),
+                      fs: &'static str,
                       depth: wgpu::DepthStencilState,
                       cull: Option<wgpu::Face>| {
-            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some(label),
-                layout: Some(layout),
-                vertex: wgpu::VertexState {
-                    module,
-                    entry_point: Some(vs),
-                    compilation_options: wgpu::PipelineCompilationOptions { constants, ..Default::default() },
-                    buffers: &[],
-                },
-                primitive: wgpu::PrimitiveState { cull_mode: cull, ..Default::default() },
-                depth_stencil: Some(depth),
-                multisample: Default::default(),
-                fragment: Some(wgpu::FragmentState {
-                    module,
-                    entry_point: Some(fs),
-                    compilation_options: Default::default(),
-                    targets: &[],
-                }),
-                multiview_mask: None,
-                cache: None,
+            let (device, layout, module, constants) = (device.clone(), layout.clone(), module.clone(), constants.to_vec());
+            Lazy::background(move || {
+                device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some(label),
+                    layout: Some(&layout),
+                    vertex: wgpu::VertexState {
+                        module: &module,
+                        entry_point: Some(vs),
+                        compilation_options: wgpu::PipelineCompilationOptions { constants: &constants, ..Default::default() },
+                        buffers: &[],
+                    },
+                    primitive: wgpu::PrimitiveState { cull_mode: cull, ..Default::default() },
+                    depth_stencil: Some(depth.clone()),
+                    multisample: Default::default(),
+                    fragment: Some(wgpu::FragmentState {
+                        module: &module,
+                        entry_point: Some(fs),
+                        compilation_options: Default::default(),
+                        targets: &[],
+                    }),
+                    multiview_mask: None,
+                    cache: None,
+                })
             })
         };
         // Reverse-Z: push stored depth away from the light by a slope-scaled amount against acne.
@@ -423,6 +428,7 @@ impl VirtualShadowMap {
             volume_marking: false,
             info_begin: vsm_pipeline("vsm info", "info_begin"),
             dirty_info: vsm_pipeline("vsm info", "dirty_info"),
+            count_local_requests: vsm_pipeline("vsm info", "count_local_requests"),
             refresh: vsm_pipeline("vsm refresh", "refresh"),
             expand: expand_pipeline("vsm expand", "expand"),
             expand_local: expand_pipeline("vsm expand local", "expand_local"),
@@ -567,6 +573,10 @@ impl VirtualShadowMap {
         let mut cache = self.cache.default_params(f.frame, RETAIN_FRAMES, 1);
         cache.level_pages = LEVEL_PAGES;
         cache.level_count = MAX_LEVELS as u32;
+        // A full pool serves each light's coarsest pages, then the sun's, then the local lights'
+        // by their rank on screen (page_cache.wgsl).
+        cache.local_base = MAX_LEVELS as u32 * LEVEL_PAGES * LEVEL_PAGES;
+        cache.ranks = self.local.slot_ranks();
         let sun_moved = (sun - self.last_sun).length() > 1e-5;
         cache.invalidate = (sun_moved || f.scene_changed) as u32;
         self.last_sun = sun;
@@ -712,6 +722,10 @@ impl VirtualShadowMap {
             pass.dispatch_workgroups(workgroups(INFO_ITEMS, 64), 1, 1);
             pass.set_pipeline(&self.dirty_info);
             pass.dispatch_workgroups(workgroups(self.cache.physical_count, 64), 1, 1);
+            if local {
+                pass.set_pipeline(&self.count_local_requests);
+                pass.dispatch_workgroups(workgroups(crate::vsm_local::ENTRIES, 64), 1, 1);
+            }
             pass.set_pipeline(&self.refresh);
             pass.dispatch_workgroups(workgroups(self.cache.physical_count, 64), 1, 1);
         }
@@ -946,9 +960,9 @@ struct PageInvalidation {
     /// Indexed by [residency changed][wind switched on or off]: the first also collects
     /// instances whose streamed pages changed residency, the second frees the pages of casters
     /// that changed layer instead of dropping their static layer.
-    collect: [[wgpu::ComputePipeline; 2]; 2],
-    remember_residency: wgpu::ComputePipeline,
-    invalidate_pages: wgpu::ComputePipeline,
+    collect: [[Lazy<wgpu::ComputePipeline>; 2]; 2],
+    remember_residency: Lazy<wgpu::ComputePipeline>,
+    invalidate_pages: Lazy<wgpu::ComputePipeline>,
     /// The page table as of the previous residency check (resized with the scene's).
     previous_page_table: wgpu::Buffer,
     /// Count + light-space footprints of the changed instances.
@@ -1075,16 +1089,27 @@ impl PageInvalidation {
 mod tests {
     use super::*;
 
-    /// The value of `const NAME: u32 = ...u;` in a shader (with its includes).
+    /// The value of `const NAME: u32 = ...;` in a shader (with its includes): a literal or a
+    /// sum of literals and other such constants.
     fn shader_constant(shader: &str, name: &str) -> u32 {
         let source = crate::shader::compose(shader);
         let prefix = format!("const {name}: u32 = ");
         let line = source.lines().find_map(|l| l.trim().strip_prefix(prefix.as_str())).unwrap_or_else(|| panic!("{name} not in {shader}"));
-        let value = line.trim_end_matches(';').trim_end_matches('u');
-        match value.strip_prefix("0x") {
-            Some(hex) => u32::from_str_radix(hex, 16).unwrap(),
-            None => value.parse().unwrap(),
-        }
+        line.trim_end_matches(';')
+            .split('+')
+            .map(|term| {
+                let term = term.trim();
+                if term.starts_with(|c: char| c.is_ascii_digit()) {
+                    let value = term.trim_end_matches('u');
+                    match value.strip_prefix("0x") {
+                        Some(hex) => u32::from_str_radix(hex, 16).unwrap(),
+                        None => value.parse().unwrap(),
+                    }
+                } else {
+                    shader_constant(shader, term)
+                }
+            })
+            .sum()
     }
 
     #[test]
@@ -1097,6 +1122,7 @@ mod tests {
             ("INFO_PAGE_STATIC", INFO_PAGE_STATIC),
             ("INFO_PAGE_REFRESH", INFO_PAGE_STATIC + PHYSICAL_PAGES),
             ("INFO_PAGE_MOTION", INFO_PAGE_MOTION),
+            ("VSM_PHYSICAL_PAGES", PHYSICAL_PAGES),
             ("LOCAL_INFO_SLOTS", INFO_LOCAL_SLOTS),
             ("LOCAL_INFO_SLOT_WORDS", LOCAL_SLOT_WORDS),
             ("LOCAL_INFO_RECTS", INFO_LOCAL_RECTS),

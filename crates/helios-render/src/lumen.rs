@@ -32,7 +32,7 @@ use glam::{Vec3, Vec4};
 use wgpu::BindingResource::{Sampler, TextureView};
 use wgpu::{BindingType, ShaderStages, TextureFormat as F, TextureUsages as U};
 
-use crate::cards::{CardCache, CardUniform};
+use crate::cards::{CaptureInputs, CardCache, CardUniform};
 use crate::lumen_displaced::{DisplaceInputs, DisplacedSurfaces, Surface};
 use crate::lumen_dynamic::{ComposeParams, DynamicField, DynamicFieldStats, FieldBindings, LevelPlacement, SdfInstance};
 use crate::motion::SceneChanges;
@@ -43,6 +43,7 @@ use crate::shader::create_module;
 use crate::targets::FrameTargets;
 use crate::textures::TextureLibrary;
 use crate::util::{bind, bind_group, bind_group_layout, compute_pipeline, storage_buffer, storage_buffer_init, uniform_buffer, workgroups};
+use crate::pipelines::{in_group, Group, Lazy};
 
 pub const SDF_LEVELS: usize = 4;
 const SDF_RES: u32 = 128;
@@ -104,18 +105,21 @@ struct Level {
     candidate_count: u32,
 }
 
-/// Renderer resources the mesh-card lighting reads besides Lumen's own: the sun's virtual
-/// shadow map and the materials (average albedo, emission).
+/// Renderer resources the mesh-card capture and lighting read besides Lumen's own: the sun's
+/// virtual shadow map, the materials (captured per texel; average albedo and emission until
+/// then) with their graphs' slab table and parameters, and the queue (capture uploads).
 pub struct CardInputs<'a> {
     pub vsm: &'a crate::vsm::VirtualShadowMap,
     pub textures: &'a TextureLibrary,
     pub materials: &'a wgpu::Buffer,
+    pub extended: &'a crate::substrate_gpu::ExtendedMaterials,
+    pub queue: &'a wgpu::Queue,
 }
 
 /// Per-entry-point pipeline with its own (exact) bind group layout.
 pub(crate) struct Stage {
     layout: wgpu::BindGroupLayout,
-    pub pipeline: wgpu::ComputePipeline,
+    pub pipeline: Lazy<wgpu::ComputePipeline>,
 }
 
 impl Stage {
@@ -253,7 +257,9 @@ impl Lumen {
             bricks: storage_buffer(device, "sdf bricks", 4096 * 64 * 4, wgpu::BufferUsages::empty()),
             near_field: NearField::new(device),
             cards: CardCache::new(device),
-            dynamic: DynamicField::new(device, &sdf_module, SDF_LEVELS),
+            // The global distance field is built (and its shadows traced) whether GI is on or not:
+            // compiled with the core set in the browser.
+            dynamic: in_group(Group::Core, || DynamicField::new(device, &sdf_module, SDF_LEVELS)),
             levels: level_list,
             displaced: DisplacedSurfaces::new(),
             instance_aabbs: Vec::new(),
@@ -265,8 +271,8 @@ impl Lumen {
             probe_origins: [Vec3::splat(f32::MAX); 2],
             frame: 0,
             gather: None,
-            cull_bricks: Stage::new(device, &sdf_module, "cull_bricks", &[(0, u()), (1, ro()), (4, ro()), (5, rw())]),
-            compose: Stage::new(
+            cull_bricks: in_group(Group::Core, || Stage::new(device, &sdf_module, "cull_bricks", &[(0, u()), (1, ro()), (4, ro()), (5, rw())])),
+            compose: in_group(Group::Core, || Stage::new(
                 device,
                 &sdf_module,
                 "compose",
@@ -280,9 +286,10 @@ impl Lumen {
                     (7, bind::texture_array(true)),
                     (8, bind::sampler()),
                     (9, bind::storage_texture_3d(F::Rgba8Snorm)),
+                    (12, ro()),
                     (70, bind::storage_texture_3d(F::R32Uint)),
                 ],
-            ),
+            )),
             update_voxels: Stage::new(
                 device,
                 &light_module,
@@ -394,6 +401,7 @@ impl Lumen {
                     (21, u()),
                     (22, bind::texture_array(true)),
                     (23, bind::sampler()),
+                    (28, tex(false)),
                 ],
             ),
             debug_cards: Stage::new(
@@ -459,6 +467,11 @@ impl Lumen {
             let fields: Vec<_> = surfaces.iter().map(Surface::sdf).collect();
             self.near_field.upload(device, queue, scene, &fields, surface_of, &card_instances, &coverage);
             self.cards.upload(device, queue, scene, &surfaces, surface_of, &sdf_instances, &self.instance_bounds);
+            // The field's voxels take their card pair's captured mean (once captured).
+            for (record, pair) in self.dynamic.records.iter_mut().zip(self.cards.instance_pairs()) {
+                record.pair = pair;
+            }
+            queue.write_buffer(&self.sdf_instances, 0, bytemuck::cast_slice(&self.dynamic.records));
             drop(surfaces);
             self.displaced = variants;
             for level in &mut self.levels {
@@ -471,6 +484,14 @@ impl Lumen {
             self.near_field.move_instances(queue, scene, &fields, moved.iter().map(|&(i, _)| i));
             for (i, k) in moved {
                 self.cards.move_instance(queue, k, scene.instances[i].transform, self.instance_bounds[k]);
+            }
+        }
+        self.cards.sync_materials(scene);
+        // Captures finished since: the field's voxels take the captured means (a full recompose,
+        // as after any scene change; once after loading, and after material edits).
+        if self.cards.take_albedo_changed() {
+            for level in &mut self.levels {
+                level.dirty = true;
             }
         }
 
@@ -693,6 +714,7 @@ impl Lumen {
                         (7, TextureView(&textures.albedo)),
                         (8, Sampler(&samplers.material)),
                         (9, TextureView(&self.global_sdf_storage)),
+                        (12, self.cards.pair_sums.as_entire_binding()),
                         (70, TextureView(&self.instance_ids)),
                     ],
                 );
@@ -715,6 +737,7 @@ impl Lumen {
                 sampler: &samplers.material,
                 sdf: &self.global_sdf_storage,
                 instance_ids: &self.instance_ids,
+                pair_sums: &self.cards.pair_sums,
             };
             self.dynamic.record(rec, &field);
         }
@@ -740,7 +763,17 @@ impl Lumen {
         let device = rec.device;
         let Some(gather) = &self.gather else { return };
 
-        // ---- Mesh cards: light this frame's pages ------------------------------------------------
+        // ---- Mesh cards: capture pending materials, light this frame's pages ---------------------
+        if self.has_sdf {
+            let inputs = CaptureInputs {
+                frame,
+                materials: surfaces.materials,
+                textures: surfaces.textures,
+                sampler: &samplers.material,
+                extended: surfaces.extended,
+            };
+            self.cards.record_capture(rec, surfaces.queue, &inputs);
+        }
         if self.has_sdf && self.cards.update_count() > 0 {
             let group = self.light_cards.group(
                 device,
@@ -766,6 +799,7 @@ impl Lumen {
                     (21, surfaces.materials.as_entire_binding()),
                     (22, TextureView(&surfaces.textures.albedo)),
                     (23, Sampler(&samplers.material)),
+                    (28, TextureView(&self.cards.albedo)),
                 ],
             );
             let mut pass = rec.compute_pass("lumen cards");

@@ -74,7 +74,9 @@ pub(crate) struct SdfInstance {
     pub mesh: u32,
     /// 1 if the instance has mesh cards (a volume field): candidates for the instance index.
     pub has_cards: u32,
-    pub _pad: u32,
+    /// 1 + the instance's card pair whose captured material mean the field stores (0: the
+    /// material's average; see `CardCache::instance_pairs`).
+    pub pair: u32,
 }
 
 impl SdfInstance {
@@ -190,6 +192,7 @@ pub(crate) struct FieldBindings<'a> {
     pub sampler: &'a wgpu::Sampler,
     pub sdf: &'a wgpu::TextureView,
     pub instance_ids: &'a wgpu::TextureView,
+    pub pair_sums: &'a wgpu::Buffer,
 }
 
 /// Counts of the latest frame (HUD, measurements).
@@ -250,6 +253,7 @@ impl DynamicField {
                     (9, bind::storage_texture_3d(wgpu::TextureFormat::Rgba8Snorm)),
                     (10, ro()),
                     (11, rw()),
+                    (12, ro()),
                     (70, bind::storage_texture_3d(wgpu::TextureFormat::R32Uint)),
                 ],
             ),
@@ -427,6 +431,7 @@ impl DynamicField {
                     (9, wgpu::BindingResource::TextureView(field.sdf)),
                     (10, q.list.as_entire_binding()),
                     (11, self.stamps.as_entire_binding()),
+                    (12, field.pair_sums.as_entire_binding()),
                     (70, wgpu::BindingResource::TextureView(field.instance_ids)),
                 ],
             );

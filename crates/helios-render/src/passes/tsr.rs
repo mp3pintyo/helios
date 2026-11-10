@@ -11,6 +11,7 @@ use crate::profiler::Recorder;
 use crate::shader::create_module;
 use crate::targets::{FrameTargets, HDR_FORMAT, HISTORY_MOTION_FORMAT};
 use crate::util::{bind, bind_group, bind_group_layout, compute_pipeline, uniform_buffer, workgroups};
+use crate::pipelines::Lazy;
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -20,7 +21,7 @@ struct TsrUniform {
 }
 
 pub struct TsrPass {
-    pipeline: wgpu::ComputePipeline,
+    pipeline: Lazy<wgpu::ComputePipeline>,
     layout: wgpu::BindGroupLayout,
     uniform: wgpu::Buffer,
 }

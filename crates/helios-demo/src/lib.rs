@@ -13,4 +13,6 @@ pub mod tour;
 #[cfg(target_arch = "wasm32")]
 mod web;
 #[cfg(target_arch = "wasm32")]
+mod web_bake;
+#[cfg(target_arch = "wasm32")]
 mod web_editor;

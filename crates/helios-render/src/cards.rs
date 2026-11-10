@@ -9,9 +9,18 @@
 //!   per texel, ~10 cm texels (coarser for very large meshes), rasterised from a LOD cut of the
 //!   virtual mesh ([`helios_geometry::cards`]), or from the displaced surface of a displaced
 //!   variant (`lumen_displaced.rs`). Captures are per mesh (or variant), packed into one capture
-//!   atlas; materials contribute their average albedo (base colour × the texture's 1×1 mip,
-//!   as the global distance field does), since an instance has a single material and diffuse
-//!   bounce light is low-frequency anyway.
+//!   atlas. The capture also records, per texel, the texture coordinates of the surface point
+//!   and — for a displaced variant — the base point it was displaced from ([`SurfaceCapture`]).
+//! * **Material capture** (GPU, `lumen_card_capture.wgsl`; UE5 renders each card's material into
+//!   the surface cache's albedo and emissive atlases): per (surface, material) pair — and per
+//!   instance where the material depends on where the instance stands (world-space textures and
+//!   graphs, a rock's moss on upward faces) — the material is evaluated at every texel as the
+//!   G-buffer resolve evaluates it (image and procedural textures, shading models, material
+//!   graphs) into an albedo atlas (rgba8: albedo, emission). Captures run within a texel budget
+//!   per frame when a scene loads, and again when a material, its graph or its parameters
+//!   change; until a pair is captured its cards use the material's average albedo (base colour
+//!   × the texture's 1×1 mip, as the global distance field does). Unchanged pairs keep their
+//!   albedo through scene re-uploads (copied into the new atlas).
 //! * **Allocation**: each instance's cards are lit at a *mip* of their capture chosen from the
 //!   instance's distance to the camera (lighting texels of ~1 % of that distance), in 8×8
 //!   texel pages of a 2048² lighting atlas reached through per-card page tables. Instances
@@ -19,22 +28,34 @@
 //!   runs full. An instance switches mip only when all its new pages can be lit in the same
 //!   frame, so its cards never show unlit pages.
 //! * **Lighting** (`lumen_card_light.wgsl`): a budget of pages per frame — newly allocated
-//!   ones first (closest instances first), then a round-robin refresh of the rest.
+//!   ones first (closest instances first), then a round-robin refresh of the rest. A texel's
+//!   light is reflected with the captured albedo of the surface it covers (averaged over up to
+//!   four captured texels at coarse mips) and adds its captured emission.
 //! * **Sampling** (`lumen_cards.wgsl`): screen-probe and reflection hits are projected into the
 //!   hit instance's cards; the near field reports the instance it hit, the global distance
 //!   field stores the closest instance per voxel. Where no card matches, the voxel surface
-//!   cache stays in place.
+//!   cache stays in place. The bilinear filter over lit texels is depth-aware: each lit texel
+//!   stores the depth of the surface it was lit at, and only texels on the hit's tangent plane
+//!   contribute (no light bleeding across depth discontinuities).
+//! * **Voxel albedo**: the capture sums each pair's texels (`pair_sums`); the global distance
+//!   field stores the closest instance's pair mean per voxel (`lumen_sdf.wgsl`), which the voxel
+//!   surface cache reflects with. Lumen recomposes the field when captures finish.
 
 use bytemuck::{Pod, Zeroable};
-use glam::{Vec3, Vec4};
-use helios_geometry::cards::{CardConfig, CardVertex, MeshCards, CARD_AXES, MAX_CARD_LAYERS};
-use helios_geometry::{lod_cut_resident, LodView, SdfKind, VirtualMesh};
-use std::collections::{HashMap, HashSet};
+use glam::{Vec2, Vec3, Vec4};
+use helios_geometry::cards::{Card, CardConfig, CardVertex, MeshCards, CARD_AXES, MAX_CARD_LAYERS};
+use helios_geometry::{lod_cut_resident, Aabb, LodView, SdfKind, VirtualMesh};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use wgpu::BindingResource::{Sampler, TextureView};
 use wgpu::{TextureFormat as F, TextureUsages as U};
 
 use crate::lumen_displaced::Surface;
-use crate::scene::Scene;
-use crate::util::{storage_buffer, storage_buffer_init};
+use crate::profiler::Recorder;
+use crate::scene::{MaterialKind, Scene, TextureMapping};
+use crate::shader::{compose_variant, create_module_from};
+use crate::substrate_gpu::ExtendedMaterials;
+use crate::textures::TextureLibrary;
+use crate::util::{bind, bind_group, bind_group_layout, compute_pipeline_with, storage_buffer, Lazy, storage_buffer_init};
 
 /// Card slots per mesh / instance: directions × layers (`CARD_SLOTS` in lumen_cards.wgsl).
 const CARD_SLOTS: usize = CARD_AXES * MAX_CARD_LAYERS;
@@ -63,6 +84,21 @@ const NONE: u32 = u32::MAX;
 /// vec4s per instance / card record (`CARD_INSTANCE_VEC4S`, `CARD_RECORD_VEC4S`).
 const INSTANCE_VEC4S: usize = 7;
 const CARD_VEC4S: usize = 3;
+/// Width of the albedo atlas (rgba8, 4 bytes per texel).
+const ALBEDO_ATLAS_WIDTH: u32 = 4096;
+/// Albedo texels of all (surface, material) pairs at most (16 MiB); pairs beyond keep the
+/// material's average albedo.
+const ALBEDO_BUDGET: usize = 4 << 20;
+/// Of that, texels for per-instance captures of materials that depend on the placement; further
+/// instances share their pair's capture (made at its first instance's placement).
+const PLACED_BUDGET: usize = 1 << 20;
+/// Texels whose material is captured per frame (at least one pair): 16 k workgroups, at most ~0.3 ms.
+const CAPTURE_TEXELS_PER_FRAME: usize = 1 << 20;
+/// Tile records of a capture dispatch start on 256-byte boundaries (storage buffer offsets).
+const TILE_ALIGN: usize = 16;
+/// u32 sums per pair of its captured texels: albedo rgb and emission (bytes), count
+/// (`PAIR_SUM_WORDS` in lumen_card_capture.wgsl and lumen_sdf.wgsl).
+const PAIR_SUM_WORDS: usize = 5;
 
 /// Mesh-card part of the Lumen uniform (`cards` in lumen_types.wgsl).
 #[repr(C)]
@@ -119,21 +155,113 @@ fn pack_shelves(sizes: &[[u32; 2]], width: u32) -> (Vec<[u32; 2]>, u32) {
     (positions, y + shelf)
 }
 
-/// Triangles of `mesh` (mesh space) at about `error` geometric error, from the pages in memory.
-fn mesh_triangles(mesh: &VirtualMesh, error: f32) -> Vec<[CardVertex; 3]> {
+/// Triangles of `mesh` (mesh space) at about `error` geometric error, from the pages in memory,
+/// and their corners' material sources.
+fn mesh_triangles(mesh: &VirtualMesh, error: f32) -> (Vec<[CardVertex; 3]>, Vec<[CornerSource; 3]>) {
     let view = LodView { position: Vec3::ZERO, lod_scale: 1.0, threshold: error, orthographic: true };
     let mut triangles = Vec::new();
+    let mut sources = Vec::new();
     for cluster in lod_cut_resident(mesh, &view, &|page| mesh.has_payload(page as usize)) {
         let c = cluster as usize;
-        let vertices: Vec<CardVertex> = (0..mesh.clusters[c].vertex_count())
-            .map(|i| {
-                let (p, n, _) = mesh.cluster_vertex(c, i);
-                (p, n)
-            })
-            .collect();
-        triangles.extend(mesh.cluster_triangles(c).map(|t| t.map(|i| vertices[i as usize])));
+        let vertices: Vec<(Vec3, Vec3, Vec2)> = (0..mesh.clusters[c].vertex_count()).map(|i| mesh.cluster_vertex(c, i)).collect();
+        for t in mesh.cluster_triangles(c) {
+            let corners = t.map(|i| vertices[i as usize]);
+            triangles.push(corners.map(|(p, n, _)| (p, n)));
+            sources.push(corners.map(|(p, _, uv)| (p, uv)));
+        }
     }
-    triangles
+    (triangles, sources)
+}
+
+/// What the material capture needs of a triangle corner besides its position: the point of the
+/// base surface it stands for (mesh space; a displaced variant's point before displacement,
+/// where the resolve evaluates the material, else the corner itself) and its texture
+/// coordinates (UV set 0).
+pub(crate) type CornerSource = (Vec3, Vec2);
+
+/// A surface's mesh cards and the material inputs of their texels.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct SurfaceCapture {
+    pub cards: MeshCards,
+    /// Per card and texel (`attributes` in lumen_card_capture.wgsl): uv (2 × f32), the base
+    /// point's offset from the texel's surface point (3 × f16) and the texture coordinate change
+    /// across the texel (f16); zero where the texel sees no surface.
+    pub attributes: Vec<Vec<[u32; 4]>>,
+}
+
+impl SurfaceCapture {
+    /// Captured texels (GPU atlas) plus their material inputs (kept on the CPU for recaptures).
+    pub fn bytes(&self) -> usize {
+        self.cards.texel_count() * 20
+    }
+}
+
+/// Captures the cards of `triangles` (with their corners' `sources`) and the material inputs of
+/// every texel.
+pub(crate) fn capture_cards(triangles: &[[CardVertex; 3]], sources: &[[CornerSource; 3]], bounds: Aabb, config: &CardConfig) -> SurfaceCapture {
+    debug_assert_eq!(triangles.len(), sources.len());
+    let mut cards = MeshCards::capture(triangles, bounds, &CardConfig { sources: true, ..*config });
+    let texel = cards.texel_size;
+    let attributes = cards
+        .cards
+        .iter_mut()
+        .map(|card| {
+            let texel_sources = std::mem::take(&mut card.sources);
+            let (_, u, v) = Card::coordinates(card.axis);
+            let width = card.resolution[0];
+            (0..card.texels.len())
+                .map(|k| {
+                    let Some((p, _)) = card.texel_surface(k as u32 % width, k as u32 / width, texel) else { return [0; 4] };
+                    let s = texel_sources[k];
+                    let (t, c) = (&triangles[s.triangle as usize], &sources[s.triangle as usize]);
+                    let [b1, b2] = s.barycentrics;
+                    let b0 = 1.0 - b1 - b2;
+                    let base = c[0].0 * b0 + c[1].0 * b1 + c[2].0 * b2;
+                    let uv = c[0].1 * b0 + c[1].1 * b1 + c[2].1 * b2;
+                    let footprint = uv_footprint(t, c.map(|c| c.1), u, v) * texel;
+                    let offset = base - p;
+                    [uv.x.to_bits(), uv.y.to_bits(), f16_bits(offset.x) | (f16_bits(offset.y) << 16), f16_bits(offset.z) | (f16_bits(footprint.min(1.0e4)) << 16)]
+                })
+                .collect()
+        })
+        .collect();
+    SurfaceCapture { cards, attributes }
+}
+
+/// The larger texture coordinate change of triangle `t` (with corner `uv`s) per mesh unit along
+/// a card's plane axes `u` and `v` (0 for a triangle edge-on to the card).
+fn uv_footprint(t: &[CardVertex; 3], uv: [Vec2; 3], u: usize, v: usize) -> f32 {
+    let p = t.map(|c| Vec2::new(c.0[u], c.0[v]));
+    let (e1, e2) = (p[1] - p[0], p[2] - p[0]);
+    let det = e1.perp_dot(e2);
+    if det.abs() < 1e-12 {
+        return 0.0;
+    }
+    let (f1, f2) = (uv[1] - uv[0], uv[2] - uv[0]);
+    // A plane step d = α e1 + β e2 changes the coordinates by α f1 + β f2.
+    let along_u = (f1 * e2.y - f2 * e1.y) / det;
+    let along_v = (f2 * e1.x - f1 * e2.x) / det;
+    along_u.length().max(along_v.length())
+}
+
+/// IEEE half-precision bits of `x` (rounded to nearest; overflow saturates, magnitudes below the
+/// smallest normal half flush to zero), as WGSL's `unpack2x16float` reads them.
+fn f16_bits(x: f32) -> u32 {
+    let bits = x.to_bits();
+    let sign = (bits >> 16) & 0x8000;
+    if x.is_nan() {
+        return sign | 0x7e00;
+    }
+    let exponent = ((bits >> 23) & 0xff) as i32 - 127 + 15;
+    if exponent <= 0 {
+        return sign;
+    }
+    if exponent >= 31 {
+        return sign | 0x7bff;
+    }
+    let mantissa = bits & 0x7f_ffff;
+    let half = ((exponent as u32) << 10) | (mantissa >> 13);
+    sign | (half + ((mantissa >> 12) & 1)).min(0x7bff)
 }
 
 /// A captured mesh as laid out on the GPU.
@@ -241,11 +369,85 @@ pub struct CardCache {
     update_count: usize,
     /// Captures by [`capture_key`], the geometry version they were made at and the target texel
     /// of the last full capture.
-    captures: HashMap<u64, MeshCards>,
+    captures: HashMap<u64, Capture>,
     capture_version: u64,
     capture_texel: f32,
+    /// Serial of the next capture (identifies a capture's texels for its albedo).
+    next_serial: u64,
     allocator: Allocator,
     uniform: CardUniform,
+    /// Captured materials (rgba8: sqrt(albedo), emission e / (1 + e)), read by `light_cards`.
+    albedo_texture: wgpu::Texture,
+    pub albedo: wgpu::TextureView,
+    /// The (surface, material) pairs of the last upload, their mesh entries' order.
+    pairs: Vec<AlbedoPair>,
+    /// Pairs whose material is to be (re)captured, in order.
+    pending: VecDeque<usize>,
+    /// Graph and parameter versions the pairs' contents were computed at.
+    material_versions: (u64, u64),
+    /// Surface code of the scenes' graphs by hash (the capture pipelines' variants).
+    graph_code: HashMap<u64, String>,
+    capture_pipelines: Option<CapturePipelines>,
+    /// Texels whose material was captured in the latest frame.
+    pub captured_texels: usize,
+    /// Per pair, the sums of its captured texels (the global distance field's voxel albedo).
+    pub pair_sums: wgpu::Buffer,
+    /// Captures finished since [`CardCache::take_albedo_changed`] was last called.
+    albedo_changed: bool,
+}
+
+/// A surface's capture and its serial.
+struct Capture {
+    surface: SurfaceCapture,
+    serial: u64,
+}
+
+/// What a material capture is of: a capture's texels, a material and, for materials that depend
+/// on the instance's placement, the scene instance.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct PairKey {
+    capture: u64,
+    material: u32,
+    placement: Option<usize>,
+}
+
+/// A (surface, material) pair: one mesh entry (card records) of the upload and its material
+/// capture.
+struct AlbedoPair {
+    key: PairKey,
+    /// Key of the surface's capture in `captures`.
+    surface: u64,
+    /// Card instance whose placement and material are captured.
+    representative: u32,
+    /// The capture pipeline: shading model and graph hash (0: none); `None`: no albedo
+    /// (terrain, water), the cards use the material's average.
+    pipeline: Option<(u32, u64)>,
+    /// Hash of everything the albedo depends on (see [`material_content`]).
+    content: u64,
+    /// Albedo atlas origin of each card (the capture's order); empty without albedo.
+    origins: Vec<[u32; 2]>,
+    first_record: u32,
+    /// The content the albedo holds (captured, or copied from the previous atlas); `None`: not
+    /// captured yet, the records point at no albedo.
+    captured: Option<u64>,
+}
+
+/// Pipelines and layouts of the material capture.
+struct CapturePipelines {
+    layout: wgpu::BindGroupLayout,
+    graph_layout: wgpu::BindGroupLayout,
+    /// By (shading model, graph hash).
+    pipelines: HashMap<(u32, u64), Lazy<wgpu::ComputePipeline>>,
+    modules: HashMap<u64, wgpu::ShaderModule>,
+}
+
+/// What the material capture reads besides the cache's own resources.
+pub struct CaptureInputs<'a> {
+    pub frame: &'a wgpu::Buffer,
+    pub materials: &'a wgpu::Buffer,
+    pub textures: &'a TextureLibrary,
+    pub sampler: &'a wgpu::Sampler,
+    pub extended: &'a ExtendedMaterials,
 }
 
 impl CardCache {
@@ -261,6 +463,7 @@ impl CardCache {
             usage: U::TEXTURE_BINDING | U::STORAGE_BINDING,
             view_formats: &[],
         });
+        let albedo_texture = albedo_atlas(device, 1, 1);
         Self {
             data: storage_buffer(device, "card data", 16, wgpu::BufferUsages::empty()),
             pages: storage_buffer(device, "card pages", 16, wgpu::BufferUsages::empty()),
@@ -272,9 +475,31 @@ impl CardCache {
             captures: HashMap::new(),
             capture_version: u64::MAX,
             capture_texel: CARD_TEXEL,
+            next_serial: 0,
             allocator: Allocator::default(),
             uniform: CardUniform::default(),
+            albedo: albedo_texture.create_view(&Default::default()),
+            albedo_texture,
+            pairs: Vec::new(),
+            pending: VecDeque::new(),
+            material_versions: (u64::MAX, u64::MAX),
+            graph_code: HashMap::new(),
+            capture_pipelines: None,
+            captured_texels: 0,
+            pair_sums: storage_buffer(device, "card pair sums", 16, wgpu::BufferUsages::COPY_SRC),
+            albedo_changed: false,
         }
+    }
+
+    /// Per card instance: 1 + its pair if the pair's material is captured (its sums then hold its
+    /// captured texels once done), else 0.
+    pub fn instance_pairs(&self) -> Vec<u32> {
+        self.allocator.instances.iter().map(|i| i.mesh.filter(|&p| !self.pairs[p].origins.is_empty()).map_or(0, |p| p as u32 + 1)).collect()
+    }
+
+    /// Whether captures finished (every pending pair captured) since the last call.
+    pub fn take_albedo_changed(&mut self) -> bool {
+        std::mem::take(&mut self.albedo_changed)
     }
 
     /// Pages to light this frame (`light_cards` workgroups).
@@ -312,6 +537,7 @@ impl CardCache {
         instances: &[usize],
         bounds: &[(Vec3, Vec3)],
     ) {
+        let start = web_time::Instant::now();
         // The surfaces to capture, with the largest scale they are instanced at (0: unused).
         let mut mesh_scale = vec![0.0f32; surfaces.len()];
         for &i in instances {
@@ -329,48 +555,44 @@ impl CardCache {
         if self.capture_version != scene.geometry_version || missing {
             self.capture_version = scene.geometry_version;
             let (captures, texel) = capture_meshes(surfaces, &mesh_scale);
-            self.captures = captures.into_iter().enumerate().filter_map(|(m, c)| Some((key(m), c?))).collect();
+            let serial = &mut self.next_serial;
+            self.captures = captures
+                .into_iter()
+                .enumerate()
+                .filter_map(|(m, c)| {
+                    *serial += 1;
+                    Some((key(m), Capture { surface: c?, serial: *serial }))
+                })
+                .collect();
             self.capture_texel = texel;
         }
         for m in scene.meshes.len()..surfaces.len() {
             if used[m] && !self.captures.contains_key(&key(m)) {
-                self.captures.insert(key(m), capture_surface(&surfaces[m], mesh_scale[m], self.capture_texel));
+                self.next_serial += 1;
+                let surface = capture_surface(&surfaces[m], mesh_scale[m], self.capture_texel);
+                self.captures.insert(key(m), Capture { surface, serial: self.next_serial });
             }
         }
         let keep: HashSet<u64> = (0..surfaces.len()).filter(|&m| m < scene.meshes.len() || used[m]).map(key).collect();
         self.captures.retain(|k, _| keep.contains(k));
 
-        // Card records and the capture atlas.
-        let mut mesh_index = vec![None; surfaces.len()];
+        // The capture atlas: every used surface's cards.
+        let mut first_card: HashMap<u64, (usize, usize)> = HashMap::new();
         let mut sizes = Vec::new();
-        let mut meshes = Vec::new();
-        for m in 0..surfaces.len() {
-            let Some(cards) = self.captures.get(&key(m)).filter(|_| used[m]) else { continue };
-            mesh_index[m] = Some(meshes.len());
-            sizes.extend(cards.cards.iter().map(|c| c.resolution));
-            meshes.push(MeshEntry::new(cards, (meshes.len() * CARD_SLOTS) as u32));
+        for m in (0..surfaces.len()).filter(|&m| used[m]) {
+            let Some(c) = self.captures.get(&key(m)) else { continue };
+            first_card.insert(key(m), (m, sizes.len()));
+            sizes.extend(c.surface.cards.cards.iter().map(|c| c.resolution));
         }
         let (positions, height) = pack_shelves(&sizes, CAPTURE_ATLAS_WIDTH);
         let mut atlas = vec![u32::MAX; (CAPTURE_ATLAS_WIDTH * height.max(1)) as usize];
-        let mut records = vec![[0u32; 4]; meshes.len() * CARD_SLOTS * CARD_VEC4S];
-        let mut k = 0;
-        for m in 0..surfaces.len() {
-            let Some(entry) = mesh_index[m].map(|e| &meshes[e]) else { continue };
-            let sdf_voxel = surfaces[m].sdf().map_or(0.0, |s| s.voxel_size);
-            for card in &self.captures[&key(m)].cards {
-                let [x, y] = positions[k];
-                k += 1;
+        for (surface, &(_, first)) in &first_card {
+            for (card, &[x, y]) in self.captures[surface].surface.cards.cards.iter().zip(&positions[first..]) {
                 for row in 0..card.resolution[1] {
                     let src = (row * card.resolution[0]) as usize;
                     let dst = ((y + row) * CAPTURE_ATLAS_WIDTH + x) as usize;
                     atlas[dst..dst + card.resolution[0] as usize].copy_from_slice(&card.texels[src..src + card.resolution[0] as usize]);
                 }
-                let slot = (card.axis * MAX_CARD_LAYERS as u32 + card.layer) as usize;
-                let base = (entry.first_record as usize + slot) * CARD_VEC4S;
-                let [d0, d1] = card.depth_range;
-                records[base] = Vec4::new(card.origin.x, card.origin.y, entry.texel, card.plane).to_array().map(f32::to_bits);
-                records[base + 1] = Vec4::new(d0, (d1 - d0) / 65534.0, sdf_voxel, 0.0).to_array().map(f32::to_bits);
-                records[base + 2] = [card.resolution[0] | (card.resolution[1] << 16), x | (y << 16), 0, 0];
             }
         }
         let capture = capture_texture(device, CAPTURE_ATLAS_WIDTH, height.max(1));
@@ -382,15 +604,109 @@ impl CardCache {
         );
         self.capture = capture.create_view(&Default::default());
 
+        // (Surface, material) pairs: one mesh entry (card records) each; per instance where the
+        // material depends on the placement, within PLACED_BUDGET.
+        let mut pair_index: HashMap<PairKey, usize> = HashMap::new();
+        let mut pairs: Vec<AlbedoPair> = Vec::new();
+        let mut instance_pair = vec![None; instances.len()];
+        let mut placed_texels = 0;
+        for (k, &i) in instances.iter().enumerate() {
+            let m = surface_of[i];
+            let Some(c) = self.captures.get(&key(m)).filter(|_| used[m]) else { continue };
+            let material = scene.instances[i].material.0;
+            let pipeline = capture_pipeline(scene, material, &mut self.graph_code).filter(|_| !c.surface.attributes.is_empty());
+            let texels = c.surface.cards.texel_count();
+            let placed = pipeline.is_some() && placement_dependent(scene, material) && placed_texels + texels <= PLACED_BUDGET;
+            let pair = PairKey { capture: c.serial, material, placement: placed.then_some(i) };
+            let p = *pair_index.entry(pair).or_insert_with(|| {
+                placed_texels += if placed { texels } else { 0 };
+                pairs.push(AlbedoPair {
+                    key: pair,
+                    surface: key(m),
+                    representative: k as u32,
+                    pipeline,
+                    content: material_content(scene, material, placed.then_some(scene.instances[i].transform)),
+                    origins: Vec::new(),
+                    first_record: (pairs.len() * CARD_SLOTS) as u32,
+                    captured: None,
+                });
+                pairs.len() - 1
+            });
+            instance_pair[k] = Some(p);
+        }
+
+        // The albedo atlas: the cards of every pair with a material capture, within ALBEDO_BUDGET.
+        let mut albedo_sizes = Vec::new();
+        let mut albedo_owner = Vec::new();
+        let mut albedo_texels = 0;
+        for (p, pair) in pairs.iter().enumerate() {
+            let cards = &self.captures[&pair.surface].surface.cards;
+            if pair.pipeline.is_none() || albedo_texels + cards.texel_count() > ALBEDO_BUDGET {
+                continue;
+            }
+            albedo_texels += cards.texel_count();
+            albedo_sizes.extend(cards.cards.iter().map(|c| c.resolution));
+            albedo_owner.extend(std::iter::repeat_n(p, cards.cards.len()));
+        }
+        let (albedo_positions, albedo_height) = pack_shelves(&albedo_sizes, ALBEDO_ATLAS_WIDTH);
+        for (&p, &origin) in albedo_owner.iter().zip(&albedo_positions) {
+            pairs[p].origins.push(origin);
+        }
+        let albedo_texture = albedo_atlas(device, ALBEDO_ATLAS_WIDTH, albedo_height.max(1));
+        // Pairs whose material is unchanged keep their albedo: copied from the previous atlas.
+        let previous: HashMap<PairKey, &AlbedoPair> = self.pairs.iter().filter(|p| p.captured.is_some()).map(|p| (p.key, p)).collect();
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("card albedo copies") });
+        let pair_sums = storage_buffer(device, "card pair sums", (pairs.len() * PAIR_SUM_WORDS * 4) as u64, wgpu::BufferUsages::COPY_SRC);
+        let sum_bytes = (PAIR_SUM_WORDS * 4) as u64;
+        let old_index: HashMap<PairKey, usize> = self.pairs.iter().enumerate().map(|(i, p)| (p.key, i)).collect();
+        let mut copied = 0;
+        for (p, pair) in pairs.iter_mut().enumerate() {
+            let Some(old) = previous.get(&pair.key).filter(|old| old.captured == Some(pair.content) && !pair.origins.is_empty()) else { continue };
+            for ((card, from), to) in self.captures[&pair.surface].surface.cards.cards.iter().zip(&old.origins).zip(&pair.origins) {
+                let at = |texture, [x, y]: [u32; 2]| wgpu::TexelCopyTextureInfo { texture, mip_level: 0, origin: wgpu::Origin3d { x, y, z: 0 }, aspect: wgpu::TextureAspect::All };
+                let size = wgpu::Extent3d { width: card.resolution[0], height: card.resolution[1], depth_or_array_layers: 1 };
+                encoder.copy_texture_to_texture(at(&self.albedo_texture, *from), at(&albedo_texture, *to), size);
+            }
+            encoder.copy_buffer_to_buffer(&self.pair_sums, old_index[&pair.key] as u64 * sum_bytes, &pair_sums, p as u64 * sum_bytes, Some(sum_bytes));
+            pair.captured = Some(pair.content);
+            copied += 1;
+        }
+        self.pair_sums = pair_sums;
+        queue.submit([encoder.finish()]);
+        self.albedo = albedo_texture.create_view(&Default::default());
+        self.albedo_texture = albedo_texture;
+        self.pending = (0..pairs.len()).filter(|&p| pairs[p].captured.is_none() && !pairs[p].origins.is_empty()).collect();
+        self.material_versions = (scene.graphs.version, scene.graphs.parameter_version);
+
+        // Card records: per pair, its surface's cards with its albedo.
+        let mut meshes = Vec::with_capacity(pairs.len());
+        let mut records = vec![[0u32; 4]; pairs.len() * CARD_SLOTS * CARD_VEC4S];
+        for pair in &pairs {
+            let cards = &self.captures[&pair.surface].surface.cards;
+            let entry = MeshEntry::new(cards, pair.first_record);
+            let (m, first) = first_card[&pair.surface];
+            let sdf_voxel = surfaces[m].sdf().map_or(0.0, |s| s.voxel_size);
+            for (k, card) in cards.cards.iter().enumerate() {
+                let [x, y] = positions[first + k];
+                let slot = (card.axis * MAX_CARD_LAYERS as u32 + card.layer) as usize;
+                let base = (entry.first_record as usize + slot) * CARD_VEC4S;
+                let [d0, d1] = card.depth_range;
+                let albedo = if pair.captured.is_some() { pair.origins[k][0] | (pair.origins[k][1] << 16) } else { NONE };
+                records[base] = Vec4::new(card.origin.x, card.origin.y, entry.texel, card.plane).to_array().map(f32::to_bits);
+                records[base + 1] = Vec4::new(d0, (d1 - d0) / 65534.0, sdf_voxel, 0.0).to_array().map(f32::to_bits);
+                records[base + 2] = [card.resolution[0] | (card.resolution[1] << 16), x | (y << 16), albedo, 0];
+            }
+            meshes.push(entry);
+        }
+
         // Instance records and the page-table layout.
         let mut entries = Vec::with_capacity(instances.len());
         let mut data: Vec<[u32; 4]> = Vec::with_capacity(instances.len() * INSTANCE_VEC4S + records.len());
-        for (&i, &bounds) in instances.iter().zip(bounds) {
+        for ((&i, &bounds), &pair) in instances.iter().zip(bounds).zip(&instance_pair) {
             let instance = &scene.instances[i];
-            let m = surface_of[i];
             let world = instance.transform;
             let scale = max_scale(world);
-            let entry = mesh_index[m].map(|e| &meshes[e]);
+            let entry = pair.map(|p| &meshes[p]);
             let to_local = world.inverse();
             for row in 0..3 {
                 data.push(to_local.row(row).to_array().map(f32::to_bits));
@@ -399,7 +715,7 @@ impl CardCache {
                 data.push(world.row(row).to_array().map(f32::to_bits));
             }
             data.push([entry.map_or(0, |e| e.first_record), instance.material.0, entry.map_or(0, |e| e.layers), scale.to_bits()]);
-            entries.push(InstanceEntry::new(mesh_index[m], bounds, entry.map_or(1.0, |e| e.texel * scale)));
+            entries.push(InstanceEntry::new(pair, bounds, entry.map_or(1.0, |e| e.texel * scale)));
         }
         self.uniform.counts = [if meshes.is_empty() { 0 } else { instances.len() as u32 }, data.len() as u32, ATLAS_PAGES, 0];
         data.extend_from_slice(&records);
@@ -408,15 +724,31 @@ impl CardCache {
         let with_cards = entries.iter().filter(|e| e.mesh.is_some()).count();
         self.allocator = Allocator::new(meshes, entries);
         self.pages = storage_buffer_init(device, queue, "card pages", bytemuck::cast_slice(&self.allocator.page_words));
+        let attribute_bytes: usize = self.captures.values().map(|c| c.surface.bytes()).sum::<usize>();
         log::info!(
-            "lumen cards: {} meshes captured ({} cards, capture atlas {}x{}, {:.1} MiB), {} instances with cards",
-            self.allocator.meshes.len(),
+            "lumen cards: {} surfaces captured ({} cards, capture atlas {}x{}, {:.1} MiB; {:.1} MiB of capture data on the CPU), {} instances with cards, uploaded in {:.0} ms",
+            first_card.len(),
             sizes.len(),
             CAPTURE_ATLAS_WIDTH,
             height,
             atlas.len() as f64 * 4.0 / 1048576.0,
-            with_cards
+            attribute_bytes as f64 / 1048576.0,
+            with_cards,
+            start.elapsed().as_secs_f64() * 1000.0
         );
+        log::info!(
+            "lumen cards: {} (surface, material) pairs ({} per instance), {} with material captures ({} texels, albedo atlas {}x{}, {:.1} MiB), {} kept, {} to capture",
+            pairs.len(),
+            pairs.iter().filter(|p| p.key.placement.is_some()).count(),
+            pairs.iter().filter(|p| !p.origins.is_empty()).count(),
+            albedo_texels,
+            ALBEDO_ATLAS_WIDTH,
+            albedo_height,
+            (ALBEDO_ATLAS_WIDTH * albedo_height.max(1)) as f64 * 4.0 / 1048576.0,
+            copied,
+            self.pending.len()
+        );
+        self.pairs = pairs;
     }
 
     /// Chooses every instance's lighting mip for the camera position, (re)allocates pages within
@@ -442,6 +774,183 @@ impl CardCache {
             queue.write_buffer(&self.updates, 0, bytemuck::cast_slice(&updates[..self.update_count]));
         }
         self.uniform
+    }
+}
+
+impl CardCache {
+    /// Schedules recaptures of the pairs whose graph or parameter values changed (other
+    /// material and texture changes re-upload the scene, which recaptures what changed).
+    pub fn sync_materials(&mut self, scene: &Scene) {
+        let versions = (scene.graphs.version, scene.graphs.parameter_version);
+        if versions == self.material_versions {
+            return;
+        }
+        self.material_versions = versions;
+        for (p, pair) in self.pairs.iter_mut().enumerate() {
+            let placement = pair.key.placement.and_then(|i| scene.instances.get(i)).map(|i| i.transform);
+            pair.pipeline = capture_pipeline(scene, pair.key.material, &mut self.graph_code).filter(|_| !pair.origins.is_empty());
+            pair.content = material_content(scene, pair.key.material, placement);
+            if pair.pipeline.is_some() && !pair.origins.is_empty() && pair.captured != Some(pair.content) && !self.pending.contains(&p) {
+                self.pending.push_back(p);
+            }
+        }
+    }
+
+    /// Records the material capture of the next pending pairs (within
+    /// [`CAPTURE_TEXELS_PER_FRAME`]) and points their records at their albedo; their instances'
+    /// cards are relit next.
+    pub fn record_capture(&mut self, rec: &mut Recorder, queue: &wgpu::Queue, inputs: &CaptureInputs) {
+        self.captured_texels = 0;
+        if self.pending.is_empty() {
+            return;
+        }
+        // Graphs the resolve runs (the parameter block holds their values): others are captured
+        // with their material's own shading model, as the resolve renders them then.
+        let active: HashSet<u64> = inputs.extended.slots.iter().filter_map(|s| s.graph.as_ref().map(|g| g.0)).collect();
+        let mut groups: BTreeMap<(u32, u64), Vec<[u32; 4]>> = BTreeMap::new();
+        let mut attributes: Vec<[u32; 4]> = Vec::new();
+        let record_base = self.uniform.counts[1] as usize;
+        while let Some(&p) = self.pending.front() {
+            let pair = &self.pairs[p];
+            let capture = &self.captures[&pair.surface].surface;
+            let texels = capture.cards.texel_count();
+            if self.captured_texels > 0 && self.captured_texels + texels > CAPTURE_TEXELS_PER_FRAME {
+                break;
+            }
+            self.pending.pop_front();
+            let Some((kind, graph)) = pair.pipeline.filter(|_| !pair.origins.is_empty()) else { continue };
+            self.captured_texels += texels;
+            let tiles = groups.entry((kind, if active.contains(&graph) { graph } else { 0 })).or_default();
+            for (k, (card, texel_attributes)) in capture.cards.cards.iter().zip(&capture.attributes).enumerate() {
+                let slot = (card.axis * MAX_CARD_LAYERS as u32 + card.layer) as usize;
+                let record = (record_base + (pair.first_record as usize + slot) * CARD_VEC4S) as u32;
+                let first = attributes.len() as u32;
+                attributes.extend_from_slice(texel_attributes);
+                for y in 0..card.resolution[1].div_ceil(8) {
+                    for x in 0..card.resolution[0].div_ceil(8) {
+                        tiles.push([record, pair.representative, first, x | (y << 8) | (card.axis << 16)]);
+                    }
+                }
+                if k == 0 {
+                    // Its sums start again (the capture adds every texel).
+                    queue.write_buffer(&self.pair_sums, (p * PAIR_SUM_WORDS * 4) as u64, &[0; PAIR_SUM_WORDS * 4]);
+                }
+                if pair.captured.is_none() {
+                    // The record's albedo origin (read by the capture as its target, too).
+                    let [ox, oy] = pair.origins[k];
+                    queue.write_buffer(&self.data, (record as u64 + 2) * 16 + 8, bytemuck::bytes_of(&(ox | (oy << 16))));
+                }
+            }
+            let pair = &mut self.pairs[p];
+            pair.captured = Some(pair.content);
+            for (i, instance) in self.allocator.instances.iter().enumerate() {
+                if instance.mesh == Some(p) && instance.mip.is_some() && !self.allocator.relight.contains(&i) {
+                    self.allocator.relight.push(i);
+                }
+            }
+        }
+        if groups.is_empty() {
+            return;
+        }
+        self.albedo_changed |= self.pending.is_empty();
+
+        let device = rec.device;
+        let capture = self.capture_pipelines.get_or_insert_with(|| CapturePipelines::new(device));
+        // One tile list, each group's part starting on a storage-offset boundary.
+        let mut tiles: Vec<[u32; 4]> = Vec::new();
+        let mut dispatches = Vec::new();
+        for (&(kind, graph), group) in &groups {
+            tiles.resize(tiles.len().next_multiple_of(TILE_ALIGN), [NONE; 4]);
+            dispatches.push((capture.pipeline(device, kind, graph, &self.graph_code), tiles.len(), group.len()));
+            tiles.extend_from_slice(group);
+        }
+        let attribute_buffer = storage_buffer_init(device, queue, "card capture attributes", bytemuck::cast_slice(&attributes));
+        let tile_buffer = storage_buffer_init(device, queue, "card capture tiles", bytemuck::cast_slice(&tiles));
+        let graph_group = bind_group(
+            device,
+            "card capture graphs",
+            &capture.graph_layout,
+            &[(0, inputs.extended.slab_buffer().as_entire_binding()), (1, inputs.extended.parameter_buffer().as_entire_binding())],
+        );
+        let groups: Vec<(wgpu::BindGroup, u32)> = dispatches
+            .iter()
+            .map(|&(_, first, count)| {
+                let tile_range = wgpu::BufferBinding { buffer: &tile_buffer, offset: first as u64 * 16, size: wgpu::BufferSize::new(count as u64 * 16) };
+                let group = bind_group(
+                    device,
+                    "card capture",
+                    &capture.layout,
+                    &[
+                        (0, inputs.frame.as_entire_binding()),
+                        (1, inputs.materials.as_entire_binding()),
+                        (2, TextureView(&inputs.textures.albedo)),
+                        (3, TextureView(&inputs.textures.data)),
+                        (4, Sampler(inputs.sampler)),
+                        (5, self.data.as_entire_binding()),
+                        (6, TextureView(&self.capture)),
+                        (7, attribute_buffer.as_entire_binding()),
+                        (8, wgpu::BindingResource::Buffer(tile_range)),
+                        (9, TextureView(&self.albedo)),
+                        (10, self.pair_sums.as_entire_binding()),
+                    ],
+                );
+                (group, count as u32)
+            })
+            .collect();
+        let mut pass = rec.compute_pass("lumen card capture");
+        pass.set_bind_group(1, &graph_group, &[]);
+        for ((pipeline, _, _), (group, count)) in dispatches.iter().zip(&groups) {
+            pass.set_pipeline(&capture.pipelines[pipeline]);
+            pass.set_bind_group(0, group, &[]);
+            pass.dispatch_workgroups(*count, 1, 1);
+        }
+    }
+}
+
+impl CapturePipelines {
+    fn new(device: &wgpu::Device) -> Self {
+        let c = wgpu::ShaderStages::COMPUTE;
+        let layout = bind_group_layout(
+            device,
+            "card capture",
+            c,
+            &[
+                (0, bind::uniform()),
+                (1, bind::uniform()),
+                (2, bind::texture_array(true)),
+                (3, bind::texture_array(true)),
+                (4, bind::sampler()),
+                (5, bind::storage(true)),
+                (6, bind::texture_uint()),
+                (7, bind::storage(true)),
+                (8, bind::storage(true)),
+                (9, bind::storage_texture(F::Rgba8Unorm)),
+                (10, bind::storage(false)),
+            ],
+        );
+        let graph_layout = bind_group_layout(device, "card capture graphs", c, &[(0, bind::uniform()), (1, bind::uniform())]);
+        Self { layout, graph_layout, pipelines: HashMap::new(), modules: HashMap::new() }
+    }
+
+    /// The pipeline of shading model `kind` and graph `graph` (0: none), compiled on first use;
+    /// returns its key.
+    fn pipeline(&mut self, device: &wgpu::Device, kind: u32, graph: u64, graph_code: &HashMap<u64, String>) -> (u32, u64) {
+        let graph = if graph_code.contains_key(&graph) { graph } else { 0 };
+        if !self.pipelines.contains_key(&(kind, graph)) {
+            let module = self.modules.entry(graph).or_insert_with(|| create_module_from(device, "lumen card capture", capture_shader(graph_code.get(&graph).map(String::as_str))));
+            let layouts = [&self.layout, &self.graph_layout];
+            let pipeline = compute_pipeline_with(device, "lumen card capture", module, "capture_albedo", &layouts, &[("MATERIAL_KIND", kind as f64)]);
+            self.pipelines.insert((kind, graph), pipeline);
+        }
+        (kind, graph)
+    }
+}
+
+/// lumen_card_capture.wgsl, with a graph's surface code in place of material_graph_off.wgsl.
+pub(crate) fn capture_shader(graph: Option<&str>) -> String {
+    match graph {
+        Some(code) => compose_variant("lumen_card_capture.wgsl", &[("material_graph_off.wgsl", &format!("const HAS_GRAPH: bool = true;\n{code}"))]),
+        None => compose_variant("lumen_card_capture.wgsl", &[]),
     }
 }
 
@@ -624,6 +1133,77 @@ fn set_word(words: &mut [u32], dirty: &mut [bool], index: usize, value: u32) {
     dirty[index / CHUNK_WORDS] = true;
 }
 
+fn albedo_atlas(device: &wgpu::Device, width: u32, height: u32) -> wgpu::Texture {
+    device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("card albedo"),
+        size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: F::Rgba8Unorm,
+        usage: U::TEXTURE_BINDING | U::STORAGE_BINDING | U::COPY_SRC | U::COPY_DST,
+        view_formats: &[],
+    })
+}
+
+/// The capture pipeline of `material` — its shading model (`MATERIAL_KIND` of
+/// lumen_card_capture.wgsl) and its graph's hash (0: none; the graph's surface code goes into
+/// `graph_code`) — or `None` if its cards keep the average albedo (terrain, water).
+fn capture_pipeline(scene: &Scene, material: u32, graph_code: &mut HashMap<u64, String>) -> Option<(u32, u64)> {
+    let m = scene.materials.get(material as usize)?;
+    let kind = match m.kind {
+        MaterialKind::Standard | MaterialKind::Translucent => 0,
+        MaterialKind::Rock => 1,
+        MaterialKind::Metal => 3,
+        MaterialKind::Foliage => 4,
+        MaterialKind::Glass => 5,
+        MaterialKind::Terrain | MaterialKind::Water => return None,
+    };
+    let graph = m.graph.filter(|_| !m.kind.is_translucent()).and_then(|g| scene.compiled_material_graph(g));
+    let hash = graph.map_or(0, |g| {
+        graph_code.entry(g.hash).or_insert_with(|| graph_surface_code(&g.wgsl).to_string());
+        g.hash
+    });
+    Some((kind, hash))
+}
+
+/// A graph's surface function: its generated code without the displacement function (cards
+/// capture the displaced surface's geometry; the material is evaluated on it).
+pub(crate) fn graph_surface_code(wgsl: &str) -> &str {
+    wgsl.find("const GRAPH_DISPLACEMENT_VECTOR").map_or(wgsl, |end| &wgsl[..end])
+}
+
+/// Whether `material`'s albedo depends on where an instance stands: textures projected in world
+/// space, a rock's moss (on faces pointing up in the world), graphs that read the world position,
+/// normal, tangent frame, camera or object axes.
+fn placement_dependent(scene: &Scene, material: u32) -> bool {
+    let Some(m) = scene.materials.get(material as usize) else { return false };
+    if m.kind == MaterialKind::Rock || m.mapping == TextureMapping::WorldTriplanar {
+        return true;
+    }
+    let Some(graph) = m.graph.and_then(|g| scene.compiled_material_graph(g)) else { return false };
+    let code = graph_surface_code(&graph.wgsl);
+    ["input.world_position", "input.normal", "input.tangent", "input.bitangent", "input.dpdx", "input.dpdy", "frame.camera", "graph_transform_vector"]
+        .iter()
+        .any(|field| code.contains(field))
+}
+
+/// Hash of what `material`'s captured albedo depends on: the material, the scene's textures, its
+/// graph's code and parameter values, and the placement for placement-dependent pairs.
+fn material_content(scene: &Scene, material: u32, placement: Option<glam::Mat4>) -> u64 {
+    let Some(m) = scene.materials.get(material as usize) else { return 0 };
+    let mut text = format!("{m:?} {}", scene.texture_version);
+    if let Some(graph) = m.graph.and_then(|g| scene.compiled_material_graph(g)) {
+        let mut parameters: Vec<String> = scene.material_parameters(crate::MaterialHandle(material)).map(|(k, v)| format!("{k}={v:?}")).collect();
+        parameters.sort();
+        text += &format!(" {} {:?} {}", graph.hash, graph.parameters, parameters.join(","));
+    }
+    if let Some(transform) = placement {
+        text += &format!(" {:?}", transform.to_cols_array());
+    }
+    text.bytes().fold(0xcbf29ce484222325u64, |h, b| (h ^ b as u64).wrapping_mul(0x100000001b3))
+}
+
 fn capture_texture(device: &wgpu::Device, width: u32, height: u32) -> wgpu::Texture {
     device.create_texture(&wgpu::TextureDescriptor {
         label: Some("card capture"),
@@ -665,17 +1245,19 @@ pub(crate) fn capture_config(two_sided: bool, scale: f32, texel: f32) -> CardCon
 
 /// Captures `surface`, instanced at up to `scale`, at a target world `texel`. A displaced variant
 /// usually brings its capture along (made on the bake's worker thread for the default texel).
-fn capture_surface(surface: &Surface, scale: f32, texel: f32) -> MeshCards {
+fn capture_surface(surface: &Surface, scale: f32, texel: f32) -> SurfaceCapture {
     let aabb = surface.aabb();
     let config = capture_config(surface.sdf().is_some_and(|s| s.two_sided), scale, texel);
     match surface {
         Surface::Mesh(mesh) => {
             let size = capture_texel(aabb.extent(), scale, texel);
-            MeshCards::capture(&mesh_triangles(mesh, size * 0.5), aabb, &config)
+            let (triangles, sources) = mesh_triangles(mesh, size * 0.5);
+            capture_cards(&triangles, &sources, aabb, &config)
         }
         Surface::Displaced(variant) => match &variant.cards {
             Some((s, t, cards)) if *s == scale && *t == texel => cards.clone(),
-            _ => MeshCards::capture(&variant.triangles, aabb, &config),
+            // (The base points are not kept: such a capture has no material inputs.)
+            _ => SurfaceCapture { cards: MeshCards::capture(&variant.triangles, aabb, &config), attributes: Vec::new() },
         },
     }
 }
@@ -683,7 +1265,7 @@ fn capture_surface(surface: &Surface, scale: f32, texel: f32) -> MeshCards {
 /// Captures the surfaces with a scale (`mesh_scale`, 0: unused) with world texels grown
 /// uniformly from [`CARD_TEXEL`] until all cards fit [`CAPTURE_BUDGET`] (estimated from the
 /// bounding boxes first, then checked); returns the captures and the texel.
-fn capture_meshes(surfaces: &[Surface], mesh_scale: &[f32]) -> (Vec<Option<MeshCards>>, f32) {
+fn capture_meshes(surfaces: &[Surface], mesh_scale: &[f32]) -> (Vec<Option<SurfaceCapture>>, f32) {
     let used_meshes = || surfaces.iter().zip(mesh_scale).filter(|(_, &s)| s > 0.0);
     // Texels of the bounding-box faces: about one layer per direction.
     let estimate = |texel: f32| -> f32 {
@@ -700,9 +1282,9 @@ fn capture_meshes(surfaces: &[Surface], mesh_scale: &[f32]) -> (Vec<Option<MeshC
         texel *= 1.25;
     }
     loop {
-        let captures: Vec<Option<MeshCards>> =
+        let captures: Vec<Option<SurfaceCapture>> =
             surfaces.iter().zip(mesh_scale).map(|(surface, &scale)| (scale > 0.0).then(|| capture_surface(surface, scale, texel))).collect();
-        let texels: usize = captures.iter().flatten().map(MeshCards::texel_count).sum();
+        let texels: usize = captures.iter().flatten().map(|c| c.cards.texel_count()).sum();
         if texels as f32 <= CAPTURE_BUDGET || texel >= 1.0 {
             log::debug!("lumen cards: {texels} texels captured (target texel {texel:.2} m)");
             return (captures, texel);
@@ -873,5 +1455,81 @@ mod tests {
         assert!(a.bias > 0);
         assert!(a.pages_wanted(Vec3::ZERO, a.bias) as f32 <= 0.9 * PAGE_COUNT as f32);
         assert_eq!(missing(&a), 0, "everything in reach fits at the coarser bias");
+    }
+
+    /// Decodes IEEE half bits (normal numbers and zero).
+    fn f16_value(bits: u32) -> f32 {
+        let sign = if bits & 0x8000 != 0 { -1.0 } else { 1.0 };
+        let exponent = ((bits >> 10) & 0x1f) as i32;
+        if exponent == 0 {
+            return 0.0;
+        }
+        sign * (1.0 + (bits & 0x3ff) as f32 / 1024.0) * 2f32.powi(exponent - 15)
+    }
+
+    #[test]
+    fn half_floats_round_and_saturate() {
+        assert_eq!(f16_bits(1.0), 0x3c00);
+        assert_eq!(f16_bits(-2.0), 0xc000);
+        assert_eq!(f16_bits(0.5), 0x3800);
+        assert_eq!(f16_bits(65504.0), 0x7bff);
+        assert_eq!(f16_bits(1.0e6), 0x7bff, "overflow saturates");
+        assert_eq!(f16_bits(-1.0e6), 0xfbff);
+        assert_eq!(f16_bits(1.0e-6), 0, "below the normal range");
+        for x in [0.1f32, -0.0371, 3.3, 123.456, 0.0007] {
+            assert!((f16_value(f16_bits(x)) - x).abs() <= x.abs() * 0.0005, "{x}");
+        }
+    }
+
+    /// A 2 x 2 m quad facing +Y with UVs 3 repeats per metre, and its corners' sources with base
+    /// points `lift` below the corners (a displaced surface's base).
+    fn tiled_quad(lift: f32) -> (Vec<[CardVertex; 3]>, Vec<[CornerSource; 3]>) {
+        let corner = |x: f32, z: f32| ((Vec3::new(x, 0.0, z), Vec3::Y), (Vec3::new(x, -lift, z), Vec2::new(x, z) * 3.0));
+        let (a, b, c, d) = (corner(-1.0, -1.0), corner(1.0, -1.0), corner(1.0, 1.0), corner(-1.0, 1.0));
+        let triangles = [[a, c, b], [a, d, c]];
+        (triangles.iter().map(|t| t.map(|v| v.0)).collect(), triangles.iter().map(|t| t.map(|v| v.1)).collect())
+    }
+
+    #[test]
+    fn captured_texels_carry_their_material_inputs() {
+        let (triangles, sources) = tiled_quad(0.05);
+        let bounds = Aabb { min: Vec3::new(-1.0, 0.0, -1.0), max: Vec3::new(1.0, 0.0, 1.0) };
+        let config = CardConfig { texel_size: 0.1, ..Default::default() };
+        let capture = capture_cards(&triangles, &sources, bounds, &config);
+        assert_eq!(capture.cards.cards.len(), 1);
+        let card = &capture.cards.cards[0];
+        assert!(card.sources.is_empty(), "sources are dropped once converted");
+        assert_eq!(capture.attributes[0].len(), card.texels.len());
+        for y in 0..card.resolution[1] {
+            for x in 0..card.resolution[0] {
+                let (p, _) = card.texel_surface(x, y, capture.cards.texel_size).unwrap();
+                let a = capture.attributes[0][(x + y * card.resolution[0]) as usize];
+                let uv = Vec2::new(f32::from_bits(a[0]), f32::from_bits(a[1]));
+                assert!(uv.distance(Vec2::new(p.x, p.z) * 3.0) < 1e-4, "{uv} at {p}");
+                let offset = Vec3::new(f16_value(a[2] & 0xffff), f16_value(a[2] >> 16), f16_value(a[3] & 0xffff));
+                assert!(offset.distance(Vec3::new(0.0, -0.05, 0.0)) < 1e-4, "{offset}");
+                // 3 repeats per metre across 0.1 m texels.
+                assert!((f16_value(a[3] >> 16) - 0.3).abs() < 1e-3);
+            }
+        }
+    }
+
+    #[test]
+    fn uv_footprint_follows_the_projection() {
+        let (triangles, sources) = tiled_quad(0.0);
+        let uv = sources[0].map(|c| c.1);
+        // Seen from +Y (plane axes z, x) the quad's coordinates change by 3 per metre.
+        assert!((uv_footprint(&triangles[0], uv, 2, 0) - 3.0).abs() < 1e-5);
+        // Edge-on (seen along x: plane axes y, z) the projection is degenerate.
+        assert_eq!(uv_footprint(&triangles[0], uv, 1, 2), 0.0);
+    }
+
+    #[test]
+    fn graph_surface_code_leaves_the_displacement_out() {
+        let compiled = helios_material::compile(&helios_material::presets::mushrooms()).unwrap();
+        assert!(compiled.wgsl.contains("fn graph_displacement"));
+        let code = graph_surface_code(&compiled.wgsl);
+        assert!(code.contains("fn graph_eval") && !code.contains("graph_displacement") && !code.contains("GRAPH_DISPLACEMENT"));
+        assert_eq!(graph_surface_code("fn graph_eval() {}"), "fn graph_eval() {}");
     }
 }

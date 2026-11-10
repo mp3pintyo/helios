@@ -58,7 +58,7 @@ use crate::scene::{MaterialKind, Scene};
 use crate::shader::create_module;
 use crate::targets::{FrameTargets, DEPTH_FORMAT, HDR_FORMAT};
 use crate::textures::TextureLibrary;
-use crate::util::{bind, bind_group, bind_group_layout, compute_pipeline, mip_count, mip_view, uniform_buffer, workgroups};
+use crate::util::{bind, bind_group, bind_group_layout, compute_pipeline, mip_count, mip_view, uniform_buffer, workgroups, Lazy};
 use crate::water::{water_bodies, WaterBody, WaterUniform};
 
 /// Mips of the scene-colour copy (blur for rough refraction and reflections).
@@ -418,13 +418,15 @@ fn layer_ranges(peel_count: usize) -> Vec<LayerRange> {
 
 pub struct Translucency {
     layout: wgpu::BindGroupLayout,
-    /// By [`Shading`].
-    pipelines: Vec<wgpu::RenderPipeline>,
+    /// By [`Shading`], each compiled when a frame first draws that model ([`Lazy`]; in the
+    /// browser in the background once the scene has it): a scene without water never pays the
+    /// water pipeline's compile, 1–1.5 s in Firefox.
+    pipelines: Vec<Lazy<wgpu::RenderPipeline>>,
     peel_layout: wgpu::BindGroupLayout,
     /// Depth-only peeling draws by [`Shading::SURFACES`].
-    peel_pipelines: Vec<wgpu::RenderPipeline>,
+    peel_pipelines: Vec<Lazy<wgpu::RenderPipeline>>,
     downsample_layout: wgpu::BindGroupLayout,
-    downsample: wgpu::ComputePipeline,
+    downsample: Lazy<wgpu::ComputePipeline>,
     /// [`WaterUniform`]: the medium and the water bodies (the G-buffer resolve reads it too).
     water: wgpu::Buffer,
     water_bodies: Vec<WaterBody>,
@@ -459,14 +461,19 @@ impl Translucency {
     pub fn new(device: &wgpu::Device) -> Self {
         let module = create_module(device, "translucency.wgsl");
         let layout = layout(device);
-        let pipelines = Shading::ALL.iter().map(|&s| pipeline(device, &module, &layout, s)).collect();
+        type Make = fn(&wgpu::Device, &wgpu::ShaderModule, &wgpu::BindGroupLayout, Shading) -> wgpu::RenderPipeline;
+        let lazy = |make: Make, layout: &wgpu::BindGroupLayout, shading: Shading| {
+            let (device, module, layout) = (device.clone(), module.clone(), layout.clone());
+            Lazy::new(move || make(&device, &module, &layout, shading))
+        };
+        let pipelines = Shading::ALL.iter().map(|&s| lazy(pipeline, &layout, s)).collect();
         let peel_layout = bind_group_layout(
             device,
             "translucency peel",
             ShaderStages::VERTEX_FRAGMENT,
             &[(0, bind::uniform()), (1, bind::storage(true)), (4, bind::texture(false)), (108, bind::texture(false))],
         );
-        let peel_pipelines = Shading::SURFACES.iter().map(|&s| peel_pipeline(device, &module, &peel_layout, s)).collect();
+        let peel_pipelines = Shading::SURFACES.iter().map(|&s| lazy(peel_pipeline, &peel_layout, s)).collect();
         // The bloom chain's 13-tap downsample filter doubles as the blur of the mip chain.
         let bloom = create_module(device, "bloom.wgsl");
         let downsample_layout = bind_group_layout(
@@ -519,6 +526,19 @@ impl Translucency {
     /// false) and sizes the scene-colour copy and the layers. With `enabled` false nothing is
     /// drawn (the water uniform is still written: lake beds need it).
     #[allow(clippy::too_many_arguments)]
+    /// Queues the pipelines of the translucent models the scene's visible instances use for the
+    /// browser's background compile.
+    pub fn prefetch(&self, scene: &Scene) {
+        for instance in scene.instances.iter().filter(|i| i.visible) {
+            let Some(shading) = scene.materials.get(instance.material.0 as usize).and_then(|m| Shading::of(m.kind)) else { continue };
+            self.pipelines[shading as usize].prefetch();
+            self.peel_pipelines[shading as usize].prefetch();
+            if shading == Shading::Water {
+                self.pipelines[Shading::Underwater as usize].prefetch();
+            }
+        }
+    }
+
     pub fn update(
         &mut self,
         device: &wgpu::Device,
@@ -843,7 +863,7 @@ impl Translucency {
 
     /// Draws this frame's surfaces in back-to-front instance order with `pipelines` (by
     /// [`Shading`]).
-    fn draw_surfaces(&self, pass: &mut wgpu::RenderPass, pipelines: &[wgpu::RenderPipeline]) {
+    fn draw_surfaces(&self, pass: &mut wgpu::RenderPass, pipelines: &[Lazy<wgpu::RenderPipeline>]) {
         let (Some(vertices), Some(indices)) = (&self.vertices, &self.indices) else { return };
         pass.set_vertex_buffer(0, vertices.slice(..));
         pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);

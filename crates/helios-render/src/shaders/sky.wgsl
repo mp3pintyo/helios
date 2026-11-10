@@ -155,7 +155,10 @@ fn build_sky_view(@builtin(global_invocation_id) gid: vec3<u32>) {
 
 // ---- Sky irradiance as order-2 spherical harmonics ----------------------------------------
 
-var<workgroup> sh_partial: array<array<vec3<f32>, 9>, 64>;
+// Summed one coefficient at a time (the same additions as a 64 × 9 array): the browser
+// zero-initialises workgroup memory, and Firefox's shader compiler took 0.8 s over the
+// initialisation of the 576-element array.
+var<workgroup> sh_partial: array<vec3<f32>, 64>;
 
 @compute @workgroup_size(64)
 fn project_sky_sh(@builtin(local_invocation_index) lid: u32) {
@@ -186,17 +189,18 @@ fn project_sky_sh(@builtin(local_invocation_index) lid: u32) {
             acc[k] += radiance * y[k] * weight;
         }
     }
-    sh_partial[lid] = acc;
-    workgroupBarrier();
-    for (var stride = 32u; stride > 0u; stride >>= 1u) {
-        if lid < stride {
-            for (var k = 0u; k < 9u; k++) {
-                sh_partial[lid][k] += sh_partial[lid + stride][k];
+    for (var k = 0u; k < 9u; k++) {
+        sh_partial[lid] = acc[k];
+        workgroupBarrier();
+        for (var stride = 32u; stride > 0u; stride >>= 1u) {
+            if lid < stride {
+                sh_partial[lid] += sh_partial[lid + stride];
             }
+            workgroupBarrier();
+        }
+        if lid == 0u {
+            sky_sh[k] = vec4<f32>(sh_partial[0], 0.0);
         }
         workgroupBarrier();
-    }
-    if lid < 9u {
-        sky_sh[lid] = vec4<f32>(sh_partial[0][lid], 0.0);
     }
 }

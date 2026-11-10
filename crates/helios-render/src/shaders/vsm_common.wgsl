@@ -23,10 +23,12 @@ const INFO_FULL_MASK: u32 = 8328u;
 // Per physical page: this frame's PAGE_* kind | scratch tile << 8 (valid for pages rendered this
 // frame); the entry whose static layer the mirror holds (or INVALID_ID); a pending dynamic
 // refresh (vsm_invalidate.wgsl); motion bounds (two words, below).
+// The physical atlas' pages (PHYSICAL_PAGES in vsm.rs).
+const VSM_PHYSICAL_PAGES: u32 = 1024u;
 const INFO_PAGE_STATE: u32 = 22152u;
-const INFO_PAGE_STATIC: u32 = 23176u;
-const INFO_PAGE_REFRESH: u32 = 24200u;
-const INFO_PAGE_MOTION: u32 = 25224u;
+const INFO_PAGE_STATIC: u32 = INFO_PAGE_STATE + VSM_PHYSICAL_PAGES;
+const INFO_PAGE_REFRESH: u32 = INFO_PAGE_STATIC + VSM_PHYSICAL_PAGES;
+const INFO_PAGE_MOTION: u32 = INFO_PAGE_REFRESH + VSM_PHYSICAL_PAGES;
 // INFO_PAGE_STATIC of a page whose static layer is out of date (a caster changed layer): the
 // mirror still holds it, so the page's next render clears it.
 const STALE_STATIC_LAYER: u32 = 0xfffffffeu;

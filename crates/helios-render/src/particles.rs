@@ -19,7 +19,7 @@ use crate::passes::shading::LightingInputs;
 use crate::profiler::Recorder;
 use crate::scene::Scene;
 use crate::shader::create_module;
-use crate::util::{bind, bind_group, bind_group_layout, compute_pipeline, storage_buffer, uniform_buffer, workgroups};
+use crate::util::{bind, bind_group, bind_group_layout, lazy_compute_pipeline, Lazy, storage_buffer, uniform_buffer, workgroups};
 
 /// Emitters per scene (the uniform's array).
 const MAX_EMITTERS: usize = 16;
@@ -309,9 +309,9 @@ impl Spawner {
 }
 
 pub(crate) struct ParticleSystem {
-    simulate: wgpu::ComputePipeline,
-    light: wgpu::ComputePipeline,
-    draw: wgpu::RenderPipeline,
+    simulate: Lazy<wgpu::ComputePipeline>,
+    light: Lazy<wgpu::ComputePipeline>,
+    draw: Lazy<wgpu::RenderPipeline>,
     simulate_layout: wgpu::BindGroupLayout,
     light_layout: wgpu::BindGroupLayout,
     draw_layout: wgpu::BindGroupLayout,
@@ -356,9 +356,12 @@ impl ParticleSystem {
             &[(0, bind::uniform()), (112, bind::storage(true)), (115, bind::storage(true)), (116, bind::texture(false)), (118, bind::texture(false))],
         );
         Self {
-            simulate: compute_pipeline(device, "particle simulation", &module, "simulate", &simulate_layout, &[]),
-            light: compute_pipeline(device, "particle lighting", &module, "light", &light_layout, &[]),
-            draw: crate::oit::particle_pipeline(device, &module, &draw_layout),
+            simulate: lazy_compute_pipeline(device, "particle simulation", &module, "simulate", &simulate_layout, &[]),
+            light: lazy_compute_pipeline(device, "particle lighting", &module, "light", &light_layout, &[]),
+            draw: {
+                let (device, module, layout) = (device.clone(), module.clone(), draw_layout.clone());
+                Lazy::new(move || crate::oit::particle_pipeline(&device, &module, &layout))
+            },
             simulate_layout,
             light_layout,
             draw_layout,
@@ -382,6 +385,15 @@ impl ParticleSystem {
 
     /// Lays out the emitters' slots, turns rates and bursts into this frame's spawn counts and
     /// uploads the uniform.
+    /// Queues the pipelines for the browser's background compile if the scene has emitters.
+    pub fn prefetch(&self, scene: &Scene) {
+        if scene.particles.iter().take(MAX_EMITTERS).any(|e| e.capacity > 0) {
+            self.simulate.prefetch();
+            self.light.prefetch();
+            self.draw.prefetch();
+        }
+    }
+
     pub fn update(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, scene: &Scene, enabled: bool, delta_time: f32) {
         let emitters = &scene.particles[..scene.particles.len().min(MAX_EMITTERS)];
         self.active = enabled && emitters.iter().any(|e| e.capacity > 0);

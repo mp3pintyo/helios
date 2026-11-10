@@ -26,7 +26,7 @@ use crate::passes::shading::LightingInputs;
 use crate::profiler::Recorder;
 use crate::shader::create_module;
 use crate::targets::{DEPTH_FORMAT, HDR_FORMAT};
-use crate::util::{bind, bind_group, bind_group_layout, uniform_buffer};
+use crate::util::{bind, bind_group, bind_group_layout, uniform_buffer, Lazy};
 
 const ACCUM_FORMAT: TextureFormat = TextureFormat::Rgba16Float;
 const REVEAL_FORMAT: TextureFormat = TextureFormat::R16Float;
@@ -80,8 +80,8 @@ impl Targets {
 
 pub(crate) struct Oit {
     layout: wgpu::BindGroupLayout,
-    back: wgpu::RenderPipeline,
-    front: wgpu::RenderPipeline,
+    back: Lazy<wgpu::RenderPipeline>,
+    front: Lazy<wgpu::RenderPipeline>,
     uniform: wgpu::Buffer,
     targets: Option<Targets>,
 }
@@ -108,23 +108,26 @@ impl Oit {
         let over = wgpu::BlendComponent { src_factor: wgpu::BlendFactor::One, dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha, operation: wgpu::BlendOperation::Add };
         let color = Some(wgpu::ColorTargetState { format: HDR_FORMAT, blend: Some(wgpu::BlendState { color: over, alpha: over }), write_mask: wgpu::ColorWrites::COLOR });
         let reactive = Some(wgpu::ColorTargetState { format: TextureFormat::Rgba16Float, blend: None, write_mask: wgpu::ColorWrites::BLUE });
-        let pipeline = |entry: &str, targets: &[Option<wgpu::ColorTargetState>]| {
-            let pipeline_layout = crate::util::pipeline_layout(device, "oit composite", &[&layout]);
-            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("oit composite"),
-                layout: Some(&pipeline_layout),
-                vertex: wgpu::VertexState { module: &module, entry_point: Some("vs_main"), compilation_options: Default::default(), buffers: &[] },
-                primitive: Default::default(),
-                depth_stencil: None,
-                multisample: Default::default(),
-                fragment: Some(wgpu::FragmentState { module: &module, entry_point: Some(entry), compilation_options: Default::default(), targets }),
-                multiview_mask: None,
-                cache: None,
+        let pipeline = |entry: &'static str, targets: Vec<Option<wgpu::ColorTargetState>>| {
+            let (device, module, layout) = (device.clone(), module.clone(), layout.clone());
+            Lazy::background(move || {
+                let pipeline_layout = crate::util::pipeline_layout(&device, "oit composite", &[&layout]);
+                device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some("oit composite"),
+                    layout: Some(&pipeline_layout),
+                    vertex: wgpu::VertexState { module: &module, entry_point: Some("vs_main"), compilation_options: Default::default(), buffers: &[] },
+                    primitive: Default::default(),
+                    depth_stencil: None,
+                    multisample: Default::default(),
+                    fragment: Some(wgpu::FragmentState { module: &module, entry_point: Some(entry), compilation_options: Default::default(), targets: &targets }),
+                    multiview_mask: None,
+                    cache: None,
+                })
             })
         };
         Self {
-            back: pipeline("fs_back", &[color.clone()]),
-            front: pipeline("fs_front", &[color, reactive]),
+            back: pipeline("fs_back", vec![color.clone()]),
+            front: pipeline("fs_front", vec![color, reactive]),
             layout,
             uniform: uniform_buffer(device, "oit composite", std::mem::size_of::<CompositeUniform>() as u64),
             targets: None,

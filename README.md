@@ -8,7 +8,9 @@ lights), **Substrate**-style layered materials with material graphs, heterogeneo
 dynamic world of moving instances, with its material / lighting / post stack — running natively and in the
 browser, where a UE-style level editor with scene files and a PCG graph sits around the live viewport.
 
-**Live showcase:** https://mp3pintyo.github.io/helios/ (needs a WebGPU browser, e.g. recent Chrome or Edge).
+**Live showcase:** https://mp3pintyo.github.io/helios/ (needs a WebGPU browser: recent Chrome, Edge or Firefox; the
+browser compiles the renderer's GPU shaders on the way: the first image after ~9 s in Chrome and ~11–15 s in Firefox,
+shadows, Lumen and the rest joining as their shaders arrive — see gap 15).
 Redeploy with `python site/build.py` then `python site/deploy_pages.py`.
 Round 4's design notes, measurements and screenshots, one file per feature: [`docs/round4/`](docs/round4/).
 
@@ -44,6 +46,7 @@ rustup target add wasm32-unknown-unknown
 cargo install wasm-bindgen-cli --version 0.2.130
 ./build-web.ps1
 python -m http.server 8080 --directory web     # open http://localhost:8080/?scene=cathedral
+#   ?shaders=serial|parallel: how the browser's background shader compile is worked (default: by browser)
 
 # The level editor (browser): outliner, details, gizmos, content browser, PCG volumes, material graphs
 python serve.py 8080 web
@@ -62,6 +65,7 @@ cargo run -p helios-demo --release -- --gltf path/to/Fox.glb          # - (Minus
 #   browser: http://localhost:8080/?gltf=models/DamagedHelmet.glb (fetched relative to the page)
 #   browser resolution: dynamic resolution (14 ms GPU budget) is on by default; ?sp=67 fixes the screen
 #   percentage, ?budget=10 changes the budget, ?budget=0 turns it off
+#   ?bake-workers=0: Lumen's displaced variants bake on the render thread instead of Web Workers (comparisons)
 
 # Streaming geometry from pre-baked .hvm files instead of baking at startup
 cargo run -p helios-demo --release -- --scene forest --bake-hvm hvm/forest      # bake once
@@ -178,7 +182,13 @@ the story of how Helios was built. It talks to the engine through the page API i
 `globalThis.heliosConfig = { scene, embedded, screenPercentage, gpuBudgetMs, gi, megaLights, lights, statusElement }`
 before loading the module, then `heliosLoadScene`, `heliosLoadModel(url)` (fetch a glTF model and make it the scene;
 a promise), `heliosSetCandleLights(n)` (the cathedral's candle lights from its next build; 0: the 33 fixture lights),
-`heliosKey`, `heliosLookAt`, `heliosSetSun`, `heliosSetView`, `heliosSetPaused`, `heliosHud` and `heliosScene`.
+`heliosKey`, `heliosLookAt`, `heliosSetSun`, `heliosSetView`, `heliosSetPaused`, `heliosHud`, `heliosScene` and
+`heliosBusy` (what the engine waits for — `Compiling GPU shaders… 4 s (31 / 52)` while the browser compiles the
+core pipelines of the first image, `Compiling GPU shaders… 2 s` for a new scene's or a feature's that a frame needs at
+once, the canvas keeping its last frame — or empty while it renders), `heliosFrames` (frames presented; 0 until the
+first image) and `heliosShaders` (the background compile as JSON: pipelines compiled and in all, the features still
+waiting for theirs, the time to the first image and to full quality). The site shows `heliosBusy` on its veil until
+the first frame, then a note with the features still compiling.
 `embedded: true` keeps keyboard input on the focused canvas and leaves the mouse wheel to the page; `statusElement`
 names the element the engine writes its (English) progress and errors into instead of `#status`, so a page can show
 its own, translated text. The editor uses a second set of exports (`heliosEditor*`, `heliosMaterialNodes`; see
@@ -189,7 +199,7 @@ its own, translated text. The editor uses a second set of exports (`heliosEditor
 cargo build --release -p helios-demo
 python site/capture.py all          # stills + tour videos into site/media-src (needs ffmpeg; HELIOS_ASSETS = glTF samples)
 uv run --with playwright --with pillow python -I site/capture_editor.py   # editor stills + video (headless Chromium)
-python site/build.py                # site/dist: page, pkg, editor, the media the page references
+python site/build.py                # site/dist: page, pkg (with pkg/snippets/: the bake worker), editor, media
 python serve.py 8080 site/dist      # open http://localhost:8080/preview.html
 ```
 
@@ -339,6 +349,13 @@ Round 6 ([`docs/round6/`](docs/round6/); final build on an idle GPU, minimum of 
 valley 8.7 / 5.4 → 8.8 / 5.5 ms (Lumen's final gather sees the displaced boulders), cathedral 10.8 / 6.6 → 10.9 /
 6.7 ms (an eleventh swinging chandelier light gets a shadow map), forest 16.9 / 11.4 → 15.8 / 10.6 ms (assembly
 culling), gallery 8.0 / 5.0 → 8.1 / 5.0 ms, cathedral with 300 lights under MegaLights 15.0 / 9.0 → 15.2 / 9.0 ms.
+Round 6 follow-ups (browser start-up, Web Worker bakes, per-texel card albedo, the candle redraw budget and the page
+pool's priorities; same method, against round 6): valley 8.7 / 5.4 → 8.7 / 5.5 ms, cathedral 10.8 / 6.7 → 10.8 / 6.7
+ms, forest 15.8 / 10.5 → 15.9 / 10.6 ms, gallery 8.0 / 5.0 → 8.1 / 5.0 ms, cathedral with 300 lights without
+MegaLights 16.0 / 9.7 → 14.7 / 8.8 ms (no candle left without a shadow page), with MegaLights 15.0 / 9.0 → 15.1 /
+8.9 ms, the lantern 11.4 / 7.3 → 11.4 / 7.3 ms. In the browser the first image of a fresh visit takes ~8 s in
+Chromium and in Firefox (was 31–50 s), Firefox's full set ~33 s; the displaced-variant bakes' worst frame 718–920 →
+6–31 ms.
 
 * **Streaming** (`streaming.rs`, `page_source/`). Cluster and page records are always resident; vertex/triangle data
   lives in a fixed GPU pool. Culling stamps "a resident parent wants to refine into this page" into a feedback buffer,
@@ -452,8 +469,8 @@ culling), gallery 8.0 / 5.0 → 8.1 / 5.0 ms, cathedral with 300 lights under Me
   layers per material (sheen colour + sheen roughness + coat normal + coat roughness + coat; specular colour +
   specular), sampled from the 512² arrays with the main texture's coordinates; `KHR_materials_transmission` makes
   the material glass (the forward translucency pass, refracting), tinted by the base colour and
-  `KHR_materials_volume`'s attenuation over its thickness. Lumen's surface cache keeps the average albedo (slabs
-  don't change GI bounces). The extended path needs 17 sampled textures per shader stage (WebGPU's default limit is
+  `KHR_materials_volume`'s attenuation over its thickness. Lumen's mesh cards capture the base albedo per texel
+  (slabs don't change GI bounces). The extended path needs 17 sampled textures per shader stage (WebGPU's default limit is
   16; device creation requests up to 24 where the adapter offers them): with 16, slab materials render as their plain
   base. Cost: scenes without slabs render the same images (valley, cathedral, forest and Sponza differ from the
   previous build by 61–70 dB PSNR, as much as two runs of it differ) and cost the same; the gallery (eleven slab materials, three graphs, about half the screen
@@ -482,7 +499,10 @@ culling), gallery 8.0 / 5.0 → 8.1 / 5.0 ms, cathedral with 300 lights under Me
   position derivatives) — texture filtering, the SVT's tile requests and noise filtering work in graphs; other
   values pay nothing. **Pipelines**: a graph's code replaces `material_graph_off.wgsl` in the extended resolve,
   compiled at runtime (WGSL shader modules are created in the browser too) and cached by the code's FNV hash, so
-  editing a graph compiles one module, identical graphs share one, and moving nodes compiles nothing.
+  editing a graph compiles one module, identical graphs share one, and moving nodes compiles nothing. The same
+  surface code (without the displacement function) is composed into Lumen's card capture
+  (`lumen_card_capture.wgsl`), so a graph's colours and emission reach the surface cache and its bounce light;
+  editing a parameter recaptures that material's cards.
   **Material instances**: `Scene::set_material_parameter` overrides a parameter for one material; values live in a
   16 KiB uniform block (one vec4 per parameter, the material's offset in its slab record), so changing them
   recompiles nothing (the gallery's two water spheres are one graph with different colours). Unset texture
@@ -1008,6 +1028,27 @@ culling), gallery 8.0 / 5.0 → 8.1 / 5.0 ms, cathedral with 300 lights under Me
   sun patches through windows bounce. Debug view 14 shows the card lighting each pixel would read (purple: voxels).
   GPU memory: 32 MiB lighting atlas, 16 MiB instance ids (16 bits per global-SDF voxel), a capture atlas within 16 MiB
   (cathedral 7.7, Sponza 9.4 MiB).
+  **Material capture** (`lumen_card_capture.wgsl`; round 6, `docs/round6/card-albedo.md`; UE5's card capture into
+  the surface cache's albedo and emissive atlases): cards carry the material per texel, not its average. The CPU
+  capture records which triangle each texel sees, from which the texel's texture coordinates and — for displaced
+  variants — the base point it was displaced from are interpolated; the GPU then evaluates the material at every
+  texel as the G-buffer resolve does (image and procedural textures through the 512² arrays, the shading models'
+  procedural detail, material graphs' generated surface code with their parameters), filtered for the texel's
+  footprint, into an rgba8 albedo atlas (albedo and emission), once per (surface, material) pair — per instance
+  where the material depends on the placement (world-space textures and graphs, a rock's moss), within 1 M texels.
+  The card lighting reflects each texel's light with that albedo and adds its emission, so bounce light takes the
+  colours of the surfaces it leaves: the gallery's mushroom caps bounce red, not their bed's green; the cathedral's
+  stained glass glows in its panes' colours, its walls and pews in their textures'. Captures run within 1 M texels a
+  frame (at most ~0.3 ms) after a scene loads (the cathedral's 2.1 M in 3 frames) and again for the pairs whose material,
+  graph or parameters change; until then a pair uses the average; pairs that did not change keep their albedo
+  through scene re-uploads. Memory: the albedo atlas within 16 MiB (gallery 2.6, cathedral 10.7 MiB), the texels'
+  material inputs kept on the CPU for recaptures (16 bytes per captured texel). The capture also sums each pair's
+  texels: the global distance field stores, per voxel, the mean captured albedo of the closest instance's pair
+  instead of the material's average, so the voxel surface cache (and the near field's estimate from it) bounces a
+  graph's colours too — the mushroom bed's voxels went from moss green to the caps', stems' and moss's mean; the
+  field recomposes once captures finish. Card lighting is filtered **depth-aware**: every lit texel stores the depth
+  of the surface it was lit at, and a hit's bilinear taps keep only texels on its tangent plane, so a mushroom cap's
+  light no longer tints the ground beside it (nor a wall's the floor at its foot).
   **Radiance cache refresh** (`update_probes` in `lumen_light.wgsl`): it ran one thread per probe tracing its 32 rays
   in turn — ~3500 long serial threads, most of the GPU idle; it now runs a workgroup per probe, a thread per ray,
   with a shared-memory reduction of the SH: the "lumen surface + radiance cache" pass went from 1.42–1.49 to
@@ -1023,7 +1064,15 @@ culling), gallery 8.0 / 5.0 → 8.1 / 5.0 ms, cathedral with 300 lights under Me
   vectors, world triplanar heights). The mesh is refined into points at most ¾ of a voxel apart (welded, on a
   worker thread), the GPU displaces them with the tessellator's own `displacement_position` — for graphs through
   the dicing passes' generated module — filtered for the point spacing, and the field and cards are baked from the
-  read-back positions on worker threads with the same code as every mesh's (in the browser one bake per frame). An
+  read-back positions on worker threads with the same code as every mesh's. In the browser, which has no threads
+  without cross-origin isolation, the refinement and the bake run on **Web Workers** that each run a second instance
+  of the wasm module (`lumen_offload.rs`, `web_bake.rs`, `bake_worker.js`; `docs/round6/web-bake-worker.md`): the
+  render thread only hands over the inputs and takes in the results, one per frame, so a scene's variants no longer
+  stall frames for 30–920 ms each (worst frame while the gallery's four variants bake 718–920 → 6–7 ms, against
+  2–4 ms without baking, and all of them in after 1.5–1.6 instead of 2.3–3.3 s; `?bake-workers=0` runs them on the
+  render thread as before, as does a browser where a worker cannot start). A watchdog keeps a worker from ever
+  leaving a variant missing: a worker that does not report ready within 8 s, does not answer a task within 10 s or
+  raises an error is terminated and its task runs on the render thread. An
   animated displacement is represented by its mean surface (32 times in 8 s): the gallery's cloth moves at most
   3.6 cm RMS from it at 3.3 cm voxels, where a snapshot would be √2 times as far off and a re-bake could never keep
   up with the waves. Until a variant is ready (0.5–1.3 s of CPU per variant) instances keep their previous one;
@@ -1131,6 +1180,20 @@ culling), gallery 8.0 / 5.0 → 8.1 / 5.0 ms, cathedral with 300 lights under Me
   pillars and through the choir screens. Lights beyond the budget keep cone-traced distance-field soft shadows for
   the strongest few per pixel (mesh SDFs within 2 m of the receiver and of the light, the global field between).
   Debug view 15 shows the sampled mip and page grid of each pixel's strongest shadow-mapped light.
+  **The page pool serves what matters first** ([`vsm-pool-fairness.md`](docs/round6/vsm-pool-fairness.md)). The sun
+  and the 32 maps share 1024 pages, and the candle-lit cathedral requests ~1860 a frame. The cache placed requests
+  first come, first served — in entry order, so the slots with the highest indices got none: the six candelabrum
+  candles nearest the camera held slots without a single resident page and cast no shadow. When the requests do not
+  fit, the page cache now serves them by priority buckets (`page_cache.wgsl`: each mapped light's coarsest page per
+  face, then the sun's pages, then the local lights' pages by their light's rank on screen, coarse mips first) and
+  evicts resident pages below the cut instead of leaving the better requests without a page; and a pool resolution
+  bias (`PoolPressure`, UE's virtual shadow map dynamic resolution) makes the local lights request coarser mips while
+  the requests exceed 95 % of the pool — spread by rank, none for the most influential light, twice the bias for the
+  faintest — and relaxes below 70 %. Candle-lit view at 2560×1440: 963 pages requested and none
+  unallocated (before: ~1860, 840), no map without a page, bias 1.46 mips; the image matches a 2304-page pool's
+  within noise (60.2 dB; before 43.0 dB) — what the faintest lights lose falls on receivers where their coarse pages
+  are as fine as the screen. The six candles cost their filtering again (`local light shadows` +0.37 ms); the 33-light
+  cathedral (55 pages short) and the lantern (94) now fit too, at 0.2 and 0.34 mips, images within noise.
   Slot order matters with moving lights: in the candle-lit cathedral (300 lights, MegaLights) the swinging
   chandeliers' candles took slots and re-rendered ~970 pages a frame (page raster 11–15 ms); static lights first cut
   that to 713 dynamic-only refreshes (0.11 ms), but near the altar six swinging candles still took the slots left
@@ -1158,7 +1221,17 @@ culling), gallery 8.0 / 5.0 → 8.1 / 5.0 ms, cathedral with 300 lights under Me
   six faces due together spread over the next frames; a light that crosses its tolerance sphere every frame is
   rendered every frame **from where it is** (the lead shrinks with the speed, to none); one the budget cannot follow
   at its tolerance is held at twice or four times it rather than given up; and a moving light competes for a slot at
-  half its influence instead of only for the slots static lights leave. The lantern of `--lantern` (a 2 cm flame at
+  up to half its influence instead of only for the slots static lights leave — less the more its map costs per frame
+  ([`candle-redraw-budget.md`](docs/round6/candle-redraw-budget.md)): casters moving with a light (its own fixture)
+  refresh its pages every frame outside the page budget, so the GPU counts the pages each slot renders and requests
+  (resident or not: a map the full pool starves is not free), and the claim is `0.5 / (1 + (pages a frame / 4)²)` of
+  the influence. A chandelier light at its ring's centre (~3.5 pages a frame) keeps 0.28 of it; a candle flame inside
+  its swinging fixture redraws its whole map, 20–50 pages a frame, and keeps under 2 %, so in the candle-lit
+  cathedral's classic loop the static candles keep the slots as in round 5 (shadow pages ~140 → 14 a frame, GPU
+  frame 15.29 → 14.22 ms at 2560×1440: `vsm raster` + expand 0.27 → 0.10 ms, marking 0.36 → 0.21, lighting
+  4.73 → 4.22 — round 5's level; 39.3 dB against the every-frame reference instead of 43.4), while the lantern,
+  hundreds of times more influential than the faint candles holding the last slots, still takes one. The lantern
+  of `--lantern` (a 2 cm flame at
   up to 1.6 m/s) is re-rendered every frame, ~17 pages at the moving mip bias (the reference at full resolution:
   33): 44.8 dB against the every-frame reference — all of it the mip bias — where its distance-field shadows were
   33.9 dB; with the chandeliers swinging too, all twelve moving lights keep their maps for 1000 frames (round 5:
@@ -1546,6 +1619,8 @@ culling), gallery 8.0 / 5.0 → 8.1 / 5.0 ms, cathedral with 300 lights under Me
 | Read-write storage textures only for 32-bit single-channel formats | Subsurface diffusion adds its result to the rgba16f scene colour with a full-screen pass and additive blending instead of a compute read-modify-write |
 | No hardware ray tracing | MegaLights' shadow rays march the depth buffer, the lights' virtual shadow maps and Lumen's distance fields |
 | No derivatives in compute shaders (the material resolve is compute over the visibility buffer) | Analytic barycentric UV derivatives; material graphs carry screen derivatives through their math by forward-mode differentiation |
+| Browsers compile every pipeline in their GPU process before running what follows it (Firefox one at a time, asynchronous or not, on every visit); wgpu calls only the synchronous `create*Pipeline` | Progressive start-up (`pipelines.rs`): every pipeline belongs to a feature group and is queued in the browser; the renderer turns a feature off until its group is compiled, so the first image needs only the core set. Chromium: each pipeline is warmed through `create*PipelineAsync` (Dawn compiles in parallel) and made when warm, a cache hit. Firefox: the core set compiles while the scene bakes, the rest one per frame. The frame loop renders into its own texture and presents only frames that queued no compile, so the page never stalls behind one; content pipelines (skinning, masks, a translucent model…) are made on first use or queued once the scene has the content (`Lazy`) |
+| No wasm threads without cross-origin isolation (`SharedArrayBuffer` needs COOP/COEP headers, which GitHub Pages cannot send) | Lumen's displaced-variant bakes run on Web Workers that each instantiate the page's compiled wasm module and exchange bytes with it (`bake_worker.js`); other start-up work (scene build, texture encoding) runs on the render thread |
 ## Status vs. Unreal Engine 5 — what is still simpler
 
 Honest differences that remain:
@@ -1558,7 +1633,8 @@ Honest differences that remain:
    reassigned, shadow casting toggled, new geometry), moves that grow the scene bounds and toggling voxel LODs or tessellation
    invalidate them globally.
 2. **Lumen**'s mesh cards are axis-aligned (6 directions × 3 depth layers per mesh, no per-mesh card fitting as in UE5),
-   carry the material's *average* albedo (no per-texel textures), are lit with one bounce from the radiance cache
+   carry their materials per ~10 cm texel (the bounce of detail finer than that is averaged by the texel's
+   footprint; the voxel surface cache sees one mean per instance and material), are lit with one bounce from the radiance cache
    rather than card-to-card radiosity, and local lights shadow them through the global field only; surfaces no card
    sees (deep concavities, sub-texel slivers) and instances beyond 100 m use the voxel surface cache, which still leaks
    a little light through thin walls; translucent surfaces get no Lumen
@@ -1591,8 +1667,9 @@ Honest differences that remain:
    specular textures are sampled with the main texture's coordinates from the 512² arrays (not streamed);
    `KHR_materials_transmission` becomes refracting glass (refraction of the screen, not a thin-walled BTDF;
    `transmissionTexture` and `thicknessTexture` are ignored). Alpha tests ignore wrap modes and vertex alpha. Lumen's
-   cards and voxels see a material's average albedo, without vertex colours, texture transforms, AO, slabs or graphs
-   (a lava graph glows on screen but bounces its base colour). Simplification keeps second-UV and colour seams but
+   cards capture materials per texel (graphs included) but without vertex colours or the second UV set, and graphs
+   that read the camera or time are captured as they were at capture; its voxels and the global distance field see
+   one mean captured albedo per instance and material (no emission). Simplification keeps second-UV and colour seams but
    does not weigh their deviation. Alpha tests read image textures with mesh UVs only (not procedural textures or
    triplanar mapping), with 8-bit cutoffs. In Lumen an alpha-masked instance is partially transparent by
    one average coverage (its partial shadows and occlusion are uniform, not shaped like its holes), only in the near
@@ -1623,7 +1700,14 @@ Honest differences that remain:
    occluders the blocker search finds, while shadows of occluders right next to a large moving light stay where the
    origin casts them, single-tap lookups (fog, lights beyond a pixel's four filtered ones) are uncorrected, the map is
    a mip coarser, lights the budget cannot follow are held at up to four times their tolerance (beyond that,
-   distance fields until they rest), and the budget counts pages, not their cost in draws. With the classic
+   distance fields until they rest), and the budget counts pages, not their cost in draws. Casters moving with a
+   light (its own fixture) refresh its pages every frame outside that budget; such a light's claim on a slot falls
+   with the pages its map costs per frame, so candles inside swinging fixtures keep distance-field shadows where
+   static lights compete for the slots (a map without its fixture, traced in the distance fields instead, would
+   be cheap but no better than distance fields: the fixture's shadow is what such a candle casts). The pool is
+   too small for the candle-lit cathedral's 32 maps (~1860 pages requested a frame): it serves them by priority
+   (every map's coarsest pages, the sun, then lights by rank) and coarsens the fainter lights' maps until the
+   requests fit (up to 2.5 mips on average), where UE's larger pool would hold them. With the classic
    clustered loop, the rest get distance-field
    shadows for the strongest few per pixel and no shadows beyond those (light leaks through walls), and shadow-map
    soft shadows are PCSS-filtered, not ray-marched. **MegaLights** shadows every light but traces no hardware rays
@@ -1689,7 +1773,8 @@ Honest differences that remain:
    so a thin caster with a wide part (a chandelier's chain above its ring) still refreshes some pages its geometry
    doesn't touch; UE's instance-culled page invalidation is tighter. A move's speed bound is its current displacement
    held with a decay, not a true bound: a caster that slows down sharply can leave a page a few texels stale until it
-   moves on or stops. A fixture around its own moving light redraws that light's pages every frame (item 4). The
+   moves on or stops. A fixture around its own moving light redraws that light's pages every frame (the light's
+   slot claim pays for it, item 4). The
    global distance field lags by up to a quarter voxel per level (and further for a fast mover beyond the brick
    budget); an instance that stops within that distance of where a level last composed it
    stays there. The voxel surface cache and radiance cache follow moves over a few frames instead of being
@@ -1765,9 +1850,10 @@ Honest differences that remain:
     displacement through baked *variants* (distance field and cards per mesh and displacement): accurate to the
     mesh's voxels and the cards' ~10 cm texels, so relief finer than those (mortar joints, cobbles) only reaches it
     through screen traces; an animated displacement is represented by its mean surface (8 s average), not the moving
-    one; a variant takes a few frames to bake after a displacement changes (0.5–1.3 s of CPU time per variant
-    natively, on worker threads; in the browser, which has no threads, one bake per frame, each a hitch of that
-    length); a world-dependent displacement of a moving instance keeps the variant baked where the instance stood;
+    one; a variant takes a few frames to bake after a displacement changes (0.5–1.3 s of CPU time per variant, on
+    worker threads natively and on Web Workers in the browser, where the render thread still copies each result in —
+    up to ≈ 5 ms for a 124 k-triangle variant — and Lumen re-uploads its scene when a scene's variants are in, as on
+    any structural change); a world-dependent displacement of a moving instance keeps the variant baked where the instance stood;
     meshes baked without a distance field (`SdfMode::None`) stay out of Lumen, displaced or not. A graph displaces
     only while it has one of the 16 extended resolve pipelines (else its materials stay flat); every displacing
     graph of the scene runs in one dicing permutation behind a switch on the material, compiled when the set
@@ -1785,3 +1871,16 @@ Honest differences that remain:
     patch and micro-triangle); texture derivatives are the base plane's. Skinned, alpha-masked, translucent and
     voxel geometry is not tessellated; the wind does not
     rotate displaced normals.
+15. **Browser start-up** (round 6, `firefox-freeze`, `browser-startup`): the browser compiles every pipeline in its
+    GPU process (WGSL → HLSL → DXC on Windows) — Firefox one at a time on every visit, Chrome through wgpu's
+    synchronous calls one at a time too on a first visit. UE ships precompiled shaders and a PSO cache. Helios
+    compiles progressively instead, like UE's asynchronous compilation with fallbacks (`pipelines.rs`,
+    `docs/round6/browser-startup.md`): the first image needs only the core pipelines, and shadows, Lumen, clouds,
+    fog, translucency, tessellation and occlusion culling come on as theirs arrive; Chrome compiles them in parallel
+    (warmed through `create*PipelineAsync`, then made from Dawn's cache), Firefox the core set while the scene bakes
+    and the rest one batch per frame. The first image now takes ~9 s in a fresh Chrome profile (was 26–41 s) and
+    11–15 s in Firefox (was 36–50 s) on this shared Ryzen 5 7600X; the full set ~11 s in Chrome and 33–51 s in
+    Firefox, about when it used to show its first image (a slower CPU waits proportionally longer). Still simpler:
+    the core set itself is ~4 s of Firefox compiling (the material resolve 0.6–1.2 s per shading model), the scene's
+    content pipelines are found only after the bake, a new scene or a debug view compiles its new pipelines in the
+    frame that needs them (the canvas holding its last frame), and the scene bake (3–6 s) runs on the main thread.
