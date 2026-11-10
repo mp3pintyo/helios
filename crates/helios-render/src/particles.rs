@@ -385,17 +385,18 @@ impl ParticleSystem {
 
     /// Lays out the emitters' slots, turns rates and bursts into this frame's spawn counts and
     /// uploads the uniform.
-    pub fn update(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, scene: &Scene, enabled: bool, delta_time: f32) {
-        let emitters = &scene.particles[..scene.particles.len().min(MAX_EMITTERS)];
-        let wanted = emitters.iter().any(|e| e.capacity > 0);
-        if wanted {
-            // Compiled in the background in the browser while the scene has emitters.
-            for pipeline in [&self.simulate, &self.light] {
-                pipeline.prefetch();
-            }
+    /// Queues the pipelines for the browser's background compile if the scene has emitters.
+    pub fn prefetch(&self, scene: &Scene) {
+        if scene.particles.iter().take(MAX_EMITTERS).any(|e| e.capacity > 0) {
+            self.simulate.prefetch();
+            self.light.prefetch();
             self.draw.prefetch();
         }
-        self.active = enabled && wanted;
+    }
+
+    pub fn update(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, scene: &Scene, enabled: bool, delta_time: f32) {
+        let emitters = &scene.particles[..scene.particles.len().min(MAX_EMITTERS)];
+        self.active = enabled && emitters.iter().any(|e| e.capacity > 0);
         if !self.active {
             return;
         }

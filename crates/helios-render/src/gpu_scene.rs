@@ -448,7 +448,7 @@ impl GpuScene {
         self.instance_count = count as u32;
         self.wind_shadows = wind_shadows;
         self.displaced = instances.iter().any(|i| i.flags & instance_flags::DISPLACED != 0);
-        self.displaceable = scene.instances.iter().any(|i| displaced(scene, i));
+        self.displaceable = displaceable(scene);
         let animated_caster = instance_flags::ANIMATED | instance_flags::CAST_SHADOW;
         self.animated_shadows = instances.iter().any(|i| i.flags & animated_caster == animated_caster);
         self.tessellation_uploaded = self.tessellation_enabled;
@@ -501,6 +501,11 @@ fn gpu_instance_flags(scene: &Scene, instance: &Instance, alpha_masked: bool) ->
         flags |= instance_flags::TRANSLUCENT;
     }
     flags
+}
+
+/// Whether some instance's material displaces it (tessellated once tessellation is on).
+pub(crate) fn displaceable(scene: &Scene) -> bool {
+    scene.instances.iter().any(|i| displaced(scene, i))
 }
 
 /// Whether the instance's material displaces it (skinned meshes are not tessellated).

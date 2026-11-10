@@ -526,6 +526,19 @@ impl Translucency {
     /// false) and sizes the scene-colour copy and the layers. With `enabled` false nothing is
     /// drawn (the water uniform is still written: lake beds need it).
     #[allow(clippy::too_many_arguments)]
+    /// Queues the pipelines of the translucent models the scene's visible instances use for the
+    /// browser's background compile.
+    pub fn prefetch(&self, scene: &Scene) {
+        for instance in scene.instances.iter().filter(|i| i.visible) {
+            let Some(shading) = scene.materials.get(instance.material.0 as usize).and_then(|m| Shading::of(m.kind)) else { continue };
+            self.pipelines[shading as usize].prefetch();
+            self.peel_pipelines[shading as usize].prefetch();
+            if shading == Shading::Water {
+                self.pipelines[Shading::Underwater as usize].prefetch();
+            }
+        }
+    }
+
     pub fn update(
         &mut self,
         device: &wgpu::Device,
@@ -544,14 +557,6 @@ impl Translucency {
             self.versions = versions;
         } else {
             self.move_instances(scene, changes);
-        }
-        // The browser compiles the models the scene has in the background.
-        for c in &self.candidates {
-            self.pipelines[c.shading as usize].prefetch();
-            self.peel_pipelines[c.shading as usize].prefetch();
-        }
-        if !self.water_bodies.is_empty() {
-            self.pipelines[Shading::Underwater as usize].prefetch();
         }
         self.draws = if enabled { sort_back_to_front(&self.candidates, eye, &frustum_planes(view_proj)) } else { Vec::new() };
         self.camera_body = if enabled { self.water_bodies.iter().position(|b| b.contains(eye)) } else { None };

@@ -17,12 +17,14 @@
 use bytemuck::{Pod, Zeroable};
 use wgpu::{ShaderStages, TextureFormat as F, TextureUsages as U};
 
-use crate::scene::{Image, ImageTexture, Scene, TextureDesc, TextureSource};
+use crate::scene::{Image, ImageTexture, Scene, TextureDesc, TexturePattern, TextureSource};
 use crate::shader::create_module;
-use crate::util::{bind, bind_group, bind_group_layout, compute_pipeline, mip_count, uniform_buffer, workgroups};
+use crate::util::{bind, bind_group, bind_group_layout, compute_pipeline, lazy_compute_pipeline, mip_count, uniform_buffer, workgroups};
 use crate::pipelines::Lazy;
 
 pub const TEXTURE_SIZE: u32 = 512;
+/// [`TexturePattern`] variants (`PATTERN_*` in texgen.wgsl).
+const PATTERNS: u32 = TexturePattern::Cobblestone as u32 + 1;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
@@ -41,7 +43,9 @@ pub struct TextureLibrary {
     pub data: wgpu::TextureView,
     pub layer_count: u32,
     version: u64,
-    generate: Lazy<wgpu::ComputePipeline>,
+    /// `generate` specialised per [`TexturePattern`] (`PATTERN`), each compiled when a scene
+    /// first uses the pattern (in the browser in the background, before the arrays are built).
+    generate: Vec<Lazy<wgpu::ComputePipeline>>,
     normals: Lazy<wgpu::ComputePipeline>,
     pack: Lazy<wgpu::ComputePipeline>,
     /// `pack` with the occlusion image in the albedo alpha.
@@ -91,7 +95,7 @@ impl TextureLibrary {
             upload_image(device, queue, &Image { width: 1, height: 1, pixels: rgba.to_vec() }, label).expect("1x1 texture")
         };
         let mut library = Self {
-            generate: compute_pipeline(device, "texgen", &module, "generate", &layouts[0], &[]),
+            generate: (0..PATTERNS).map(|p| lazy_compute_pipeline(device, "texgen", &module, "generate", &layouts[0], &[("PATTERN", p as f64)])).collect(),
             normals: compute_pipeline(device, "texgen normals", &module, "normals", &layouts[1], &[]),
             pack: compute_pipeline(device, "texgen pack images", &module, "pack_images", &layouts[4], &[]),
             pack_occlusion: compute_pipeline(device, "texgen pack images", &module, "pack_images", &layouts[4], &[("PACK_OCCLUSION", 1.0)]),
@@ -124,6 +128,19 @@ impl TextureLibrary {
     /// Regenerates the arrays if the scene's textures changed. Returns true if it did.
     pub fn sync(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, scene: &Scene) -> bool {
         if self.version == scene.texture_version {
+            return false;
+        }
+        // In the browser the patterns' pipelines compile in the background first; the arrays are
+        // built once they are in (the first frame waits for them).
+        let mut compiling = false;
+        for source in &scene.textures {
+            if let TextureSource::Procedural(desc) = source {
+                let pipeline = &self.generate[desc.pattern as usize];
+                pipeline.prefetch();
+                compiling |= crate::pipelines::deferring() && !pipeline.is_made();
+            }
+        }
+        if compiling {
             return false;
         }
         self.version = scene.texture_version;
@@ -194,7 +211,7 @@ impl TextureLibrary {
                             &self.layouts[0],
                             &[(0, uniform.as_entire_binding()), (1, TextureView(&albedo0)), (2, TextureView(&height_view))],
                         );
-                        pass.set_pipeline(&self.generate);
+                        pass.set_pipeline(&self.generate[desc.pattern as usize]);
                         pass.set_bind_group(0, &g, &[]);
                         pass.dispatch_workgroups(groups, groups, 1);
                         let g = bind_group(

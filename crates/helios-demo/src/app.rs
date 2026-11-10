@@ -95,8 +95,14 @@ impl DemoApp {
         config: RendererConfig,
         model: Option<Model>,
     ) -> Self {
+        Self::build(Renderer::with_config(device, queue, format, width, height, config), kind, detail, model)
+    }
+
+    /// Builds the scene for a renderer made beforehand (the browser creates the renderer first,
+    /// so its GPU process compiles shaders while the scene bakes).
+    pub fn build(renderer: Renderer, kind: SceneKind, detail: Detail, model: Option<Model>) -> Self {
         let setup = scenes::build(kind, detail, model.as_ref());
-        Self::from_setup(Renderer::with_config(device, queue, format, width, height, config), setup, kind, detail, model)
+        Self::from_setup(renderer, setup, kind, detail, model)
     }
 
     /// Builds the library's scene with its pre-baked meshes, streaming their pages on demand.
@@ -108,9 +114,14 @@ impl DemoApp {
         library: Library,
         config: RendererConfig,
     ) -> Self {
+        Self::build_from_library(Renderer::with_config(device, queue, format, width, height, config), library)
+    }
+
+    /// [`DemoApp::from_library`] for a renderer made beforehand.
+    pub fn build_from_library(renderer: Renderer, library: Library) -> Self {
         let (kind, detail) = (library.manifest.scene, library.manifest.detail);
         let (setup, _) = scenes::build_with(kind, detail, None, MeshStore::Stream(library));
-        Self::from_setup(Renderer::with_config(device, queue, format, width, height, config), setup, kind, detail, None)
+        Self::from_setup(renderer, setup, kind, detail, None)
     }
 
     fn from_setup(renderer: Renderer, setup: SceneSetup, kind: SceneKind, detail: Detail, model: Option<Model>) -> Self {

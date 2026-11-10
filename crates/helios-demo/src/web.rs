@@ -8,17 +8,23 @@
 //! `embedded: true` keeps keyboard input on the focused canvas and leaves the mouse wheel to
 //! the page, so the engine can sit inside a scrolling document.
 //!
-//! **Shader compilation never blocks the page.** The renderer creates ~130 pipelines up
-//! front and more on first use (a scene's material permutations, a debug view, MegaLights).
-//! WebGPU's `createComputePipeline` returns at once, but the browser's GPU process compiles each
-//! pipeline (WGSL → HLSL → DXC on Windows) before it runs anything queued after it: 36 s for the
-//! valley's set in Firefox, which compiles them one at a time and keeps no cache between visits,
-//! and as long in Chrome on a first visit. The page's next paint waited for a frame presented
-//! behind that queue, so it stopped painting, scrolling and reacting for the whole time ("the
-//! browser freezes"). So the engine renders each frame into its own texture and
-//! copies it to the canvas only if the frame created no pipeline; otherwise it skips the canvas,
-//! waits (`onSubmittedWorkDone`, which resolves once the GPU process has worked through the
-//! compiles) while the page keeps running, and shows the wait in the status element.
+//! **Shaders compile progressively and never block the page.** The renderer needs ~160
+//! pipelines; the browser's GPU process compiles each one (WGSL → HLSL → DXC on Windows) before
+//! it runs anything queued after it: 36 s for the valley's set in Firefox, which compiles them
+//! one at a time and keeps no cache between visits, and as long in Chrome on a first visit
+//! through the synchronous `createComputePipeline`. So:
+//!
+//! * the renderer is created before the scene is baked, and its core pipelines are queued at
+//!   once (`helios_render::pipelines`): the GPU process compiles them while the main thread
+//!   bakes; the first image needs only those, every feature (shadows, Lumen, clouds,
+//!   tessellation…) joins as its pipelines arrive in the background, and the last image is the
+//!   full one. Chromium compiles them all in parallel through `create*PipelineAsync` (warmed,
+//!   then made from its cache); Firefox one per presented frame;
+//! * each frame renders into the engine's own texture, copied to the canvas only if the frame
+//!   created no pipeline; otherwise the canvas keeps its last frame and the loop waits
+//!   (`onSubmittedWorkDone`, which resolves once the GPU process has worked through the compiles)
+//!   while the page keeps running. Before the first image the wait is shown in the status
+//!   element and `heliosBusy`; `heliosShaders` reports the background compile.
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -26,7 +32,8 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use glam::Vec2;
-use helios_render::{DynamicResolution, GpuContext};
+use helios_render::pipelines::{self, browser, Compiler, Group};
+use helios_render::{DynamicResolution, GpuContext, Renderer};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use web_sys::{HtmlCanvasElement, HtmlElement};
@@ -59,6 +66,10 @@ pub(crate) struct State {
     /// Frames in a row that created pipelines (a frame that keeps creating them is presented
     /// anyway after a few, rather than never).
     compiling_frames: u32,
+    /// Frames presented so far (`heliosFrames`).
+    presented: u32,
+    /// Serial compiles: the next rAF compiles the next background pipeline instead of rendering.
+    compile_next: bool,
 }
 
 /// A wait for the browser's GPU process to work through the pipelines created so far.
@@ -67,6 +78,8 @@ struct Compiling {
     generation: u32,
     /// When the wait began (ms, `performance.now()`).
     since: f64,
+    /// A background compile after the first image (not reported as busy).
+    background: bool,
 }
 
 /// Generation of the last `onSubmittedWorkDone` that resolved (the callback must be `Send`).
@@ -77,44 +90,54 @@ static GPU_WAIT: AtomicU32 = AtomicU32::new(0);
 thread_local! {
     /// The running engine, for the exported page API.
     static STATE: RefCell<Option<Rc<RefCell<State>>>> = const { RefCell::new(None) };
-    /// Pipelines created on the device so far (counted by `count_pipelines`).
-    static PIPELINES: Cell<u32> = const { Cell::new(0) };
     /// What the engine is waiting for (`heliosBusy`); empty while it renders.
     static BUSY: RefCell<String> = const { RefCell::new(String::new()) };
+    /// When the shaders started compiling, the first image was presented and the last queued
+    /// pipeline was made (ms, `performance.now()`; 0: not yet).
+    static TIMES: Cell<[f64; 3]> = const { Cell::new([0.0; 3]) };
 }
 
-/// Counts every pipeline the device creates, by wrapping the `GPUDevice` object's
-/// `createComputePipeline` and `createRenderPipeline` (wgpu calls them as methods of the object,
-/// so own properties take precedence over the prototype's): the frame loop can then tell whether
-/// a frame queued compiles without any bookkeeping in the renderer.
-fn count_pipelines(device: &wgpu::Device) {
-    let Some(gpu) = device.as_webgpu() else { return };
-    let gpu: &JsValue = gpu.as_ref();
-    for name in ["createComputePipeline", "createRenderPipeline"] {
-        let Ok(original) = js_sys::Reflect::get(gpu, &JsValue::from_str(name)).and_then(|f| f.dyn_into::<js_sys::Function>()) else {
-            continue;
-        };
-        let this = gpu.clone();
-        let wrapper = Closure::<dyn Fn(JsValue) -> Result<JsValue, JsValue>>::new(move |descriptor: JsValue| {
-            PIPELINES.with(|c| c.set(c.get() + 1));
-            original.call1(&this, &descriptor)
-        });
-        let _ = js_sys::Reflect::set(gpu, &JsValue::from_str(name), wrapper.as_ref());
-        wrapper.forget();
-    }
-}
-
+/// Pipelines created on the device so far (counted by `helios_render::pipelines::browser`).
 fn pipelines_created() -> u32 {
-    PIPELINES.with(Cell::get)
+    browser::created()
+}
+
+/// Whether the browser compiles `create*PipelineAsync` pipelines in parallel and hands out an
+/// identical descriptor's compiled pipeline at once (Chromium's Dawn; `?shaders=serial|parallel`
+/// overrides). Firefox compiles one pipeline at a time, asynchronous or not.
+fn parallel_compiles() -> bool {
+    if let Some(choice) = option_string("shaders", "shaders") {
+        return choice == "parallel";
+    }
+    let navigator = js_sys::Reflect::get(&window(), &JsValue::from_str("navigator")).unwrap_or(JsValue::UNDEFINED);
+    let agent = js_sys::Reflect::get(&navigator, &JsValue::from_str("userAgent")).ok().and_then(|a| a.as_string()).unwrap_or_default();
+    agent.contains("Chrome/")
 }
 
 /// Starts a wait for everything queued so far, pipeline compiles included.
-fn wait_for_gpu(queue: &wgpu::Queue) -> Compiling {
+fn wait_for_gpu(queue: &wgpu::Queue, background: bool) -> Compiling {
     let generation = GPU_WAIT.fetch_add(1, Ordering::Relaxed) + 1;
     queue.on_submitted_work_done(move || {
         GPU_DRAINED.fetch_max(generation, Ordering::Relaxed);
     });
-    Compiling { generation, since: now() }
+    Compiling { generation, since: now(), background }
+}
+
+fn set_time(index: usize, at: f64) {
+    TIMES.with(|t| {
+        let mut times = t.get();
+        if times[index] == 0.0 {
+            times[index] = at;
+            t.set(times);
+        }
+    });
+}
+
+/// The status line before the first image: the wait and the core shaders compiled.
+fn compiling_text(now: f64) -> String {
+    let since = TIMES.with(Cell::get)[0];
+    let (made, total) = pipelines::group_progress(Group::Core);
+    format!("Compiling GPU shaders… {:.0} s ({made} / {total})", (now - since) / 1000.0)
 }
 
 fn now() -> f64 {
@@ -328,7 +351,8 @@ async fn run() -> Result<(), String> {
     let ctx = GpuContext::new(instance, Some(&surface))
         .await
         .map_err(|e| format!("{e}. Use a browser with WebGPU enabled (Chrome/Edge 113+, Safari 26+, Firefox 141+)."))?;
-    count_pipelines(&ctx.device);
+    // `?shaders=serial|parallel`: how the background compile works (by default by browser).
+    browser::install(&ctx.device, parallel_compiles());
 
     let (width, height) = canvas_size(&canvas);
     canvas.set_width(width);
@@ -348,6 +372,21 @@ async fn run() -> Result<(), String> {
         ..surface.get_default_config(&ctx.adapter, width, height).ok_or("surface unsupported")?
     };
     surface.configure(&ctx.device, &config);
+
+    // The renderer first: its core pipelines are queued now (Chromium: every pipeline starts
+    // compiling in parallel) and compile in the GPU process while the scene loads and bakes.
+    let renderer = Renderer::with_config(&ctx.device, &ctx.queue, format, width, height, renderer_config());
+    // Firefox: yielding between the renderer's shader modules and the first pipelines kept the
+    // main thread from blocking 5 s (until the GPU process had compiled the core set) at the
+    // next turn of the event loop.
+    next_tick().await;
+    set_time(0, now());
+    pipelines::pump();
+    browser::take_created_labels();
+    let (_, queued) = pipelines::progress();
+    log::info!("{queued} pipelines queued ({:?} compiles); {} core pipelines for the first image", pipelines::compiler(), pipelines::group_progress(Group::Core).1);
+    // Let the browser send the compiles to its GPU process before the main thread bakes.
+    next_tick().await;
 
     // `?scene-file=URL`: a saved editor scene; its base scene is built instead of `?scene`.
     let scene_file = match query_param("scene-file") {
@@ -375,7 +414,7 @@ async fn run() -> Result<(), String> {
             let library = mesh_store::fetch_library(&base).await?;
             set_status(&format!("Building the {} (textures)…", library.manifest.scene.name()));
             next_tick().await;
-            DemoApp::from_library(&ctx.device, &ctx.queue, format, (width, height), library, renderer_config())
+            DemoApp::build_from_library(renderer, library)
         }
         None => {
             let (mut kind, mut detail) = (scene_from_url(), Detail::Medium);
@@ -391,7 +430,7 @@ async fn run() -> Result<(), String> {
             };
             set_status(&format!("Building the {} (virtual geometry, distance fields, textures)…", kind.name()));
             next_tick().await;
-            DemoApp::with_config(&ctx.device, &ctx.queue, format, width, height, kind, detail, renderer_config(), model)
+            DemoApp::build(renderer, kind, detail, model)
         }
     };
     configure_resolution(&mut app);
@@ -422,9 +461,11 @@ async fn run() -> Result<(), String> {
         paused: false,
         looking: false,
         frame_target: target,
-        // The renderer's pipelines are compiling now: wait for them before the first frame.
-        compiling: Some(wait_for_gpu(&ctx.queue)),
+        // The core pipelines are compiling now: wait for them before the first frame.
+        compiling: Some(wait_for_gpu(&ctx.queue, false)),
         compiling_frames: 0,
+        presented: 0,
+        compile_next: false,
     }));
     STATE.with(|s| *s.borrow_mut() = Some(state.clone()));
     // Keep the context (instance/adapter/queue) alive for the page lifetime.
@@ -570,16 +611,41 @@ fn frame(st: &mut State, now: f64) {
         let seconds = (now - wait.since) / 1000.0;
         if GPU_DRAINED.load(Ordering::Relaxed) < wait.generation {
             // Short waits (a pipeline or two) pass without a message.
-            if seconds > 0.5 {
-                set_busy(&format!("Compiling GPU shaders… {seconds:.0} s"));
+            if !wait.background && seconds > 0.5 {
+                set_busy(&if st.presented == 0 { compiling_text(now) } else { format!("Compiling GPU shaders… {seconds:.0} s") });
             }
             return;
         }
-        if seconds > 0.5 {
+        if !wait.background && seconds > 0.5 {
             log::info!("waited {seconds:.1} s for the GPU process to compile pipelines ({} created so far)", pipelines_created());
+        }
+        if !wait.background && st.presented > 0 {
+            log::info!("a frame waited for compiles: {}", browser::take_created_labels().join(", "));
         }
         st.compiling = None;
         set_busy("");
+    }
+
+    // Firefox: compile the next background pipeline in a frame of its own, one after a presented
+    // frame (compiling right after presenting held the page's next paint until the compile was
+    // done: the canvas's presentation waits in the same GPU process queue). The frames after
+    // wait for it instead of presenting behind it.
+    if std::mem::take(&mut st.compile_next) && pipelines::make_next() {
+        browser::take_created_labels();
+        st.compiling = Some(wait_for_gpu(&st.queue, true));
+        return;
+    }
+
+    // Chromium: start warming newly queued pipelines, make the warm ones. Firefox: make the
+    // queued core pipelines (the first image waits for all of them).
+    let pipelines = pipelines_created();
+    pipelines::pump();
+    if !pipelines::ready(Group::Core) || pipelines_created() != pipelines {
+        if pipelines_created() != pipelines {
+            st.compiling = Some(wait_for_gpu(&st.queue, false));
+        }
+        set_busy(&compiling_text(now));
+        return;
     }
 
     let (width, height) = canvas_size(&st.canvas);
@@ -594,13 +660,19 @@ fn frame(st: &mut State, now: f64) {
     }
 
     st.app.update(&mut st.input, dt);
-    let pipelines = pipelines_created();
+    let rendered = st.app.renderer.frame_count();
     let view = st.frame_target.create_view(&Default::default());
     st.app.render(&view, dt);
+    if st.app.renderer.frame_count() == rendered {
+        // The first frame found core pipelines of the scene's content to compile first (they are
+        // queued now); nothing was rendered.
+        set_busy(&compiling_text(now));
+        return;
+    }
     if pipelines_created() != pipelines && st.compiling_frames < 8 {
         // This frame queued compiles: presenting it would stall the page until they finish.
         st.compiling_frames += 1;
-        st.compiling = Some(wait_for_gpu(&st.queue));
+        st.compiling = Some(wait_for_gpu(&st.queue, st.presented > 0));
         return;
     }
     st.compiling_frames = 0;
@@ -620,14 +692,39 @@ fn frame(st: &mut State, now: f64) {
     );
     st.queue.submit([encoder.finish()]);
     st.queue.present(texture);
+    if st.presented == 0 {
+        set_time(1, now);
+        let start = TIMES.with(Cell::get)[0];
+        log::info!("first image at {:.1} s, {:.1} s after the shaders started compiling; waiting for: {}", now / 1000.0, (now - start) / 1000.0, waiting_features());
+        let made_in_frames = browser::take_created_labels();
+        if !made_in_frames.is_empty() {
+            log::info!("made by the first frames: {}", made_in_frames.join(", "));
+        }
+    }
+    st.presented += 1;
+
+    if pipelines::compiler() == Compiler::Serial && !pipelines::waiting().is_empty() {
+        st.compile_next = true;
+    } else if pipelines::waiting().is_empty() && TIMES.with(Cell::get)[2] == 0.0 {
+        set_time(2, now);
+        let start = TIMES.with(Cell::get)[0];
+        log::info!("every pipeline compiled at {:.1} s, {:.1} s after the shaders started ({} pipelines)", now / 1000.0, (now - start) / 1000.0, pipelines::progress().1);
+    }
 
     st.hud_timer += dt as f64;
     if st.hud_timer > 0.25 {
         st.hud_timer = 0.0;
         if let Some(hud) = &st.hud {
-            hud.set_inner_text(&st.app.hud());
+            let (made, total) = pipelines::progress();
+            let shaders = if made < total { format!("shaders compiling in the background: {made} / {total} (waiting: {})\n", waiting_features()) } else { String::new() };
+            hud.set_inner_text(&format!("{shaders}{}", st.app.hud()));
         }
     }
+}
+
+/// The features still waiting for their pipelines, e.g. "shadows, global illumination".
+fn waiting_features() -> String {
+    pipelines::waiting().iter().map(|g| g.name()).collect::<Vec<_>>().join(", ")
 }
 
 // ---- Page API ---------------------------------------------------------------------------------
@@ -677,12 +774,37 @@ pub fn helios_hud() -> String {
     with_state(|st| st.app.hud()).unwrap_or_default()
 }
 
-/// What the engine is waiting for, e.g. "Compiling GPU shaders… 12 s" while the browser compiles
-/// the pipelines of the first frame, a new scene or a feature switched on (the canvas keeps its
-/// last frame meanwhile); empty while it renders. A page can show it over the canvas.
+/// What the engine is waiting for, e.g. "Compiling GPU shaders… 4 s (31 / 52)" while the browser
+/// compiles the pipelines of the first image (or "Compiling GPU shaders… 2 s" for a new scene's
+/// or a feature's that a frame needs at once; the canvas keeps its last frame meanwhile); empty
+/// while it renders. A page can show it over the canvas until [`helios_frames`] counts a frame.
 #[wasm_bindgen(js_name = heliosBusy)]
 pub fn helios_busy() -> String {
     BUSY.with(|b| b.borrow().clone())
+}
+
+/// Frames presented so far (0 until the first image is on the canvas).
+#[wasm_bindgen(js_name = heliosFrames)]
+pub fn helios_frames() -> u32 {
+    with_state(|st| st.presented).unwrap_or(0)
+}
+
+/// The background shader compile as JSON: `{"compiled": 84, "total": 160, "waiting": ["shadows",
+/// …], "compiler": "Serial", "firstImageMs": …, "fullQualityMs": …}` (times from the start of the
+/// compile, 0 until reached). The features in `waiting` are off until their pipelines arrive.
+#[wasm_bindgen(js_name = heliosShaders)]
+pub fn helios_shaders() -> String {
+    let (made, total) = pipelines::progress();
+    let waiting: Vec<String> = pipelines::waiting().iter().map(|g| format!("\"{}\"", g.name())).collect();
+    let [start, first, full] = TIMES.with(Cell::get);
+    let since = |t: f64| if t > 0.0 { (t - start).round() } else { 0.0 };
+    format!(
+        "{{\"compiled\":{made},\"total\":{total},\"waiting\":[{}],\"compiler\":\"{:?}\",\"firstImageMs\":{},\"fullQualityMs\":{}}}",
+        waiting.join(","),
+        pipelines::compiler(),
+        since(first),
+        since(full)
+    )
 }
 
 /// The current scene's name; empty until the engine runs.

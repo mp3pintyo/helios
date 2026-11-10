@@ -331,6 +331,12 @@ pub fn progress() -> (usize, usize) {
     (entries.iter().filter(|j| j.state() == MADE).count(), entries.len())
 }
 
+/// [`progress`] of one group.
+pub fn group_progress(group: Group) -> (usize, usize) {
+    let entries: Vec<_> = entries().into_iter().filter(|j| j.group() == group).collect();
+    (entries.iter().filter(|j| j.state() == MADE).count(), entries.len())
+}
+
 /// Groups with pipelines still to make, in priority order.
 pub fn waiting() -> Vec<Group> {
     let mut groups: Vec<Group> = entries().iter().filter(|j| pending(j.state())).map(|j| j.group()).collect();
@@ -417,6 +423,8 @@ pub mod browser {
         static WARMING: Cell<bool> = const { Cell::new(false) };
         static UNCOUNTED: Cell<bool> = const { Cell::new(false) };
         static COMPILES: RefCell<Vec<js_sys::Promise>> = const { RefCell::new(Vec::new()) };
+        /// Labels of the pipelines counted since [`take_created_labels`].
+        static LABELS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
     }
 
     /// Wraps the `GPUDevice` object's `createComputePipeline` and `createRenderPipeline` (wgpu
@@ -444,6 +452,8 @@ pub mod browser {
                 }
                 if !UNCOUNTED.with(Cell::get) {
                     CREATED.with(|c| c.set(c.get() + 1));
+                    let label = js_sys::Reflect::get(&descriptor, &JsValue::from_str("label")).ok().and_then(|l| l.as_string()).unwrap_or_default();
+                    LABELS.with(|l| l.borrow_mut().push(label));
                 }
                 original.call1(&this, &descriptor)
             });
@@ -457,6 +467,12 @@ pub mod browser {
     /// Pipelines created on the device so far (made from a warm compile: not counted).
     pub fn created() -> u32 {
         CREATED.with(Cell::get)
+    }
+
+    /// The labels of the pipelines created (and counted) since the last call: which compiles a
+    /// frame had to wait for.
+    pub fn take_created_labels() -> Vec<String> {
+        LABELS.with(|l| std::mem::take(&mut *l.borrow_mut()))
     }
 
     /// Runs a constructor with pipeline creation switched to the asynchronous calls; the

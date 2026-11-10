@@ -388,6 +388,10 @@ pub struct Renderer {
     /// The settings asked for this frame (`settings` holds the ones it renders with: features
     /// whose pipelines the browser is still compiling are off, see [`Renderer::render`]).
     requested: RenderSettings,
+    /// Scene versions whose content pipelines were queued, and whether the scene has displaced
+    /// surfaces (browser only, see `prefetch_content`).
+    prefetched: Option<(u64, u64, u64)>,
+    displaceable: bool,
     frame_uniform: wgpu::Buffer,
     scene: GpuScene,
     targets: FrameTargets,
@@ -473,6 +477,8 @@ impl Renderer {
             queue: queue.clone(),
             settings: RenderSettings::default(),
             requested: RenderSettings::default(),
+            prefetched: None,
+            displaceable: false,
             frame_uniform: uniform_buffer(device, "frame", std::mem::size_of::<FrameUniform>() as u64),
             scene: GpuScene::new(device, pool),
             targets: FrameTargets::new(device, (width, height), (width, height)),
@@ -743,10 +749,53 @@ impl Renderer {
     pub fn render(&mut self, scene: &Scene, camera: &Camera, output: &wgpu::TextureView, delta_time: f32) {
         let requested = self.settings;
         self.requested = requested;
-        self.settings = compiled_features(requested);
+        if pipelines::deferring() {
+            self.prefetch_content(scene);
+        }
+        self.settings = self.compiled_features(requested);
         self.render_frame(scene, camera, output, delta_time);
         // Keep the one choice a frame makes itself (the Lumen Lite fallback).
         self.settings = RenderSettings { gi_method: self.settings.gi_method, ..requested };
+    }
+
+    /// Queues the pipelines of the scene's content features need (its translucent models,
+    /// volumes, particles) before the frame decides which features it renders, so a feature does
+    /// not come on with pipelines still to compile. (Content the core set needs is queued during
+    /// the frame: see the wait in `render_frame`.)
+    fn prefetch_content(&mut self, scene: &Scene) {
+        let versions = (scene.geometry_version, scene.material_version, scene.instance_version);
+        if self.prefetched == Some(versions) {
+            return;
+        }
+        self.prefetched = Some(versions);
+        self.translucency.prefetch(scene);
+        self.effects.prefetch(scene);
+        self.displaceable = crate::gpu_scene::displaceable(scene);
+    }
+
+    /// `settings` with the features whose pipelines are not made yet switched off (in the
+    /// browser, while they compile in the background; natively every group is ready).
+    fn compiled_features(&self, mut s: RenderSettings) -> RenderSettings {
+        let ready = pipelines::ready;
+        s.occlusion_culling &= ready(Group::OcclusionCulling);
+        s.shadows &= ready(Group::Shadows);
+        s.global_illumination &= ready(Group::GlobalIllumination);
+        s.clouds &= ready(Group::Clouds);
+        s.volumetric_fog &= ready(Group::Fog);
+        s.translucency &= ready(Group::Translucency);
+        // The tessellator (and its pipelines) is created once the frame knows the scene has
+        // displaced surfaces: until then its group is empty, not ready.
+        s.tessellation &= ready(Group::Tessellation) && !(self.displaceable && self.culling.tessellation.is_none() && pipelines::deferring());
+        if !ready(Group::Effects) {
+            s.volumes = false;
+            s.particles = false;
+        }
+        if !ready(Group::CameraEffects) {
+            s.motion_blur = 0.0;
+            s.depth_of_field = None;
+            s.local_exposure = None;
+        }
+        s
     }
 
     fn render_frame(&mut self, scene: &Scene, camera: &Camera, output: &wgpu::TextureView, delta_time: f32) {
@@ -1230,29 +1279,6 @@ impl Renderer {
             0
         }
     }
-}
-
-/// `settings` with the features whose pipelines are not made yet switched off (in the browser,
-/// while they compile in the background; natively every group is ready).
-fn compiled_features(mut s: RenderSettings) -> RenderSettings {
-    let ready = pipelines::ready;
-    s.occlusion_culling &= ready(Group::OcclusionCulling);
-    s.shadows &= ready(Group::Shadows);
-    s.global_illumination &= ready(Group::GlobalIllumination);
-    s.clouds &= ready(Group::Clouds);
-    s.volumetric_fog &= ready(Group::Fog);
-    s.translucency &= ready(Group::Translucency);
-    s.tessellation &= ready(Group::Tessellation);
-    if !ready(Group::Effects) {
-        s.volumes = false;
-        s.particles = false;
-    }
-    if !ready(Group::CameraEffects) {
-        s.motion_blur = 0.0;
-        s.depth_of_field = None;
-        s.local_exposure = None;
-    }
-    s
 }
 
 /// Moving instances in a frame ([`Renderer::dynamic_stats`]).

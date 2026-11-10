@@ -560,6 +560,16 @@ impl HeterogeneousVolumes {
     /// Mirrors the scene's emitters, picks which to simulate and march, uploads their uniforms.
     /// `enabled` false skips everything (fire lights keep the scene's intensity).
     #[allow(clippy::too_many_arguments)]
+    /// Queues the pipelines for the browser's background compile if the scene has volumes.
+    pub fn prefetch(&self, scene: &Scene) {
+        if !scene.volumes.is_empty() {
+            for pipeline in [&self.curl, &self.forces, &self.divergence, &self.project, &self.advect, &self.maccormack, &self.procedural, &self.flicker, &self.light_cache, &self.march, &self.resolve] {
+                pipeline.prefetch();
+            }
+            self.pressure.iter().for_each(Lazy::prefetch);
+        }
+    }
+
     pub fn update(
         &mut self,
         device: &wgpu::Device,
@@ -577,12 +587,6 @@ impl HeterogeneousVolumes {
         self.visible.clear();
         self.rect = [0; 4];
         self.flicker_count = 0;
-        if !scene.volumes.is_empty() {
-            for pipeline in [&self.curl, &self.forces, &self.divergence, &self.project, &self.advect, &self.maccormack, &self.procedural, &self.flicker, &self.light_cache, &self.march, &self.resolve] {
-                pipeline.prefetch();
-            }
-            self.pressure.iter().for_each(Lazy::prefetch);
-        }
         for gpu in &mut self.emitters {
             gpu.update = false;
             gpu.visible = false;
