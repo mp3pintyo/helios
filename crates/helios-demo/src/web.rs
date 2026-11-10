@@ -8,14 +8,14 @@
 //! `embedded: true` keeps keyboard input on the focused canvas and leaves the mouse wheel to
 //! the page, so the engine can sit inside a scrolling document.
 //!
-//! **Shader compilation never blocks the page.** The renderer creates its ~140 pipelines up
+//! **Shader compilation never blocks the page.** The renderer creates ~130 pipelines up
 //! front and more on first use (a scene's material permutations, a debug view, MegaLights).
 //! WebGPU's `createComputePipeline` returns at once, but the browser's GPU process compiles each
 //! pipeline (WGSL → HLSL → DXC on Windows) before it runs anything queued after it: 36 s for the
 //! valley's set in Firefox, which compiles them one at a time and keeps no cache between visits,
-//! and as long in Chrome on a first visit. A frame presented behind that queue holds the tab's
-//! compositor transaction, so the page stopped painting, scrolling and reacting for the whole
-//! time ("the browser freezes"). So the engine renders each frame into its own texture and
+//! and as long in Chrome on a first visit. The page's next paint waited for a frame presented
+//! behind that queue, so it stopped painting, scrolling and reacting for the whole time ("the
+//! browser freezes"). So the engine renders each frame into its own texture and
 //! copies it to the canvas only if the frame created no pipeline; otherwise it skips the canvas,
 //! waits (`onSubmittedWorkDone`, which resolves once the GPU process has worked through the
 //! compiles) while the page keeps running, and shows the wait in the status element.
