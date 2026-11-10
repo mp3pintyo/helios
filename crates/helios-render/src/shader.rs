@@ -336,6 +336,12 @@ mod tests {
                 assert!(animated.contains(&format!("{node} ({pin})")), "{animated:?}");
             }
         }
+        // Motion vectors: only an animated graph's resolve evaluates the previous frame's surface,
+        // at the previous frame's time.
+        let resolve = |graph| extended_resolve(Some(&compile(&graph).unwrap().wgsl), true);
+        let (still, moving) = (resolve(presets::mushrooms()), resolve(presets::rippling_cloth()));
+        assert!(still.contains("const GRAPH_DISPLACEMENT_ANIMATED: bool = false;") && moving.contains("const GRAPH_DISPLACEMENT_ANIMATED: bool = true;"));
+        assert!(moving.contains("if DISPLACEMENT_ANIMATED {\n        let before = displaced_input(instance, objects, normals, uvs, l, tess.time.y);"));
         let code = crate::tessellation::graphs::dispatch_module(&functions);
         assert!(code.contains("displacement_from_height(displacement_graph_") && code.contains("displacement_from_vector(displacement_graph_"));
         for name in ["tess.wgsl", "vsm_tess.wgsl"] {

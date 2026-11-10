@@ -58,7 +58,8 @@ pub fn dispatch_module(functions: &[(u32, DisplacementKind, String)]) -> String 
     code.push_str(&format!("@group(0) @binding({BINDING_ALBEDO}) var material_albedo: texture_2d_array<f32>;\n"));
     code.push_str(&format!("@group(0) @binding({BINDING_GRAPH_PARAMETERS}) var<uniform> graph_params: array<vec4<f32>, {GRAPH_PARAMETER_SLOTS}>;\n\n"));
     // The tessellation passes have no motion vectors to write.
-    code.push_str("const DISPLACEMENT_ANIMATED: bool = false;\n\n");
+    let vectors = functions.iter().any(|f| f.1 == DisplacementKind::Vector);
+    code.push_str(&format!("const DISPLACEMENT_VECTORS: bool = {vectors};\nconst DISPLACEMENT_ANIMATED: bool = false;\n\n"));
     for (_, _, function) in functions {
         code.push_str(function);
         code.push('\n');
@@ -120,5 +121,42 @@ mod tests {
         scene.add_material(Material { graph: Some(bricks), ..displaced });
         assert_eq!(displacing_graphs(&scene), set);
         assert_ne!(set_hash(&set), set_hash(&[]));
+    }
+
+    #[test]
+    fn vector_and_animated_graphs_set_bounds_and_flags() {
+        use crate::tessellation::{displacement_animated, displacement_bound, graph_displacement, material_table};
+        let mut scene = Scene::new();
+        let displaced = Material { displacement: Some(Displacement::height(0.1, 0.25)), ..Material::default() };
+        let texture = scene.add_texture(crate::TextureDesc::new(crate::TexturePattern::Cobblestone, glam::Vec3::ONE, glam::Vec3::ZERO));
+        let by_texture = scene.add_material(Material { texture: Some(texture), ..displaced });
+        let bricks = scene.add_material_graph(presets::brick_pavement());
+        let mushrooms = scene.add_material_graph(presets::mushrooms());
+        let cloth = scene.add_material_graph(presets::rippling_cloth());
+        let [height, vector, animated] = [bricks, mushrooms, cloth].map(|graph| scene.add_material(Material { graph: Some(graph), ..displaced }));
+        let of = |handle: crate::MaterialHandle| scene.material(handle);
+        // A height moves a point by at most magnitude · max(centre, 1 − centre), a vector (its
+        // length clamped to 1) by the magnitude, whatever the centre.
+        assert!((displacement_bound(&scene, of(by_texture)) - 0.075).abs() < 1e-6);
+        assert!((displacement_bound(&scene, of(height)) - 0.075).abs() < 1e-6);
+        assert!((displacement_bound(&scene, of(vector)) - 0.1).abs() < 1e-6);
+        assert_eq!(graph_displacement(&scene, of(by_texture)), None);
+        assert_eq!(graph_displacement(&scene, of(vector)), Some((DisplacementKind::Vector, false)));
+        assert_eq!(graph_displacement(&scene, of(animated)), Some((DisplacementKind::Height, true)));
+        assert!(!displacement_animated(&scene, of(height)) && !displacement_animated(&scene, of(vector)) && displacement_animated(&scene, of(animated)));
+        let table = material_table(&scene);
+        assert_eq!(table[vector.index() as usize].params.z, 0.1, "the culling bound in the tessellation uniform");
+        // The permutation wraps each graph's function by what it returns.
+        let code = scene_dispatch_module(&scene, &displacing_graphs(&scene));
+        let id = graph_id(mushrooms);
+        assert!(code.contains(&format!("fn displacement_graph_{id}(m: Material, input: DisplacementSurface, params: u32) -> vec3<f32>")), "{code}");
+        assert!(code.contains(&format!("case {id}u: {{ return displacement_from_vector(displacement_graph_{id}(m, input, params)); }}")), "{code}");
+        // A graph whose displacement changes kind or starts moving re-flags its instances.
+        let version = scene.graphs.displacement_version;
+        scene.set_material_graph(bricks, presets::rippling_cloth());
+        assert_ne!(scene.graphs.displacement_version, version, "static to animated");
+        let version = scene.graphs.displacement_version;
+        scene.set_material_graph(bricks, presets::mushrooms());
+        assert_ne!(scene.graphs.displacement_version, version, "height to vector");
     }
 }

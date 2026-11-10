@@ -63,31 +63,7 @@ fn resolve_displaced(pixel: vec2<u32>, instance: Instance, objects: array<vec3<f
     let footprint = max(distance(hit, tess.eye.xyz), tess.dice.z) / tess.dice.y;
     let d1 = footprint / max(length(e1), 1e-6);
     let d2 = footprint / max(length(e2), 1e-6);
-    let p1 = displaced_input(instance, objects, normals, uvs, l + vec3<f32>(-d1, d1, 0.0), tess.time.x);
-    let p2 = displaced_input(instance, objects, normals, uvs, l + vec3<f32>(-d2, 0.0, d2), tess.time.x);
-    let v1 = displacement_value(material, scale, p1);
-    let v2 = displacement_value(material, scale, p2);
-    let n = p.world_normal;
-    let face = cross(e1, e2);
-    if value.is_vector {
-        // Tangents of the displaced surface: the steps along the edges, taken in the plane of the
-        // interpolated normal (so an undisplaced point keeps its smooth normal), plus how the
-        // offset changes over them.
-        let linear = mat3x3<f32>(instance.world[0].xyz, instance.world[1].xyz, instance.world[2].xyz);
-        let s1 = e1 * d1;
-        let s2 = e2 * d2;
-        let t1 = (s1 - (n * dot(n, s1))) + (linear * (displacement_offset(instance, p1, v1) - (h.object - p.object)));
-        let t2 = (s2 - (n * dot(n, s2))) + (linear * (displacement_offset(instance, p2, v2) - (h.object - p.object)));
-        let c = cross(t1, t2) * select(-1.0, 1.0, dot(face, n) >= 0.0);
-        h.normal = select(n, normalize(c), dot(c, c) > 1e-30);
-        return h;
-    }
-    let inv = 1.0 / max(dot(face, face), 1e-30);
-    // World gradients of the barycentrics λ1, λ2 in the triangle's plane.
-    let grad1 = cross(e2, face) * inv;
-    let grad2 = cross(face, e1) * inv;
-    let gradient = ((grad1 * ((v1.height - value.height) / d1)) + (grad2 * ((v2.height - value.height) / d2))) * (tess.materials[material].params.x * scale);
-    h.normal = normalize(n - (gradient - (n * dot(gradient, n))));
+    h.normal = p.world_normal;
     return h;
 }
 

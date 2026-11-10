@@ -4,6 +4,9 @@
 // the extended resolve of a displacing graph displacement_graph_resolve.wgsl. Elsewhere no
 // material is graph-displaced: its surface stays at the centre height.
 
+// Some graph of the module displaces by a vector: without one the vector paths compile away
+// (they would cost every pass registers, and the resolve that on every pixel).
+const DISPLACEMENT_VECTORS: bool = false;
 // The resolve's graph moves its displaced surfaces with the time (their motion vectors then need
 // the previous frame's surface).
 const DISPLACEMENT_ANIMATED: bool = false;

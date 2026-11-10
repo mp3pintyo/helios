@@ -5,6 +5,7 @@
 
 #include "displacement_graph.wgsl"
 
+const DISPLACEMENT_VECTORS: bool = GRAPH_DISPLACEMENT_VECTOR;
 const DISPLACEMENT_ANIMATED: bool = GRAPH_DISPLACEMENT_ANIMATED;
 
 fn displacement_graph_value(graph: u32, material: u32, params: u32, max_scale: f32, p: DisplacementInput) -> DisplacementValue {
