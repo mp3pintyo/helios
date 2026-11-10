@@ -452,8 +452,8 @@ culling), gallery 8.0 / 5.0 → 8.1 / 5.0 ms, cathedral with 300 lights under Me
   layers per material (sheen colour + sheen roughness + coat normal + coat roughness + coat; specular colour +
   specular), sampled from the 512² arrays with the main texture's coordinates; `KHR_materials_transmission` makes
   the material glass (the forward translucency pass, refracting), tinted by the base colour and
-  `KHR_materials_volume`'s attenuation over its thickness. Lumen's surface cache keeps the average albedo (slabs
-  don't change GI bounces). The extended path needs 17 sampled textures per shader stage (WebGPU's default limit is
+  `KHR_materials_volume`'s attenuation over its thickness. Lumen's mesh cards capture the base albedo per texel
+  (slabs don't change GI bounces). The extended path needs 17 sampled textures per shader stage (WebGPU's default limit is
   16; device creation requests up to 24 where the adapter offers them): with 16, slab materials render as their plain
   base. Cost: scenes without slabs render the same images (valley, cathedral, forest and Sponza differ from the
   previous build by 61–70 dB PSNR, as much as two runs of it differ) and cost the same; the gallery (eleven slab materials, three graphs, about half the screen
@@ -482,7 +482,10 @@ culling), gallery 8.0 / 5.0 → 8.1 / 5.0 ms, cathedral with 300 lights under Me
   position derivatives) — texture filtering, the SVT's tile requests and noise filtering work in graphs; other
   values pay nothing. **Pipelines**: a graph's code replaces `material_graph_off.wgsl` in the extended resolve,
   compiled at runtime (WGSL shader modules are created in the browser too) and cached by the code's FNV hash, so
-  editing a graph compiles one module, identical graphs share one, and moving nodes compiles nothing.
+  editing a graph compiles one module, identical graphs share one, and moving nodes compiles nothing. The same
+  surface code (without the displacement function) is composed into Lumen's card capture
+  (`lumen_card_capture.wgsl`), so a graph's colours and emission reach the surface cache and its bounce light;
+  editing a parameter recaptures that material's cards.
   **Material instances**: `Scene::set_material_parameter` overrides a parameter for one material; values live in a
   16 KiB uniform block (one vec4 per parameter, the material's offset in its slab record), so changing them
   recompiles nothing (the gallery's two water spheres are one graph with different colours). Unset texture
@@ -1008,6 +1011,21 @@ culling), gallery 8.0 / 5.0 → 8.1 / 5.0 ms, cathedral with 300 lights under Me
   sun patches through windows bounce. Debug view 14 shows the card lighting each pixel would read (purple: voxels).
   GPU memory: 32 MiB lighting atlas, 16 MiB instance ids (16 bits per global-SDF voxel), a capture atlas within 16 MiB
   (cathedral 7.7, Sponza 9.4 MiB).
+  **Material capture** (`lumen_card_capture.wgsl`; round 6, `docs/round6/card-albedo.md`; UE5's card capture into
+  the surface cache's albedo and emissive atlases): cards carry the material per texel, not its average. The CPU
+  capture records which triangle each texel sees, from which the texel's texture coordinates and — for displaced
+  variants — the base point it was displaced from are interpolated; the GPU then evaluates the material at every
+  texel as the G-buffer resolve does (image and procedural textures through the 512² arrays, the shading models'
+  procedural detail, material graphs' generated surface code with their parameters), filtered for the texel's
+  footprint, into an rgba8 albedo atlas (albedo and emission), once per (surface, material) pair — per instance
+  where the material depends on the placement (world-space textures and graphs, a rock's moss), within 1 M texels.
+  The card lighting reflects each texel's light with that albedo and adds its emission, so bounce light takes the
+  colours of the surfaces it leaves: the gallery's mushroom caps bounce red, not their bed's green; the cathedral's
+  stained glass glows in its panes' colours, its walls and pews in their textures'. Captures run within 1 M texels a
+  frame (at most ~0.3 ms) after a scene loads (the cathedral's 2.1 M in 3 frames) and again for the pairs whose material,
+  graph or parameters change; until then a pair uses the average; pairs that did not change keep their albedo
+  through scene re-uploads. Memory: the albedo atlas within 16 MiB (gallery 2.6, cathedral 10.7 MiB), the texels'
+  material inputs kept on the CPU for recaptures (16 bytes per captured texel).
   **Radiance cache refresh** (`update_probes` in `lumen_light.wgsl`): it ran one thread per probe tracing its 32 rays
   in turn — ~3500 long serial threads, most of the GPU idle; it now runs a workgroup per probe, a thread per ray,
   with a shared-memory reduction of the SH: the "lumen surface + radiance cache" pass went from 1.42–1.49 to
@@ -1558,7 +1576,8 @@ Honest differences that remain:
    reassigned, shadow casting toggled, new geometry), moves that grow the scene bounds and toggling voxel LODs or tessellation
    invalidate them globally.
 2. **Lumen**'s mesh cards are axis-aligned (6 directions × 3 depth layers per mesh, no per-mesh card fitting as in UE5),
-   carry the material's *average* albedo (no per-texel textures), are lit with one bounce from the radiance cache
+   carry their materials per ~10 cm texel (the bounce of detail finer than that is averaged by the texel's
+   footprint; the voxel surface cache keeps the average albedo), are lit with one bounce from the radiance cache
    rather than card-to-card radiosity, and local lights shadow them through the global field only; surfaces no card
    sees (deep concavities, sub-texel slivers) and instances beyond 100 m use the voxel surface cache, which still leaks
    a little light through thin walls; translucent surfaces get no Lumen
@@ -1591,8 +1610,9 @@ Honest differences that remain:
    specular textures are sampled with the main texture's coordinates from the 512² arrays (not streamed);
    `KHR_materials_transmission` becomes refracting glass (refraction of the screen, not a thin-walled BTDF;
    `transmissionTexture` and `thicknessTexture` are ignored). Alpha tests ignore wrap modes and vertex alpha. Lumen's
-   cards and voxels see a material's average albedo, without vertex colours, texture transforms, AO, slabs or graphs
-   (a lava graph glows on screen but bounces its base colour). Simplification keeps second-UV and colour seams but
+   cards capture materials per texel (graphs included) but without vertex colours or the second UV set, and graphs
+   that read the camera or time are captured as they were at capture; its voxels and the global distance field see
+   a material's average albedo. Simplification keeps second-UV and colour seams but
    does not weigh their deviation. Alpha tests read image textures with mesh UVs only (not procedural textures or
    triplanar mapping), with 8-bit cutoffs. In Lumen an alpha-masked instance is partially transparent by
    one average coverage (its partial shadows and occlusion are uniform, not shaped like its holes), only in the near

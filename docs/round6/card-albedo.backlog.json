@@ -1,0 +1,24 @@
+[
+ {
+  "id": "lumen-card-texel-albedo",
+  "title": "A Lumen mesh card-jai texelenként rögzítik az anyagot (albedó és emisszió)",
+  "area": "Globális megvilágítás",
+  "kind": "feature",
+  "summary": "A mesh card-ok eddig az anyag átlagos albedóját vitték (alapszín × a textúra 1×1-es mipje), így a visszavert fény mindenhol az átlag színét kapta, ahol az anyag színe változik: a galéria gombaágyása a piros kalapok alatt is mohazölden vert vissza. Mostantól – mint az UE5 felületcache-ében – a GPU minden card-texelen kiértékeli az anyagot úgy, ahogy a G-buffer resolve teszi (képtextúrák, procedurális textúrák, árnyalási modellek, anyaggráfok generált felületkódja a paramétereivel), és egy rgba8 albedó-atlaszba írja (albedó + emisszió); a card-megvilágítás ezzel veri vissza a fényt. A gomba kalapja pirosan, a katedrális festett üvege a táblái színeiben, a láva a saját izzásával világít vissza.",
+  "details": "CPU (a geometria-befogással együtt): a card-raszterizáló texelenként rögzíti, melyik háromszöget és hol látja (helios-geometry: CardConfig::sources, Card::sources); ebből a cards.rs kiszámolja a texel UV-jét, UV-lábnyomát és elmozdított változatnál az alappont eltolását (texelenként 16 bájt: uv 2×f32, eltolás 3×f16, lábnyom f16; SurfaceCapture). GPU (lumen_card_capture.wgsl): (felület, anyag) páronként – és példányonként, ha az anyag függ az elhelyezéstől (világtérbeli textúra, a szikla mohája, világpozíciót / normált olvasó gráf), legfeljebb 1 M texelig – felépíti a resolve SurfaceInput-ját (pozíció, normál, normálmátrix a befogó példányból, UV és lábnyom mint 'képernyő-derivált', így a mipek és a lábnyom-szűrt zaj a texelre átlagolnak), és az árnyalási modell szerinti pipeline-nal (MATERIAL_KIND) vagy gráfonként külön pipeline-nal (a gráf felületkódja a material_graph_off.wgsl helyén, az elmozdító függvény nélkül) értékeli ki. Elmozdított változatnál az anyag az alapponton értékelődik (mint a resolve-ban): a kalap texelje a kalappá vált alappont színét kapja. Ütemezés: jelenet-feltöltés után képkockánként legfeljebb 1 M texel, újra, ha egy gráf vagy paraméterértéke változik (tartalom-hash páronként); újrafeltöltéskor a változatlan párok albedója átmásolódik az új atlaszba. Amíg egy pár nincs befogva, az átlagos albedót kapja. A light_cards durva mipen a mintavételezett legfeljebb négy befogott texel átlagát használja. Memória: albedó-atlasz legfeljebb 16 MiB, a texelenkénti bemenetek a CPU-n maradnak (újrabefogáshoz). Elvetve: a card-ok renderelése a visibility-buffer útvonalon (külön culling-nézet card-onként, második renderelő-útvonal), az anyag kiértékelése a light_cards-ban (minden lapon minden képkockában, gráfonként pipeline), irradiancia tárolása és az albedóval mintavételkor szorzás (minden card-olvasó pass kötné az atlaszt).",
+  "metrics": "{{METRICS}}",
+  "showcase": "Galéria, gombaágyás: --scene gallery --eye -5.9,0.3,10.4 --at -6.5,0.08,9.2, debug nézet 14 (előtte az ágyás card-jai egyenletesen mohazöldek, utána piros kalapok, fehér tönkök) és 7 (indirekt fény: a kalapok körül piros visszavert fény). Felülről: --eye -6.5,1.6,9.6 --at -6.5,0.0,9.2 --view 14. Katedrális (--scene cathedral --view 14): a festett üveg ablakok mintásan, a falak kőtömbjei textúrával. Láva: --scene gallery --eye 8.6,1.1,5.4 --at 6.75,0.4,3.0. Képek: docs/round6/card-albedo/*.jpg.",
+  "modules": [
+   "crates/helios-geometry/src/cards.rs",
+   "crates/helios-render/src/cards.rs",
+   "crates/helios-render/src/shaders/lumen_card_capture.wgsl",
+   "crates/helios-render/src/shaders/lumen_card_light.wgsl",
+   "crates/helios-render/src/shaders/lumen_cards.wgsl",
+   "crates/helios-render/src/lumen.rs",
+   "crates/helios-render/src/lumen_displaced.rs",
+   "crates/helios-render/src/substrate_gpu.rs",
+   "crates/helios-render/src/renderer.rs",
+   "crates/helios-render/src/shader.rs"
+  ]
+ }
+]
