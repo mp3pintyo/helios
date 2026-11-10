@@ -35,4 +35,4 @@ wasm-bindgen-futures.workspace = true
 console_error_panic_hook.workspace = true
 console_log.workspace = true
 js-sys = "0.3"
-web-sys = { workspace = true, features = ["Window", "Document", "Element", "HtmlCanvasElement", "KeyboardEvent", "MouseEvent", "WheelEvent", "PointerEvent", "Performance", "HtmlElement", "CssStyleDeclaration", "DomRect", "AddEventListenerOptions", "EventTarget", "Event", "Location", "Response", "Url"] }
+web-sys = { workspace = true, features = ["Window", "Document", "Element", "HtmlCanvasElement", "KeyboardEvent", "MouseEvent", "WheelEvent", "PointerEvent", "Performance", "HtmlElement", "CssStyleDeclaration", "DomRect", "AddEventListenerOptions", "EventTarget", "Event", "Location", "Response", "Url", "Navigator"] }

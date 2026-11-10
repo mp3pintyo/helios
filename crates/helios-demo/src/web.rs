@@ -1,7 +1,7 @@
 //! Browser platform layer: canvas surface, DOM input and a requestAnimationFrame loop.
 //!
 //! A page can embed the engine instead of using `index.html`'s full-window demo: it sets
-//! `globalThis.heliosConfig = { scene, screenPercentage, gpuBudgetMs, embedded, lights, megaLights, statusElement }` before
+//! `globalThis.heliosConfig = { scene, screenPercentage, gpuBudgetMs, embedded, lights, megaLights, statusElement, bakeWorkers }` before
 //! loading the module (query parameters still work and take part as fallbacks), and drives the
 //! running engine through the exported `helios*` functions (scene, glTF model, candle lights,
 //! camera, sun, hotkeys, HUD).
@@ -192,6 +192,10 @@ async fn next_tick() {
 pub fn start() {
     console_error_panic_hook::set_once();
     let _ = console_log::init_with_level(log::Level::Info);
+    // A bake worker (web_bake.rs) instantiates this module too: it only runs bakes.
+    if web_sys::window().is_none() {
+        return;
+    }
     wasm_bindgen_futures::spawn_local(async {
         if let Err(message) = run().await {
             log::error!("{message}");
@@ -209,6 +213,9 @@ async fn run() -> Result<(), String> {
         .map_err(|_| "#helios-canvas is not a canvas")?;
 
     set_status("Initialising WebGPU…");
+    // `?bake-workers=0` (page config `bakeWorkers: "0"`): Lumen's displaced variants bake on
+    // the render thread instead of Web Workers.
+    crate::web_bake::install(option_string("bakeWorkers", "bake-workers").as_deref() != Some("0"));
     let instance = GpuContext::create_instance();
     let surface = instance
         .create_surface(wgpu::SurfaceTarget::Canvas(canvas.clone()))
