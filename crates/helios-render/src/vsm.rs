@@ -51,6 +51,7 @@ use crate::passes::culling::{alpha_mask_entries, alpha_mask_resources, CullCapac
 use crate::profiler::Recorder;
 use crate::shader::create_module;
 use crate::targets::FrameTargets;
+use crate::tessellation::{tessellation_entry, tessellation_resource, ShadowInputs};
 use crate::util::{bind, bind_group, bind_group_layout, compute_pipeline, pipeline_layout, storage_buffer, uniform_buffer, workgroups};
 use crate::vsm_local::{self, LocalCull, LocalFrame, LocalShadows};
 use crate::skin::{skin_entry, skin_resource};
@@ -124,7 +125,7 @@ const LOCAL_CAPACITY: CullCapacity = CullCapacity { batches: 1 << 15, pages: 1 <
 const SW_THRESHOLD_SCALE: f32 = 2.0;
 /// Slope-scaled depth bias against shadow acne, in multiples of the depth slope per texel
 /// (pushed away from the light). Shared by the hardware pipeline and the software rasteriser.
-const SLOPE_BIAS: f32 = 1.5;
+pub(crate) const SLOPE_BIAS: f32 = 1.5;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
@@ -301,6 +302,7 @@ impl VirtualShadowMap {
         expand_entries.push((8, bind::storage(true)));
         expand_entries.push(wind_entry());
         expand_entries.push(skin_entry());
+        expand_entries.push(tessellation_entry());
         expand_entries.push((60, bind::uniform()));
         let expand_layout = bind_group_layout(device, "vsm expand", c, &expand_entries);
         let draw_module = create_module(device, "vsm_draw.wgsl");
@@ -723,6 +725,7 @@ impl VirtualShadowMap {
                     (8, self.info.as_entire_binding()),
                     wind_resource(scene),
                     skin_resource(scene),
+                    tessellation_resource(scene),
                     (60, self.local.uniform.as_entire_binding()),
                 ],
             )
@@ -805,6 +808,16 @@ impl VirtualShadowMap {
                 pass.set_pipeline(&self.raster_voxels);
                 pass.dispatch_workgroups_indirect(&self.draws, SW_DISPATCH_OFFSET);
             }
+        }
+        if let Some(tessellation) = culling.tessellation(scene) {
+            let inputs = ShadowInputs {
+                vsm: &self.uniform,
+                draws: &self.draws,
+                sw_depth: &self.sw_depth,
+                local: &self.local.uniform,
+                dispatch_offset: SW_DISPATCH_OFFSET,
+            };
+            tessellation.record_shadows(rec, scene, &inputs);
         }
         let resolve_group = bind_group(
             device,

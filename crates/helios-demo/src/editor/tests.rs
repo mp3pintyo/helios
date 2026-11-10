@@ -89,6 +89,19 @@ fn graphs_materials_and_instance_parameters() {
 }
 
 #[test]
+fn materials_get_and_lose_displacement() {
+    let mut f = Fixture::new();
+    let mut editor = f.editor();
+    let stone = f.scene.find_material("stone").unwrap();
+    assert!(f.scene.material(stone).displacement.is_none());
+    op(&mut editor, &mut f, json!({ "op": "material", "name": "stone", "params": { "displacement": { "magnitude": 0.1, "center": 0.25 } } }));
+    let d = f.scene.material(stone).displacement.expect("displaced by its own texture's height");
+    assert_eq!((d.magnitude, d.center, d.channel), (0.1, 0.25, 3));
+    op(&mut editor, &mut f, json!({ "op": "material", "name": "stone", "params": { "displacement": { "magnitude": 0.0 } } }));
+    assert!(f.scene.material(stone).displacement.is_none());
+}
+
+#[test]
 fn transforms_undo_and_redo() {
     let mut f = Fixture::new();
     let mut editor = f.editor();

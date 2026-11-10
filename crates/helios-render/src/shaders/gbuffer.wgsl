@@ -30,6 +30,10 @@
 #include "voxel.wgsl"
 #include "voxel_resolve.wgsl"
 #include "resolve_extended_off.wgsl"
+#include "displacement.wgsl"
+#include "displacement_height.wgsl"
+#include "tess_core.wgsl"
+#include "tess_resolve.wgsl"
 
 override MATERIAL_KIND: u32 = 0u;
 // The tile list this pipeline resolves: MATERIAL_KIND for plain pipelines, 8-15 for extended ones.
@@ -37,6 +41,9 @@ override RESOLVE_SLOT: u32 = 0u;
 // The scene has skinned instances (passes/material.rs): without them the skinning code is
 // compiled out, so it costs other scenes no registers.
 override SKINNING: bool = true;
+// The scene has displaced instances (tessellation.rs): without them the displaced-surface resolve
+// (tess_resolve.wgsl) is compiled out.
+override TESSELLATION: bool = true;
 
 const RESOLVE_SLOTS: u32 = 16u;
 const TILE_LISTS: u32 = 80u;
@@ -343,8 +350,17 @@ fn resolve(
     // jitter cycle.
     b.ddx *= frame.upscale.x;
     b.ddy *= frame.upscale.y;
+    // Tessellated: the pixel's point on the displaced surface (position, normal; the barycentrics
+    // of the base point it was displaced from). Texture derivatives stay those of the base plane.
+    let displaced = TESSELLATION && is_tessellated(instance.flags, cluster);
+    var hit: DisplacedHit;
+    if displaced {
+        let depth_hit = world_from_depth(uv, textureLoad(scene_depth, pixel, 0).r, frame.inv_view_proj);
+        hit = resolve_displaced(instance, object_positions, normals, uvs, world_positions, depth_hit);
+        b.lambda = hit.lambda;
+    }
     var input: SurfaceInput;
-    input.object_position = interpolate3(object_positions, b.lambda);
+    input.object_position = select(interpolate3(object_positions, b.lambda), hit.object, displaced);
     // The wind offset varies smoothly: evaluated at the pixel, it matches the interpolated corners
     // to far below a pixel, which is all motion vectors need. Skinning is affine per triangle: the
     // corners' previous positions interpolate exactly. (Resolved here, before the material, so
@@ -353,7 +369,12 @@ fn resolve(
     if skinned {
         previous_world = interpolate3(previous_worlds, b.lambda);
     }
-    input.world_position = interpolate3(world_positions, b.lambda);
+    if displaced {
+        // The hit's own motion: the solved point is a hair off the micro-triangle the depth came
+        // from, which must not read as motion (TSR and motion blur would smear a still surface).
+        previous_world += hit.world - wind_world_position(instance, wind_force, hit.object);
+    }
+    input.world_position = select(interpolate3(world_positions, b.lambda), hit.world, displaced);
     input.dpdx = interpolate3(world_positions, b.ddx);
     input.dpdy = interpolate3(world_positions, b.ddy);
     input.object_dpdx = interpolate3(object_positions, b.ddx);
@@ -368,7 +389,7 @@ fn resolve(
 
     let normal_matrix = mat3x3<f32>(instance.normal_matrix_0.xyz, instance.normal_matrix_1.xyz, instance.normal_matrix_2.xyz);
     input.normal_matrix = normal_matrix;
-    var normal = normalize(normal_matrix * interpolate3(normals, b.lambda));
+    var normal = select(normalize(normal_matrix * interpolate3(normals, b.lambda)), hit.normal, displaced);
     let eye = frame.camera_position.xyz;
     let to_eye = normalize(eye - input.world_position);
     let face = cross(world_positions[1] - world_positions[0], world_positions[2] - world_positions[0]);
@@ -433,6 +454,13 @@ fn resolve(
         // Triangles grey (voxel_resolve.wgsl colours voxel clusters).
         case DEBUG_VOXELS: { surface.albedo = vec3<f32>(0.3 + 0.1 * hash_color(entry.y).x); }
         case DEBUG_ASSEMBLY_PARTS: { surface.albedo = assembly_part_color(instance); }
+        // Tessellated surfaces coloured by depth and micro-triangle, the rest grey.
+        case DEBUG_TESSELLATION: {
+            surface.albedo = vec3<f32>(0.25 + 0.3 * luminance(surface.albedo));
+            if displaced {
+                surface.albedo = tessellation_debug_color(id, instance, b.lambda);
+            }
+        }
         default: {}
     }
 

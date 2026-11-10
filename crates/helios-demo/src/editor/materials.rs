@@ -3,10 +3,10 @@
 //! Substrate slab overrides.
 
 use helios_render::material_graph::{MaterialGraph, ParameterKind};
-use helios_render::{Material, MaterialHandle, ParameterValue, Scene};
+use helios_render::{Displacement, Material, MaterialHandle, ParameterValue, Scene};
 use serde_json::{json, Value};
 
-use super::doc::{MaterialParams, ParameterDef, SlabDef};
+use super::doc::{DisplacementDef, MaterialParams, ParameterDef, SlabDef};
 use super::{Editor, World};
 
 impl Editor {
@@ -93,6 +93,14 @@ pub fn with_params(base: Material, p: &MaterialParams) -> Material {
         slab.anisotropy = f(s.anisotropy, slab.anisotropy);
         slab.unlit = s.unlit.unwrap_or(slab.unlit);
     }
+    let mut displacement = base.displacement;
+    if let Some(d) = &p.displacement {
+        let mut value = displacement.unwrap_or(Displacement::height(0.0, 0.5));
+        value.magnitude = d.magnitude.unwrap_or(value.magnitude);
+        value.center = d.center.unwrap_or(value.center).clamp(0.0, 1.0);
+        value.channel = d.channel.unwrap_or(value.channel).min(3);
+        displacement = (value.magnitude != 0.0).then_some(value);
+    }
     Material {
         base_color: p.base_color.map_or(base.base_color, Vec3::from),
         roughness: p.roughness.unwrap_or(base.roughness),
@@ -103,8 +111,15 @@ pub fn with_params(base: Material, p: &MaterialParams) -> Material {
         normal_strength: p.normal_strength.unwrap_or(base.normal_strength),
         uv_scale: p.uv_scale.unwrap_or(base.uv_scale),
         slab,
+        displacement,
         ..base
     }
+}
+
+/// A material's displacement as the Details panel edits it (magnitude 0: none).
+pub fn displacement_value(m: &Material) -> Value {
+    let d = m.displacement.unwrap_or(Displacement::height(0.0, 0.5));
+    json!(DisplacementDef { magnitude: Some(d.magnitude), center: Some(d.center), channel: Some(d.channel) })
 }
 
 /// A material's slab as the Details panel edits it.

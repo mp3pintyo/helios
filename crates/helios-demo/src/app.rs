@@ -40,7 +40,8 @@ pub struct DemoApp {
     /// The scene's moving props (`Digit0` pauses them).
     pub motion: DemoMotion,
     pub(crate) sun_intensity: f32,
-    speed: f32,
+    /// Fly speed (m/s; the mouse wheel changes it).
+    pub speed: f32,
     pub(crate) sun_azimuth: f32,
     pub(crate) sun_elevation: f32,
     /// Position in the day cycle (radians) and the azimuth it started from.
@@ -67,7 +68,7 @@ pub struct DemoApp {
 const SCREEN_PERCENTAGES: [f32; 4] = [50.0, 67.0, 75.0, 100.0];
 
 pub const HELP: &str = "WASD/QE fly · drag to look · wheel speed · Shift fast\n\
-N next scene · 0 demo motion · V debug view · Insert voxel LODs · G GI · ; GI method (Lumen / Lumen Lite) · H shadows · 1 local light shadow maps · [ ] screen percentage (50/67/75/100 %) · \\ dynamic resolution · T TAA · O occlusion · K software raster · I texture streaming · - animation clip / pause · F fog · C clouds · U translucency · / translucency layers · ' volumes + particles · L wind · M motion blur · B depth of field · ` local exposure · = MegaLights · Z/X zoom · , . LOD error · PageUp Substrate materials · ←→↑↓ sun · P animate sun · J day/night cycle · Y camera tour · R reset · Tab editor tools (native)";
+N next scene · 0 demo motion · V debug view · Insert voxel LODs · PageDown tessellation · G GI · ; GI method (Lumen / Lumen Lite) · H shadows · 1 local light shadow maps · [ ] screen percentage (50/67/75/100 %) · \\ dynamic resolution · T TAA · O occlusion · K software raster · I texture streaming · - animation clip / pause · F fog · C clouds · U translucency · / translucency layers · ' volumes + particles · L wind · M motion blur · B depth of field · ` local exposure · = MegaLights · Z/X zoom · , . LOD error · PageUp Substrate materials · ←→↑↓ sun · P animate sun · J day/night cycle · Y camera tour · R reset · Tab editor tools (native)";
 
 impl DemoApp {
     pub fn new(
@@ -239,6 +240,8 @@ impl DemoApp {
             "KeyK" => s.sw_raster_threshold = if s.sw_raster_threshold > 0.0 { 0.0 } else { 2.5 },
             // Voxel LODs of foliage on / off (the triangle-only cut), for A/B comparisons.
             "Insert" => s.voxel_lods = !s.voxel_lods,
+            // Nanite tessellation of displaced materials on / off (undisplaced surfaces).
+            "PageDown" => s.tessellation = !s.tessellation,
             // Screen percentage one step down / up. With dynamic resolution on, a press turns it
             // off (back to the fixed percentage).
             "BracketLeft" | "BracketRight" => {
@@ -471,6 +474,20 @@ impl DemoApp {
                 st.voxels as f64 / 1e6,
                 st.shadow_voxels as f64 / 1e6,
                 st.assembly_parts
+            ));
+        }
+        if let Some(t) = self.renderer.tessellation_stats() {
+            let scale = if t.dice_scale > 1.01 { format!(" (×{:.1}: lists full)", t.dice_scale) } else { String::new() };
+            text.push_str(&format!(
+                "
+tessellation {} (PageDown): {:.2} M micro-triangles ({:.2} M in shadows), {} k patches ({} k in shadows), dice rate {} px{scale}, {} split passes",
+                on(s.tessellation),
+                t.micro_triangles as f64 / 1e6,
+                t.shadow_micro_triangles as f64 / 1e6,
+                t.patches / 1000,
+                t.shadow_patches / 1000,
+                s.dice_rate,
+                t.split_passes,
             ));
         }
         let tex = self.renderer.texture_streaming_stats();

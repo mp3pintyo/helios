@@ -26,6 +26,7 @@
 #include "wind.wgsl"
 #include "skin_palette.wgsl"
 #include "dynamic_caster.wgsl"
+#include "displacement.wgsl"
 
 const DRAW_HEADER: u32 = 16u; // words before the first draw entry
 const MAX_DISPATCH: u32 = 65535u;
@@ -44,6 +45,7 @@ const MAX_DISPATCH: u32 = 65535u;
 @group(0) @binding(60) var<uniform> local_vsm: LocalVsm;
 @group(0) @binding(65) var<uniform> wind: Wind;
 @group(0) @binding(66) var skin_palette: texture_2d<f32>;
+@group(0) @binding(67) var<uniform> tess: Tessellation;
 
 const MAX_PAGES_PER_CLUSTER: i32 = 256;
 
@@ -110,11 +112,11 @@ fn expand(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups
     let item = visible_clusters[select(view.cluster_capacity - 1u - (index - hw), index, index < hw)];
     let software = item.z != 0u;
     let instance = instances[item.x];
-    // Padded like in culling: the cluster reaches every page its wind-displaced or posed
-    // triangles touch.
+    // Padded like in culling: the cluster reaches every page its wind-displaced, displaced or
+    // posed triangles touch.
     let strength = wind_strength(instance);
     let dynamic = dynamic_caster(instance, strength);
-    let sphere = skin_padded(instance, wind_padded(instance, strength, transform_sphere(instance.world, clusters[item.y].bounds, instance.max_scale)));
+    let sphere = skin_padded(instance, wind_padded(instance, strength, displacement_padded(instance, transform_sphere(instance.world, clusters[item.y].bounds, instance.max_scale))));
     let level = u32(view.vsm.x);
     let page_world = vsm.level_info[level].x;
     let ls = (vsm.light_view * vec4<f32>(sphere.xyz, 1.0)).xyz;
@@ -169,11 +171,11 @@ fn expand_local(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_work
     }
     let item = visible_clusters[select(view.cluster_capacity - 1u - (index - hw), index, index < hw)];
     let instance = instances[item.x];
-    // Padded like in culling: the cluster reaches every page its wind-displaced or posed
-    // triangles touch.
+    // Padded like in culling: the cluster reaches every page its wind-displaced, displaced or
+    // posed triangles touch.
     let strength = wind_strength(instance);
     let dynamic = dynamic_caster(instance, strength);
-    let sphere = skin_padded(instance, wind_padded(instance, strength, transform_sphere(instance.world, clusters[item.y].bounds, instance.max_scale)));
+    let sphere = skin_padded(instance, wind_padded(instance, strength, displacement_padded(instance, transform_sphere(instance.world, clusters[item.y].bounds, instance.max_scale))));
     var visited = 0;
     for (var slot = 0u; slot < LOCAL_SLOTS; slot++) {
         // Static casters: the box of the light's pages rendered in full.
@@ -195,6 +197,7 @@ fn expand_local(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_work
 fn expand_into_light(item: vec4<u32>, dynamic: bool, sphere: vec4<f32>, slot: u32, visited_before: i32) -> i32 {
     var visited = visited_before;
     let software = item.z != 0u;
+    let tessellated = is_tessellated(instances[item.x].flags, clusters[item.y]);
     let near = local_vsm.slots[slot].params.y;
     for (var face = 0u; f32(face) < local_vsm.slots[slot].params.x; face++) {
         let r = local_sphere_rect(slot, face, sphere);
@@ -211,8 +214,9 @@ fn expand_into_light(item: vec4<u32>, dynamic: bool, sphere: vec4<f32>, slot: u3
             let page_lo = max(vec2<i32>(floor(uv_lo * pages)), vec2<i32>(info[rect], info[rect + 1u]));
             let page_hi = min(vec2<i32>(floor(uv_hi * pages)), vec2<i32>(info[rect + 2u], info[rect + 3u]));
             let extent = (uv_hi - uv_lo) * pages * f32(vsm.page_texels);
-            // Voxels are always software (vsm_voxel_raster.wgsl clips per voxel).
-            let sw = software && ((item.z & CLUSTER_VOXEL) != 0u || (front > 2.0 * near && all(extent <= vec2<f32>(LOCAL_SW_MAX_TEXELS))));
+            // Voxels are always software (vsm_voxel_raster.wgsl clips per voxel), tessellated
+            // clusters in front of the near plane too (vsm_tess.wgsl bounds micro-triangles).
+            let sw = software && ((item.z & CLUSTER_VOXEL) != 0u || (front > 2.0 * near && (tessellated || all(extent <= vec2<f32>(LOCAL_SW_MAX_TEXELS)))));
             let level = LOCAL_LEVEL + view_index * LOCAL_MIPS + mip;
             for (var y = page_lo.y; y <= page_hi.y; y++) {
                 for (var x = page_lo.x; x <= page_hi.x; x++) {
