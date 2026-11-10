@@ -202,13 +202,14 @@ pub struct RenderSettings {
     /// when off, get distance-field shadows).
     pub local_light_shadow_maps: bool,
     /// How local lights that move are shadowed (with shadow-map slots to spare; MegaLights
-    /// traces them in any case). By default their shadow maps stay cached around an origin near
-    /// the light and are re-rendered within `moving_light_renders` (`vsm_anchor.rs`).
+    /// traces them in any case). By default each face of their shadow maps stays cached around
+    /// an origin near the light and is re-rendered within `moving_light_pages` (`vsm_anchor.rs`).
     pub moving_light_shadows: MovingLightShadows,
-    /// Moving lights' shadow maps rendered in full per frame (a cube map's requested pages:
-    /// 0.35 ms for a chandelier light of the cathedral at 1440p). Lights that would need more
-    /// keep distance-field shadows until they rest.
-    pub moving_light_renders: u32,
+    /// Pages of moving lights' shadow map faces rendered from new origins per frame (a face
+    /// costs the pages the view requests of it: a chandelier light of the cathedral ~8 for all
+    /// six, a lantern near the camera ~40). Lights that would need more keep distance-field
+    /// shadows until they rest.
+    pub moving_light_pages: f32,
     /// MegaLights: stochastic, denoised direct lighting in which every local light casts soft
     /// shadows, at a cost that barely grows with the light count (`megalights.rs`). Off: the
     /// clustered light loop (shadow maps for the 32 most important lights, distance-field shadows
@@ -308,7 +309,7 @@ impl Default for RenderSettings {
             shadows: true,
             local_light_shadow_maps: true,
             moving_light_shadows: MovingLightShadows::Cached,
-            moving_light_renders: 1,
+            moving_light_pages: DEFAULT_MOVING_LIGHT_PAGES,
             mega_lights: false,
             global_illumination: true,
             gi_method: GiMethod::ScreenProbes,
@@ -348,6 +349,8 @@ impl Default for RenderSettings {
     }
 }
 
+/// Default of [`RenderSettings::moving_light_pages`].
+pub const DEFAULT_MOVING_LIGHT_PAGES: f32 = 32.0;
 /// Capacities of the per-view GPU work lists.
 const MAIN_CAPACITY: CullCapacity = CullCapacity { batches: 1 << 16, pages: 1 << 18, clusters: 1 << 20, masked: 1 << 18 };
 
@@ -642,6 +645,12 @@ impl Renderer {
         self.vsm.local.held_count()
     }
 
+    /// What moving lights' shadow maps did in a recent frame: lights with maps and on distance
+    /// fields, faces re-anchored and pages rendered.
+    pub fn moving_light_stats(&self) -> crate::vsm_local::MovingLightStats {
+        self.vsm.local.moving_stats()
+    }
+
     /// Local lights rendered into virtual shadow maps this frame.
     pub fn shadow_mapped_lights(&self) -> usize {
         self.vsm.local.active_count()
@@ -755,7 +764,7 @@ impl Renderer {
             enabled: self.settings.shadows && self.settings.local_light_shadow_maps,
             scene_changed: self.scene_changed,
             moving: if self.settings.mega_lights { MovingLightShadows::DistanceFields } else { self.settings.moving_light_shadows },
-            moving_renders: self.settings.moving_light_renders as usize,
+            moving_pages: self.settings.moving_light_pages,
         });
         self.lights.upload(&self.queue, scene, self.vsm.local.light_slots());
         let clouds = self.settings.clouds.then_some(&scene.clouds);
@@ -964,6 +973,7 @@ impl Renderer {
         self.queue.submit([commands]);
         self.profiler.after_submit(map_profiler);
         self.picker.after_submit();
+        self.vsm.local.after_submit();
         if read_stats {
             self.stats.map();
         }

@@ -120,7 +120,8 @@ pub use stats::RenderStats;
 pub use streaming::StreamingStats;
 pub use svt::TextureStreamingStats;
 pub use tessellation::TessellationStats;
-pub use vsm_anchor::MovingLightShadows;
+pub use vsm_anchor::{AnchorStats, MovingLightShadows};
+pub use vsm_local::MovingLightStats;
 pub use wind::{Wind, WindResponse};
 
 pub use helios_geometry as geometry;
