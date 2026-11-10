@@ -288,6 +288,26 @@ footer .wide-inner { gap: 10px; }
         </div>
         <figcaption data-en="32 candles and chandeliers, each with its own virtual cube map, share the sun's page pool.">32 gyertya és csillár, mindegyik saját virtuális kockatérképpel, a nappal közös lapkészletből.</figcaption>
       </figure>
+      <p data-en="Glass casts no shadow, so the shadow map let the sun through the stained-glass windows white. Now the visible panes are drawn from the sun into a map of their own that keeps, per texel, the colour and depth of the pane nearest the sun. Sunlight behind a pane is filtered by its colour: red, blue and gold patches land on the piers and the floor, softened by the distance behind the glass, the fog carries coloured shafts, and Lumen's bounce picks up the colour too.">Az üveg nem vet árnyékot, ezért az árnyéktérkép fehéren engedte át a napot az ólomüveg ablakokon. Most a látható üvegtáblák a nap felől egy saját térképbe rajzolódnak, amely texelenként a naphoz legközelebbi tábla színét és mélységét tartja. Ami egy tábla mögött van, annak a napfényét a tábla színe szűri: piros, kék és arany foltok kerülnek a pillérekre és a padlóra, az üveg mögötti távolsággal elmosva, a ködben színes fénysávok húzódnak, és a Lumen visszaverődése is átveszi a színt.</p>
+      <div class="controls">
+        <button class="btn" type="button" data-preset="glass-sun" data-en="Light through stained glass">Fény az ólomüvegen át</button>
+        <button class="btn" type="button" data-toggle="End" data-label="glass shadows" data-en="Coloured glass light">Színes üvegfény <span class="state"></span></button>
+      </div>
+      <figure>
+        <div class="compare" style="--cut:50%">
+          <img src="media/glass_shadow_off.webp" alt="" data-alt-hu="Fehér napfény az ablakok alatt" data-alt-en="White sunlight under the windows">
+          <img class="after" src="media/glass_shadow_on.webp" alt="" data-alt-hu="Az üveg színére szűrt napfény" data-alt-en="Sunlight filtered by the glass">
+          <span class="handle" aria-hidden="true"></span>
+          <span class="tag l" data-en="White">Fehér</span><span class="tag r" data-en="Through the glass">Az üvegen át</span>
+          <input type="range" min="0" max="100" value="50" aria-label="Összehasonlítás">
+        </div>
+        <figcaption data-en="The cathedral's south aisle, looking west. The map is redrawn only when the sun, the panes or the view's fit change.">A katedrális déli mellékhajója nyugat felé. A térkép csak akkor rajzolódik újra, ha a nap, a táblák vagy a nézet illesztése változik.</figcaption>
+      </figure>
+      <div class="metrics">
+        <div class="metric"><b>+0,05 ms</b><span data-en="lighting at 2560×1440 (RTX 3090)">megvilágítás 2560×1440-en (RTX 3090)</span></div>
+        <div class="metric"><b>4,1 cm</b><span data-en="texels over the cathedral's 84 m of windows">texel a katedrális 84 m-nyi ablakán</span></div>
+        <div class="metric"><b>0,03 ms</b><span data-en="a redraw per frame while the sun moves">újrarajzolás képkockánként, ha mozog a nap</span></div>
+      </div>
     </section>
 
     <section class="chapter" id="world">
@@ -832,6 +852,7 @@ footer .wide-inner { gap: 10px; }
       <article class="story"><span class="round-tag" data-en="Round 6">6. kör</span><h3 data-en="Baking on the render thread">Sütés a megjelenítő szálon</h3><p data-en="At load the browser baked the displaced surfaces' Lumen variants on the render thread, and single frames took almost a second. Now Web Workers bake them; when a worker does not answer, a watchdog hands its task back to the main thread, so no variant goes missing.">Betöltéskor az elmozdított felületek Lumen-változatait a böngésző a megjelenítő szálon sütötte, és egy-egy képkocka majdnem egy másodpercig tartott. Most Web Workerek sütnek; ha egy worker nem válaszol, egy őrfolyamat a feladatát visszaadja a főszálnak, így egyetlen változat sem marad ki.</p><div class="delta" data-en="worst frame 718–920 → 6–31 ms">legrosszabb képkocka 718–920 → 6–31 ms</div></article>
       <article class="story"><span class="round-tag" data-en="Round 6">6. kör</span><h3 data-en="Green light from red mushrooms">Piros gombák zöld fénye</h3><p data-en="The mushroom bed's red bounced back green, because Lumen's cards carried each material's average colour, and the moss dominated it. The cards now capture colour per texel, their filtering respects depth so the caps' light does not bleed onto the ground, and the voxel cache gets the captured colour too.">A gombaágyás vöröse zölden verődött vissza, mert a Lumen-kártyák az anyag átlagszínét hordozták, abban pedig a moha dominált. A kártyák most texelenként rögzítik a színt, a szűrésük figyeli a mélységet, így a kalapok fénye nem szivárog át a talajra, és a voxeles gyorsítótár is a rögzített színt kapja.</p><div class="delta" data-en="red/green ratio of the bounced light 0.800 → 0.870">vörös/zöld arány a visszavert fényben 0,800 → 0,870</div></article>
       <article class="story"><span class="round-tag" data-en="Round 6">6. kör</span><h3 data-en="Six candles without shadows">Hat gyertya árnyék nélkül</h3><p data-en="In the 300-candle cathedral the moving candles redrew more shadow pages than they should, and the full page pool was handed out in queue order: the six candles nearest the camera got no page at all. Now moving lights claim slots by what their maps cost, a full pool serves requests by importance, and fainter lights' resolution adapts to the load, as with UE's VSM dynamic resolution.">A 300 gyertyás katedrálisban a mozgó gyertyák több árnyéklapot rajzoltak újra, mint kellett volna, és a betelt lapkészletet sorrendben osztották ki: a kamerához legközelebbi hat gyertya egyetlen lapot sem kapott. Most a mozgó fények annyi helyet igényelnek, amennyibe a térképük kerül, telített készletnél a kérések fontosság szerint kapnak lapot, és a halványabb fények felbontása a terheléshez igazodik, mint az UE VSM dinamikus felbontásánál.</p><div class="delta" data-en="16.0 → 14.7 ms · lights without a page 6 → 0">16,0 → 14,7 ms · lap nélküli fények 6 → 0</div></article>
+      <article class="story"><span class="round-tag" data-en="Round 7">7. kör</span><h3 data-en="White light under coloured windows">Fehér fény a színes ablakok alatt</h3><p data-en="The sun shone through windows full of red, blue and gold glass and landed white on the piers: glass casts no shadow, so nothing coloured the light. The shadow map could not carry it, as it keeps one depth per texel, no colour. Multiplying every pane along the way was wrong too: a pane behind the lit surface would tint it. The fix is a map of its own, drawn from the sun, that keeps only the nearest pane's colour and depth.">A nap piros, kék és arany üveggel teli ablakokon sütött át, és fehéren ért a pillérekre: az üveg nem vet árnyékot, így semmi sem színezte a fényt. Az árnyéktérkép nem vihette, mert texelenként egy mélységet tart, színt nem. Minden útba eső tábla összeszorzása is hibás lett volna: a megvilágított felület mögötti tábla is színezte volna. A megoldás egy saját, a nap felől rajzolt térkép, amely csak a legközelebbi tábla színét és mélységét tartja.</p></article>
     </div>
   </div>
 </section>
@@ -845,7 +866,7 @@ footer .wide-inner { gap: 10px; }
         <div class="stage-box"><span class="cat" style="background:#8fb7e6"></span><h3 data-en="Culling">Láthatóság</h3><ul><li>instance → cluster</li><li>assembly parts</li><li>HZB, two passes</li><li>LOD cut &lt; 1 px</li></ul></div>
         <div class="stage-box"><span class="cat" style="background:#8fb7e6"></span><h3 data-en="Rasterising">Raszterizálás</h3><ul><li>hardware</li><li>compute (tiny tris)</li><li>tessellation (displacement)</li><li>voxels (foliage)</li><li>skinning</li><li>visibility buffer</li></ul></div>
         <div class="stage-box"><span class="cat" style="background:#c7a6e8"></span><h3 data-en="Materials">Anyagok</h3><ul><li>classify &amp; resolve</li><li>Substrate slabs</li><li>material graphs</li><li>BC7 tile streaming</li></ul></div>
-        <div class="stage-box"><span class="cat" style="background:#e88c6f"></span><h3 data-en="Shadows">Árnyékok</h3><ul><li>mark pages</li><li>static / dynamic cache</li><li>movable casters</li><li>sun + 32 lights</li></ul></div>
+        <div class="stage-box"><span class="cat" style="background:#e88c6f"></span><h3 data-en="Shadows">Árnyékok</h3><ul><li>mark pages</li><li>static / dynamic cache</li><li>movable casters</li><li>sun + 32 lights</li><li>coloured glass</li></ul></div>
         <div class="stage-box"><span class="cat" style="background:#f2b04a"></span><h3>Lumen</h3><ul><li>cards &amp; voxels</li><li>radiance cache</li><li>screen probes or Lite probes</li><li>reflections</li></ul></div>
         <div class="stage-box"><span class="cat" style="background:#7fd1a3"></span><h3 data-en="Sky, fog, volumes">Ég, köd, térfogatok</h3><ul><li>clouds</li><li>froxel fog</li><li>fluid volumes</li><li>particles (OIT)</li></ul></div>
         <div class="stage-box"><span class="cat" style="background:#ece6da"></span><h3 data-en="Lighting">Megvilágítás</h3><ul><li>deferred</li><li>clustered lights or MegaLights</li><li>subsurface</li><li>glass, water, layers</li></ul></div>
@@ -862,6 +883,7 @@ footer .wide-inner { gap: 10px; }
     <ul class="limits">
       <li data-en="<b>Lumen cards</b> are axis-aligned; they carry the texture's colour, but the voxel cache gets one average colour per instance and material.">A <b>Lumen-kártyák</b> tengelyhez igazítottak; a textúra színét hordozzák, de a voxeles gyorsítótár példányonként és anyagonként csak egy átlagszínt kap.</li>
       <li data-en="<b>Shadow pages</b> share a 1024-page pool, a quarter of UE's default: with hundreds of shadowed lights the fainter ones get coarser pages.">Az <b>árnyéklapok</b> egy közös, 1024 lapos készletből jönnek, ami az UE alapértékének negyede: több száz árnyékoló fénynél a halványabbak durvább lapokat kapnak.</li>
+      <li data-en="<b>Coloured glass light</b> comes from the sun only and keeps one pane per texel; local lights and Lumen's voxel cache still see glass as clear.">A <b>színes üvegfény</b> csak a napé, és texelenként egy tábla színét tartja; a helyi fények és a Lumen voxeles gyorsítótára az üveget még színtelennek látja.</li>
       <li data-en="<b>The first visit</b> compiles the shaders in the browser: the first image takes about 10 s, and in Firefox full quality arrives after 35–50 s.">Az <b>első látogatáskor</b> a böngésző fordítja a shadereket: az első kép kb. 10 s, Firefoxban a teljes minőség 35–50 s múlva érkezik.</li>
       <li data-en="<b>Water</b> is a flat sheet with per-pixel waves; under water there are no light shafts.">A <b>víz</b> lapos felület pixelenkénti hullámokkal; víz alatt nincsenek fénynyalábok.</li>
       <li data-en="<b>Mobile GPUs</b> get uncompressed texture tiles: there is no ASTC or ETC2 encoder yet.">A <b>mobil GPU-k</b> tömörítetlen textúracsempéket kapnak: ASTC- és ETC2-kódoló még nincs.</li>
@@ -1000,9 +1022,11 @@ function watchShaders() {
   }, 500);
 }
 
+// The slider moves the sun's elevation along the current azimuth (presets may set their own).
+let sunAzimuth = 200;
 function setSun(deg) {
   $("#sun-out").textContent = deg + "°";
-  engine?.heliosSetSun(200, deg);
+  engine?.heliosSetSun(sunAzimuth, deg);
 }
 $("#sun").addEventListener("input", (e) => setSun(Number(e.target.value)));
 
@@ -1080,7 +1104,7 @@ function ensure(key, label, want) {
   const on = hudStates(engine.heliosHud())[label];
   if (on !== undefined && on !== want) engine.heliosKey(key);
 }
-const ENSURE = { megalights: ["Equal", "megalights"], lite: ["Semicolon", "lumen lite"], volumes: ["Quote", "volumes + particles"], substrate: ["PageUp", "substrate"], tessellation: ["PageDown", "tessellation"] };
+const ENSURE = { megalights: ["Equal", "megalights"], lite: ["Semicolon", "lumen lite"], volumes: ["Quote", "volumes + particles"], substrate: ["PageUp", "substrate"], tessellation: ["PageDown", "tessellation"], glass: ["End", "glass shadows"] };
 
 // Presets: scene (or glTF model), camera (eye/at, heights above ground), sun, debug view, and
 // features to switch on or off (`set`).
@@ -1133,6 +1157,8 @@ const PRESETS = {
   "gallery-paint": { scene: "gallery", view: 0, eye: [-7.2, 1.9, 3.4], at: [-7.2, 1.5, 0] },
   "gallery-night": { scene: "gallery", view: 0, sun: -30, eye: [-1.9, 1.5, 1.8], at: [-1.45, 1.35, 0] },
   "gallery-features": { scene: "gallery", view: 24, set: { substrate: true } },
+  // Round 7: the cathedral's own sun (azimuth 66°) shines through the south windows.
+  "glass-sun": { scene: "cathedral", view: 0, az: 66, sun: 41, eye: [45, 1.7, 10.3], at: [5, 4, 10.8], set: { glass: true } },
 };
 async function applyPreset(name) {
   const p = PRESETS[name];
@@ -1141,7 +1167,7 @@ async function applyPreset(name) {
   // Cathedral presets without a lantern take it away again (a rebuild).
   if (p.scene && !(await loadScene(p.scene, p.candles, p.lantern ?? (p.scene === "cathedral" ? false : undefined)))) return;
   if (p.view !== undefined) engine.heliosSetView(p.view);
-  if (p.sun !== undefined) { $("#sun").value = p.sun; setSun(p.sun); }
+  if (p.sun !== undefined) { sunAzimuth = p.az ?? 200; $("#sun").value = p.sun; setSun(p.sun); }
   if (p.eye) engine.heliosLookAt(...p.eye, ...p.at);
   for (const [feature, want] of Object.entries(p.set || {})) ensure(...ENSURE[feature], want);
   setTimeout(updateTelemetry, 60);

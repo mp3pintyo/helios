@@ -422,7 +422,7 @@ impl DemoApp {
             "{} · {:.1} ms ({:.0} fps){gpu} · {resolution} · {} · LOD error {} px{budget}\n\
              visible: {} clusters ({} software, {} alpha-masked), {:.2} M tris (early pass {}) · shadows: {:.2} M tris ({:.2} M software)\n\
              streaming: {}/{} pages, {:.0}/{:.0} MiB resident, {} pending, {} in flight · scene: {} instances, {:.0} M source tris\n\
-             GI {} · shadows {} · TAA {} · fog {} · SW raster {} · wind {} · local exposure {} · MegaLights {} ({} lights) · volumes + particles {} · Substrate {}",
+             GI {} · shadows {} · TAA {} · fog {} · SW raster {} · wind {} · local exposure {} · MegaLights {} ({} lights) · volumes + particles {} · Substrate {} · glass shadows {}",
             self.scene_name(),
             self.frame_ms,
             1000.0 / self.frame_ms.max(0.01),
@@ -454,6 +454,7 @@ impl DemoApp {
             self.scene.lights().len(),
             on(s.volumes || s.particles),
             on(s.substrate),
+            on(s.glass_shadows),
         );
         text.push_str(&format!(
             "\nshadow pages: {}/{} in use, {} requested, {} rendered ({} dynamic casters only, {} split; {}/{} draws), {} unallocated · local lights with shadow maps: {} ({} moving, cached)",
