@@ -51,6 +51,7 @@ use crate::svt::{StreamingVirtualTexture, TextureStreamingStats, TileFormat};
 use crate::targets::FrameTargets;
 use crate::util::uniform_buffer;
 use crate::vsm::{VirtualShadowMap, VsmFrame, MAX_LEVELS};
+use crate::vsm_anchor::MovingLightShadows;
 use crate::vsm_local::LocalFrame;
 use crate::wind::WindUniform;
 use crate::{Camera, Scene};
@@ -200,12 +201,14 @@ pub struct RenderSettings {
     /// Virtual shadow maps for the most important shadow-casting local lights (others, or all
     /// when off, get distance-field shadows).
     pub local_light_shadow_maps: bool,
-    /// Also give *moving* local lights virtual shadow maps (with slots to spare). A moving
-    /// light's map is stale every frame, so it is re-rendered in full every frame: the
-    /// cathedral's eleven swinging chandelier lights cost 3.5 ms of page rendering at 1440p.
-    /// Off (default), they keep distance-field shadows while they move, like the lights beyond
-    /// the shadow-map budget (MegaLights traces them in any case).
-    pub moving_light_shadow_maps: bool,
+    /// How local lights that move are shadowed (with shadow-map slots to spare; MegaLights
+    /// traces them in any case). By default their shadow maps stay cached around an origin near
+    /// the light and are re-rendered within `moving_light_renders` (`vsm_anchor.rs`).
+    pub moving_light_shadows: MovingLightShadows,
+    /// Moving lights' shadow maps rendered in full per frame (a cube map's requested pages:
+    /// 0.35 ms for a chandelier light of the cathedral at 1440p). Lights that would need more
+    /// keep distance-field shadows until they rest.
+    pub moving_light_renders: u32,
     /// MegaLights: stochastic, denoised direct lighting in which every local light casts soft
     /// shadows, at a cost that barely grows with the light count (`megalights.rs`). Off: the
     /// clustered light loop (shadow maps for the 32 most important lights, distance-field shadows
@@ -304,7 +307,8 @@ impl Default for RenderSettings {
             occlusion_culling: true,
             shadows: true,
             local_light_shadow_maps: true,
-            moving_light_shadow_maps: false,
+            moving_light_shadows: MovingLightShadows::Cached,
+            moving_light_renders: 1,
             mega_lights: false,
             global_illumination: true,
             gi_method: GiMethod::ScreenProbes,
@@ -633,6 +637,11 @@ impl Renderer {
         self.culling.tessellation(&self.scene).map(|t| t.stats())
     }
 
+    /// Of them, the lights away from their shadow map's origin (moving, `vsm_anchor.rs`).
+    pub fn shadow_held_lights(&self) -> usize {
+        self.vsm.local.held_count()
+    }
+
     /// Local lights rendered into virtual shadow maps this frame.
     pub fn shadow_mapped_lights(&self) -> usize {
         self.vsm.local.active_count()
@@ -745,7 +754,8 @@ impl Renderer {
             planes: frustum_planes(&view_proj),
             enabled: self.settings.shadows && self.settings.local_light_shadow_maps,
             scene_changed: self.scene_changed,
-            moving_shadow_maps: self.settings.moving_light_shadow_maps && !self.settings.mega_lights,
+            moving: if self.settings.mega_lights { MovingLightShadows::DistanceFields } else { self.settings.moving_light_shadows },
+            moving_renders: self.settings.moving_light_renders as usize,
         });
         self.lights.upload(&self.queue, scene, self.vsm.local.light_slots());
         let clouds = self.settings.clouds.then_some(&scene.clouds);
@@ -1114,6 +1124,7 @@ impl Renderer {
                 geometry_streamed: self.scene.streaming_stats().changed(),
                 wind: wind_moves_shadows,
                 animated_displacement: self.scene.animated_displacement_shadows(),
+                wind_bounds: [if s.wind { scene.wind.strength } else { 0.0 }, scene.wind.gust_frequency, scene.wind.turbulence],
                 moves: self.scene.shadow_moves(),
                 instances_changed: !self.motion.changes.moved.is_empty(),
                 volume_distance: if self.fog.enabled() { scene.fog.distance } else { 0.0 },

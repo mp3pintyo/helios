@@ -34,7 +34,8 @@
 // mip-0 texels per unit at distance 1 (f32 bits) - what the single local light culling view
 // needs (cull.wgsl) - then the box (min xyz, max xyz) of its pages rendered in full; and per
 // local face mip from word LOCAL_INFO_RECTS (4 words): its dirty page rectangle. Then per
-// physical page its kind this frame, its static layer's entry and its pending refresh flag.
+// physical page its kind this frame, its static layer's entry and its pending refresh flag,
+// then the motion bounds of local light pages' swaying casters (two words per physical page).
 // draws buffer: see vsm_expand.wgsl.
 
 #include "common.wgsl"
@@ -147,8 +148,10 @@ fn mark_volume(@builtin(global_invocation_id) gid: vec3<u32>) {
 // Requests the local light page a receiver samples (see local_receiver) and the coarsest page
 // of its face (the fallback while finer pages are missing, e.g. for translucent surfaces, which
 // request nothing); where the filter footprint of `footprint` texels reaches a page border, also
-// the pages under its corners (which may lie on other cube faces).
-fn request_local(slot: u32, world: vec3<f32>, n: vec3<f32>, mip_bias: u32, footprint: f32) {
+// the pages under its corners (which may lie on other cube faces). A light away from its map's
+// origin moves its filter by up to its search radius (local_filter_follow): twice the footprint.
+fn request_local(slot: u32, world: vec3<f32>, n: vec3<f32>, mip_bias: u32, taps: f32) {
+    let footprint = taps * select(1.0, 2.0, any(local_vsm.slots[slot].anchor_offset.xyz != vec3<f32>(0.0)));
     let r = local_receiver(slot, world, n, mip_bias);
     let face = local_face(slot, r.p);
     let a = local_address(slot, face, r.p, r.mip);
@@ -321,6 +324,9 @@ fn dirty_page(entry: u32, state: u32) {
     atomicStore(&info[INFO_PAGE_STATE + entries[entry].x], bitcast<i32>(state));
     let full = page_kind(state) != PAGE_DYNAMIC;
     if entry >= local_vsm.entry_base {
+        // Its expansion measures its swaying casters' motion anew.
+        atomicStore(&info[INFO_PAGE_MOTION + 2u * entries[entry].x], 0);
+        atomicStore(&info[INFO_PAGE_MOTION + 2u * entries[entry].x + 1u], 0);
         local_dirty_info(entry, full);
         return;
     }

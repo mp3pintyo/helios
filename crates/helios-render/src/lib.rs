@@ -88,6 +88,7 @@ mod translucency;
 mod util;
 mod volumes;
 mod vsm;
+mod vsm_anchor;
 mod vsm_local;
 mod vsm_motion;
 mod water;
@@ -119,6 +120,7 @@ pub use stats::RenderStats;
 pub use streaming::StreamingStats;
 pub use svt::TextureStreamingStats;
 pub use tessellation::TessellationStats;
+pub use vsm_anchor::MovingLightShadows;
 pub use wind::{Wind, WindResponse};
 
 pub use helios_geometry as geometry;
