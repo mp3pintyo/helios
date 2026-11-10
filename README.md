@@ -1131,6 +1131,20 @@ culling), gallery 8.0 / 5.0 → 8.1 / 5.0 ms, cathedral with 300 lights under Me
   pillars and through the choir screens. Lights beyond the budget keep cone-traced distance-field soft shadows for
   the strongest few per pixel (mesh SDFs within 2 m of the receiver and of the light, the global field between).
   Debug view 15 shows the sampled mip and page grid of each pixel's strongest shadow-mapped light.
+  **The page pool serves what matters first** ([`vsm-pool-fairness.md`](docs/round6/vsm-pool-fairness.md)). The sun
+  and the 32 maps share 1024 pages, and the candle-lit cathedral requests ~1860 a frame. The cache placed requests
+  first come, first served — in entry order, so the slots with the highest indices got none: the six candelabrum
+  candles nearest the camera held slots without a single resident page and cast no shadow. When the requests do not
+  fit, the page cache now serves them by priority buckets (`page_cache.wgsl`: each mapped light's coarsest page per
+  face, then the sun's pages, then the local lights' pages by their light's rank on screen, coarse mips first) and
+  evicts resident pages below the cut instead of leaving the better requests without a page; and a pool resolution
+  bias (`PoolPressure`, UE's virtual shadow map dynamic resolution) makes the local lights request coarser mips while
+  the requests exceed 95 % of the pool — spread by rank, none for the most influential light, twice the bias for the
+  faintest — and relaxes below 70 %. Candle-lit view at 2560×1440: 963 pages requested and none
+  unallocated (before: ~1860, 840), no map without a page, bias 1.46 mips; the image matches a 2304-page pool's
+  within noise (60.2 dB; before 43.0 dB) — what the faintest lights lose falls on receivers where their coarse pages
+  are as fine as the screen. The six candles cost their filtering again (`local light shadows` +0.37 ms); the 33-light
+  cathedral (55 pages short) and the lantern (94) now fit too, at 0.2 and 0.34 mips, images within noise.
   Slot order matters with moving lights: in the candle-lit cathedral (300 lights, MegaLights) the swinging
   chandeliers' candles took slots and re-rendered ~970 pages a frame (page raster 11–15 ms); static lights first cut
   that to 713 dynamic-only refreshes (0.11 ms), but near the altar six swinging candles still took the slots left
@@ -1636,8 +1650,11 @@ Honest differences that remain:
    distance fields until they rest), and the budget counts pages, not their cost in draws. Casters moving with a
    light (its own fixture) refresh its pages every frame outside that budget; such a light's claim on a slot falls
    with the pages its map costs per frame, so candles inside swinging fixtures keep distance-field shadows where
-   static lights compete for the slots. The pool is too small for the candle-lit cathedral's 32 maps (~1000
-   requests a frame unallocated), and a slot assigned once it is full may get no page at all. With the classic
+   static lights compete for the slots (a map without its fixture, traced in the distance fields instead, would
+   be cheap but no better than distance fields: the fixture's shadow is what such a candle casts). The pool is
+   too small for the candle-lit cathedral's 32 maps (~1860 pages requested a frame): it serves them by priority
+   (every map's coarsest pages, the sun, then lights by rank) and coarsens the fainter lights' maps until the
+   requests fit (up to 2.5 mips on average), where UE's larger pool would hold them. With the classic
    clustered loop, the rest get distance-field
    shadows for the strongest few per pixel and no shadows beyond those (light leaks through walls), and shadow-map
    soft shadows are PCSS-filtered, not ray-marched. **MegaLights** shadows every light but traces no hardware rays
