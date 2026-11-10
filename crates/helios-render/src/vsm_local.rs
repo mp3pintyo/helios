@@ -93,19 +93,19 @@ pub(crate) fn moving_weight(work: f32) -> f32 {
     MOVING_WEIGHT / (1.0 + (work.max(0.0) / MOVING_WORK_PAGES).powi(2))
 }
 
-/// The shadow pages a light's map costs per frame, from what was last counted while it held a
-/// slot: `rendered` pages per frame (smoothed; negative: never counted), of the `resident` pages
-/// the view requested and the pool held, out of the `requested` pages it asked for in all. The
-/// count of a map the pool could not hold whole is scaled up to all its requests — a map that
-/// got no pages renders nothing and would look free — and one that got none at all is assumed
-/// to redraw every page it requests every frame. `None`: never counted.
+/// The shadow pages a light's map costs per frame, from one read-back frame: it `rendered`
+/// that many, of the `resident` pages the view requested and the pool held, out of the
+/// `requested` pages it asked for in all. A map the pool could not hold whole is scaled up to all
+/// its requests (a map with half its pages renders half its cost). `None` for a map that got
+/// none of the pages it requested — a new slot in a full pool renders nothing and would look
+/// free —: such a frame says nothing about its cost.
 pub(crate) fn map_work(rendered: f32, resident: f32, requested: f32) -> Option<f32> {
-    if rendered < 0.0 {
-        None
-    } else if resident > 0.0 {
+    if resident > 0.0 {
         Some(rendered * (requested / resident).max(1.0))
+    } else if requested > 0.0 {
+        None
     } else {
-        Some(rendered.max(requested))
+        Some(rendered)
     }
 }
 /// A light that moved within this many frames counts as moving (see [`SlotAllocator::assign`]).
@@ -388,12 +388,9 @@ struct Feedback {
     moving: [bool; LOCAL_SLOTS],
     /// Per light of the scene: the pages its faces cost, as last counted.
     pages: Vec<[f32; FACES]>,
-    /// Per light of the scene: the shadow pages it renders per frame (smoothed over the
-    /// read-backs while it holds a slot; negative: never counted).
+    /// Per light of the scene: the shadow pages its map costs per frame ([`map_work`], smoothed
+    /// over the read-backs while it holds a slot; negative: never counted).
     work: Vec<f32>,
-    /// Per light of the scene: the pages of all its faces it requested when last counted,
-    /// whether the pool held them or not.
-    requested: Vec<f32>,
     /// Pages moving lights rendered in the latest read-back frame (in full or their dynamic
     /// casters only).
     moving_rendered: u32,
@@ -468,7 +465,6 @@ impl LocalShadows {
                 moving: [false; LOCAL_SLOTS],
                 pages: Vec::new(),
                 work: Vec::new(),
-                requested: Vec::new(),
                 moving_rendered: 0,
                 full: 0,
                 moving_full: 0,
@@ -492,21 +488,18 @@ impl LocalShadows {
         if fb.pages.len() != f.lights.len() {
             fb.pages = vec![[vsm_anchor::DEFAULT_FACE_PAGES; FACES]; f.lights.len()];
             fb.work = vec![-1.0; f.lights.len()];
-            fb.requested = vec![0.0; f.lights.len()];
         }
         let moving: Vec<bool> = motion.iter().map(|m| m.0).collect();
-        // A moving light's claim on a slot shrinks with the pages its map costs per frame
-        // (`map_work`). One never counted is assumed to redraw a few pages of every face every
-        // frame: an unknown cost buys no slot from a static light unless the moving one is far
-        // more influential. (The reference mode keeps round 6's plain weight, so that its slots
+        // A moving light's claim on a slot shrinks with the pages its map costs per frame. One
+        // never counted is assumed to redraw a few pages of every face every frame: an unknown
+        // cost buys no slot from a static light unless the moving one is far more influential. (The reference mode keeps round 6's plain weight, so that its slots
         // are the ones compared against.)
         let weights: Vec<f32> = (0..f.lights.len())
             .map(|i| match (moving[i], f.moving) {
                 (false, _) => 1.0,
                 (true, MovingLightShadows::Cached) => {
-                    let faces = face_count(&f.lights[i]);
-                    let work = map_work(fb.work[i], fb.pages[i][..faces].iter().sum(), fb.requested[i]);
-                    moving_weight(work.unwrap_or(vsm_anchor::DEFAULT_FACE_PAGES * faces as f32))
+                    let work = fb.work[i];
+                    moving_weight(if work >= 0.0 { work } else { vsm_anchor::DEFAULT_FACE_PAGES * face_count(&f.lights[i]) as f32 })
                 }
                 (true, _) => MOVING_WEIGHT,
             })
@@ -619,11 +612,10 @@ impl LocalShadows {
                     fb.moving_full += full;
                     fb.moving_rendered += rendered;
                 }
-                if let Some(requested) = fb.requested.get_mut(light) {
-                    *requested = slot[FEEDBACK_REQUESTED_ALL] as f32;
-                }
-                if let Some(work) = fb.work.get_mut(light) {
-                    *work = if *work < 0.0 { rendered as f32 } else { *work + (rendered as f32 - *work) * WORK_SMOOTHING };
+                let resident: u32 = slot[FEEDBACK_REQUESTED..FEEDBACK_REQUESTED + FACES].iter().sum();
+                let sample = map_work(rendered as f32, resident as f32, slot[FEEDBACK_REQUESTED_ALL] as f32);
+                if let (Some(work), Some(sample)) = (fb.work.get_mut(light), sample) {
+                    *work = if *work < 0.0 { sample } else { *work + (sample - *work) * WORK_SMOOTHING };
                 }
                 if let Some(pages) = fb.pages.get_mut(light) {
                     for (face, p) in pages.iter_mut().enumerate() {
@@ -804,14 +796,12 @@ mod tests {
 
     #[test]
     fn map_work_counts_what_the_pool_could_not_hold() {
-        // Never counted: unknown.
-        assert_eq!(map_work(-1.0, 10.0, 10.0), None);
         // The pool held all requests: the pages rendered.
         assert_eq!(map_work(3.5, 40.0, 40.0), Some(3.5));
         // It held a quarter: four times as many once the pages are there.
         assert_eq!(map_work(5.0, 10.0, 40.0), Some(20.0));
-        // None at all (a new map in a full pool renders nothing): every request, every frame.
-        assert_eq!(map_work(0.0, 0.0, 51.0), Some(51.0));
+        // None at all (a new map in a full pool renders nothing): no information.
+        assert_eq!(map_work(0.0, 0.0, 51.0), None);
         // Nothing requested (nobody looks at it): what it rendered.
         assert_eq!(map_work(0.5, 0.0, 0.0), Some(0.5));
     }
