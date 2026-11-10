@@ -684,6 +684,16 @@ impl Renderer {
         self.vsm.local.moving_stats()
     }
 
+    /// How the shadow page pool served the local lights' maps in a recent frame.
+    pub fn local_pool_stats(&self) -> crate::vsm_local::LocalPoolStats {
+        self.vsm.local.pool_stats()
+    }
+
+    /// The local lights' shadow-map slots in rank order with their pages (diagnostics).
+    pub fn local_pool_report(&self) -> String {
+        self.vsm.local.pool_report()
+    }
+
     /// Local lights rendered into virtual shadow maps this frame.
     pub fn shadow_mapped_lights(&self) -> usize {
         self.vsm.local.active_count()
@@ -902,6 +912,8 @@ impl Renderer {
         self.megalights.update(&self.device, capacity, megalights);
         if self.stats.poll(self.scene.instance_count) {
             self.update_lod_budget();
+            let st = self.stats.latest;
+            self.vsm.local.pool_load(st.shadow_pages_requested, st.shadow_page_capacity);
             self.scene.assemblies.update_budget(self.stats.latest.assembly_parts_requested);
         }
         if let Some(tessellation) = &mut self.culling.tessellation {

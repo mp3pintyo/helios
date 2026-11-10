@@ -1,0 +1,46 @@
+[
+  {
+    "id": "candlelit-moving-redraw-budget",
+    "title": "A mozgó fény slotigénye a térképe képkockánkénti költségével csökken: a lengő csillárgyertyák visszaadják a slotokat",
+    "area": "Árnyékok",
+    "kind": "fix",
+    "summary": "A 6. kör óta a mozgó fények a hatásuk felével versenyeznek a 32 árnyéktérkép-slotért. A gyertyafényes katedrálisban (--lights 300, klasszikus fényhurok) így 10–11 lengő csillárgyertya kapott slotot, és mindegyik a saját csillárát – a gyertyát, a karikát, a szomszéd gyertyákat – minden képkockában újrarajzolta a térképe összes lapjára, a lapkereten kívül: 14 helyett ~140 árnyéklap képkockánként, és a nagy hatótávú gyertyák a megvilágítást is drágították. Mostantól a GPU slotonként számolja, hány lapot rajzol és kér a térkép képkockánként, és a mozgó fény ennek négyzetével csökkenő súllyal versenyez: a karika közepén ülő csillárfény (~3,5 lap) a hatása 0,28-ával, a lengő foglalatában égő gyertya (20–50 lap, a teljes térképe) 2 %-nál kevesebbel. Ahol statikus fények versenyeznek, azok tartják meg a slotokat, ahogy az 5. körben; a kamera mellett vitt lámpás és a 33 fényes katedrális csillárfényei megtartják a térképüket.",
+    "details": "vsm_local.rs: moving_weight(work) = MOVING_WEIGHT / (1 + (work / MOVING_WORK_PAGES)²), MOVING_WORK_PAGES = 4; Feedback::work fényenként a slot képkockánként rajzolt lapjai (a slot 7. szava: local_dirty_info minden teljes és csak dinamikus lapnál növeli), visszaolvasásonként 0,25-ös simítással, csak amíg a fénynek slotja van; a sosem mért mozgó fény laponként 8 lappal számít. SlotAllocator::ranked (hatás × súly × megtartási bónusz, a 32 legnagyobb) az assign és a contenders közös rangsora; az assign a mozgó-jelzők helyett fényenkénti súlyokat kap. A referencia mód (--moving-light-maps) a 6. kör sima 0,5-ös súlyával fut, hogy ugyanazokhoz a slotokhoz hasonlítsunk. Mérlegelt és elvetett: a redraw-k beszámítása a lapkeretbe (a 33 fényes katedrális csillárfényei már 31,5 lapot rajzolnak képkockánként, a lámpással 61-et – csillárfények esnének ki), a foglalat rajzolása a fény saját keretében / ritkított frissítése (a tartott középpont 0,5–1 cm-re van a fénytől, a karika önárnyéka 2 texeles, ~0,3 mm-es torzítás mellett aknés és fényszivárgó lenne), az újrahorgonyzott lapok azonnali split rajzolása (legfeljebb a 138-ból 30 lap, a megvilágítás költségéből semmi), lineáris súly (W = 4-nél 6 gyertya maradt, W = 1-nél csillárfények estek ki).",
+    "metrics": "Gyertyafényes katedrális (--lights 300, klasszikus), 2560×1440, 3 váltakozó futás minimuma (az RTX 3090-et más ügynökök is terhelték): GPU-képkocka 15,29 → 14,22 ms (67 %: 8,92 → 8,53 ms) – az 5. kör szintje (távolságmezővel 14,23 ms); árnyéklapok 142 → 14,2 képkockánként (ebből csak dinamikus 102 → 12,3), rajzolások 8,7 ezer → 0,43 ezer; vsm raster + expand 0,27 → 0,10 ms, vsm mark local 0,36 → 0,21, lighting 4,73 → 4,22 ms. A minden képkockás referenciához (24 mozgó térkép, zaj 59,4 dB): 6. kör 43,4 dB, most 39,3 dB = az 5. kör értéke (a gyertyák újra távolságmezősek). Csillár közelről: 279 → 76 lap, 26,6 ezer → 2,2 ezer rajzolás, 42,1 → 40,8 dB; álló kamerán 16 képkocka alatt mindhárom módban 0,038 % pixel változik 24/255 fölött (nincs pattogás). 33 fényes katedrális: mind a 11 csillárfény térképes minden futásban, 10,34 → 10,33 ms, kép 61,2 dB (zaj 61,1), referenciához 48,9 dB előtte és utána. Lámpás: mind a 12 mozgó fény térképes, alapnézet 11,04 → 11,01 ms, közeli nézet 11,33 → 11,35 ms, a referenciához 46,8–47,0 → 46,8–46,9 dB, ill. 43,3–44,9 → 43,0–45,0 dB (6–6 futás). MegaLights 300 fénnyel és a völgy, erdő, galéria változatlan (a kérésszámlálás +0,003–0,004 ms a vsm dirty info-ban).",
+    "showcase": "Katedrális --lights 300 (?lights=300), klasszikus fényhurok: a HUD 'moving lights: 0 with shadow maps …, 88 on distance fields', 'shadow pages: … 14 rendered'; a 6. körben 11 térképes gyertya és ~140 lap. Összevetés --moving-light-fields-szel (= 5. kör) és --moving-light-maps-szel (referencia): candle-redraw-budget/candlelit-default.jpg, candlelit-chandelier.jpg. --lantern --lights 300: a lámpás a 300 gyertya mellett is térképet kap.",
+    "modules": ["crates/helios-render/src/vsm_local.rs", "crates/helios-render/src/vsm_anchor.rs"]
+  },
+  {
+    "id": "starved-map-request-count",
+    "title": "A tele lappoolban éhező térkép nem számít ingyenesnek: slotonként az összes kért lap",
+    "area": "Árnyékok",
+    "kind": "fix",
+    "summary": "A gyertyafényes katedrális képkockánként a 1024 lapos pool kétszeresét kéri, és amelyik slot akkor kap fényt, amikor a pool már tele van, egyetlen lapot sem kap: semmit sem rajzol, így a mért költsége nulla lenne, és egy lengő gyertya árnyék nélkül, de a megvilágítás költségével tarthatná a slotját (az első változatban 14 ilyen gyertya). Egy új, olcsó GPU-menet slotonként megszámolja az összes kért lapot, akár kapott fizikai lapot, akár nem: a részben kiszolgált térkép mért munkája az összes kérésre skálázódik, a teljesen éhező képkocka pedig nem számít bele.",
+    "details": "vsm.wgsl: count_local_requests – egy szál helyi lapcache-bejegyzésenként (32 × 6 × 1365), requests[e] == frame esetén atomicAdd a slot 30. szavára (LOCAL_INFO_REQUESTED_ALL, vsm_local_common.wgsl; info_begin nullázza); vsm.rs: a dirty_info után, a visszaolvasás előtt fut, csak ha van helyi nézet. vsm_local.rs: map_work(rendered, resident, requested) visszaolvasásonként: ha a pool csak részben tartotta a kéréseket, rendered × requested / resident; ha semmit, None – az a képkocka nem mond semmit a költségről, és kimarad (az első változat ilyenkor az összes kért lapot számolta, és a 33 fényes katedrális egy távoli csillárfénye három futásból kettőben elvesztette a slotját egy halvány gyertyatartóval szemben).",
+    "metrics": "A számlálás 262 ezer szálas menete +0,003–0,004 ms (vsm dirty info 0,012 → 0,015–0,017 ms). Nélküle az első (lineáris súlyú) változatban 14 mozgó gyertya tartott slotot ~0 rajzolt lappal, a megvilágítás 4,90 ms volt a 4,24 helyett; a teljesen éhező képkockák kihagyása nélkül a 33 fényes katedrális egy távoli csillárfénye három futásból kettőben távolságmezőre esett, most háromból háromszor térképes.",
+    "showcase": "Katedrális --lights 300: a lengő gyertyák nem foglalnak üres slotot (HUD 'moving lights: 0 with shadow maps').",
+    "modules": ["crates/helios-render/src/shaders/vsm.wgsl", "crates/helios-render/src/shaders/vsm_local_common.wgsl", "crates/helios-render/src/vsm.rs", "crates/helios-render/src/vsm_local.rs"]
+  },
+  {
+    "id": "moving-budget-contenders",
+    "title": "Slotot nem nyerő mozgó fényre nem megy el a lapkeret",
+    "area": "Árnyékok",
+    "kind": "fix",
+    "summary": "A lapkeret eddig a slotkiosztás előtt fizetett az új mozgó térképekért, így egy képkockában akár olyan fény új térképére is jutott keret, amelyet a slotverseny utána elejtett – a tartott térképek lapjai közben vártak. Mostantól a slotrangsor fut előbb, és csak a 32 legnagyobb igényű fény közé kerülő mozgó fény kérhet térképet.",
+    "details": "vsm_local.rs: SlotAllocator::contenders (a ranked rangsor) a LocalShadows::assign elején; a ki nem jutó mozgó fények hatása 0 az Anchors::update számára. vsm_anchor.rs: Anchors::keep a statisztikához megkapja, mely mozgó fények akartak térképet a verseny előtt (így a HUD továbbra is távolságmezősnek számolja őket).",
+    "metrics": "A 6. kör gyertyafényes nézetében képkockánként ~10 újrahorgonyzott lap jutott, a tartott térképek igénye 38–42 lap volt a 32-ből (durvább tűrés 100 képkockában); most a lámpás nézetben változatlan (12 térképes mozgó fény, 46 lap igény).",
+    "showcase": "HUD 'moving lights' sor: a 'faces re-anchored' csak slotos fények lapjait mutatja.",
+    "modules": ["crates/helios-render/src/vsm_local.rs", "crates/helios-render/src/vsm_anchor.rs"]
+  },
+  {
+    "id": "moving-pages-hud",
+    "title": "HUD és fej nélküli napló: a mozgó fények képkockánként rajzolt árnyéklapjai",
+    "area": "Eszközök",
+    "kind": "tool",
+    "summary": "A HUD 'moving lights' sora és a fej nélküli futások átlagsora mostantól azt is mutatja, hány lapot rajzoltak a mozgó fények térképei egy képkockában, és ebből mennyi volt csak a velük mozgó testek (a saját foglalatuk) újrarajzolása – a lapkereten kívüli költség.",
+    "details": "vsm_local.rs: MovingLightStats::moving_pages (a mozgó slotok 7. szavának összege a visszaolvasott képkockában); app.rs: 'moving lights' pages rendered: N (dynamic casters only: M)'; main.rs: FrameMeans 'moving lights' pages' átlag.",
+    "metrics": "33 fényes katedrális: 31–38 lap képkockánként (29 csak dinamikus); lámpással ~60 (26); gyertyafényes nézet: 0.",
+    "showcase": "Bármely katedrális-futás HUD-ja / naplója.",
+    "modules": ["crates/helios-render/src/vsm_local.rs", "crates/helios-demo/src/app.rs", "crates/helios-demo/src/main.rs"]
+  }
+]

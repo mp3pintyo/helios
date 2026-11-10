@@ -295,12 +295,17 @@ impl Anchors {
         self.origins.clone()
     }
 
-    /// Forgets the origins of lights that got no slot (`has_slot` per light).
-    pub fn keep(&mut self, has_slot: impl Fn(usize) -> bool) {
+    /// Forgets the origins of lights that got no slot (`has_slot` per light). `wanting`: per
+    /// light, moving and wanting a map before the slot competition turned it away (the
+    /// statistics count it on distance fields; empty: those [`Anchors::update`] saw).
+    pub fn keep(&mut self, has_slot: impl Fn(usize) -> bool, wanting: &[bool]) {
         for (i, origin) in self.origins.iter_mut().enumerate() {
             if !has_slot(i) {
                 *origin = None;
             }
+        }
+        if wanting.len() == self.wanting.len() {
+            self.wanting.copy_from_slice(wanting);
         }
         let wanting = || self.wanting.iter().zip(&self.origins).zip(&self.relax).filter(|((w, _), _)| **w);
         self.stats.mapped = wanting().filter(|((_, o), _)| o.is_some()).count() as u32;
@@ -447,7 +452,7 @@ mod tests {
         let lights = [light(0.0, true), light(1.0, true)];
         let first = anchors.update(&lights, CACHED);
         assert_eq!(first.iter().flatten().count(), 1);
-        anchors.keep(|i| first[i].is_some());
+        anchors.keep(|i| first[i].is_some(), &[]);
         assert_eq!(anchors.update(&lights, CACHED).iter().flatten().count(), 2);
     }
 
@@ -468,7 +473,7 @@ mod tests {
                 l.position += l.step;
             }
             let origins = anchors.update(&lights, one);
-            anchors.keep(|i| origins[i].is_some());
+            anchors.keep(|i| origins[i].is_some(), &[]);
             mapped = (0..8).filter(|&i| origins[i].is_some()).collect();
             for &i in &mapped {
                 assert!(origins[i].unwrap()[0].distance(lights[i].position) <= 0.02 * anchors.relax[i] * HARD_LIMIT + 1e-5);
@@ -545,7 +550,7 @@ mod tests {
         let hidden = LightState { influence: 0.0, ..lights[1] };
         assert_eq!(anchors.update(&[lights[0], hidden], every)[1], None);
         // A slot that went to another light: the origin is forgotten.
-        anchors.keep(|i| i == 1);
+        anchors.keep(|i| i == 1, &[]);
         assert_eq!(anchors.origins[0], None);
     }
 }
