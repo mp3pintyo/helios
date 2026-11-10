@@ -549,6 +549,13 @@ pub fn helios_set_candle_lights(count: u32) {
     crate::scenes::candles::set_candle_lights(count as usize);
 }
 
+/// Sets whether a lantern is carried down the cathedral's nave from its next build
+/// (`heliosLoadScene`; `?lantern=1` at start): a fast, sharp moving light.
+#[wasm_bindgen(js_name = heliosSetLantern)]
+pub fn helios_set_lantern(on: bool) {
+    crate::scenes::cathedral::set_lantern(on);
+}
+
 /// Fetches a glTF model (`.glb`, or `.gltf` with its files; relative to the page, as `?gltf=`)
 /// and rebuilds the engine with it as the scene; skinned models play their first clip. Resolves
 /// to whether the engine was running; rejects with the import error.

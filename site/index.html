@@ -396,6 +396,19 @@ footer .wide-inner { gap: 10px; }
         <img src="media/dyn_invalidation.webp" alt="" loading="lazy" data-alt-hu="Érvénytelenítési nézet a katedrálisban" data-alt-en="Invalidation view in the cathedral">
         <img src="media/dyn_raft.webp" alt="" loading="lazy" data-alt-hu="A tutaj a völgy taván" data-alt-en="The raft on the valley's lake">
       </div>
+      <p data-en="A moving light keeps the shadow map it was rendered from while it stays within a tenth of its source radius of that point, and the filter corrects the parallax. A small, sharp flame leaves that sphere almost every frame, so until round 6 such lights fell back to coarse distance-field shadows until they stopped. Now every cube face of a moving light holds its own origin and only the faces the light has left are redrawn, within a budget of 32 shadow pages a frame; a light the budget cannot follow gets a larger tolerance instead of losing its map. A lantern carried down the nave at walking pace shows it: its 2 cm flame moves 2.6 tolerances a frame.">A mozgó fény addig tartja meg az árnyéktérképét, amíg a készítési pontjától a forrássugara tizedén belül marad, a szűrés pedig korrigálja a parallaxist. Egy kicsi, éles láng szinte minden képkockában kilép ebből a gömbből, ezért a 6. körig az ilyen fények megállásig durva, távolságmezős árnyékot kaptak. Most a mozgó fény kockatérképének minden lapja saját középpontot tart, és csak azok a lapok rajzolódnak újra, amelyekből a fény kilépett, képkockánként legfeljebb 32 árnyéklapnyi keretben; amelyik fényt a keret nem tudja követni, nagyobb tűrést kap, de megtartja a térképét. Ezt mutatja a hajóban sétatempóban végigvitt lámpás: a 2 cm-es lángja képkockánként 2,6 tűrésnyit mozdul.</p>
+      <div class="controls">
+        <button class="btn" type="button" data-preset="lantern" data-en="Lantern in the nave (night)">Lámpás a hajóban (éjjel)</button>
+        <button class="btn" type="button" data-preset="lantern-pages" data-en="Its shadow pages (15)">Az árnyéklapjai (15)</button>
+      </div>
+      <div class="metrics">
+        <div class="metric"><b>33,9 → 44,8 dB</b><span data-en="the lantern against the every-frame reference: distance field → shadow map">a lámpás a minden képkockában újrarajzolt referenciához képest: távolságmező → árnyéktérkép</span></div>
+        <div class="metric"><b>161 → 28</b><span data-en="shadow pages a frame for 12 moving lights: every frame → per-face origins">árnyéklap képkockánként 12 mozgó fénynél: minden képkockában → laponkénti középpont</span></div>
+        <div class="metric"><b>4,41 → 0,21 ms</b><span data-en="shadow rasterising in the same view">árnyékraszterizálás ugyanabban a nézetben</span></div>
+      </div>
+      <div class="shots">
+        <img src="media/lantern_night.webp" alt="" loading="lazy" data-alt-hu="A lámpás a katedrális hajójában éjjel" data-alt-en="The lantern in the cathedral's nave at night">
+      </div>
     </section>
 
     <section class="chapter" id="skeletal">
@@ -563,6 +576,12 @@ footer .wide-inner { gap: 10px; }
       <div class="shots">
         <img src="media/foliage_assemblies.webp" alt="" loading="lazy" data-alt-hu="Assembly-részek színezve" data-alt-en="Assembly parts coloured">
       </div>
+      <p data-en="Expanded parts used to be culled one by one, each carrying its tree's bounds, so every view tested the same tree 176 times, and a needle spray of 17 clusters kept 6 of a workgroup's 64 lanes busy. Since round 6 every tree has one culling record: each view tests it once, and only the surviving trees' parts are spread over the lanes, page by page; small pages hand their clusters on as candidates, 64 to a workgroup. The image is unchanged.">A kibontott részeket korábban egyenként vágta a GPU, mindegyik a fája befoglalóját hordozta, így minden nézet 176-szor tesztelte ugyanazt a fát, egy 17 klaszteres tűlevélág pedig egy munkacsoport 64 sávjából csak 6-ot dolgoztatott. A 6. kör óta minden fának egyetlen vágási rekordja van: a nézetek egyszer tesztelik, és csak a látható fák részei oszlanak szét a sávokon, lapról lapra; a kis lapok klasztereiket jelöltként adják tovább, 64-et munkacsoportonként. A kép nem változott.</p>
+      <div class="metrics">
+        <div class="metric"><b>1,19 → 0,56 ms</b><span data-en="the forest's culling, both passes (2560×1440)">az erdő láthatósági vágása, mindkét menet (2560×1440)</span></div>
+        <div class="metric"><b>0,59 → 0,10 ms</b><span data-en="the assembly parts' share">ebből az assembly-részek része</span></div>
+        <div class="metric"><b>36,5 → 16,7 MiB</b><span data-en="culling work buffers (the sun's levels share one)">vágási munkapufferek (a nap szintjei közösen használnak egyet)</span></div>
+      </div>
     </section>
 
     <section class="chapter" id="tessellation">
@@ -635,6 +654,30 @@ footer .wide-inner { gap: 10px; }
       </figure>
       <div class="shots">
         <img src="media/tess_cloth.webp" alt="" loading="lazy" data-alt-hu="Hullámzó kendő animált elmozdítással" data-alt-en="Rippling cloth with animated displacement">
+      </div>
+      <p data-en="Round 6 closed three gaps. Lumen now sees displacement: for every displacing material the GPU moves points of the mesh with the tessellator's own function, and distance fields and cards are baked from the result, so the caps occlude the sky and bounce light onto the ground beneath; an animated surface is represented by its average over eight seconds. The compiler derives a speed bound from a graph that reads the time, so the cloth's shadow pages refresh only once it may have moved two texels on them. And a TransformVector node turns object- or tangent-space vectors into world space: behind the gallery's opening view a platform of combed tufts turns, and the tufts turn with it.">A 6. kör három hiányt pótolt. A Lumen most már látja az elmozdítást: minden elmozdító anyagnál a GPU a tesszellátor saját függvényével mozdítja el a háló pontjait, és a távolságmezők meg a kártyák ebből sülnek ki, így a gombakalapok eltakarják az eget, és fényt vernek vissza maguk alá; az animált felületet a nyolc másodperces átlaga képviseli. Az időt olvasó gráfokból a fordító sebességkorlátot vezet le, így a kendő árnyéklapjai csak akkor frissülnek, ha a felület két texelnyit elmozdulhatott rajtuk. A TransformVector csomópont pedig tárgy- vagy érintőtérbeli vektort alakít világtérbelivé: a galéria kezdőnézete mögött fésült csomókkal teli korong forog, és a csomók vele fordulnak.</p>
+      <div class="controls">
+        <button class="btn" type="button" data-preset="tess-lumen" data-en="Mushrooms in Lumen's cards (14)">Gombák a Lumen kártyáiban (14)</button>
+        <button class="btn" type="button" data-preset="tess-lumen-indirect" data-en="Their indirect light (7)">A közvetett fényük (7)</button>
+        <button class="btn" type="button" data-preset="tess-tufts" data-en="Turning tufts (tangent space)">Forgó csomók (érintőtér)</button>
+      </div>
+      <figure>
+        <div class="compare" style="--cut:50%">
+          <img src="media/lumen_disp_off.webp" alt="" loading="lazy" data-alt-hu="A gombaágyás a Lumen kártyanézetében, elmozdítás nélkül" data-alt-en="The mushroom bed in Lumen's card view, without displacement">
+          <img class="after" src="media/lumen_disp_on.webp" alt="" loading="lazy" data-alt-hu="A gombaágyás a Lumen kártyanézetében, az elmozdított változat kártyáival" data-alt-en="The mushroom bed in Lumen's card view, with the displaced variant's cards">
+          <span class="handle" aria-hidden="true"></span>
+          <span class="tag l" data-en="Round 5">5. kör</span><span class="tag r" data-en="Round 6">6. kör</span>
+          <input type="range" min="0" max="100" value="50" aria-label="Összehasonlítás">
+        </div>
+        <figcaption data-en="Lumen's mesh cards (view 14): in round 5 the bed was not in Lumen at all and the coarse voxel fallback (purple) lit it; now the cards of the displaced variant cover the ground, the stems and the caps with their shadows.">A Lumen kártyái (14-es nézet): az 5. körben az ágyás egyáltalán nem volt a Lumenben, és a durva voxeles tartalék (lila) világította meg; most az elmozdított változat kártyái fedik a talajt, a tönköket és a kalapokat az árnyékaikkal együtt.</figcaption>
+      </figure>
+      <div class="metrics">
+        <div class="metric"><b>98,5 → 14 %</b><span data-en="of the mushroom bed lit by the voxel fallback instead of cards">a gombaágyásból, amit kártyák helyett a voxeles tartalék világít meg</span></div>
+        <div class="metric"><b>83 → 45</b><span data-en="shadow pages a frame for the cloth from 7 m, with the speed bound">árnyéklap képkockánként a kendőnél 7 m-ről, sebességkorláttal</span></div>
+        <div class="metric"><b>0 ms</b><span data-en="extra GPU work in scenes without displacement">többlet GPU-munka elmozdítás nélküli jelenetben</span></div>
+      </div>
+      <div class="shots">
+        <img src="media/tess_tufts.webp" alt="" loading="lazy" data-alt-hu="Forgó korong fésült csomókkal" data-alt-en="A turning platform of combed tufts">
       </div>
     </section>
 
@@ -781,6 +824,7 @@ footer .wide-inner { gap: 10px; }
       <article class="story"><span class="round-tag" data-en="Round 4">4. kör</span><h3 data-en="Still stones that flickered">Álló kövek, amelyek villogtak</h3><p data-en="The resolve finds the displaced point by an iteration that lands a hair away from the micro-triangle the depth came from. That hair read as motion, so TSR and motion blur shimmered on a still camera. The previous-frame position now carries the hit point's own motion.">A G-puffer-feloldás egy iterációval keresi meg az elmozdított pontot, amely egy hajszálnyira attól a mikroháromszögtől landol, amelyből a mélység jött. Ez a hajszál mozgásnak látszott, ezért álló kamerán is remegett a TSR és a mozgási elmosás. Az előző képkocka pozíciója most a találati pont saját mozgását kapja.</p><div class="delta" data-en="0.45% → 0.003% changing pixels">0,45% → 0,003% változó pixel</div></article>
       <article class="story"><span class="round-tag" data-en="Round 4 · bisect">4. kör · felezéses keresés</span><h3 data-en="A debug view every pixel paid for">Egy debug nézet, amit minden pixel megfizetett</h3><p data-en="After the merges every scene's material pass got slower, though no feature had changed it. Bisecting merge by merge led to one new case in the resolve's debug-view switch: it kept many values alive through the whole material evaluation. The debug colouring now lives in a separate shader variant that only runs while a debug view is on.">Az összefésülések után minden jelenet anyagmenete lassabb lett, pedig egyik funkció sem nyúlt hozzá. Az összefésülésenkénti felezéses keresés (bisect) egyetlen új ágig vezetett a feloldó debugnézet-switch-ében: sok értéket életben tartott a teljes anyagkiértékelésen át. A debug színezés most külön shaderváltozatban él, amely csak bekapcsolt debug nézetnél fut.</p><div class="delta" data-en="material pass 1.01 → 0.73 ms (cathedral, 1440p)">anyagmenet 1,01 → 0,73 ms (katedrális, 1440p)</div></article>
       <article class="story"><span class="round-tag" data-en="Round 4 · bisect">4. kör · felezéses keresés</span><h3 data-en="A chandelier the size of a house">Egy ház méretű csillár</h3><p data-en="A swinging chandelier is a 2.8 m ring on a 12 m chain, so its moving bounds were a sphere of 6.3 m, and every candle light around it redrew 820 shadow pages a frame. The bounds are now cut into slices along the chain, each refreshed only once it may have moved two texels.">A lengő csillár egy 2,8 m-es gyűrű 12 m-es láncon, így a mozgó befoglalója 6,3 m-es gömb lett, és körülötte minden gyertyafény képkockánként 820 árnyéklapot rajzolt újra. A befoglaló most a lánc mentén szeletekre bomlik, és mindegyik szelet csak akkor frissül, ha már két texelnyit elmozdulhatott.</p><div class="delta" data-en="822 → 25 pages per frame · 0.68 → 0.23 ms">822 → 25 lap képkockánként · 0,68 → 0,23 ms</div></article>
+      <article class="story"><span class="round-tag" data-en="Round 6">6. kör</span><h3 data-en="Six lanes out of sixty-four">Hat sáv a hatvannégyből</h3><p data-en="The forest's culling cost 0.75 ms more than it should, and round 5 found no cause. Timestamps around every stage showed it: a needle spray of 17 clusters on 6 pages kept 6 of a workgroup's 64 lanes busy, in the early and the late pass, and each of the 14 views tested the same tree 176 times. One record per tree and cluster candidates for small pages fill the lanes again.">Az erdő láthatósági vágása 0,75 ms-mal többe került a kelleténél, és az 5. kör nem találta az okát. Az egyes fázisok köré tett időbélyegek megmutatták: egy 6 lapon elférő, 17 klaszteres tűlevélág egy munkacsoport 64 sávjából csak 6-ot foglalt le, a korai és a késői menetben is, a 14 nézet pedig mindegyike 176-szor tesztelte ugyanazt a fát. A fánkénti egy rekord és a kis lapok klaszterjelöltjei újra megtöltik a sávokat.</p><div class="delta" data-en="1.19 → 0.56 ms culling · image unchanged">1,19 → 0,56 ms vágás · a kép változatlan</div></article>
     </div>
   </div>
 </section>
@@ -818,7 +862,7 @@ footer .wide-inner { gap: 10px; }
       <li data-en="<b>MegaLights</b> traces no hardware rays (WebGPU has none): beyond a 1 m screen trace, shadows come from shadow maps or coarse distance fields.">A <b>MegaLights</b> nem követ hardveres sugarakat (WebGPU-n nincs ilyen): az 1 m-es képtérbeli követésen túl az árnyékot árnyéktérképek vagy durva távolságmezők adják.</li>
       <li data-en="<b>Volumes</b> cast no shadows on the scene and Lumen does not see them; only the fire's light reaches the surroundings.">A <b>térfogatok</b> nem vetnek árnyékot a jelenetre, és a Lumen sem látja őket; csak a tűz fénye jut el a környezetbe.</li>
       <li data-en="<b>Substrate</b> has one slab per material; UE layers and mixes any number of them.">A <b>Substrate</b> anyagonként egyetlen réteget (slabot) kezel; az UE akárhányat egymásra rétegez és kever.</li>
-      <li data-en="<b>Displacement</b> is not seen by Lumen: distance fields and the surface cache keep the undisplaced surface, and vectors are world-space only.">Az <b>elmozdítást</b> a Lumen nem látja: a távolságmezők és a felületi cache az elmozdítatlan felületet őrzik, a vektor pedig csak világtérbeli lehet.</li>
+      <li data-en="<b>Displacement</b> reaches Lumen only at its voxel and ~10 cm card resolution: finer relief such as mortar joints shows only in screen traces, and an animated surface is represented by its average.">Az <b>elmozdítást</b> a Lumen csak a voxelei és ~10 cm-es kártyatexelei felbontásában látja: a finomabb domborzat, például a fugák, csak a képtérbeli követésben jelenik meg, az animált felületet pedig az átlaga képviseli.</li>
       <li data-en="<b>The editor</b> has no actors or hierarchy: a tree's trunk and foliage are two separate instances.">A <b>szerkesztőben</b> nincsenek aktorok és hierarchia: egy fa törzse és lombja két külön példány.</li>
     </ul>
   </div>
@@ -912,15 +956,17 @@ $("#sun").addEventListener("input", (e) => setSun(Number(e.target.value)));
 
 // Candle lights the cathedral was last built with (0: its 33 fixture lights).
 let candles = 0;
+let lantern = false;
 const SCENE_NAMES = {
   valley: ["A völgy", "valley"], cathedral: ["A katedrális", "cathedral"], forest: ["Az erdő", "forest"],
   gallery: ["Az anyaggaléria", "material gallery"],
 };
 // Builds a procedural scene; `candleLights` (cathedral only) rebuilds it with that many candle
-// lights, undefined keeps the current lighting.
-async function loadScene(name, candleLights) {
+// lights and `lanternOn` with or without the carried lantern; undefined keeps the current state.
+async function loadScene(name, candleLights, lanternOn) {
   if (!engine || busy) return false;
-  const relight = name === "cathedral" && candleLights !== undefined && candleLights !== candles;
+  const relight = name === "cathedral" && ((candleLights !== undefined && candleLights !== candles)
+    || (lanternOn !== undefined && lanternOn !== lantern));
   if (engine.heliosScene() === name && !relight) return true;
   busy = true;
   const [hu, en] = SCENE_NAMES[name];
@@ -930,7 +976,9 @@ async function loadScene(name, candleLights) {
   await nextFrames();
   if (name === "cathedral") {
     if (candleLights !== undefined) candles = candleLights;
+    if (lanternOn !== undefined) lantern = lanternOn;
     engine.heliosSetCandleLights(candles);
+    engine.heliosSetLantern(lantern);
   }
   engine.heliosLoadScene(name);
   await nextFrames();
@@ -1020,6 +1068,12 @@ const PRESETS = {
   "tess-bricks": { scene: "gallery", view: 0, eye: [0.9, 0.45, 10.9], at: [0, 0, 9.2], set: { tessellation: true } },
   "tess-mushrooms": { scene: "gallery", view: 0, eye: [-5.9, 0.3, 10.4], at: [-6.5, 0.08, 9.2], set: { tessellation: true } },
   "tess-cloth": { scene: "gallery", view: 0, eye: [4.4, 0.6, 10.9], at: [6.3, 0.15, 9.0], set: { tessellation: true } },
+  // Round 6
+  "tess-lumen": { scene: "gallery", view: 14, eye: [-5.9, 0.3, 10.4], at: [-6.5, 0.08, 9.2], set: { tessellation: true } },
+  "tess-lumen-indirect": { scene: "gallery", view: 7, eye: [-5.9, 0.3, 10.4], at: [-6.5, 0.08, 9.2], set: { tessellation: true } },
+  "tess-tufts": { scene: "gallery", view: 0, eye: [1.9, 1.1, 15.6], at: [0, 0.1, 13.4], set: { tessellation: true } },
+  lantern: { scene: "cathedral", lantern: true, view: 0, sun: -25, eye: [11.4, 1.2, -0.6], at: [12.9, 0.5, 0.5] },
+  "lantern-pages": { scene: "cathedral", lantern: true, view: 15, sun: -25, eye: [11.4, 1.2, -0.6], at: [12.9, 0.5, 0.5] },
   "tess-view": { scene: "valley", view: 25, eye: [-27, 1.2, 41], at: [-31, 0.1, 48], set: { tessellation: true } },
   gallery: { scene: "gallery", view: 0 },
   "gallery-paint": { scene: "gallery", view: 0, eye: [-7.2, 1.9, 3.4], at: [-7.2, 1.5, 0] },
@@ -1030,7 +1084,8 @@ async function applyPreset(name) {
   const p = PRESETS[name];
   if (!engine || !p) return;
   if (p.model && !(await loadModel(p.model, p.name))) return;
-  if (p.scene && !(await loadScene(p.scene, p.candles))) return;
+  // Cathedral presets without a lantern take it away again (a rebuild).
+  if (p.scene && !(await loadScene(p.scene, p.candles, p.lantern ?? (p.scene === "cathedral" ? false : undefined)))) return;
   if (p.view !== undefined) engine.heliosSetView(p.view);
   if (p.sun !== undefined) { $("#sun").value = p.sun; setSun(p.sun); }
   if (p.eye) engine.heliosLookAt(...p.eye, ...p.at);

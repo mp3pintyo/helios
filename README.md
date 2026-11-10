@@ -335,6 +335,10 @@ Foliage's assemblies); new in round 4: gallery 8.0 / 5.0 ms (with the graph-disp
 with 300 lights under MegaLights 15.3 / 9.2 ms. Round 5 ([`docs/round5/`](docs/round5/); final build on an idle GPU, minimum of 3 interleaved runs): valley
 8.8 / 5.5 ms, cathedral 10.7 / 6.7 ms (the swinging chandelier lights have shadow maps again, cached), forest
 17.0 / 11.3 ms (local light pages), gallery 8.0 / 5.0 ms, cathedral with 300 lights under MegaLights 15.2 / 9.0 ms.
+Round 6 ([`docs/round6/`](docs/round6/); final build on an idle GPU, minimum of 3 interleaved runs against round 5):
+valley 8.7 / 5.4 → 8.8 / 5.5 ms (Lumen's final gather sees the displaced boulders), cathedral 10.8 / 6.6 → 10.9 /
+6.7 ms (an eleventh swinging chandelier light gets a shadow map), forest 16.9 / 11.4 → 15.8 / 10.6 ms (assembly
+culling), gallery 8.0 / 5.0 → 8.1 / 5.0 ms, cathedral with 300 lights under MegaLights 15.0 / 9.0 → 15.2 / 9.0 ms.
 
 * **Streaming** (`streaming.rs`, `page_source/`). Cluster and page records are always resident; vertex/triangle data
   lives in a fixed GPU pool. Culling stamps "a resident parent wants to refine into this page" into a feedback buffer,
