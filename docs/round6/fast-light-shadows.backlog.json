@@ -1,0 +1,46 @@
+[
+  {
+    "id": "fast-light-shadow-maps",
+    "title": "Árnyéktérkép a gyors, éles mozgó fényeknek: kockalaponkénti középpont, lapokban mért keret",
+    "area": "Árnyékok",
+    "kind": "fix",
+    "summary": "Az 5. kör a mozgó helyi fény árnyéktérképét egy középpontban tartotta, és képkockánként legfeljebb egy fényt rajzolt újra. Egy kis láng, amely minden képkockában kilép az 1 cm-es tűréséből, ennél többet kért: ha térkép nélkül indult, távolságmező-árnyékot kapott, ha volt térképe, minden képkockában elvitte az egész keretet, és a lengő csillárok sorra elvesztették a magukét. Mostantól a kockatérkép minden lapjának saját középpontja van, a keret lapokban mérődik (egy lap annyiba kerül, ahány lapot a nézet kér belőle – ezt a GPU számolja), a tűrésénél gyorsabb fény minden képkockában a saját helyéről rajzolódik (a minden képkockás referencia képe), amit pedig a keret nem bír követni, az kétszeres-négyszeres tűréssel tartja meg a térképét távolságmező helyett.",
+    "details": "vsm_anchor.rs: Anchors::update fényenként hat középpontot ad (Origins); a tűrésből kilépett lapok hiba (tűrésben mérve), majd hatás szerint sorba állnak, és addig rajzolódnak újra, amíg a képkocka lapkerete (RenderSettings::moving_light_pages = 32, --moving-light-pages) tart; a keretnél nagyobb lap egyedül megy. Új térképet akkor kap egy mozgó fény, ha a tartott térképek csúcssebességhez tartozó igénye (Σ lapköltség × min(1, sebesség / 1,75 tűrés)) és az övé belefér; ha nem, kétszeres, majd négyszeres tűréssel próbálja (MAX_RELAX). A lemaradó lap (2 tűrés + a fény két képkockányi mozgása) előbb a tűrést duplázza (képkockánként egyszer), csak négyszeres fölött adja fel a fény a térképét a megállásáig. A előretolás (lead) a sebességgel csökken: k képkocka a következő újrarajzolásig, a hiba max(lead, k·s − lead), ezért k·s/2, legfeljebb 0,75 tűrés; 1,75 tűrés/képkocka fölött nulla, a fény a saját helyéről rajzolódik. vsm_local.rs: a slot laponként tárolja a középpontokat, a flags.x laponkénti elavulás-bitmaszk (invalidate_local csak a mozdult lapok lapjait üríti), face_offsets[6] (középpont − fény) hajtja a parallaxis-korrekciót (local_filter_follow), position_range maga a fény; a különböző középpontú lapok közti keskeny rést a kockatérkép-keresés a laphoz szorítja (local_in_face). vsm.wgsl, dirty_info: fizikai laponként egy atomic számolja, hány lapot kért a nézet az egyes kockalapokból, a local_dirty_info a teljesen rajzolt lapokat; a slotszavak 18–29. szavát a CPU visszaolvassa (Feedback, néhány képkocka késéssel, várakozás nélkül) – ez a lapok költsége. HUD: 'moving lights' sor.",
+    "metrics": "Lámpás egyedül (--movers 1), közeli éjszakai nézet, 1600×900, a minden képkockás referenciához: távolságmező (5. kör, nem kapott slotot) 33,9 dB, 1,59 % 24/255 fölött; most 44,8 dB, 0,11 % – a különbség egésze a mozgó fények egy mippel durvább térképe (nélküle 65,5 dB = zaj), ~17 lap képkockánként (bias nélkül 33). Szűkebb kerettel a lapok sorban követik: 8 lap 43,6 dB, 4 lap 42,9 dB; nagyobb tűrés: ×2 44,6, ×4 43,1, ×8 42,0 dB (4392 → 2514 / 1888 / 1242 rajzolás). Csillárokkal együtt, 2560×1440: 5. kör 1500 képkocka után 24 térképes fény, ebből 2 mozgó (8 csillárfény távolságmezőre esett), 42,0 dB; most mind a 12 mozgó fény végig térképes, 44,5 dB; új középpontból ~28 lap képkockánként a minden képkockás 161 helyett (közeli nézet: vsm raster 0,21 ms a 4,41 ms helyett, 7,4 ezer rajzolás 70 ezer helyett). A négy alapjelenet képe zajszinten azonos (katedrális 60,6 dB, zaj 61,0), csak a vsm dirty info +0,002–0,005 ms; a katedrális csillárai a referenciához 48,9 dB előtte és utána, a csillár alól 42,6 dB. Az RTX 3090-et végig három másik ügynök mérései terhelték: az ms-értékek 5–6 futás minimumai, nagy szórással.",
+    "showcase": "Katedrális, --lantern (?lantern=1), közeli éjszakai nézet: --eye 11.4,1.2,-0.6 --at 12.9,0.5,0.5 --sun 200,-25, --movers 1 (csak a lámpás mozog): a padvégek hosszú árnyéka a sorok közt a lámpással együtt mozog; összevetés --moving-light-maps (referencia) és az 5. kör között (fast-light-shadows/lantern-close.jpg). Alapnézet --lantern mellett 1500 képkocka: a pillérfők alatti lágy sávok megmaradnak (cathedral-1500-frames.jpg). HUD: 'moving lights: 12 with shadow maps (0 at a coarser tolerance), 0 on distance fields'; --moving-light-pages 6 mellett a fények durvább tűréssel, de térképpel maradnak.",
+    "modules": ["crates/helios-render/src/vsm_anchor.rs", "crates/helios-render/src/vsm_local.rs", "crates/helios-render/src/vsm.rs", "crates/helios-render/src/shaders/vsm.wgsl", "crates/helios-render/src/shaders/vsm_local_common.wgsl", "crates/helios-render/src/shaders/vsm_local_sample.wgsl", "crates/helios-render/src/renderer.rs", "crates/helios-demo/src/app.rs", "crates/helios-demo/src/main.rs"]
+  },
+  {
+    "id": "moving-light-slot-weight",
+    "title": "A mozgó fények fél hatással versenyeznek a slotokért, nem csak a maradékért",
+    "area": "Árnyékok",
+    "kind": "fix",
+    "summary": "A 4. körben a mozgó fények csak azokat a slotokat kaphatták meg, amelyeket a statikus fények meghagytak, mert a térképük minden képkockában újrarajzolódott. A kamera mellett vitt lámpás így egyáltalán nem kapott árnyéktérképet, amíg a katedrális 33 statikus fénye elfoglalta mind a 32 slotot. Mostantól a mozgó fény a hatása felével versenyez: egy közeli lámpás elveheti egy messzi, halvány gyertyatartó slotját, egy csillárfény nem.",
+    "details": "vsm_local.rs, SlotAllocator::assign: a jelöltek értéke hatás × (megtartási bónusz) × MOVING_WEIGHT (0,5) a mozgó fényeknél, egyetlen rendezés. A költségük a lapkeretben korlátos, és amelyik fényt a keret elutasította, annak nincs középpontja, így nem is versenyez (MegaLights alatt a mozgó fények továbbra sem kapnak slotot).",
+    "metrics": "Katedrális alapnézet: mind a 11 csillárfény térképes (előtte 10), 46,4 helyett 49,0 lap és 3174 helyett 3468 rajzolás képkockánként, a kép zajszinten azonos. Lámpás egyedül: előtte nincs slot (33,9 dB), most térkép (44,8 dB). Gyertyafényes katedrális klasszikus fényhurokkal (--lights 300): 10–11 csillárgyertya kap térképet, 14 → 140 lap képkockánként (100 csak dinamikus újrarajzolás), vsm raster 0,03 → 0,87 ms.",
+    "showcase": "Katedrális --lantern --movers 1, közeli nézet: a lámpás HUD-sora 'moving lights: 1 with shadow maps'.",
+    "modules": ["crates/helios-render/src/vsm_local.rs"]
+  },
+  {
+    "id": "cathedral-lantern",
+    "title": "Kézben vitt lámpás a katedrálisban (gyors, éles mozgó fény tesztesete)",
+    "area": "Demó",
+    "kind": "feature",
+    "summary": "A --lantern kapcsoló (böngészőben ?lantern=1) egy lámpást ad a katedrálishoz, amelyet valaki végigvisz a középső folyosón és vissza: kovácsoltvas keret, gyertya és 2 cm-es lángfény, legfeljebb 1,6 m/s-mal, kézből lengve. Ez a gyors, éles mozgó fény tesztesete; a --movers 1 csak a lámpást hagyja mozogni.",
+    "details": "motion.rs: Motion::Carry – két pont közt oda-vissza, a végeken lassítva (44 s), kézmozgással és ±0,2 rad lengéssel a fogantyú körül; DemoMotion::move_last_first a lámpást teszi az első mozgó csoporttá. cathedral.rs: lantern() (alap, tető, négy saroktartó, a láng alatt és fölött egy-egy korlát, fogantyú; ~1 ezer háromszög), a gyertya és a láng, fény: 2 cm forrássugár, 12-es intenzitás, 10 m hatótáv; a jelenet végén épül, így az előre sütött mesh-könyvtárak érvényesek maradnak. main.rs: --lantern, web.rs: ?lantern=1.",
+    "metrics": "A lámpás 2,6 tűrést tesz meg képkockánként (1,57 m/s, 1 cm tűrés), minden képkockában újrarajzolódik, a közeli nézetben ~17 lapon (1600×900).",
+    "showcase": "Katedrális, --lantern --sun 200,-25 --eye 11.4,1.2,-0.6 --at 12.9,0.5,0.5: a lámpás a padsorok mellett, a padvégek árnyéka a sorok közé vetül.",
+    "modules": ["crates/helios-demo/src/motion.rs", "crates/helios-demo/src/scenes/cathedral.rs", "crates/helios-demo/src/main.rs", "crates/helios-demo/src/web.rs"]
+  },
+  {
+    "id": "headless-frame-means",
+    "title": "Fej nélküli futások: képkockánkénti átlagok és medián GPU-idő a naplóban",
+    "area": "Eszközök",
+    "kind": "tool",
+    "summary": "A fej nélküli képernyőkép-futás a végén kiírja a képkockák utolsó kétharmadára vett átlagokat (GPU és passzonkénti idő, árnyéklapok, rajzolások, újrahorgonyzott kockalapok), a nem simított GPU-képkockaidő mediánját és 10. percentilisét (megosztott GPU-n kevésbé zajos, mint az átlag), valamint hogy volt-e közben mozgó fény távolságmezőn vagy durvább tűréssel.",
+    "details": "main.rs: FrameMeans (add/report/moving_report); renderer.rs: Renderer::gpu_frame_ms (a profiler legutóbb visszaolvasott, nem simított képkockaideje sorszámmal), Renderer::moving_light_stats.",
+    "metrics": "Sorok: 'GPU frame median … · frames 50..150 mean: GPU … · shadow pages rendered … · local pages in full … · passes: …' és 'frames 50..150: moving lights with shadow maps at least N in every frame; …'.",
+    "showcase": "Bármely --screenshot futás naplója.",
+    "modules": ["crates/helios-demo/src/main.rs", "crates/helios-render/src/renderer.rs"]
+  }
+]
