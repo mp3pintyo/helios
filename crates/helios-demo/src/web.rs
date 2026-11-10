@@ -7,10 +7,23 @@
 //! camera, sun, hotkeys, HUD).
 //! `embedded: true` keeps keyboard input on the focused canvas and leaves the mouse wheel to
 //! the page, so the engine can sit inside a scrolling document.
+//!
+//! **Shader compilation never blocks the page.** The renderer creates its ~140 pipelines up
+//! front and more on first use (a scene's material permutations, a debug view, MegaLights).
+//! WebGPU's `createComputePipeline` returns at once, but the browser's GPU process compiles each
+//! pipeline (WGSL → HLSL → DXC on Windows) before it runs anything queued after it: 36 s for the
+//! valley's set in Firefox, which compiles them one at a time and keeps no cache between visits,
+//! and as long in Chrome on a first visit. A frame presented behind that queue holds the tab's
+//! compositor transaction, so the page stopped painting, scrolling and reacting for the whole
+//! time ("the browser freezes"). So the engine renders each frame into its own texture and
+//! copies it to the canvas only if the frame created no pipeline; otherwise it skips the canvas,
+//! waits (`onSubmittedWorkDone`, which resolves once the GPU process has worked through the
+//! compiles) while the page keeps running, and shows the wait in the status element.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use glam::Vec2;
 use helios_render::{DynamicResolution, GpuContext};
@@ -38,11 +51,88 @@ pub(crate) struct State {
     hud_timer: f64,
     /// Skip rendering (the page hides the canvas or scrolls it out of view).
     paused: bool,
+    /// The frame is rendered here and copied to the canvas only when it compiled nothing (see
+    /// the module docs).
+    frame_target: wgpu::Texture,
+    /// Waiting for the GPU process to finish compiling pipelines.
+    compiling: Option<Compiling>,
+    /// Frames in a row that created pipelines (a frame that keeps creating them is presented
+    /// anyway after a few, rather than never).
+    compiling_frames: u32,
 }
+
+/// A wait for the browser's GPU process to work through the pipelines created so far.
+struct Compiling {
+    /// `GPU_DRAINED` reaches this once the wait is over.
+    generation: u32,
+    /// When the wait began (ms, `performance.now()`).
+    since: f64,
+}
+
+/// Generation of the last `onSubmittedWorkDone` that resolved (the callback must be `Send`).
+static GPU_DRAINED: AtomicU32 = AtomicU32::new(0);
+/// Generation of the last wait asked for.
+static GPU_WAIT: AtomicU32 = AtomicU32::new(0);
 
 thread_local! {
     /// The running engine, for the exported page API.
     static STATE: RefCell<Option<Rc<RefCell<State>>>> = const { RefCell::new(None) };
+    /// Pipelines created on the device so far (counted by `count_pipelines`).
+    static PIPELINES: Cell<u32> = const { Cell::new(0) };
+    /// What the engine is waiting for (`heliosBusy`); empty while it renders.
+    static BUSY: RefCell<String> = const { RefCell::new(String::new()) };
+}
+
+/// Counts every pipeline the device creates, by wrapping the `GPUDevice` object's
+/// `createComputePipeline` and `createRenderPipeline` (wgpu calls them as methods of the object,
+/// so own properties take precedence over the prototype's): the frame loop can then tell whether
+/// a frame queued compiles without any bookkeeping in the renderer.
+fn count_pipelines(device: &wgpu::Device) {
+    let Some(gpu) = device.as_webgpu() else { return };
+    let gpu: &JsValue = gpu.as_ref();
+    for name in ["createComputePipeline", "createRenderPipeline"] {
+        let Ok(original) = js_sys::Reflect::get(gpu, &JsValue::from_str(name)).and_then(|f| f.dyn_into::<js_sys::Function>()) else {
+            continue;
+        };
+        let this = gpu.clone();
+        let wrapper = Closure::<dyn Fn(JsValue) -> Result<JsValue, JsValue>>::new(move |descriptor: JsValue| {
+            PIPELINES.with(|c| c.set(c.get() + 1));
+            original.call1(&this, &descriptor)
+        });
+        let _ = js_sys::Reflect::set(gpu, &JsValue::from_str(name), wrapper.as_ref());
+        wrapper.forget();
+    }
+}
+
+fn pipelines_created() -> u32 {
+    PIPELINES.with(Cell::get)
+}
+
+/// Starts a wait for everything queued so far, pipeline compiles included.
+fn wait_for_gpu(queue: &wgpu::Queue) -> Compiling {
+    let generation = GPU_WAIT.fetch_add(1, Ordering::Relaxed) + 1;
+    queue.on_submitted_work_done(move || {
+        GPU_DRAINED.fetch_max(generation, Ordering::Relaxed);
+    });
+    Compiling { generation, since: now() }
+}
+
+fn now() -> f64 {
+    window().performance().map(|p| p.now()).unwrap_or(0.0)
+}
+
+/// The texture a frame is rendered into before it is copied to the canvas.
+fn frame_target(device: &wgpu::Device, config: &wgpu::SurfaceConfiguration) -> wgpu::Texture {
+    device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("frame"),
+        size: wgpu::Extent3d { width: config.width, height: config.height, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: config.format,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    })
 }
 
 /// Runs `f` on the running engine (`None` until it has started).
@@ -63,6 +153,21 @@ fn set_status(text: &str) {
     let id = page_config("statusElement").and_then(|v| v.as_string()).unwrap_or_else(|| "status".into());
     if let Some(el) = window().document().and_then(|d| d.get_element_by_id(&id)) {
         el.set_text_content(Some(text));
+    }
+}
+
+/// Shows what the engine waits for in the status element and `heliosBusy` (empty: nothing).
+fn set_busy(text: &str) {
+    let changed = BUSY.with(|b| {
+        let mut b = b.borrow_mut();
+        let changed = *b != text;
+        if changed {
+            *b = text.to_string();
+        }
+        changed
+    });
+    if changed {
+        set_status(text);
     }
 }
 
@@ -216,6 +321,7 @@ async fn run() -> Result<(), String> {
     let ctx = GpuContext::new(instance, Some(&surface))
         .await
         .map_err(|e| format!("{e}. Use a browser with WebGPU enabled (Chrome/Edge 113+, Safari 26+, Firefox 141+)."))?;
+    count_pipelines(&ctx.device);
 
     let (width, height) = canvas_size(&canvas);
     canvas.set_width(width);
@@ -223,7 +329,8 @@ async fn run() -> Result<(), String> {
     let caps = surface.get_capabilities(&ctx.adapter);
     let format = caps.formats.first().copied().ok_or("surface has no formats")?;
     let config = wgpu::SurfaceConfiguration {
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        // Frames are copied in from `frame_target` (see the module docs).
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_DST,
         format,
         width,
         height,
@@ -293,6 +400,7 @@ async fn run() -> Result<(), String> {
         help.set_text_content(Some(HELP));
     }
 
+    let target = frame_target(&ctx.device, &config);
     let state = Rc::new(RefCell::new(State {
         app,
         input: Input::default(),
@@ -302,10 +410,14 @@ async fn run() -> Result<(), String> {
         config,
         canvas: canvas.clone(),
         hud,
-        last_time: window().performance().map(|p| p.now()).unwrap_or(0.0),
+        last_time: now(),
         hud_timer: 0.0,
         paused: false,
         looking: false,
+        frame_target: target,
+        // The renderer's pipelines are compiling now: wait for them before the first frame.
+        compiling: Some(wait_for_gpu(&ctx.queue)),
+        compiling_frames: 0,
     }));
     STATE.with(|s| *s.borrow_mut() = Some(state.clone()));
     // Keep the context (instance/adapter/queue) alive for the page lifetime.
@@ -447,6 +559,21 @@ fn frame(st: &mut State, now: f64) {
     if st.paused {
         return;
     }
+    if let Some(wait) = &st.compiling {
+        let seconds = (now - wait.since) / 1000.0;
+        if GPU_DRAINED.load(Ordering::Relaxed) < wait.generation {
+            // Short waits (a pipeline or two) pass without a message.
+            if seconds > 0.5 {
+                set_busy(&format!("Compiling GPU shaders… {seconds:.0} s"));
+            }
+            return;
+        }
+        if seconds > 0.5 {
+            log::info!("waited {seconds:.1} s for the GPU process to compile pipelines ({} created so far)", pipelines_created());
+        }
+        st.compiling = None;
+        set_busy("");
+    }
 
     let (width, height) = canvas_size(&st.canvas);
     if (width, height) != (st.config.width, st.config.height) {
@@ -455,10 +582,21 @@ fn frame(st: &mut State, now: f64) {
         st.config.width = width;
         st.config.height = height;
         st.surface.configure(&st.device, &st.config);
+        st.frame_target = frame_target(&st.device, &st.config);
         st.app.resize(width, height);
     }
 
     st.app.update(&mut st.input, dt);
+    let pipelines = pipelines_created();
+    let view = st.frame_target.create_view(&Default::default());
+    st.app.render(&view, dt);
+    if pipelines_created() != pipelines && st.compiling_frames < 8 {
+        // This frame queued compiles: presenting it would stall the page until they finish.
+        st.compiling_frames += 1;
+        st.compiling = Some(wait_for_gpu(&st.queue));
+        return;
+    }
+    st.compiling_frames = 0;
     let texture = match st.surface.get_current_texture() {
         wgpu::CurrentSurfaceTexture::Success(t) | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
         wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
@@ -467,8 +605,13 @@ fn frame(st: &mut State, now: f64) {
         }
         _ => return,
     };
-    let view = texture.texture.create_view(&Default::default());
-    st.app.render(&view, dt);
+    let mut encoder = st.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("present") });
+    encoder.copy_texture_to_texture(
+        st.frame_target.as_image_copy(),
+        texture.texture.as_image_copy(),
+        wgpu::Extent3d { width: st.config.width, height: st.config.height, depth_or_array_layers: 1 },
+    );
+    st.queue.submit([encoder.finish()]);
     st.queue.present(texture);
 
     st.hud_timer += dt as f64;
@@ -525,6 +668,14 @@ pub fn helios_set_paused(paused: bool) {
 #[wasm_bindgen(js_name = heliosHud)]
 pub fn helios_hud() -> String {
     with_state(|st| st.app.hud()).unwrap_or_default()
+}
+
+/// What the engine is waiting for, e.g. "Compiling GPU shaders… 12 s" while the browser compiles
+/// the pipelines of the first frame, a new scene or a feature switched on (the canvas keeps its
+/// last frame meanwhile); empty while it renders. A page can show it over the canvas.
+#[wasm_bindgen(js_name = heliosBusy)]
+pub fn helios_busy() -> String {
+    BUSY.with(|b| b.borrow().clone())
 }
 
 /// The current scene's name; empty until the engine runs.
