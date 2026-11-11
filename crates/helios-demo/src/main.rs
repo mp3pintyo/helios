@@ -100,8 +100,12 @@ mod native {
         pub texture_pool_mb: Option<u64>,
         /// Block-compress streamed texture tiles where the GPU supports BC (`--no-texture-compression`: RGBA8).
         pub texture_compression: bool,
-        /// Headless: switch to this scene halfway through (exercises scene reloading).
-        pub switch_to: Option<SceneKind>,
+        /// Headless: switch to these scenes at evenly spaced frames (`--switch-to gallery,forest`;
+        /// one scene: halfway through), exercising scene reloading.
+        pub switch_to: Vec<SceneKind>,
+        /// Headless: log the GPU memory by subsystem before each switch and at the end
+        /// (`--gpu-memory`; the backend allocator's report, D3D12 / Vulkan).
+        pub gpu_memory: bool,
         /// Headless: save the last `dump_count` frames as PNGs into this directory.
         pub dump_dir: Option<String>,
         pub dump_count: u32,
@@ -210,7 +214,7 @@ mod native {
 
     impl Options {
         pub fn parse(args: &[String]) -> Self {
-            let mut o = Options { screenshot: None, size: (1600, 900), frames: 90, view: None, detail: Detail::High, scene: SceneKind::Valley, camera: None, eye: None, at: None, occlusion: true, sw_raster: true, rvt: true, glass_shadows: true, svt: true, animate_sun: false, lod: None, fov: None, pool_mb: None, texture_pool_mb: None, texture_compression: true, switch_to: None, dump_dir: None, dump_count: 16, keys: Vec::new(), keys_at: None, hold: Vec::new(), gltf: None, ground: true, bake_hvm: None, hvm_raw: false, stream_from: None, io_latency_ms: 0, io_bandwidth_mbps: None, sun: None, move_light: false, full_invalidation: false, moving_lights: Default::default(), moving_light_pages: None, movers: None, static_motion: false, screen_percentage: None, gpu_budget_ms: None, local_exposure: Some(Default::default()), scene_file: None, select: Vec::new(), no_skinning: false, gi: None, megalights: false, tessellation: true, displacement_speed_bound: true, dice_rate: None, speed: None, fog_scattering: None, tsr_depth_history: true, dof: None, photo: None, shadow_refresh_budget: None, shadow_max_staleness: None, shadow_distant: None, megalights_options: (None, true, true, true), avboit: true, shadow_prefiltered: true, shadow_distant_bias: None, volume_shadows: true, short_range_ao: true, world_cache: None, exposure: None, lumen_options: [true; 5], river_simulation: true, wind_bones: true, wind_simulation: true, drag_actor: None, drag_static: false };
+            let mut o = Options { screenshot: None, size: (1600, 900), frames: 90, view: None, detail: Detail::High, scene: SceneKind::Valley, camera: None, eye: None, at: None, occlusion: true, sw_raster: true, rvt: true, glass_shadows: true, svt: true, animate_sun: false, lod: None, fov: None, pool_mb: None, texture_pool_mb: None, texture_compression: true, switch_to: Vec::new(), gpu_memory: false, dump_dir: None, dump_count: 16, keys: Vec::new(), keys_at: None, hold: Vec::new(), gltf: None, ground: true, bake_hvm: None, hvm_raw: false, stream_from: None, io_latency_ms: 0, io_bandwidth_mbps: None, sun: None, move_light: false, full_invalidation: false, moving_lights: Default::default(), moving_light_pages: None, movers: None, static_motion: false, screen_percentage: None, gpu_budget_ms: None, local_exposure: Some(Default::default()), scene_file: None, select: Vec::new(), no_skinning: false, gi: None, megalights: false, tessellation: true, displacement_speed_bound: true, dice_rate: None, speed: None, fog_scattering: None, tsr_depth_history: true, dof: None, photo: None, shadow_refresh_budget: None, shadow_max_staleness: None, shadow_distant: None, megalights_options: (None, true, true, true), avboit: true, shadow_prefiltered: true, shadow_distant_bias: None, volume_shadows: true, short_range_ao: true, world_cache: None, exposure: None, lumen_options: [true; 5], river_simulation: true, wind_bones: true, wind_simulation: true, drag_actor: None, drag_static: false };
             let mut scene_given = false;
             let mut it = args.iter().skip(1);
             while let Some(arg) = it.next() {
@@ -278,7 +282,8 @@ mod native {
                     }
                     "--pool-mb" => o.pool_mb = value().parse().ok(),
                     "--texture-pool-mb" => o.texture_pool_mb = value().parse().ok(),
-                    "--switch-to" => o.switch_to = SceneKind::parse(&value()),
+                    "--switch-to" => o.switch_to = value().split(',').filter_map(SceneKind::parse).collect(),
+                    "--gpu-memory" => o.gpu_memory = true,
                     "--dump-dir" => o.dump_dir = Some(value()),
                     "--dump-count" => o.dump_count = value().parse().unwrap_or(16),
                     "--keys" => o.keys = value().split(',').map(str::to_string).collect(),
@@ -615,7 +620,11 @@ mod native {
         let (mut settled, mut idle): (Option<(u32, f64)>, Option<(u32, f64)>) = (None, None);
         let load_start = Instant::now();
         for i in 0..options.frames {
-            if let Some(kind) = options.switch_to.filter(|_| i == options.frames / 2) {
+            let switches = options.switch_to.len() as u32;
+            if let Some(&kind) = (0..switches).position(|k| i == options.frames * (k + 1) / (switches + 1)).map(|k| &options.switch_to[k]) {
+                if options.gpu_memory {
+                    log_gpu_memory(&ctx, &format!("{} before the switch to {}", app.scene_name(), kind.name()));
+                }
                 app.load_scene(kind);
                 options.apply(&mut app);
                 start = Instant::now();
@@ -753,11 +762,23 @@ mod native {
             log::info!("local shadow slots (rank, light, resident/requested): {}", app.renderer.local_pool_report());
         }
 
+        if options.gpu_memory {
+            log_gpu_memory(&ctx, app.scene_name());
+        }
         let c = app.camera;
         log::info!("final camera: --camera {},{},{},{},{}", c.position.x, c.position.y, c.position.z, c.yaw, c.pitch);
         let pixels = read_back(&ctx, &target, width, height);
         save_png(path, width, height, &pixels);
         log::info!("saved {path}");
+    }
+
+    /// Logs the GPU memory by subsystem (labels of 1 MiB and more listed).
+    fn log_gpu_memory(ctx: &GpuContext, what: &str) {
+        let _ = ctx.device.poll(wgpu::PollType::wait_indefinitely());
+        match helios_render::gpu_memory::Report::from_device(&ctx.device) {
+            Some(report) => log::info!("{what}: {}", report.table(1 << 20)),
+            None => log::info!("{what}: the backend gives no allocator report"),
+        }
     }
 
     /// Per-frame means of a headless run (`frames a..b mean:` in the log).

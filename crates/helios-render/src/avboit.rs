@@ -206,6 +206,7 @@ impl Avboit {
         self.current = AvboitUniform::default();
         if enabled {
             if self.grid.as_ref().is_none_or(|g| g.capacity != capacity) {
+                self.release();
                 self.grid = Some(Grid::new(device, capacity));
             }
             let tile = self.grid.as_ref().map_or(4, |g| g.tile);
@@ -215,6 +216,17 @@ impl Avboit {
         if self.written != Some(self.current) {
             queue.write_buffer(&self.uniform, 0, bytemuck::bytes_of(&self.current));
             self.written = Some(self.current);
+        }
+    }
+
+    /// Gives the grid back (replaced, or unused for a while: `Oit::idle`).
+    pub fn release(&mut self) {
+        if let Some(grid) = self.grid.take() {
+            crate::gpu_memory::retire_buffer(&grid.cells);
+            crate::gpu_memory::retire_buffer(&grid.bounds);
+            for view in [&grid.front, &grid.surface, &grid.dummy] {
+                crate::gpu_memory::retire_view(view);
+            }
         }
     }
 

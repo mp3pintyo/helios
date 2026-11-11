@@ -103,6 +103,8 @@ static CORE_COMPILED: AtomicU32 = AtomicU32::new(0);
 /// pipeline's own; for finding the expensive ones).
 static FIXED_BATCH: AtomicU32 = AtomicU32::new(0);
 static COMPILE_LOG: AtomicU32 = AtomicU32::new(0);
+/// Why the GPU device was lost, until a frame reports it (then "" stays: the loop stops).
+static DEVICE_LOST: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 
 thread_local! {
     /// The running engine, for the exported page API.
@@ -403,6 +405,8 @@ async fn run() -> Result<(), String> {
     if let Some(count) = query_param("max-sampled-textures").and_then(|v| v.parse().ok()) {
         GpuContext::limit_sampled_textures(count);
     }
+    // The GPU memory ledger (`heliosGpuMemory`); `?gpu-memory=1` also logs allocations that fail.
+    install_gpu_memory_hook(query_param("gpu-memory").as_deref() == Some("1"));
     let instance = GpuContext::create_instance();
     let surface = instance
         .create_surface(wgpu::SurfaceTarget::Canvas(canvas.clone()))
@@ -410,6 +414,11 @@ async fn run() -> Result<(), String> {
     let ctx = GpuContext::new(instance, Some(&surface))
         .await
         .map_err(|e| format!("{e}. Use a browser with WebGPU enabled (Chrome/Edge 113+, Safari 26+, Firefox 141+)."))?;
+    // A lost device (e.g. the browser's GPU process ran out of memory) stops the frames with a
+    // message instead of a frozen canvas.
+    ctx.device.set_device_lost_callback(|reason, message| {
+        *DEVICE_LOST.lock().unwrap() = Some(format!("{reason:?}: {message}"));
+    });
     // `?shaders=serial|parallel`: how the background compile works (by default by browser).
     browser::install(&ctx.device, parallel_compiles());
     FIXED_BATCH.store(query_param("compile-batch").and_then(|v| v.parse().ok()).unwrap_or(0), Ordering::Relaxed);
@@ -694,6 +703,16 @@ fn frame(st: &mut State, now: f64) {
     if st.paused {
         return;
     }
+    if let Some(reason) = DEVICE_LOST.lock().unwrap().as_mut() {
+        if !reason.is_empty() {
+            log::error!("the GPU device was lost ({reason}); {}", helios_gpu_memory(true));
+            let message = "The GPU device was lost (the browser's GPU process may have run out of memory). Reload the page to continue.";
+            set_busy(message);
+            set_status(message);
+            reason.clear();
+        }
+        return;
+    }
     if let Some(wait) = &st.compiling {
         let seconds = (now - wait.since) / 1000.0;
         if GPU_DRAINED.load(Ordering::Relaxed) < wait.generation {
@@ -756,6 +775,7 @@ fn frame(st: &mut State, now: f64) {
         st.config.width = width;
         st.config.height = height;
         st.surface.configure(&st.device, &st.config);
+        helios_render::gpu_memory::retire_texture(&st.frame_target);
         st.frame_target = frame_target(&st.device, &st.config);
         st.app.resize(width, height);
     }
@@ -992,6 +1012,47 @@ pub fn helios_gpu_passes(reset: bool) -> String {
         json
     })
     .unwrap_or_default()
+}
+
+#[wasm_bindgen(module = "/src/gpu_memory.js")]
+extern "C" {
+    #[wasm_bindgen(js_name = installGpuMemoryHook)]
+    fn install_gpu_memory_hook(diagnose: bool);
+
+    #[wasm_bindgen(js_name = gpuMemoryEntries)]
+    fn gpu_memory_entries() -> String;
+}
+
+/// The GPU memory the page holds, by subsystem, as JSON: `{"total": bytes, "peak": bytes,
+/// "failures": 0, "categories": {"shadows: virtual shadow maps": bytes, …}, "labels": [[label,
+/// category, bytes, count], …]}` — every live `GPUBuffer` / `GPUTexture` (destroyed or collected
+/// ones leave the ledger). `table`: the same as the text table the native `--gpu-memory` logs.
+#[wasm_bindgen(js_name = heliosGpuMemory)]
+pub fn helios_gpu_memory(table: bool) -> String {
+    let raw = gpu_memory_entries();
+    let Ok(value) = js_sys::JSON::parse(&raw) else { return String::new() };
+    let get = |key: &str| js_sys::Reflect::get(&value, &key.into()).ok();
+    // [label, kind, bytes, count] per label and kind.
+    let entries: Vec<(String, u64, u32)> = get("entries")
+        .map(|list| {
+            js_sys::Array::from(&list)
+                .iter()
+                .map(|e| {
+                    let e = js_sys::Array::from(&e);
+                    let number = |i| e.get(i).as_f64().unwrap_or(0.0);
+                    (e.get(0).as_string().unwrap_or_default(), number(2) as u64, number(3) as u32)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut report = helios_render::gpu_memory::Report::from_counted(entries.iter().map(|(l, b, c)| (l.as_str(), *b, *c)));
+    report.peak = get("peak").and_then(|p| p.as_f64()).map(|p| p as u64);
+    report.failures = get("failures").and_then(|p| p.as_f64()).unwrap_or(0.0) as u32;
+    if table {
+        report.table(1 << 20)
+    } else {
+        report.json()
+    }
 }
 
 /// The current scene's name; empty until the engine runs.

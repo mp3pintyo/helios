@@ -607,6 +607,7 @@ impl CardCache {
             wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(CAPTURE_ATLAS_WIDTH * 4), rows_per_image: None },
             capture.size(),
         );
+        crate::gpu_memory::retire_view(&self.capture);
         self.capture = capture.create_view(&Default::default());
 
         // (Surface, material) pairs: one mesh entry (card records) each; per instance where the
@@ -676,8 +677,10 @@ impl CardCache {
             pair.captured = Some(pair.content);
             copied += 1;
         }
+        crate::gpu_memory::retire_buffer(&self.pair_sums);
         self.pair_sums = pair_sums;
         queue.submit([encoder.finish()]);
+        crate::gpu_memory::retire_texture(&self.albedo_texture);
         self.albedo = albedo_texture.create_view(&Default::default());
         self.albedo_texture = albedo_texture;
         self.pending = (0..pairs.len()).filter(|&p| pairs[p].captured.is_none() && !pairs[p].origins.is_empty()).collect();
@@ -724,10 +727,12 @@ impl CardCache {
         }
         self.uniform.counts = [if meshes.is_empty() { 0 } else { instances.len() as u32 }, data.len() as u32, ATLAS_PAGES, 0];
         data.extend_from_slice(&records);
+        crate::gpu_memory::retire_buffer(&self.data);
         self.data = storage_buffer_init(device, queue, "card data", bytemuck::cast_slice(&data));
 
         let with_cards = entries.iter().filter(|e| e.mesh.is_some()).count();
         self.allocator = Allocator::new(meshes, entries);
+        crate::gpu_memory::retire_buffer(&self.pages);
         self.pages = storage_buffer_init(device, queue, "card pages", bytemuck::cast_slice(&self.allocator.page_words));
         let attribute_bytes: usize = self.captures.values().map(|c| c.surface.bytes()).sum::<usize>();
         log::info!(
@@ -940,6 +945,9 @@ impl CardCache {
             pass.set_bind_group(0, group, &[]);
             pass.dispatch_workgroups(*count, 1, 1);
         }
+        // This capture's inputs (up to ~11 MiB): destroyed once the frame is submitted.
+        crate::gpu_memory::retire_buffer(&attribute_buffer);
+        crate::gpu_memory::retire_buffer(&tile_buffer);
     }
 }
 

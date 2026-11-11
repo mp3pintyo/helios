@@ -153,6 +153,25 @@ impl FrameTargets {
         self.height = height.clamp(1, self.capacity.1);
     }
 
+    /// Hands every target to `gpu_memory::destroy_retired` (the targets are being replaced).
+    pub fn retire(&self) {
+        use crate::gpu_memory::{retire_buffer, retire_view};
+        for view in [&self.hw_depth, &self.hw_visibility, &self.depth, &self.visibility, &self.hzb, &self.gbuffer_albedo, &self.gbuffer_normal, &self.gbuffer_motion, &self.hdr, &self.gi_raw]
+            .into_iter()
+            .chain(&self.history)
+            .chain(&self.history_motion)
+            .chain(&self.gi_history)
+            .chain(self.tess_lambda.as_ref())
+            .chain(self.bloom_down.first())
+            .chain(self.bloom_up.first())
+        {
+            retire_view(view);
+        }
+        for buffer in [&self.sw_target, &self.material_tiles, &self.local_shadow_mask] {
+            retire_buffer(buffer);
+        }
+    }
+
     pub fn hzb_mip_count(&self) -> u32 {
         self.hzb_mips.len() as u32
     }

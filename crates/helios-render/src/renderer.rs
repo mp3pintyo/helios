@@ -725,6 +725,7 @@ impl Renderer {
     pub fn resize(&mut self, width: u32, height: u32) {
         let output = (width.max(1), height.max(1));
         if output != self.targets.output {
+            self.targets.retire();
             self.targets = FrameTargets::new(&self.device, self.capacity_for(output), output);
             self.history_valid = false;
         }
@@ -761,6 +762,7 @@ impl Renderer {
         let output = self.targets.output;
         let capacity = self.capacity_for(output);
         if capacity != self.targets.capacity {
+            self.targets.retire();
             self.targets = FrameTargets::new(&self.device, capacity, output);
             self.history_valid = false;
         }
@@ -1522,6 +1524,7 @@ impl Renderer {
 
         let (commands, map_profiler) = rec.finish();
         self.queue.submit([commands]);
+        crate::gpu_memory::destroy_retired();
         self.profiler.after_submit(map_profiler);
         self.picker.after_submit();
         self.post_fx.after_submit();

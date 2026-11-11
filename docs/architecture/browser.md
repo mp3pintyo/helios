@@ -145,3 +145,42 @@ half-precision math (packed f16 on AMD, mobile GPUs).
   GPU minima since the last reset, JSON), `heliosBusy()`, `heliosFrames()`.
 * The engine logs `first image at`, `every pipeline compiled at`, `scene bake: N meshes from W workers in T s` and
   `scene bake: built on the page in T s`.
+* `heliosGpuMemory(table)`: the GPU memory the page holds, by subsystem (below); `?gpu-memory=1` also wraps every
+  allocation in an out-of-memory error scope and logs the one that fails.
+
+## GPU memory (round 8, `gpu-memory-budget`)
+
+**The ledger** (`helios_render::gpu_memory`). Every buffer and texture is counted under its label, filed into a
+subsystem (`CATEGORIES`: label keywords → *shadows: virtual shadow maps*, *geometry (Nanite)*, *translucency and
+OIT*, *lumen*, *textures*, *post-processing*, *frame targets*, …). The sizes come from the allocator, not from a
+parallel count the create calls would have to keep: natively the backend's sub-allocator lists every live allocation
+under its label (`Device::generate_allocator_report`, D3D12 and Vulkan; sizes include the driver's padding, e.g. a
+3D texture's depth rounded up to its tile), and the native `--gpu-memory` flag logs the table at the end of a headless
+run and before each `--switch-to` (which now takes a list: `--switch-to gallery,forest,cathedral,valley`). In the
+browser `src/gpu_memory.js` wraps `GPUDevice.createBuffer` / `createTexture` before the device exists and keeps each
+resource's label and size (texel size × extent × mips) until `destroy()` or until the collector finalizes it
+(`FinalizationRegistry`); `heliosGpuMemory(false)` returns `{"total", "peak", "failures", "categories", "labels"}`,
+`heliosGpuMemory(true)` the same text table as the native log.
+
+**Freeing in the browser.** wgpu's WebGPU backend never calls `destroy()` when a `wgpu::Buffer` / `Texture` is
+dropped: the memory stays until the page's garbage collector finalizes the JS wrapper, which GPU memory pressure
+doesn't trigger. Resources the renderer replaces (frame targets on a resize, the volume, OIT and translucency
+targets, the AVBOIT grid, Lumen's card atlases and buffers on a scene upload, the post-processing targets, the page's
+frame target) are handed to `gpu_memory::retire_*` and destroyed right after the frame's submission
+(`destroy_retired`; WebGPU keeps a destroyed resource alive for the work already submitted).
+
+**Only what the scene uses.** Feature resources are allocated on first use and given back after
+`RELEASE_AFTER_FRAMES` (240) frames unused (`gpu_memory::Idle`): the glass light cube maps (24 MiB), the volume march
+targets (6 at the internal resolution: 66 MiB at 1600×900), the OIT targets and the AVBOIT grid (≈ 85 MiB), the
+translucency scene colour and peeled layers, the post-processing targets. The landscape's runtime virtual texture
+atlases (2 × 41 MiB) exist only while the scene has a landscape (1×1 stand-ins otherwise), and the post-processing
+pass keeps a second colour target only while depth of field and motion blur both run.
+
+**A lost device** (e.g. a GPU process out of memory) stops the frames with a message ("The GPU device was lost …
+Reload the page") and logs the ledger, instead of leaving a frozen canvas.
+
+**Firefox on Windows** (155 in Playwright and the installed 160, RTX 3090, D3D12): Firefox's GPU process grows by
+about two canvas-sized surfaces per presented frame (≈ 11–13 MB at 1600×900, ≈ 2.7 MB at 800×450), also for a
+30-line page that only clears and presents; wgpu's memory-budget guard then loses the device with "Not enough memory
+left" once the process holds ≈ 99 % of its DXGI budget — in the valley ≈ 20–30 s after the frames run at full rate.
+Helios's own allocations (≈ 1.3 GB, steady) are not the cause; see `docs/round8/gpumem.md`.

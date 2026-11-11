@@ -420,3 +420,14 @@ Honest differences that remain:
     instances don't push water, nothing floats on the river), the river has no underwater view, Lumen and shadows don't
     see its water, and its surface is the sim grid (no tessellation beyond it; waves are the lake's normal-mapped ones
     advected by a two-phase flow map, which can show its period as gentle pulsing on slow water).
+19. **GPU memory** (round 8, `gpu-memory-budget`): the ledger reads the backend allocator natively and wraps the
+    page's create calls in the browser (UE's `stat RHI` / `rhi.DumpMemory` / `memreport` go through the RHI's own
+    counters per pool); there is no budget the renderer scales to (UE's texture streaming pool and Nanite / VSM pool
+    sizes adapt to `r.Streaming.PoolSize` and the device's memory; here the geometry pool, the VSM pool and the
+    texture pools are fixed sizes) and no transient allocator aliasing render targets whose lifetimes don't overlap
+    within a frame (UE's RDG transient resource allocator): targets are long-lived, and unused features give theirs
+    back only after 240 frames (UE's render target pool frees after a number of unused frames, too). Growable buffers
+    (culling work, Lumen's instance lists) grow to the largest scene and never shrink. In the browser a dropped
+    resource the renderer doesn't explicitly retire still waits for the garbage collector. Firefox's per-frame growth
+    of its GPU process on Windows (`docs/round8/gpumem.md`) is a browser issue Helios can only report (a lost device
+    shows a message).

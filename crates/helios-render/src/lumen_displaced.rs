@@ -928,6 +928,9 @@ impl DisplacedSurfaces {
             mapped_at_creation: false,
         });
         rec.encoder.copy_buffer_to_buffer(&output, 0, &readback, 0, Some(size));
+        // The job's inputs and GPU output live for this frame's commands only.
+        crate::gpu_memory::retire_buffer(&point_buffer);
+        crate::gpu_memory::retire_buffer(&output);
         self.job = Some(Job { pending, readback, status: Arc::new(AtomicU32::new(IDLE)), submitted: false });
     }
 

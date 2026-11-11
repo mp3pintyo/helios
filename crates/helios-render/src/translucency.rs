@@ -489,6 +489,8 @@ pub struct Translucency {
     refracting: bool,
     versions: (u64, u64, u64),
     scene_color: Option<SceneColor>,
+    /// Frames without translucent surfaces (the scene colour and peeled layers are released after a while).
+    idle: crate::gpu_memory::Idle,
     peeled: Option<PeeledLayers>,
     unbounded: Option<Unbounded>,
     /// [`LayerRange`]s of the shading passes, `LAYER_RANGE_STRIDE` apart.
@@ -605,6 +607,7 @@ impl Translucency {
             refracting: false,
             versions: (u64::MAX, u64::MAX, u64::MAX),
             scene_color: None,
+            idle: Default::default(),
             peeled: None,
             unbounded: None,
             layer_ranges,
@@ -743,16 +746,32 @@ impl Translucency {
             self.peel_count = peel_count;
         }
         self.refracting = self.draws.iter().any(|&i| self.candidates[i].shading != Shading::Blend);
-        if self.draws.is_empty() && self.oit_draws.is_empty() && self.camera_body.is_none() {
+        let drawn = !(self.draws.is_empty() && self.oit_draws.is_empty() && self.camera_body.is_none());
+        if self.idle.tick(drawn) {
+            // Nothing translucent for a while (e.g. a scene without glass or water).
+            if let Some(color) = self.scene_color.take() {
+                crate::gpu_memory::retire_texture(&color.texture);
+            }
+            if let Some(peeled) = self.peeled.take() {
+                crate::gpu_memory::retire_view(&peeled.array);
+            }
+        }
+        if !drawn {
             return;
         }
         if self.scene_color.as_ref().is_none_or(|c| c.size != size) {
+            if let Some(old) = &self.scene_color {
+                crate::gpu_memory::retire_texture(&old.texture);
+            }
             self.scene_color = Some(SceneColor::new(device, size));
         }
         // Kept once allocated (grown, never shrunk), so views moving in and out of overlap don't
         // reallocate.
         if self.peel_count > 0 && self.peeled.as_ref().is_none_or(|p| p.size != size || p.layers.len() < self.peel_count) {
             let count = self.peel_count.max(self.peeled.as_ref().map_or(0, |p| p.layers.len()));
+            if let Some(old) = &self.peeled {
+                crate::gpu_memory::retire_view(&old.array);
+            }
             self.peeled = Some(PeeledLayers::new(device, size, count));
         }
         if self.unbounded.is_none() {

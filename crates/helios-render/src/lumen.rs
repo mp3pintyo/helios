@@ -647,6 +647,9 @@ impl Lumen {
         // Sized for the largest internal resolution; each frame uses the corner it covers.
         let size = targets.capacity;
         if self.gather.as_ref().is_none_or(|g| g.size != size) {
+            if let Some(old) = &self.gather {
+                old.retire();
+            }
             self.gather = Some(GatherTargets::new(device, size));
         }
         self.world_cache.prepare(device, camera_position, (targets.width, targets.height));
@@ -738,6 +741,9 @@ impl Lumen {
             indices.push(index);
         }
         self.has_sdf = !instances.is_empty();
+        for old in [&self.sdf_instances, &self.sdf_descs, &self.sdf_words] {
+            crate::gpu_memory::retire_buffer(old);
+        }
         self.sdf_instances = storage_buffer_init(device, queue, "sdf instances", bytemuck::cast_slice(&instances));
         self.sdf_descs = storage_buffer_init(device, queue, "sdf descs", bytemuck::cast_slice(&descs));
         self.sdf_words = storage_buffer_init(device, queue, "sdf words", bytemuck::cast_slice(&words));
@@ -1332,6 +1338,15 @@ impl GatherTargets {
             atlas: make("screen probe atlas", grid.0 * 8, rows * 8),
             reflection_raw: make("reflection raw", half.0, half.1),
             reflection: [make("reflection 0", half.0, half.1), make("reflection 1", half.0, half.1)],
+        }
+    }
+
+    /// Hands the targets to `gpu_memory::destroy_retired` (they are being replaced).
+    fn retire(&self) {
+        crate::gpu_memory::retire_buffer(&self.probes);
+        crate::gpu_memory::retire_buffer(&self.adaptive);
+        for view in [&self.atlas, &self.reflection_raw].into_iter().chain(&self.reflection) {
+            crate::gpu_memory::retire_view(view);
         }
     }
 }

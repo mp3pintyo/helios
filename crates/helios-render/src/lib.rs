@@ -115,6 +115,7 @@ mod vsm_motion;
 mod water;
 mod wind;
 mod world_cache;
+pub mod gpu_memory;
 
 pub use camera::Camera;
 pub use context::{GpuContext, ContextError};

@@ -49,7 +49,16 @@ struct PostFxUniform {
 struct Targets {
     size: (u32, u32),
     tiles: [wgpu::TextureView; 2],
-    color: [wgpu::TextureView; 2],
+    /// One, or two while depth of field and motion blur both run.
+    color: Vec<wgpu::TextureView>,
+}
+
+impl Targets {
+    fn retire(&self) {
+        for view in self.tiles.iter().chain(&self.color) {
+            crate::gpu_memory::retire_view(view);
+        }
+    }
 }
 
 pub struct PostFxPass {
@@ -62,6 +71,8 @@ pub struct PostFxPass {
     uniform: wgpu::Buffer,
     focus_state: wgpu::Buffer,
     targets: Option<Targets>,
+    /// Frames with both effects off (the targets are released after a while).
+    idle: crate::gpu_memory::Idle,
     motion_blur: bool,
     depth_of_field: bool,
     /// The autofocus distance read back for photo mode (`request_focus`).
@@ -109,6 +120,7 @@ impl PostFxPass {
             uniform: uniform_buffer(device, "post fx", std::mem::size_of::<PostFxUniform>() as u64),
             focus_state: storage_buffer(device, "focus", 16, wgpu::BufferUsages::COPY_SRC),
             targets: None,
+            idle: Default::default(),
             motion_blur: false,
             depth_of_field: false,
             focus_readback: FocusReadback {
@@ -131,8 +143,18 @@ impl PostFxPass {
     pub fn update(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, shutter: f32, dof: Option<&DepthOfField>, fov_y: f32, size: (u32, u32)) {
         self.motion_blur = shutter > 0.0;
         self.depth_of_field = dof.is_some();
-        if (self.motion_blur || self.depth_of_field) && self.targets.as_ref().is_none_or(|t| t.size != size) {
-            self.targets = Some(Self::create_targets(device, size));
+        // A second colour target only when depth of field and motion blur both run (ping-pong).
+        let colors = 1 + (self.motion_blur && self.depth_of_field) as usize;
+        if (self.motion_blur || self.depth_of_field) && self.targets.as_ref().is_none_or(|t| t.size != size || t.color.len() < colors) {
+            if let Some(old) = self.targets.take() {
+                old.retire();
+            }
+            self.targets = Some(Self::create_targets(device, size, colors));
+        }
+        if self.idle.tick(self.motion_blur || self.depth_of_field) {
+            if let Some(old) = self.targets.take() {
+                old.retire();
+            }
         }
         let height = size.1 as f32;
         let (aperture, focal_length, focus) = match dof {
@@ -181,7 +203,7 @@ impl PostFxPass {
         }
     }
 
-    fn create_targets(device: &wgpu::Device, (width, height): (u32, u32)) -> Targets {
+    fn create_targets(device: &wgpu::Device, (width, height): (u32, u32), colors: usize) -> Targets {
         let view = |label, width, height| {
             texture(
                 device,
@@ -193,7 +215,7 @@ impl PostFxPass {
         Targets {
             size: (width, height),
             tiles: [view("post fx tiles", tw, th), view("post fx tiles dilated", tw, th)],
-            color: [view("post fx 0", width, height), view("post fx 1", width, height)],
+            color: ["post fx 0", "post fx 1"][..colors].iter().map(|&label| view(label, width, height)).collect(),
         }
     }
 
