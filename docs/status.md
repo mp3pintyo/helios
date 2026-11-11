@@ -122,11 +122,18 @@ Honest differences that remain:
    deep water rather than the bed, and a camera straddling the surface gets no split waterline view. The shore
    material is procedural (no texture layers, no wet-band wave run-up animation).
 6. **Temporal super resolution** keeps one history (colour + sample weight, motion + lock) at output resolution, not
-   UE's 200 % history option or its separate anti-flicker luma history; disocclusion is judged by motion vectors only
-   (no depth history); translucency, Lumen and fog have no separate upscaling (they render at the internal resolution
+   UE's 200 % history option or its separate anti-flicker luma history; the depth history (round 8) keeps one closest
+   depth per output pixel (no dilated depth scattered forward as UE's) and stays out where surface and history moved
+   alike, so thin features missed by the jitter are not mistaken for disocclusions — UE has a dedicated thin-geometry
+   detection for that; translucency, Lumen and fog have no separate upscaling (they render at the internal resolution
    and TSR resolves them with everything else); alpha tests in the rasterisers don't get the mip bias (sharper cut-outs
    would mostly add sub-pixel shimmer to foliage). Dynamic resolution only reacts to GPU time (no CPU-bound
    detection) and needs timestamp queries.
+   **Photo mode** accumulates jitter and lens samples of one instant (no temporal samples — motion blur from
+   sub-frames — no warm-up of history-dependent effects per sample, no tiling or high-resolution output beyond the
+   window, a round aperture without blades). **Fog screen space scattering** spreads the forward lobe at
+   single-scattering angles (many orders widen it in reality), weights the kernel per pixel only through τ (not per
+   source depth), and ignores aerial perspective and underwater fog.
 7. **Wind** is procedural (no pivot-painter data per branch or leaf, no simulation) and does not rotate normals;
    leaves flutter around their position rather than their stem. Shadow pages cache static casters separately (as
    UE's static cache); the wind, `Mobility::Movable` and animated skins make a caster dynamic. Refreshes are decided

@@ -127,7 +127,8 @@ round 5's `--moving-light-renders` counted whole lights), `--lantern` / `?lanter
 carried down the nave: a fast, sharp moving light; with `--movers 1` only the lantern moves),
 `--movers N` (only the first N moving prop groups move), `--static-motion` (the props move as `Mobility::Static`
 instances: the one-off edit path), `--no-tessellation`, `--dice-rate N` (pixels per micro-triangle edge, default 2),
-`--speed N` (fly speed in m/s for held keys, e.g. a slow dolly: `--hold KeyW --speed 0.3`). Next to the HUD (whose
+`--speed N` (fly speed in m/s for held keys, e.g. a slow dolly: `--hold KeyW --speed 0.3`). Round 8: `--dof F[,M]`,
+`--photo N` (an accumulated still, Enter), `--fog-scattering N` (Home), `--no-tsr-depth-history`. Next to the HUD (whose
 per-pass times are smoothed), a headless run logs `GPU minima over N frames`: every pass's minimum, and the minimum
 frame total, over the last two thirds of the frames — on a GPU shared with other work, a pass's quiet time.
 
