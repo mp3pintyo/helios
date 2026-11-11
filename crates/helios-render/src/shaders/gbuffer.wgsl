@@ -178,8 +178,15 @@ fn evaluate_landscape(m: Material, input: SurfaceInput) -> Surface {
             return s;
         }
     }
-    // No virtual texture (or nothing resident yet): evaluate the layers directly.
-    let t = terrain_layering(input.world_position, input.normal, footprint, m.layers, volumetric);
+    // No virtual texture (or nothing resident yet): evaluate the layers directly. A mesh
+    // terrain's vertices carry its strata and cavity in their UVs.
+    var t: TerrainSample;
+    if volumetric {
+        let a = RockAttributes(input.uv.x, max(abs(input.duv_dx.x), abs(input.duv_dy.x)), saturate(input.uv.y));
+        t = mesh_terrain_layering(input.world_position, input.normal, footprint, m.layers, a);
+    } else {
+        t = terrain_layering(input.world_position, input.normal, footprint, m.layers);
+    }
     s.albedo = t.albedo * m.base_color.rgb;
     s.roughness = t.roughness;
     s.normal = t.normal;
@@ -335,6 +342,9 @@ fn resolve(
     let planted = plant_animated(instance, wind_force);
     var bones: array<u32, 3>;
     let extended = cluster_is_extended(cluster, base);
+    // The landscape needs no texture coordinates (its virtual texture and layers are mapped in
+    // world space); only the mesh terrain reads its vertex attributes from them.
+    let fetch_uvs = MATERIAL_KIND != MATERIAL_TERRAIN || materials[instance.material].mapping == MAPPING_WORLD;
     for (var i = 0u; i < 3u; i++) {
         let local = corners[i];
         // Object-space attributes stay those of the rest pose (object triplanar mapping sticks
@@ -357,7 +367,9 @@ fn resolve(
         } else {
             world_positions[i] = wind_world_position(instance, wind_force, posed, plants[i].x);
         }
-        uvs[i] = vertex_uv(cluster, base, local);
+        if fetch_uvs {
+            uvs[i] = vertex_uv(cluster, base, local);
+        }
         // Optional attributes (imported meshes only).
         uv1s[i] = uvs[i];
         colors[i] = vec4<f32>(1.0);

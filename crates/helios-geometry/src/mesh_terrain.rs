@@ -210,15 +210,39 @@ fn polyline_distance(path: &[Vec3], p: Vec2) -> (f32, f32) {
     best
 }
 
+/// Angular frequency (per metre of warped height) of a rock's horizontal strata.
+const STRATA_FREQUENCY: f32 = 2.2;
+
+/// A rock's domain-warped position: its relief and strata wander with the warp.
+fn rock_warp(p: Vec3, seed: u32) -> Vec3 {
+    let w = p * 0.05;
+    let warp = Vec3::new(noise::fbm(w, 2, seed + 3), noise::fbm(w + Vec3::splat(17.0), 2, seed + 4), noise::fbm(w + Vec3::splat(31.0), 2, seed + 5));
+    p + warp * 6.0
+}
+
 /// Rough rock surface: domain-warped 3D noise (large bulges and buttresses, then smaller lumps)
 /// plus horizontal strata (ledges) that wander with the warp.
 fn rock_relief(p: Vec3, seed: u32) -> f32 {
-    let w = p * 0.05;
-    let warp = Vec3::new(noise::fbm(w, 2, seed + 3), noise::fbm(w + Vec3::splat(17.0), 2, seed + 4), noise::fbm(w + Vec3::splat(31.0), 2, seed + 5));
-    let q = p + warp * 6.0;
+    let q = rock_warp(p, seed);
     let n = 0.8 * noise::fbm(q * 0.1, 3, seed) + 0.35 * noise::fbm(q * 0.45, 3, seed + 1);
-    let strata = (q.y * 2.2).sin();
+    let strata = (q.y * STRATA_FREQUENCY).sin();
     n + 0.25 * strata * strata * strata
+}
+
+/// Signed distance to a rock modifier's rounded, tapered box (before its relief).
+fn rock_shape(p: Vec3, center: Vec3, half_extents: Vec3, yaw: f32, taper: f32, rounding: f32) -> f32 {
+    let (s, c) = yaw.sin_cos();
+    let q = p - center;
+    let mut q = Vec3::new(c * q.x - s * q.z, q.y, s * q.x + c * q.z);
+    // Taper: the footprint shrinks (or grows) towards the top.
+    let t = (q.y / half_extents.y).clamp(-1.0, 1.0) * 0.5 + 0.5;
+    let scale = 1.0 - taper * t;
+    q.x /= scale;
+    q.z /= scale;
+    let r = rounding.min(half_extents.min_element());
+    let e = q.abs() - (half_extents - r);
+    let rock = e.max(Vec3::ZERO).length() + e.x.max(e.y).max(e.z).min(0.0) - r;
+    rock * scale.min(1.0)
 }
 
 impl MeshTerrain {
@@ -270,18 +294,7 @@ impl MeshTerrain {
             }
             match *m {
                 Modifier::Rock { center, half_extents, yaw, taper, rounding, blend, roughness, seed } => {
-                    let (s, c) = yaw.sin_cos();
-                    let q = p - center;
-                    let mut q = Vec3::new(c * q.x - s * q.z, q.y, s * q.x + c * q.z);
-                    // Taper: the footprint shrinks (or grows) towards the top.
-                    let t = (q.y / half_extents.y).clamp(-1.0, 1.0) * 0.5 + 0.5;
-                    let scale = 1.0 - taper * t;
-                    q.x /= scale;
-                    q.z /= scale;
-                    let r = rounding.min(half_extents.min_element());
-                    let e = q.abs() - (half_extents - r);
-                    let mut rock = e.max(Vec3::ZERO).length() + e.x.max(e.y).max(e.z).min(0.0) - r;
-                    rock *= scale.min(1.0);
+                    let mut rock = rock_shape(p, center, half_extents, yaw, taper, rounding);
                     if roughness > 0.0 {
                         rock += roughness * rock_relief(p, seed);
                     }
@@ -309,6 +322,50 @@ impl MeshTerrain {
         let gx = (self.height(p.x + e, p.z) - self.height(p.x - e, p.z)) / (2.0 * e);
         let gz = (self.height(p.x, p.z + e) - self.height(p.x, p.z - e)) / (2.0 * e);
         self.density_with(p, h, 1.0 / (1.0 + gx * gx + gz * gz).sqrt())
+    }
+
+    /// Shading attributes of a surface point at `p` with normal `n`, which the mesh terrain's
+    /// material reads from its vertices' UVs:
+    ///
+    /// * x, the **strata coordinate**: the warped height the rock modifiers cut their strata at,
+    ///   in half periods (`q.y · STRATA_FREQUENCY / π`), so the ledges `rock_relief` carves lie
+    ///   at its integers and its parity tells the beds apart: from an even integer to the next
+    ///   one up the bed is recessed (soft), from an odd one it protrudes (hard). Blended between
+    ///   rocks by their distance; plain height (in the same unit) away from them.
+    /// * y, the **cavity**: how much the surface is enclosed around `p` (0 open or convex, up to
+    ///   1 deep in a crevice), from the density probed along the normal at two distances.
+    ///   Only computed near volume modifiers (the heightfield ground is open).
+    pub fn shading_attributes(&self, p: Vec3, n: Vec3) -> Vec2 {
+        let unit = STRATA_FREQUENCY / std::f32::consts::PI;
+        // The ground's own weight: what a rock at 4 m would weigh.
+        let mut weight = 1.0 / 18.0;
+        let mut strata = p.y * weight;
+        let mut near = false;
+        for m in &self.modifiers {
+            let Some(b) = m.bounds() else { continue };
+            if p.cmplt(b.min).any() || p.cmpgt(b.max).any() {
+                continue;
+            }
+            near = true;
+            if let Modifier::Rock { center, half_extents, yaw, taper, rounding, blend, roughness, seed } = *m {
+                // Fades out towards the bounds, so the coordinate is continuous across them.
+                let pad = blend + roughness * 1.3;
+                let d = rock_shape(p, center, half_extents, yaw, taper, rounding).max(0.0);
+                let w = (1.0 - smoothstep(0.5 * pad, pad, d)) / ((d + 0.25) * (d + 0.25));
+                if w > 0.0 {
+                    let q = if roughness > 0.0 { rock_warp(p, seed) } else { p };
+                    strata += q.y * w;
+                    weight += w;
+                }
+            }
+        }
+        let cavity = if near {
+            let probe = |r: f32| ((r - self.density(p + n * r)) / r).clamp(0.0, 1.0);
+            0.5 * (probe(0.5) + probe(1.5))
+        } else {
+            0.0
+        };
+        Vec2::new(strata / weight * unit, cavity)
     }
 
     /// The highest point at or below `p` where the ground's surface lies (the floor under an
@@ -545,6 +602,12 @@ impl MeshTerrain {
                 kept_cells.push(vertex_cells[v]);
             }
             *idx = remap[v];
+        }
+        // Shading attributes in the UVs (the triplanar material needs no texture coordinates).
+        for v in &mut kept {
+            let a = self.shading_attributes(v.position(), v.normal());
+            v.u = a.x;
+            v.v = a.y;
         }
         // The gap to a neighbour of the other resolution is half a cell of each.
         let reach = 0.5 * (config.fine + config.coarse) + 0.1;
@@ -823,6 +886,50 @@ mod tests {
         assert!(chunks.iter().any(|c| c.cell == 0.25) && chunks.iter().any(|c| c.cell == 0.5));
         assert!(chunks.iter().any(|c| c.skirt_triangles > 0));
         assert!((t.surface_below(Vec3::new(0.0, 1.5, 0.0), 4.0, 0.05).unwrap() - floor).abs() < 0.2);
+    }
+
+    #[test]
+    fn shading_attributes_follow_the_strata_and_find_crevices() {
+        let rock = Modifier::Rock { center: Vec3::new(0.0, 3.0, 0.0), half_extents: Vec3::new(6.0, 3.0, 2.0), yaw: 0.3, taper: -0.1, rounding: 0.5, blend: 0.8, roughness: 0.6, seed: 5 };
+        let t = MeshTerrain { region_min: Vec2::splat(-24.0), region_max: Vec2::splat(24.0), ..terrain(vec![rock]) };
+        let unit = STRATA_FREQUENCY / std::f32::consts::PI;
+        // On the rock's face: the warped height the strata are cut at (the rock dominates).
+        let face = Vec3::new(0.0, 3.0, 2.0);
+        let a = t.shading_attributes(face, Vec3::Z);
+        assert!((a.x - rock_warp(face, 5).y * unit).abs() < 0.1, "{a}");
+        // Far from any rock: the plain height in the same unit, and no cavity.
+        let open = Vec3::new(20.0, 0.0, 20.0);
+        assert_eq!(t.shading_attributes(open, Vec3::Y), Vec2::new(open.y * unit, 0.0));
+        // The corner between the face and the ground is enclosed; the top of the rock is not
+        // (points moved onto the surface along their normals).
+        let on_surface = |mut p: Vec3, n: Vec3| {
+            for _ in 0..16 {
+                p -= n * t.density(p);
+            }
+            p
+        };
+        let diagonal = (Vec3::Y + Vec3::Z).normalize();
+        let corner = t.shading_attributes(on_surface(Vec3::new(0.0, 0.3, 3.0), diagonal), diagonal);
+        let top = t.shading_attributes(on_surface(Vec3::new(0.0, 6.0, 0.0), Vec3::Y), Vec3::Y);
+        assert!(corner.y > 0.2 && top.y < 0.05, "corner {corner}, top {top}");
+        // Chunks write them into their vertices' UVs, identically on both sides of a border.
+        let chunks = t.build_chunks(&ChunkConfig { fine: 0.25, coarse: 0.5, chunk_size: 8.0, margin: 2.0 });
+        use std::collections::HashMap;
+        let mut seen: HashMap<[u32; 3], (usize, [f32; 2])> = HashMap::new();
+        let mut shared = 0;
+        for (i, c) in chunks.iter().enumerate() {
+            for v in &c.mesh.vertices {
+                assert!((0.0..=1.0).contains(&v.v));
+                // The same lattice cell meshed by two chunks gives a bit-identical vertex.
+                if let Some((j, uv)) = seen.insert(v.position.map(f32::to_bits), (i, [v.u, v.v])) {
+                    if j != i {
+                        assert_eq!(uv, [v.u, v.v], "attributes differ across a chunk border at {:?}", v.position);
+                        shared += 1;
+                    }
+                }
+            }
+        }
+        assert!(shared > 0);
     }
 
     #[test]

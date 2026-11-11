@@ -34,7 +34,7 @@ const VERTEX_FLOATS: u32 = 14u;
 const WET: f32 = 0.01;
 const MAX_SPEED: f32 = 4.0;
 // Foam fades over this many seconds.
-const FOAM_LIFE: f32 = 5.0;
+const FOAM_LIFE: f32 = 3.0;
 const NO_WATER: f32 = -1.0e4;
 const PI: f32 = 3.14159265;
 
@@ -109,6 +109,16 @@ fn clamp_cell(c: vec2<i32>) -> vec2<i32> {
     return clamp(c, vec2<i32>(0), vec2<i32>(river.size) - 1);
 }
 
+// The previous state's velocity at `n`, or `fallback` (the centre cell's) where `n` is dry or
+// beyond the grid: a bank is no shear and no convergence.
+fn wet_velocity(n: vec2<i32>, fallback: vec2<f32>) -> vec2<f32> {
+    if !inside(n) {
+        return fallback;
+    }
+    let w = water_in[index_of(n)];
+    return select(fallback, w.yz, w.x > WET);
+}
+
 @compute @workgroup_size(8, 8)
 fn depth_step(@builtin(global_invocation_id) id: vec3<u32>) {
     if any(id.xy >= river.size) {
@@ -154,8 +164,10 @@ fn depth_step(@builtin(global_invocation_id) id: vec3<u32>) {
             velocity *= MAX_SPEED / speed;
         }
     }
-    // Foam: carried along the flow, fading; born where the flow is fast or the surface breaks
-    // (steep around obstacles and drops).
+    // Foam: carried along the flow, fading; born only where the water is turbulent - where the
+    // flow converges or decelerates sharply (the pool under a step, a hydraulic jump, the bow of
+    // a boulder), where it shears (the wake behind a boulder; not along the banks), where fast
+    // water breaks over a steep surface, and a little where it runs very fast.
     var foam = foam_at(vec2<f32>(c) + 0.5 - velocity * river.dt / river.cell) * exp(-river.dt / FOAM_LIFE);
     if depth > WET {
         let level = bed.x + depth;
@@ -164,7 +176,17 @@ fn depth_step(@builtin(global_invocation_id) id: vec3<u32>) {
         let gz = slope_level(c + vec2<i32>(0, 1), level) - slope_level(c - vec2<i32>(0, 1), level);
         let slope = min(length(vec2<f32>(gx, gz)) / (2.0 * river.cell), 1.0);
         let speed = length(velocity);
-        foam += river.dt * (smoothstep(0.9, 2.0, speed) * 0.6 + smoothstep(0.12, 0.35, slope) * 3.0 * smoothstep(0.3, 0.8, speed));
+        let own = w.yz;
+        let vx0 = wet_velocity(c - vec2<i32>(1, 0), own);
+        let vx1 = wet_velocity(c + vec2<i32>(1, 0), own);
+        let vz0 = wet_velocity(c - vec2<i32>(0, 1), own);
+        let vz1 = wet_velocity(c + vec2<i32>(0, 1), own);
+        let divergence = ((vx1.x - vx0.x) + (vz1.y - vz0.y)) / (2.0 * river.cell);
+        let curl = ((vx1.y - vx0.y) - (vz1.x - vz0.x)) / (2.0 * river.cell);
+        let turbulence = max(-divergence, 0.0) + 0.5 * abs(curl);
+        let churn = smoothstep(2.5, 6.0, turbulence) * smoothstep(0.5, 1.2, speed);
+        let breaking = smoothstep(0.25, 0.5, slope) * smoothstep(1.5, 2.5, speed);
+        foam += river.dt * (1.0 * churn + 1.5 * breaking + 0.15 * smoothstep(2.5, 4.0, speed));
     } else {
         foam = 0.0;
     }

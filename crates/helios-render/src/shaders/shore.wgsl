@@ -117,7 +117,9 @@ fn shore_surface(landscape: Surface, p: vec3<f32>, macro_normal: vec3<f32>, foot
     if water.misc.z <= 0.0 && water.river.w <= 0.0 {
         return landscape;
     }
-    let level = max(water_level_at(p.xz), river_level_at(p.xz));
+    let lake = water_level_at(p.xz);
+    let river = river_level_at(p.xz);
+    let level = max(lake, river);
     let height = p.y - level;
     if height > SHORE_HEIGHT + 0.15 {
         return landscape;
@@ -135,8 +137,9 @@ fn shore_surface(landscape: Surface, p: vec3<f32>, macro_normal: vec3<f32>, foot
         albedo = mix(albedo, ALGAE_COLOR, algae * 0.8);
     }
     var slope = vec2<f32>(0.0);
-    // Sand ripples across the waves' travel direction, in the shallows only.
-    let ripple_fade = (1.0 - smoothstep(0.02, 0.05, footprint)) * (1.0 - smoothstep(-0.15, 0.05, h)) * (1.0 - silt);
+    // Sand ripples across the waves' travel direction, in the shallows only (not in a river's bed:
+    // the lake's waves don't reach it, its current leaves gravel).
+    let ripple_fade = (1.0 - smoothstep(0.02, 0.05, footprint)) * (1.0 - smoothstep(-0.15, 0.05, h)) * (1.0 - silt) * select(1.0, 0.0, river > lake);
     if ripple_fade > 0.0 {
         let along = dot(p.xz, water.waves.xy) * 52.0 + 2.0 * detail;
         slope += water.waves.xy * (0.25 * cos(along) * ripple_fade);

@@ -58,6 +58,7 @@ const PATTERN_HAMMERED: u32 = 15u;
 const PATTERN_PLASTER: u32 = 16u;
 const PATTERN_CARVED_STONE: u32 = 17u;
 const PATTERN_COBBLESTONE: u32 = 18u;
+const PATTERN_CLIFF: u32 = 19u;
 
 // ---- Periodic noise -----------------------------------------------------------------------------
 
@@ -454,6 +455,48 @@ fn cobblestone(uv: vec2<f32>) -> Texel {
     return t;
 }
 
+// A planar facet per Voronoi cell: the height of a randomly tilted plane through the cell's
+// centre (conchoidal chips, fracture planes), falling to 0 towards the cell's border.
+fn facet(v: Voronoi, p: vec2<f32>, salt: u32) -> f32 {
+    let a = idf(v.id, salt) * 6.2831853;
+    let tilt = vec2<f32>(cos(a), sin(a)) * (0.3 + 0.7 * idf(v.id, salt + 1u));
+    return dot(p - v.center, tilt) * smoothstep(0.0, 0.3, v.f2 - v.f1);
+}
+
+// Weathered cliff rock for the side projections of a triplanar mapping (u horizontal, v up):
+// rounded masses flattened along the bedding, horizontal lamination, broad fracture planes and
+// small chips (tilted facets, not crack lines), a few fractures that come and go, dark streaks
+// running down the face and fine grain. No closed network of cracks: tiled at two scales it
+// must not read as paving.
+fn cliff(uv: vec2<f32>) -> Texel {
+    let seed = recipe.seed;
+    let warp = vec2<f32>(pfbm(uv, vec2<f32>(3.0), 3u, seed + 7u), pfbm(uv, vec2<f32>(3.0), 3u, seed + 8u));
+    let w = uv + warp * 0.05;
+    let mass = pfbm(w, vec2<f32>(3.0, 5.0), 5u, seed);
+    let lamination = pridged(w, vec2<f32>(4.0, 9.0), 4u, seed + 1u);
+    let planes_cells = vec2<f32>(3.0, 2.0) * recipe.scale;
+    let planes = pvoronoi(w, planes_cells, 0.9, seed + 2u);
+    let plane = facet(planes, w * planes_cells, 3u);
+    let chips_cells = vec2<f32>(11.0, 9.0) * recipe.scale;
+    let chips = pvoronoi(w + warp * 0.03, chips_cells, 1.0, seed + 4u);
+    let chip = facet(chips, (w + warp * 0.03) * chips_cells, 5u);
+    let grain = pfbm(uv, vec2<f32>(64.0), 3u, seed + 9u);
+    // Fractures along some fracture-plane borders only (a mask fades them in and out).
+    let mask = smoothstep(0.1, 0.4, pfbm(uv, vec2<f32>(4.0, 2.0), 3u, seed + 10u));
+    let fracture = (1.0 - smoothstep(0.0, 0.05, planes.f2 - planes.f1)) * mask;
+    let streak = pfbm(w, vec2<f32>(12.0, 3.0), 4u, seed + 11u);
+    var t: Texel;
+    t.height = 0.5 + 0.2 * mass + 0.1 * (lamination - 0.5) + 0.1 * plane + 0.07 * chip + 0.03 * grain - 0.22 * fracture;
+    let tone = saturate(0.55 + 0.9 * mass + 0.5 * (lamination - 0.5) + 0.15 * plane);
+    var albedo = mix(recipe.color_b.rgb, recipe.color_a.rgb, tone);
+    albedo *= (0.93 + 0.14 * idf(chips.id, 6u)) * (0.9 + 0.2 * grain);
+    albedo *= 1.0 - 0.22 * smoothstep(0.05, 0.5, streak);
+    albedo *= mix(1.0, 0.5, fracture);
+    t.albedo = albedo;
+    t.roughness = saturate(mix(recipe.color_a.w, recipe.color_b.w, 1.0 - tone) + 0.05 * grain - 0.06 * smoothstep(0.05, 0.5, streak));
+    return t;
+}
+
 fn evaluate(uv: vec2<f32>) -> Texel {
     switch PATTERN {
         case PATTERN_ASHLAR: { return ashlar(uv, false); }
@@ -474,6 +517,7 @@ fn evaluate(uv: vec2<f32>) -> Texel {
         case PATTERN_SNOW: { return snow(uv); }
         case PATTERN_HAMMERED: { return hammered(uv); }
         case PATTERN_COBBLESTONE: { return cobblestone(uv); }
+        case PATTERN_CLIFF: { return cliff(uv); }
         default: { return plaster(uv); }
     }
 }

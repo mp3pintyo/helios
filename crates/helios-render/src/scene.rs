@@ -158,6 +158,9 @@ pub enum TexturePattern {
     CarvedStone = 17,
     /// Rounded setts in sandy joints (`param`: joint width); its height suits displacement.
     Cobblestone = 18,
+    /// Weathered cliff rock: bedding, fracture planes and chips, streaks down the face (no
+    /// crack network); made for triplanar walls (v up).
+    Cliff = 19,
 }
 
 /// A procedural texture recipe.
