@@ -323,7 +323,7 @@ MegaLights (when on): sample lights per 2×2 block → shadow rays (screen, VSM 
 deferred lighting (sun + VSM + cloud shadows, clustered local lights + VSM / SDF shadows or MegaLights' result, GI,
   reflections, sky + stars + clouds, fog; Substrate slabs where flagged)
   → subsurface diffusion (horizontal compute + vertical full-screen blur, added back)
-  → volumes (fluid simulation · lighting cache) · particles (simulation · per-particle lighting)
+  → volumes (fluid simulation · shadow transmittance atlas · lighting cache) · particles (simulation · per-particle lighting)
   → nearest translucent depth → volume march + temporal resolve → particles into OIT targets (front / back)
   → composite of what lies behind the nearest translucent surface
   → translucency (depth-peel overlapping layers → copy lit scene + mips → forward glass / water / blended draws,

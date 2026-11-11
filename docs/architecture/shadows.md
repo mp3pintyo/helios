@@ -60,8 +60,23 @@ Part of the `helios-render` GPU pipeline; the pipeline diagram and the index of 
   it has fallen more than 0.5° behind (a sun dragged by hand), so the seam between levels stays below a texel at the
   `P` / `J` speeds. The page cache's invalidation became a bit mask of levels. Wind refreshes of distant pages likewise
   wait for their level's turn (they rarely occur: a distant texel dwarfs most sway). Forest with `P`: pages rendered
-  241 → 186 a frame, shadow page passes 5.90 → 2.53 ms (the distant pages hold whole trees). Distant casters still
-  render at full resolution: no prefiltered (moment) representation as in UE 5.8's *Prefiltered Distant*.
+  241 → 186 a frame, shadow page passes 5.90 → 2.53 ms (the distant pages hold whole trees).
+* **Prefiltered distant levels** (round 8 wave 2, `vsm_moments.rs`, `vsm_moments.wgsl`, `vsm_prefiltered.wgsl`; UE
+  5.8's experimental *Prefiltered Distant*). Receivers that would sample a distant level take one
+  `RenderSettings::shadow_distant_bias` level coarser (1 by default: half the resolution, a quarter of the pages), and
+  every distant page rendered in a frame is turned into a **moment shadow map** after the page rasters: a 64² tile of
+  an rgba16float atlas with the depth atlas' tile layout (each texel the mean of four power moments of 2×2 depth
+  texels, plus mips of 32² and 16²). Half precision over the scene's whole depth range along the sun would blur contact
+  shadows by metres, so each page normalises its depth to its own range (of the texels that hold a caster), stored per
+  tile in mip 6 (one texel per tile) rounded outwards to half precision. The deferred lighting's sun shadow
+  (`vsm_shadow_prefiltered`) then takes four taps on the receiver's plane, each a bilinear moment lookup at the mip of
+  the receiver's footprint (its pixel stretched by the view angle, blended between two mips), reconstructs the
+  visibility with the Hamburger 4MSM (Peters and Klein 2015; moment bias 3·10⁻⁴, light bleeding reduction 0.25) and
+  lifts the receiver towards the sun by its slope times half a tap so filtered surfaces don't shadow themselves. The
+  nearer levels keep the 12-tap comparison filter; other samplers (fog, particles, Lumen's cards) compare the depth of
+  the coarser pages. Switching it (or the bias) re-renders the distant levels. `--no-shadow-prefiltered`,
+  `--shadow-distant-bias x`, the editor's *Prefiltered distant shadows*, `7` (cycles with volume shadows). Cost and
+  quality: see [round 8 note](../round8/shadows-volumes.md).
 * **Shadow overview** (round 8; UE 5.9's *Virtual Shadow Map Overview*): debug view 26 (`--view 26`, `V` cycles,
   the editor's *View mode*) shows four panels side by side, each the frame at half size: the clipmap level each pixel
   samples with the page grid (distant levels hatched, magenta where no page is resident), what its page did this frame
