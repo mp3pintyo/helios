@@ -43,7 +43,7 @@ fn resolve_voxel(pixel: vec2<u32>, id: u32) {
     if planted {
         let brick_center = v.origin + ((voxel_cell(brick, 0u) + 2.0) * v.size);
         brick_offset = plant_brick_offset(instance, plant_air(instance, strength, wind_origin(instance), wind.time.x), bone, brick_center, instance.world);
-        brick_previous = plant_brick_offset(instance, plant_air(instance, strength, wind_previous_origin(instance), wind.time.y), bone, brick_center, instance.prev_world);
+        brick_previous = plant_brick_offset(instance, plant_air_previous(instance, strength), bone, brick_center, instance.prev_world);
     }
     let eye = frame.camera_position.xyz;
     let uv = (vec2<f32>(pixel) + 0.5) * frame.viewport.zw;

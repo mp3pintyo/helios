@@ -34,6 +34,7 @@ override LATE: bool = false;
 @group(0) @binding(65) var<uniform> wind: Wind;
 @group(0) @binding(66) var skin_palette: texture_2d<f32>;
 @group(0) @binding(150) var plant_bones: texture_2d<f32>;
+@group(0) @binding(151) var plant_sim: texture_2d<f32>;
 
 // Cull state words (CullState in cull.wgsl).
 const STATE_HW_EARLY: u32 = 4u;

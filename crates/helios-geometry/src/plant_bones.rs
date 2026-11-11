@@ -272,8 +272,8 @@ impl BoneBounds {
         let basis: Vec<(f32, f32)> = points.iter().map(|(p, _)| (p.y.max(0.0), (p.x * p.x + p.z * p.z).sqrt())).collect();
         let class = |c: usize| -> Vec<f32> { points.iter().map(|(_, r)| r[c] * BOUND_MARGIN).collect() };
         let flutter = class(2).into_iter().fold(0.0f32, f32::max);
-        let (sway_rho, sway_const) = fit_linear(&basis, &class(1));
-        let bend = fit_quadratic(&basis, &class(0));
+        let [_, sway_rho, sway_const] = fit_bound(&basis, &class(1), false);
+        let bend = fit_bound(&basis, &class(0), true);
         Self { bend, sway: [sway_rho, sway_const], flutter }
     }
 
@@ -300,59 +300,62 @@ impl BoneBounds {
     }
 }
 
-/// `(a, c)` minimising the mean of `a·ρ + c` subject to `a·ρᵢ + c ≥ rᵢ`.
-fn fit_linear(basis: &[(f32, f32)], r: &[f32]) -> (f32, f32) {
+/// `[a, b, c] ≥ 0` minimising the mean over the points of `a·h² + b·ρ + c` subject to
+/// `a·hᵢ² + b·ρᵢ + c ≥ rᵢ` (`a = 0` unless `quadratic`). The constraints are reduced to an
+/// envelope — the points binned by (h, ρ), each bin its largest r at its smallest h and ρ, which
+/// implies the constraint for every point in it — and the objective, with `c` the largest
+/// residual, is convex in (a, b): nested ternary searches find its minimum.
+fn fit_bound(basis: &[(f32, f32)], r: &[f32], quadratic: bool) -> [f32; 3] {
     let max = r.iter().copied().fold(0.0f32, f32::max);
-    if max <= 0.0 {
-        return (0.0, 0.0);
-    }
-    let mean_rho = basis.iter().map(|b| b.1).sum::<f32>() / basis.len().max(1) as f32;
-    let mut candidates: Vec<f32> = vec![0.0];
-    let mut ratios: Vec<f32> = basis.iter().zip(r).filter(|(b, &r)| b.1 > 1e-4 && r > 0.0).map(|(b, &r)| r / b.1).collect();
-    ratios.sort_by(f32::total_cmp);
-    for q in [0.25, 0.5, 0.7, 0.8, 0.9, 0.95, 0.98, 1.0] {
-        if let Some(&v) = ratios.get(((ratios.len() as f32 - 1.0) * q) as usize) {
-            candidates.push(v);
-        }
-    }
-    let mut best = (0.0, max, f32::MAX);
-    for a in candidates {
-        let c = basis.iter().zip(r).map(|(b, &r)| r - a * b.1).fold(0.0f32, f32::max);
-        let cost = a * mean_rho + c;
-        if cost < best.2 {
-            best = (a, c, cost);
-        }
-    }
-    (best.0, best.1)
-}
-
-/// `[a, b, c]` keeping `a·h² + b·ρ + c ≥ rᵢ` with a small mean bound: a search over `a`, the
-/// rest fitted linearly.
-fn fit_quadratic(basis: &[(f32, f32)], r: &[f32]) -> [f32; 3] {
-    let max = r.iter().copied().fold(0.0f32, f32::max);
-    if max <= 0.0 {
+    if max <= 0.0 || basis.is_empty() {
         return [0.0; 3];
     }
-    let mean_h2 = basis.iter().map(|b| b.0 * b.0).sum::<f32>() / basis.len().max(1) as f32;
-    let mut ratios: Vec<f32> = basis.iter().zip(r).filter(|(b, &r)| b.0 > 1e-3 && r > 0.0).map(|(b, &r)| r / (b.0 * b.0)).collect();
-    ratios.sort_by(f32::total_cmp);
-    let mut candidates: Vec<f32> = vec![0.0];
-    for q in [0.25, 0.5, 0.7, 0.8, 0.9, 0.95, 0.98, 1.0] {
-        if let Some(&v) = ratios.get(((ratios.len() as f32 - 1.0) * q) as usize) {
-            candidates.push(v);
+    const BINS: usize = 48;
+    let h_max = basis.iter().map(|b| b.0).fold(1e-6f32, f32::max);
+    let rho_max = basis.iter().map(|b| b.1).fold(1e-6f32, f32::max);
+    let mut bins = vec![(f32::MAX, f32::MAX, 0.0f32); BINS * BINS];
+    for (b, &v) in basis.iter().zip(r) {
+        if v <= 0.0 {
+            continue;
+        }
+        let i = ((b.0 / h_max * BINS as f32) as usize).min(BINS - 1);
+        let j = ((b.1 / rho_max * BINS as f32) as usize).min(BINS - 1);
+        let bin = &mut bins[i * BINS + j];
+        *bin = (bin.0.min(b.0), bin.1.min(b.1), bin.2.max(v));
+    }
+    let envelope: Vec<(f32, f32, f32)> = bins.into_iter().filter(|b| b.2 > 0.0).map(|(h, rho, v)| (h * h, rho, v)).collect();
+    let n = basis.len() as f32;
+    let mean_h2 = basis.iter().map(|b| b.0 * b.0).sum::<f32>() / n;
+    let mean_rho = basis.iter().map(|b| b.1).sum::<f32>() / n;
+    let residual = |a: f32, b: f32| envelope.iter().map(|&(h2, rho, v)| v - a * h2 - b * rho).fold(0.0f32, f32::max);
+    let cost = |a: f32, b: f32| a * mean_h2 + b * mean_rho + residual(a, b);
+    let b_max = envelope.iter().filter(|e| e.1 > 1e-4).map(|e| e.2 / e.1).fold(0.0f32, f32::max);
+    let a_max = if quadratic { envelope.iter().filter(|e| e.0 > 1e-6).map(|e| e.2 / e.0).fold(0.0f32, f32::max) } else { 0.0 };
+    let best_b = |a: f32| {
+        let (mut lo, mut hi) = (0.0f32, b_max);
+        for _ in 0..60 {
+            let (m1, m2) = (lo + (hi - lo) / 3.0, hi - (hi - lo) / 3.0);
+            if cost(a, m1) <= cost(a, m2) {
+                hi = m2;
+            } else {
+                lo = m1;
+            }
+        }
+        // The flat ends of a piecewise-linear cost: prefer the end values when as good.
+        [0.0, lo, b_max].into_iter().min_by(|&x, &y| cost(a, x).total_cmp(&cost(a, y))).unwrap()
+    };
+    let (mut lo, mut hi) = (0.0f32, a_max);
+    for _ in 0..60 {
+        let (m1, m2) = (lo + (hi - lo) / 3.0, hi - (hi - lo) / 3.0);
+        if cost(m1, best_b(m1)) <= cost(m2, best_b(m2)) {
+            hi = m2;
+        } else {
+            lo = m1;
         }
     }
-    let mut best = ([0.0, 0.0, max], f32::MAX);
-    for a in candidates {
-        let rest: Vec<f32> = basis.iter().zip(r).map(|(b, &r)| (r - a * b.0 * b.0).max(0.0)).collect();
-        let (b, c) = fit_linear(basis, &rest);
-        let mean_rho = basis.iter().map(|b| b.1).sum::<f32>() / basis.len().max(1) as f32;
-        let cost = a * mean_h2 + b * mean_rho + c;
-        if cost < best.1 {
-            best = ([a, b, c], cost);
-        }
-    }
-    best.0
+    let a = [0.0, lo, a_max].into_iter().min_by(|&x, &y| cost(x, best_b(x)).total_cmp(&cost(y, best_b(y)))).unwrap();
+    let b = best_b(a);
+    [a, b, residual(a, b)]
 }
 
 /// The bone table of an assembly part placed at `transform` (uniform scale) hanging from

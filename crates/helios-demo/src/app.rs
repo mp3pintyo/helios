@@ -71,7 +71,7 @@ pub const PHOTO_SAMPLES: u32 = 128;
 const SCREEN_PERCENTAGES: [f32; 4] = [50.0, 67.0, 75.0, 100.0];
 
 pub const HELP: &str = "WASD/QE fly · drag to look · wheel speed · Shift fast\n\
-N next scene · 0 demo motion · V debug view · Insert voxel LODs · PageDown tessellation · G GI · ; GI method (Lumen / Lumen Lite) · H shadows · 1 local light shadow maps · [ ] screen percentage (50/67/75/100 %) · \\ dynamic resolution · T TAA · O occlusion · K software raster · I texture streaming · - animation clip / pause · F fog · C clouds · U translucency · End coloured light through glass · Home fog scattering · 2 shadow refresh budget · 7 prefiltered distant shadows / volume shadows (cycles) · / translucency layers · ' volumes + particles · L wind · M motion blur · B depth of field · Enter photo (accumulated still) · ` local exposure · = MegaLights · 3 MegaLights fog + translucency · 4 OIT (AVBOIT / weighted blended) · 9 short-range AO · Z/X zoom · , . LOD error · PageUp Substrate materials · ←→↑↓ sun · P animate sun · J day/night cycle · Y camera tour · R reset · Tab editor tools (native)";
+N next scene · 0 demo motion · V debug view · Insert voxel LODs · PageDown tessellation · G GI · ; GI method (Lumen / Lumen Lite) · H shadows · 1 local light shadow maps · [ ] screen percentage (50/67/75/100 %) · \\ dynamic resolution · T TAA · O occlusion · K software raster · I texture streaming · - animation clip / pause · F fog · C clouds · U translucency · End coloured light through glass · Home fog scattering · 2 shadow refresh budget · 7 prefiltered distant shadows / volume shadows (cycles) · / translucency layers · ' volumes + particles · L wind · M motion blur · B depth of field · Enter photo (accumulated still) · ` local exposure · = MegaLights · 3 MegaLights fog + translucency · 4 OIT (AVBOIT / weighted blended) · 9 short-range AO · Numpad1 gust (dynamic wind) · Z/X zoom · , . LOD error · PageUp Substrate materials · ←→↑↓ sun · P animate sun · J day/night cycle · Y camera tour · R reset · Tab editor tools (native)";
 
 impl DemoApp {
     pub fn new(
@@ -278,8 +278,13 @@ impl DemoApp {
             },
             // Short-range ambient occlusion (grounded foliage, rock and log contact) on / off.
             "Digit9" => s.short_range_ao = !s.short_range_ao,
-            // Dynamic wind (plant bones) on / off (off: the procedural wind).
-            "Numpad1" => s.wind_bones = !s.wind_bones,
+            // A gust burst in front of the camera (the dynamic wind's simulated tier): a ring
+            // that bends the grass, ferns and bushes it passes.
+            "Numpad1" => {
+                let forward = self.camera.forward();
+                let ahead = Vec3::new(forward.x, 0.0, forward.z).normalize_or(Vec3::X) * 5.0;
+                self.renderer.wind_gust(self.camera.position + ahead);
+            }
             "KeyL" => s.wind = !s.wind,
             "Quote" => {
                 let on = !(s.volumes || s.particles);

@@ -34,6 +34,7 @@ override SLOPE_BIAS: f32 = 1.5;
 @group(0) @binding(6) var<storage, read_write> sw_depth: array<atomic<u32>>;
 @group(0) @binding(65) var<uniform> wind: Wind;
 @group(0) @binding(150) var plant_bones: texture_2d<f32>;
+@group(0) @binding(151) var plant_sim: texture_2d<f32>;
 @group(0) @binding(60) var<uniform> local_vsm: LocalVsm;
 
 var<workgroup> brick_first: array<u32, 128>;

@@ -32,6 +32,7 @@ override LATE: bool = false;
 @group(0) @binding(7) var<storage, read_write> sw_target: array<atomic<u32>>;
 @group(0) @binding(65) var<uniform> wind: Wind;
 @group(0) @binding(150) var plant_bones: texture_2d<f32>;
+@group(0) @binding(151) var plant_sim: texture_2d<f32>;
 
 // Pixels a voxel may cover (it is about a pixel at the LOD threshold; this guards views with a
 // much coarser threshold).

@@ -9,6 +9,7 @@ use crate::alpha_mask::{AlphaMasks, MaterialMask};
 use crate::assembly::Assemblies;
 use crate::gpu_types::{instance_flags, material_flags, GpuInstance, GpuMaterial, GpuUvTransform};
 use crate::motion::SceneChanges;
+use crate::plant_sim::{Candidate, PlantSim, SIM_BONES, SIM_DEVIATION};
 use crate::plant_wind::PlantTables;
 use crate::scene::{Instance, Material, Mobility, Scene, TextureHandle, TextureSource, UvTransform};
 use crate::skin::{instance_skin_flags, SkinPalettes};
@@ -69,6 +70,8 @@ pub struct GpuScene {
     pub assemblies: Assemblies,
     /// Bone tables of plants (`plant_wind.rs`).
     pub plants: PlantTables,
+    /// The dynamic wind's simulated tier: promoted plants near the camera (`plant_sim.rs`).
+    pub plant_sim: PlantSim,
     /// Plants bend their bones in the wind (`RenderSettings::wind_bones`; the instances carry it).
     pub wind_bones_enabled: bool,
     wind_bones_uploaded: bool,
@@ -132,6 +135,7 @@ impl GpuScene {
             skins: SkinPalettes::new(device),
             assemblies: Assemblies::new(device),
             plants: PlantTables::new(device),
+            plant_sim: PlantSim::new(device),
             wind_bones_enabled: true,
             wind_bones_uploaded: true,
             instance_count: 0,
@@ -208,6 +212,22 @@ impl GpuScene {
     pub fn write_wind(&self, queue: &wgpu::Queue, wind: &WindUniform) {
         queue.write_buffer(&self.wind, 0, bytemuck::bytes_of(wind));
         self.wind_blowing.store(wind.direction.w > 0.0, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Promotes and demotes plants for the dynamic wind's simulation (`plant_sim.rs`) around
+    /// `camera`, rewriting the records whose slot changed, and writes the simulation's inputs.
+    pub(crate) fn update_plant_sim(&mut self, queue: &wgpu::Queue, scene: &Scene, camera: Vec3, time: f32, dt: f32) {
+        if self.records.len() != scene.instances.len() {
+            return;
+        }
+        let changed = self.plant_sim.update(camera, time);
+        for index in changed {
+            let i = index as usize;
+            let record = self.record(scene, i, self.records[i].prev_world, self.records[i].visibility_offset);
+            self.records[i] = record;
+            queue.write_buffer(&self.instances, (i * std::mem::size_of::<GpuInstance>()) as u64, bytemuck::bytes_of(&self.records[i]));
+        }
+        self.plant_sim.write(queue, camera, time, dt);
     }
 
     /// Shadow casters moved by the last [`GpuScene::sync`], with their old and new bounds.
@@ -287,7 +307,7 @@ impl GpuScene {
         for &(index, prev_world) in &updates {
             let i = index as usize;
             let instance = &scene.instances[i];
-            let record = self.record(scene, instance, prev_world, self.records[i].visibility_offset);
+            let record = self.record(scene, i, prev_world, self.records[i].visibility_offset);
             self.shadow_moves.extend(shadow_move(scene, i, &self.records[i], &record, self.skin_reach(instance)));
             lo = lo.min(record.bounds.truncate() - record.bounds.w);
             hi = hi.max(record.bounds.truncate() + record.bounds.w);
@@ -391,7 +411,8 @@ impl GpuScene {
     }
 
     /// The GPU record of `instance` (moved from `prev_world` since the previous frame).
-    fn record(&mut self, scene: &Scene, instance: &Instance, prev_world: Mat4, visibility_offset: u32) -> GpuInstance {
+    fn record(&mut self, scene: &Scene, index: usize, prev_world: Mat4, visibility_offset: u32) -> GpuInstance {
+        let instance = &scene.instances[index];
         let mesh = self.meshes[instance.mesh.0 as usize];
         let world = instance.transform;
         let linear = Mat3::from_mat4(world);
@@ -413,10 +434,16 @@ impl GpuScene {
             }
         }
         let response = instance_wind(scene, instance);
-        let (plant, wind) = match self.plants.instance(scene, instance, response, self.wind_bones_enabled) {
+        let (mut plant, mut wind) = match self.plants.instance(scene, instance, response, self.wind_bones_enabled) {
             Some((plant, wind)) => (plant, wind),
             None => ([0; 4], response),
         };
+        if let Some(slot) = self.plant_sim.slot(index as u32).filter(|_| plant[0] != 0) {
+            // Promoted: the simulation may deviate each bone by SIM_DEVIATION times its
+            // parametric bound, so every layer of the plant's bound grows by as much.
+            plant[2] = slot + 1;
+            wind = (wind.truncate() * (1.0 + SIM_DEVIATION)).extend(wind.w);
+        }
         GpuInstance {
             world,
             prev_world,
@@ -442,15 +469,29 @@ impl GpuScene {
         let mut wind_shadows = false;
         let mut windy = false;
         self.plants.reset_headers();
+        // Instance indices may have changed: promotion starts over (next frame).
+        self.plant_sim.set_candidates(Vec::new());
         let mut instances: Vec<GpuInstance> = Vec::with_capacity(count);
-        for (instance, &prev_world) in scene.instances.iter().zip(prev_world) {
-            let gpu = self.record(scene, instance, prev_world, visibility_bits);
+        for (index, (instance, &prev_world)) in scene.instances.iter().zip(prev_world).enumerate() {
+            let gpu = self.record(scene, index, prev_world, visibility_bits);
             wind_shadows |= instance.cast_shadow && gpu.wind != Vec4::ZERO;
             windy |= gpu.wind != Vec4::ZERO;
             visibility_bits += gpu.cluster_count;
             instances.push(gpu);
         }
         self.plants.upload(device, queue);
+        // Plants the simulation may promote: small ones (a slot holds SIM_BONES bones), not
+        // assembly parts.
+        let candidates = instances
+            .iter()
+            .enumerate()
+            .filter(|(i, gpu)| {
+                let mesh = &scene.meshes[scene.instances[*i].mesh.0 as usize];
+                gpu.plant[0] != 0 && gpu.flags & instance_flags::ASSEMBLY == 0 && mesh.bones.as_ref().is_some_and(|b| b.bones.len() as u32 <= SIM_BONES)
+            })
+            .map(|(i, gpu)| Candidate { index: i as u32, center: gpu.bounds.truncate(), radius: gpu.bounds.w, bones: scene.meshes[scene.instances[i].mesh.0 as usize].bones.as_ref().map_or(0, |b| b.bones.len() as u32) })
+            .collect();
+        self.plant_sim.set_candidates(candidates);
 
         let (mut lo, mut hi) = (glam::Vec3::splat(f32::MAX), glam::Vec3::splat(f32::MIN));
         for i in &instances {

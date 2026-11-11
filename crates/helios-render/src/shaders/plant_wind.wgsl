@@ -1,6 +1,6 @@
 // Dynamic plant wind: UE 5.9's Dynamic Wind for Nanite foliage in its parametric mode (Mode 0;
 // plant_wind.rs, helios_geometry::plant_bones). Requires common.wgsl, geometry.wgsl, wind.wgsl
-// and a `plant_bones: texture_2d<f32>` at binding 150.
+// a `plant_bones: texture_2d<f32>` at binding 150 and a `plant_sim: texture_2d<f32>` at 151.
 //
 // A plant with bones (instance.plant.x != 0) moves by its skeleton: every vertex belongs to one
 // bone (the cluster's skin section), every bone bends about its pivot as a circular arc — its
@@ -62,10 +62,16 @@ struct PlantAir {
     flutter: f32,         // 2π · 2.6 Hz · t
     response: vec3<f32>,  // the material's bend, sway, flutter times the strength
     // Leaf flutter's level of detail: 1 near, fading to 0 where a leaf tip's flutter (2.5 × the
-    // response, helios_geometry::vegetation) would cover under a pixel; at 0 leaves ride rigidly
+    // response, helios_geometry::vegetation) would cover under two pixels; at 0 leaves ride rigidly
     // on their branch and their level is skipped. A function of the instance and the camera
     // only, so every pass and view agrees.
     leaves: f32,
+    // The same for branches (sway bones), whose motion is ~5 % of the instance radius × sway.
+    branches: f32,
+    // Promoted instances (plant_sim.wgsl): simulation slot + 1 (0: parametric only), and which
+    // texel of a bone's pair to read (0: this frame's deviation, 1: the previous frame's).
+    sim: u32,
+    sim_texel: u32,
 }
 
 fn plant_air(instance: Instance, strength: f32, origin: vec3<f32>, time: f32) -> PlantAir {
@@ -82,10 +88,22 @@ fn plant_air(instance: Instance, strength: f32, origin: vec3<f32>, time: f32) ->
     a.plant = (WIND_TAU * response.w * time) + wind_phase(origin);
     a.flutter = WIND_TAU * WIND_FLUTTER_HZ * time;
     a.response = response.xyz * strength;
-    // wind.params.x: distance per metre of motion at which it covers WIND_MIN_PIXELS (4).
-    let limit = 2.5 * a.response.z * 4.0 * wind.params.x;
+    // wind.params.x: distance per metre of motion at which it covers WIND_MIN_PIXELS (4); the
+    // leaves and branches stop where theirs would cover 2 pixels.
     let d = distance(origin, wind.camera.xyz);
-    a.leaves = saturate(4.0 * (limit - d) / max(limit, 1e-3));
+    let leaf_limit = 2.5 * a.response.z * 2.0 * wind.params.x;
+    a.leaves = saturate(4.0 * (leaf_limit - d) / max(leaf_limit, 1e-3));
+    let branch_limit = 0.05 * instance.bounds.w * a.response.y * 2.0 * wind.params.x;
+    a.branches = saturate(4.0 * (branch_limit - d) / max(branch_limit, 1e-3));
+    a.sim = instance.plant.z;
+    a.sim_texel = 0u;
+    return a;
+}
+
+// The same for the previous frame (motion vectors): its origin, time and simulation state.
+fn plant_air_previous(instance: Instance, strength: f32) -> PlantAir {
+    var a = plant_air(instance, strength, wind_previous_origin(instance), wind.time.y);
+    a.sim_texel = 1u;
     return a;
 }
 
@@ -104,7 +122,7 @@ fn plant_bone_rotation(a: PlantAir, axis: vec3<f32>, kind_phase: f32, amplitude:
         // Sway: pushed downwind by the gust, bobbing mostly up and down (|force| ≤ 1).
         let b = sin((2.3 * frequency * a.plant) + phase);
         let force = (a.wind * (0.3 * a.gust)) + (((a.wind * 0.6) + (a.up * 0.8)) * (0.7 * (0.4 + (0.6 * a.gust)) * b));
-        return cross(axis, force) * (amplitude * a.response.y);
+        return cross(axis, force) * (amplitude * a.response.y * a.branches);
     }
     // Flutter: about two axes across the leaf and a twist about its stem (each in [-1, 1]).
     let t = (a.flutter * frequency) + phase;
@@ -126,57 +144,160 @@ fn plant_rotate(v: vec3<f32>, k: vec3<f32>, s: f32, c: f32) -> vec3<f32> {
     return (v * c) + (cross(k, v) * s) + (k * (dot(k, v) * (1.0 - c)));
 }
 
+// One bone of a table (its three texels) and its rotation vector this frame.
+struct PlantBoneState {
+    pivot: vec3<f32>,
+    parent: f32,   // −1: the root
+    axis: vec3<f32>,
+    len: f32,
+    attach: f32,
+    omega: vec3<f32>,
+    skip: bool,    // faded out with distance: the bone rides rigidly on its parent
+}
+
+fn plant_bone(table: u32, a: PlantAir, b: u32) -> PlantBoneState {
+    var o: PlantBoneState;
+    let t = table + (b * PLANT_BONE_TEXELS);
+    let t0 = plant_texel(t);
+    let t2 = plant_texel(t + 2u);
+    o.pivot = t0.xyz;
+    o.parent = t0.w;
+    o.attach = t2.x;
+    let kind = u32(t2.y);
+    // Leaves and branches fade out with distance (PlantAir); at zero their level is exactly the
+    // identity, so it is skipped: only the link to the parent is read.
+    let fade = select(select(1.0, a.branches, kind == 1u), a.leaves, kind == 2u);
+    o.skip = fade <= 0.0 && a.sim == 0u;
+    if o.skip {
+        return o;
+    }
+    let t1 = plant_texel(t + 1u);
+    o.axis = t1.xyz;
+    o.len = t1.w;
+    o.omega = plant_bone_rotation(a, o.axis, t2.y, t2.z, t2.w);
+    if a.sim != 0u && kind != 2u {
+        // A promoted plant's simulated deviation (plant_sim.wgsl; leaves keep their flutter).
+        o.omega += textureLoad(plant_sim, vec2<u32>((2u * b) + a.sim_texel, a.sim - 1u), 0).xyz;
+    }
+    return o;
+}
+
+// The bone's frame at distance s along it: a rotation (k, sin, cos) about its axis point, which
+// moves along the arc ∫₀ˢ R(ω u/L) a du = s·(a∥ + sinc θ·a⊥ + ((1 − cos θ)/θ)·(k × a⊥)),
+// θ = |ω|·s/L.
+struct PlantFrame {
+    k: vec3<f32>,
+    sn: f32,
+    cs: f32,
+    on_axis: vec3<f32>,
+    arc: vec3<f32>,
+    moves: bool,
+}
+
+fn plant_frame(o: PlantBoneState, s: f32) -> PlantFrame {
+    var f: PlantFrame;
+    let w = length(o.omega);
+    let theta = w * (s / o.len);
+    f.moves = !o.skip && theta > 1e-7;
+    if f.moves {
+        f.k = o.omega / w;
+        f.sn = sin(theta);
+        f.cs = cos(theta);
+        let a_par = f.k * dot(o.axis, f.k);
+        let a_perp = o.axis - a_par;
+        let sinc = select(1.0 - (theta * theta / 6.0), f.sn / theta, theta > 1e-3);
+        // (1 − cos θ)/θ = sin²θ / ((1 + cos θ)·θ), stable for small θ without another sine.
+        let cosc = select(0.5 * theta, (f.sn * f.sn) / ((1.0 + f.cs) * theta), theta > 1e-3);
+        f.on_axis = o.pivot + (o.axis * s);
+        f.arc = o.pivot + ((a_par + (a_perp * sinc) + (cross(f.k, a_perp) * cosc)) * s);
+    }
+    return f;
+}
+
+fn plant_frame_point(f: PlantFrame, q: vec3<f32>) -> vec3<f32> {
+    if !f.moves {
+        return q;
+    }
+    return f.arc + plant_rotate(q - f.on_axis, f.k, f.sn, f.cs);
+}
+
+fn plant_frame_direction(f: PlantFrame, n: vec3<f32>) -> vec3<f32> {
+    if !f.moves {
+        return n;
+    }
+    return plant_rotate(n, f.k, f.sn, f.cs);
+}
+
+// The distance along bone `o` of point `p`'s projection.
+fn plant_project(o: PlantBoneState, p: vec3<f32>) -> f32 {
+    return clamp(dot(p - o.pivot, o.axis), 0.0, o.len);
+}
+
 // The pose of object-space point `p` (with direction `n`) bound to `bone` of the table at texel
 // `table`: its own bone's arc at its projection, then each parent's frame at the attachment.
 fn plant_pose(table: u32, a: PlantAir, bone: u32, p: vec3<f32>, n: vec3<f32>) -> PlantPose {
     var q = p;
     var dir = n;
     var b = bone;
-    var s = 0.0;
+    var s = -1.0;
     for (var depth = 0u; depth < PLANT_MAX_DEPTH; depth++) {
-        let t = table + (b * PLANT_BONE_TEXELS);
-        let t0 = plant_texel(t);
-        let t2 = plant_texel(t + 2u);
-        if depth == 0u && a.leaves <= 0.0 && u32(t2.y) == 2u && t0.w >= 0.0 {
-            // A distant leaf: rigid on its branch at its attachment (exactly its pose at zero
-            // flutter).
-            s = t2.x;
-            b = u32(t0.w);
-            continue;
+        let o = plant_bone(table, a, b);
+        if !o.skip {
+            let f = plant_frame(o, select(s, plant_project(o, p), s < 0.0));
+            q = plant_frame_point(f, q);
+            dir = plant_frame_direction(f, dir);
         }
-        let t1 = plant_texel(t + 1u);
-        let pivot = t0.xyz;
-        let axis = t1.xyz;
-        let len = t1.w;
-        if depth == 0u {
-            s = clamp(dot(p - pivot, axis), 0.0, len);
-        }
-        let omega = plant_bone_rotation(a, axis, t2.y, t2.z, t2.w);
-        let w = length(omega);
-        // The frame at s turns by θ = |ω|·s/L about k; its axis point moves along the arc
-        // ∫₀ˢ R(ω u/L) a du = s·(a∥ + sinc θ·a⊥ + ((1 − cos θ)/θ)·(k × a⊥)).
-        let theta = w * (s / len);
-        if theta > 1e-7 {
-            let k = omega / w;
-            let sn = sin(theta);
-            let cs = cos(theta);
-            let half = sin(0.5 * theta);
-            let a_par = k * dot(axis, k);
-            let a_perp = axis - a_par;
-            let sinc = select(1.0 - (theta * theta / 6.0), sn / theta, theta > 1e-3);
-            let cosc = select(0.5 * theta, (2.0 * half * half) / theta, theta > 1e-3);
-            let on_axis = pivot + (axis * s);
-            let arc = pivot + ((a_par + (a_perp * sinc) + (cross(k, a_perp) * cosc)) * s);
-            q = arc + plant_rotate(q - on_axis, k, sn, cs);
-            dir = plant_rotate(dir, k, sn, cs);
-        }
-        if t0.w < 0.0 {
+        if o.parent < 0.0 {
             break;
         }
-        s = t2.x;
-        b = u32(t0.w);
+        s = o.attach;
+        b = u32(o.parent);
     }
     return PlantPose(q, dir);
+}
+
+// A triangle's three corners and normals posed at once when they share their bone (a leaf, a
+// blade, a branch): each corner gets its own arc on that bone, the parents' frames are evaluated
+// once for all three (G-buffer resolve).
+struct PlantCorners {
+    p0: vec3<f32>,
+    p1: vec3<f32>,
+    p2: vec3<f32>,
+    n0: vec3<f32>,
+    n1: vec3<f32>,
+    n2: vec3<f32>,
+}
+
+fn plant_pose_corners(table: u32, a: PlantAir, bone: u32, c: PlantCorners) -> PlantCorners {
+    var r = c;
+    var b = bone;
+    var s = -1.0;
+    for (var depth = 0u; depth < PLANT_MAX_DEPTH; depth++) {
+        let o = plant_bone(table, a, b);
+        if !o.skip {
+            // The corners' own bone: an arc each; a parent: one frame for all three.
+            let own = s < 0.0;
+            let f0 = plant_frame(o, select(s, plant_project(o, c.p0), own));
+            var f1 = f0;
+            var f2 = f0;
+            if own {
+                f1 = plant_frame(o, plant_project(o, c.p1));
+                f2 = plant_frame(o, plant_project(o, c.p2));
+            }
+            r.p0 = plant_frame_point(f0, r.p0);
+            r.p1 = plant_frame_point(f1, r.p1);
+            r.p2 = plant_frame_point(f2, r.p2);
+            r.n0 = plant_frame_direction(f0, r.n0);
+            r.n1 = plant_frame_direction(f1, r.n1);
+            r.n2 = plant_frame_direction(f2, r.n2);
+        }
+        if o.parent < 0.0 {
+            break;
+        }
+        s = o.attach;
+        b = u32(o.parent);
+    }
+    return r;
 }
 
 // World position of cluster vertex `index` (object position `object`) of `instance` this frame:
@@ -191,7 +312,7 @@ fn plant_world_position(instance: Instance, strength: f32, c: Cluster, base: u32
 }
 
 // Displacement (world) of a voxel brick of a plant: the pose of the brick's centre, with the bone
-// the brick follows; zero for bricks without bones. Voxels move rigidly with their brick.
+// the brick follows. Voxels move rigidly with their brick.
 fn plant_brick_offset(instance: Instance, a: PlantAir, bone: u32, center: vec3<f32>, world: mat4x4<f32>) -> vec3<f32> {
     let pose = plant_pose(instance.plant.y, a, bone, center, vec3<f32>(0.0));
     return (world * vec4<f32>(pose.position - center, 0.0)).xyz;

@@ -1332,6 +1332,51 @@ mod tests {
         assert_eq!(back.sdf, vm.sdf);
     }
 
+    /// A plant's bones survive `.hvm` version 6 (with the header length a streaming reader
+    /// computes), its voxel bricks carry bones, and version 5 files (six section counts, no
+    /// bones) still load.
+    #[test]
+    fn plant_bones_round_trip_and_version_5_loads() {
+        let grass = crate::vegetation::grass_clump(3, 40, 0.45);
+        let vm = build_virtual_mesh(&grass, &BuildConfig { voxels: Some(crate::VoxelConfig::default()), sdf: SdfMode::None, ..Default::default() });
+        let bones = vm.bones.clone().expect("a plant keeps its bones");
+        assert_eq!(bones.bones.len(), 40);
+        assert!(bones.bounds.bend[0] + bones.bounds.bend[1] + bones.bounds.bend[2] > 0.0);
+        let bytes = vm.to_bytes();
+        assert_eq!(&bytes[..4], b"HVM6");
+        assert_eq!(VirtualMesh::header_len(&bytes[..VirtualMesh::PREFIX_BYTES]).unwrap(), vm.header_bytes());
+        let back = VirtualMesh::from_bytes(&bytes).unwrap();
+        assert_eq!(back.bones, vm.bones);
+        assert_eq!(back.page_data, vm.page_data);
+        // Every vertex's bone is a blade; voxel bricks follow blades too.
+        let voxel_clusters: Vec<usize> = (0..vm.clusters.len()).filter(|&c| vm.clusters[c].is_voxel()).collect();
+        assert!(!voxel_clusters.is_empty());
+        for c in voxel_clusters {
+            let words = &vm.page_payload(vm.clusters[c].page as usize)[vm.clusters[c].vertex_offset as usize..];
+            let (bricks, _) = crate::voxel::voxel_counts(words);
+            for b in 0..bricks {
+                assert!((crate::voxel::voxel_brick_bone(words, b).expect("plant bricks carry bones") as usize) < 40);
+            }
+        }
+        for c in (0..vm.clusters.len()).filter(|&c| !vm.clusters[c].is_voxel()) {
+            for i in 0..vm.clusters[c].vertex_count() {
+                assert!((vm.cluster_vertex_skin(c, i).unwrap().dominant_joint() as usize) < 40);
+            }
+        }
+
+        // Version 5: the same layout without the seventh count and the bone section.
+        let plain = build_virtual_mesh(&primitives::icosphere(2), &BuildConfig { sdf: SdfMode::None, ..Default::default() });
+        let v6 = plain.to_bytes();
+        let mut v5 = b"HVM5".to_vec();
+        v5.extend_from_slice(&v6[4..28]);
+        v5.extend_from_slice(&v6[32..]);
+        assert_eq!(VirtualMesh::header_len(&v5[..VirtualMesh::PREFIX_BYTES]).unwrap(), plain.header_bytes() - 4);
+        let old = VirtualMesh::from_bytes(&v5).unwrap();
+        assert_eq!(old.clusters, plain.clusters);
+        assert_eq!(old.page_data, plain.page_data);
+        assert!(old.bones.is_none());
+    }
+
     #[test]
     fn header_and_page_ranges_stream_the_same_mesh() {
         let vm = build_rock();

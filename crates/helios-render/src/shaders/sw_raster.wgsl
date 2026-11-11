@@ -42,6 +42,7 @@ override MASKED: bool = false;
 @group(0) @binding(65) var<uniform> wind: Wind;
 @group(0) @binding(66) var skin_palette: texture_2d<f32>;
 @group(0) @binding(150) var plant_bones: texture_2d<f32>;
+@group(0) @binding(151) var plant_sim: texture_2d<f32>;
 
 const SUBPIXEL: f32 = 256.0;
 const MAX_TRIANGLE_PIXELS: u32 = 4096u;

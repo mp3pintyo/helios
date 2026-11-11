@@ -585,7 +585,7 @@ fn test_cluster(instance_id: u32, cluster_id: u32) -> ClusterResult {
     // Voxels and tessellated clusters are only rasterised in compute (voxel_raster.wgsl, tess.wgsl).
     let compute_only = cluster_is_voxel(cluster) || (DEFORMING && is_tessellated(instance.flags, cluster));
     if result.draw && (view.sw_raster_threshold > 0.0 || compute_only) {
-        result.software = compute_only || prefers_software_raster(cluster, bounds);
+        result.software = compute_only || prefers_software_raster(cluster, bounds, instance.plant.x != 0u);
     }
     // The software rasteriser alpha-tests per cluster, shadow rasterisers per draw: only the
     // main view's hardware path needs a separate list.
@@ -598,7 +598,7 @@ fn test_cluster(instance_id: u32, cluster_id: u32) -> ClusterResult {
 // texel is `1 / lod_scale` world units everywhere, and the depth range spans the scene. Local
 // light pages are perspective; their expansion (vsm_expand.wgsl) keeps clusters near a light's
 // near plane on the hardware path.
-fn prefers_software_raster(cluster: Cluster, bounds: vec4<f32>) -> bool {
+fn prefers_software_raster(cluster: Cluster, bounds: vec4<f32>, planted: bool) -> bool {
     var radius_px = bounds.w * view.lod_scale;
     if view.kind == VIEW_SHADOW && view.orthographic == 0u {
         radius_px = bounds.w * local_light_scale(vec4<f32>(bounds.xyz, 0.0));
@@ -610,7 +610,11 @@ fn prefers_software_raster(cluster: Cluster, bounds: vec4<f32>) -> bool {
         radius_px /= d;
     }
     let triangle_px = 2.0 * radius_px / sqrt(f32(max(cluster_triangle_count(cluster), 1u)));
-    return triangle_px < view.sw_raster_threshold && radius_px < 48.0;
+    // A plant with bones (plant_wind.wgsl) costs per vertex: in shadow pages the hardware path
+    // poses every triangle corner of every (cluster, page) draw, the software one each vertex
+    // once — it takes larger triangles there.
+    let threshold = view.sw_raster_threshold * select(1.0, 2.5, planted && view.kind == VIEW_SHADOW);
+    return triangle_px < threshold && radius_px < select(48.0, 96.0, planted && view.kind == VIEW_SHADOW);
 }
 
 var<workgroup> hw_local: atomic<u32>;
