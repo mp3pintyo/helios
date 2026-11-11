@@ -94,6 +94,8 @@ pub fn all() -> Vec<Setting> {
             s.fog_scattering = (f(v) > 0.0).then(|| FogScattering { intensity: f(v), ..Default::default() })
         }),
         flag("wind", "Wind animation", "Atmosphere", |s| json!(s.wind), |s, v| s.wind = b(v)),
+        flag("wind_bones", "Dynamic wind (plant bones)", "Atmosphere", |s| json!(s.wind_bones), |s, v| s.wind_bones = b(v)),
+        flag("wind_simulation", "Dynamic wind simulation (push, gusts)", "Atmosphere", |s| json!(s.wind_simulation), |s, v| s.wind_simulation = b(v)),
         number("lod_threshold", "Nanite error (px)", "Geometry", (0.125, 16.0, 0.125), |s| json!(s.lod_threshold), |s, v| s.lod_threshold = f(v)),
         flag("tessellation", "Nanite tessellation (displacement)", "Geometry", |s| json!(s.tessellation), |s, v| s.tessellation = b(v)),
         number("dice_rate", "Tessellation dice rate (px)", "Geometry", (0.5, 8.0, 0.25), |s| json!(s.dice_rate), |s, v| s.dice_rate = f(v)),

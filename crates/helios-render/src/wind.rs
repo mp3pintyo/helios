@@ -159,7 +159,7 @@ impl WindUniform {
 
 /// CPU mirror of wind.wgsl, so tests can check the culling bound against the displacement.
 #[cfg(test)]
-mod mirror {
+pub(crate) mod mirror {
     use glam::{Mat4, Vec3, Vec4};
 
     use super::WindUniform;
@@ -336,3 +336,189 @@ mod tests {
         assert!(downwind > 0.5, "{downwind}");
     }
 }
+
+/// CPU mirror of plant_wind.wgsl: checks that plants' bone motion stays within the procedural
+/// bounds their instances carry (`plant_wind.rs`), and that roots hold.
+#[cfg(test)]
+mod bone_tests {
+    use glam::{Mat3, Mat4, Quat, Vec3, Vec4};
+    use helios_geometry::vegetation::{self, Rng};
+    use helios_geometry::{BoneClass, Mesh, PlantBone, PlantBones};
+
+    use super::mirror::{reach, speed, strength};
+    use super::*;
+
+    const TAU: f32 = std::f32::consts::TAU;
+
+    struct Air {
+        wind: Vec3,
+        side: Vec3,
+        up: Vec3,
+        gust: f32,
+        turbulence: f32,
+        plant: f32,
+        flutter: f32,
+        response: Vec3,
+    }
+
+    fn air(w: &WindUniform, world: &Mat4, response: Vec4, strength: f32, time: f32, phase: f32) -> Air {
+        let origin = world.w_axis.truncate();
+        let to_object = Mat3::from_mat4(*world).inverse();
+        let wind = (to_object * Vec3::new(w.direction.x, 0.0, w.direction.z)).normalize();
+        let up = (to_object * Vec3::Y).normalize();
+        let travel = (origin.x * w.direction.x + origin.z * w.direction.z) / w.params.y;
+        let p = TAU * (w.time.z * time - travel);
+        let gust = (0.5 + 0.3 * p.sin() + 0.2 * (2.37 * p + 1.9).sin()).clamp(0.0, 1.0);
+        Air {
+            wind,
+            side: wind.cross(up),
+            up,
+            gust,
+            turbulence: w.time.w,
+            plant: TAU * response.w * time + phase,
+            flutter: TAU * 2.6 * time,
+            response: response.truncate() * strength,
+        }
+    }
+
+    fn rotation(a: &Air, b: &PlantBone) -> Vec3 {
+        let phase = b.phase * TAU;
+        match b.class {
+            BoneClass::Bend => {
+                let p = a.plant * b.frequency + phase;
+                let lean = a.gust * (1.0 - 0.5 * a.turbulence) + 0.5 * a.turbulence * p.sin();
+                let lateral = 0.3 * a.turbulence * (0.71 * p + 1.3).sin();
+                b.axis.cross(a.wind * lean + a.side * lateral) * (b.amplitude * a.response.x)
+            }
+            BoneClass::Sway => {
+                let s = (2.3 * b.frequency * a.plant + phase).sin();
+                let force = a.wind * (0.3 * a.gust) + (a.wind * 0.6 + a.up * 0.8) * (0.7 * (0.4 + 0.6 * a.gust) * s);
+                b.axis.cross(force) * (b.amplitude * a.response.y)
+            }
+            BoneClass::Flutter => {
+                let t = a.flutter * b.frequency + phase;
+                let across = b.axis.cross(a.up);
+                let e1 = if across.length_squared() > 1e-6 { across.normalize() } else { a.side };
+                let e2 = b.axis.cross(e1);
+                (e1 * t.sin() + b.axis * (1.31 * t + 1.7).sin() + e2 * (1.17 * t + 3.1).sin()) * (b.amplitude * a.response.z * (0.35 + 0.65 * a.gust))
+            }
+        }
+    }
+
+    /// `plant_pose`: the arc of the own bone, then the parents' frames.
+    fn pose(bones: &[PlantBone], a: &Air, bone: u16, p: Vec3) -> Vec3 {
+        let mut q = p;
+        let mut b = bone as usize;
+        let mut s = bones[b].project(p);
+        loop {
+            let bone = &bones[b];
+            let omega = rotation(a, bone);
+            let w = omega.length();
+            let theta = w * s / bone.length;
+            if theta > 1e-7 {
+                let k = omega / w;
+                let a_par = k * bone.axis.dot(k);
+                let a_perp = bone.axis - a_par;
+                let (sinc, cosc) = (theta.sin() / theta, 2.0 * (0.5 * theta).sin().powi(2) / theta);
+                let arc = bone.pivot + (a_par + a_perp * sinc + k.cross(a_perp) * cosc) * s;
+                q = arc + Quat::from_axis_angle(k, theta) * (q - (bone.pivot + bone.axis * s));
+            }
+            match bone.parent {
+                Some(parent) => {
+                    s = bone.attach;
+                    b = parent as usize;
+                }
+                None => return q,
+            }
+        }
+    }
+
+    fn plants() -> Vec<(Mesh, WindResponse)> {
+        let tree = vegetation::broadleaf_tree(&vegetation::TreeParams { depth: 3, leaves_per_twig: 6, height: 12.0, ..Default::default() });
+        let bush = vegetation::bush(61, 1.4, 8);
+        let conifer = vegetation::conifer(3, 12.0, 0.25, 4, 8);
+        vec![
+            (vegetation::grass_clump(91, 40, 0.45), WindResponse::GRASS),
+            (vegetation::fern(81, 9, 0.9, 10), WindResponse::FERN),
+            (tree.wood, WindResponse::WOOD),
+            (tree.foliage, WindResponse::LEAVES),
+            (bush.foliage, WindResponse::LEAVES),
+            (conifer.foliage, WindResponse::LEAVES),
+        ]
+    }
+
+    /// Every vertex's bone displacement and speed stay within the procedural bounds of the
+    /// equivalent wind (`plant_wind::equivalent_wind`), at strengths up to 2, any scale and time.
+    #[test]
+    fn bone_motion_stays_within_the_culling_bounds() {
+        let mut rng = Rng::new(17);
+        for (mesh, response) in plants() {
+            let bones = PlantBones::of_mesh(&mesh, mesh.bones.clone());
+            let r = response.to_vec4();
+            for trial in 0..24 {
+                let turbulence = if trial % 2 == 0 { 1.0 } else { 0.0 };
+                let wind = Wind { turbulence, strength: rng.range(0.3, 2.0), ..Wind::breeze(1.0) };
+                let scale = rng.range(0.6, 1.6);
+                let world = Mat4::from_scale_rotation_translation(
+                    Vec3::splat(scale),
+                    Quat::from_rotation_y(rng.range(0.0, 6.3)),
+                    Vec3::new(rng.range(-30.0, 30.0), rng.range(-2.0, 2.0), rng.range(-30.0, 30.0)),
+                );
+                let time = rng.range(0.0, 300.0);
+                let w = WindUniform::new(&wind, 1.0, time, time - 1.0 / 60.0, Vec3::ZERO, 1e-6);
+                let equivalent = crate::plant_wind::equivalent_wind(&bones.bounds, r, scale, scale);
+                let s = strength(&w, &world, equivalent, world.w_axis.truncate().extend(30.0));
+                let phase = rng.range(0.0, TAU);
+                let now = air(&w, &world, r, s, time, phase);
+                let h = 2e-3;
+                let ahead = air(&w, &world, r, s, time + h, phase);
+                let behind = air(&w, &world, r, s, time - h, phase);
+                for i in (0..mesh.vertices.len()).step_by(7) {
+                    let p = mesh.vertices[i].position();
+                    let bone = mesh.skin_of(i).dominant_joint();
+                    let rest = world.transform_point3(p);
+                    let sphere = rest.extend(1e-3);
+                    let moved = world.transform_point3(pose(&mesh.bones, &now, bone, p));
+                    let bound = reach(&world, equivalent, s, sphere);
+                    let d = moved.distance(rest);
+                    assert!(d <= bound * 1.001 + 1e-5, "{response:?} vertex {i} at {p}: moved {d} > bound {bound}");
+                    let v = world.transform_vector3(pose(&mesh.bones, &ahead, bone, p) - pose(&mesh.bones, &behind, bone, p)).length() / (2.0 * h);
+                    let max_speed = speed(&w, &world, equivalent, s, sphere);
+                    assert!(v <= max_speed * 1.01 + 1e-4, "{response:?} vertex {i} at {p}: speed {v} > bound {max_speed}");
+                }
+            }
+        }
+    }
+
+    /// Bones keep lengths (rotations and arcs) and hold the roots: a grass blade's root does not
+    /// move, its tip does.
+    #[test]
+    fn roots_hold_and_blades_bend() {
+        let grass = vegetation::grass_clump(91, 40, 0.45);
+        let wind = Wind { turbulence: 0.0, ..Wind::breeze(1.0) };
+        let w = WindUniform::new(&wind, 1.0, 5.0, 5.0 - 1.0 / 60.0, Vec3::ZERO, 1e-6);
+        let a = air(&w, &Mat4::IDENTITY, WindResponse::GRASS.to_vec4(), 1.0, 5.0, 0.3);
+        let mut tip_moved = 0.0f32;
+        for (i, v) in grass.vertices.iter().enumerate() {
+            let p = v.position();
+            let bone = grass.skin_of(i).dominant_joint();
+            let q = pose(&grass.bones, &a, bone, p);
+            let b = &grass.bones[bone as usize];
+            if p.distance(b.pivot) < 1e-3 {
+                assert!(q.distance(p) < 1e-5, "a root moved {}", q.distance(p));
+            }
+            tip_moved = tip_moved.max(q.distance(p));
+        }
+        assert!(tip_moved > 0.01, "blades bend: {tip_moved}");
+        // Nothing stretches: every edge keeps its length (an arc bends, it does not extend).
+        let posed: Vec<Vec3> = grass.vertices.iter().enumerate().map(|(i, v)| pose(&grass.bones, &a, grass.skin_of(i).dominant_joint(), v.position())).collect();
+        for t in grass.indices.chunks_exact(3) {
+            for (x, y) in [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
+                let rest = grass.vertices[x as usize].position().distance(grass.vertices[y as usize].position());
+                let now = posed[x as usize].distance(posed[y as usize]);
+                assert!((now - rest).abs() <= 0.03 * rest + 1e-5, "edge {rest} -> {now}");
+            }
+        }
+    }
+}
+

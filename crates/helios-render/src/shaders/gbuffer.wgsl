@@ -25,6 +25,7 @@
 #include "svt.wgsl"
 #include "wind.wgsl"
 #include "skinning.wgsl"
+#include "plant_wind.wgsl"
 #include "water.wgsl"
 #include "shore.wgsl"
 #include "voxel.wgsl"
@@ -81,6 +82,8 @@ const TILE_LISTS: u32 = 120u;
 @group(0) @binding(80) var svt_material: texture_2d<f32>;
 @group(0) @binding(65) var<uniform> wind: Wind;
 @group(0) @binding(66) var skin_palette: texture_2d<f32>;
+@group(0) @binding(170) var plant_bones: texture_2d<f32>;
+@group(0) @binding(171) var plant_sim: texture_2d<f32>;
 @group(0) @binding(90) var<uniform> water: Water;
 // The simulated river's water surface per cell (river.rs; shore.wgsl).
 @group(0) @binding(150) var river_surface: texture_2d<f32>;
@@ -326,6 +329,11 @@ fn resolve(
     // Skinned instances: the corners' previous positions (motion vectors).
     var previous_worlds: array<vec3<f32>, 3>;
     let skinned = SKINNING && instance_skin(instance) != 0u;
+    // A plant with bones (plant_wind.wgsl): corners and normals posed by their bones (the
+    // parents' frames once for the triangle when its corners share a bone), motion vectors from
+    // the previous pose at the pixel.
+    let planted = plant_animated(instance, wind_force);
+    var bones: array<u32, 3>;
     let extended = cluster_is_extended(cluster, base);
     for (var i = 0u; i < 3u; i++) {
         let local = corners[i];
@@ -344,7 +352,11 @@ fn resolve(
             normals[i] = v.normal;
             previous_worlds[i] = wind_previous_world_position(instance, wind_force, v.previous, plants[i].x);
         }
-        world_positions[i] = wind_world_position(instance, wind_force, posed, plants[i].x);
+        if planted {
+            bones[i] = plant_vertex_bone(cluster, base, local);
+        } else {
+            world_positions[i] = wind_world_position(instance, wind_force, posed, plants[i].x);
+        }
         uvs[i] = vertex_uv(cluster, base, local);
         // Optional attributes (imported meshes only).
         uv1s[i] = uvs[i];
@@ -356,6 +368,28 @@ fn resolve(
             colors[i] = vertex_color(cluster, base, local);
         }
         clips[i] = frame.view_proj * vec4<f32>(world_positions[i], 1.0);
+    }
+    if planted {
+        let air = plant_air(instance, wind_force, wind_origin(instance), wind.time.x);
+        if bones[0] == bones[1] && bones[0] == bones[2] {
+            let posed = plant_pose_corners(instance.plant.y, air, bones[0], PlantCorners(object_positions[0], object_positions[1], object_positions[2], normals[0], normals[1], normals[2]));
+            world_positions[0] = posed.p0;
+            world_positions[1] = posed.p1;
+            world_positions[2] = posed.p2;
+            normals[0] = posed.n0;
+            normals[1] = posed.n1;
+            normals[2] = posed.n2;
+        } else {
+            for (var i = 0u; i < 3u; i++) {
+                let posed = plant_pose(instance.plant.y, air, bones[i], object_positions[i], normals[i]);
+                world_positions[i] = posed.position;
+                normals[i] = posed.normal;
+            }
+        }
+        for (var i = 0u; i < 3u; i++) {
+            world_positions[i] = (instance.world * vec4<f32>(world_positions[i], 1.0)).xyz;
+            clips[i] = frame.view_proj * vec4<f32>(world_positions[i], 1.0);
+        }
     }
 
     let ndc = vec2<f32>(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
@@ -388,6 +422,11 @@ fn resolve(
     var previous_world = wind_previous_world_position(instance, wind_force, input.object_position, plant.x);
     if skinned {
         previous_world = interpolate3(previous_worlds, b.lambda);
+    }
+    if planted {
+        // The pixel's point on its triangle's (first corner's) bone a frame ago.
+        let before = plant_pose(instance.plant.y, plant_air_previous(instance, wind_force), bones[0], input.object_position, vec3<f32>(0.0));
+        previous_world = (instance.prev_world * vec4<f32>(before.position, 1.0)).xyz;
     }
     if displaced {
         // The hit's own motion: where its point of the surface was a frame ago (an animated

@@ -9,7 +9,7 @@
 use glam::{Mat4, Quat, Vec2, Vec3};
 use helios_geometry::modeling::{lathe, merge, tube};
 use helios_geometry::noise::fbm;
-use helios_geometry::assembly::build_assembly_base;
+use helios_geometry::assembly::build_plant_assembly_base;
 use helios_geometry::vegetation::{self, LeafShape, PlantAssembly, TreeParams};
 use helios_geometry::{primitives, BuildConfig, Mesh, SdfMode, VirtualMesh, VoxelConfig};
 use helios_render::{
@@ -86,13 +86,16 @@ impl Meshes<'_> {
             let parts: Vec<MeshHandle> = plant.sprays.iter().map(|spray| self.add_foliage(&format!("{name} spray"), spray, false)).collect();
             let meshes: Vec<VirtualMesh> = parts.iter().map(|&p| self.scene.mesh(p).clone()).collect();
             let cost = plant.sprays.iter().map(|s| s.triangle_count() as u64).sum();
+            // The parts hang from the plant's bones (the base follows them too).
             let base = add_built(self.scene, name, cost, || {
-                let geometry: Vec<(&VirtualMesh, Mat4)> = plant.placements.iter().map(|&(i, transform)| (&meshes[i], transform)).collect();
-                build_assembly_base(&geometry, &Self::foliage_config(true)).0
+                let geometry: Vec<(&VirtualMesh, &Mesh, Mat4, u16)> =
+                    plant.placements.iter().zip(&plant.part_bones).map(|(&(i, transform), &bone)| (&meshes[i], &plant.sprays[i], transform, bone)).collect();
+                build_plant_assembly_base(&geometry, &plant.wood.bones, &Self::foliage_config(true)).0
             });
             (parts, base)
         });
-        self.scene.set_assembly(base, plant.placements.iter().map(|&(i, transform)| AssemblyPart { mesh: parts[i], transform }).collect());
+        let parts = plant.placements.iter().zip(&plant.part_bones).map(|(&(i, transform), &bone)| AssemblyPart { mesh: parts[i], transform, bone: Some(bone) }).collect();
+        self.scene.set_assembly(base, parts);
         base
     }
 

@@ -32,3 +32,7 @@ runs with and without the mesh terrain and river): valley initial view 4.94 → 
 translucency, mesh terrain's per-pixel triplanar layering +0.10 ms of resolve, simulation 0.04 ms), river close-up
 (`--eye -2,3,-6 --at -9,0,-20`) 4.31 → 5.70 ms (translucency 0.92 ms), arch view 3.88 → 3.85 ms. Building the
 mesh terrain: ~2 s natively, 2.8 s in Chromium (`--detail medium`, scene 7.4 s in all).
+Round 8 dynamic wind ([`dynamic-wind.md`](round8/dynamic-wind.md); 1600×900, shared GPU, minima of interleaved runs):
+forest default view 8.45 → 9.40 ms (8.91 with `--no-wind-bones`: bone data in the clusters and larger instance
+records), fern close-up 6.60 → 7.58 ms, grass close-up 8.48 → 9.41 ms; the bones themselves cost ~0.5–0.7 ms (per-vertex chains in the rasterisers,
+the resolve and the shadow pages). Scenes without plants are unchanged (cathedral within ±0.02 ms per pass).

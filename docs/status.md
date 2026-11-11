@@ -163,10 +163,18 @@ Honest differences that remain:
    window, a round aperture without blades). **Fog screen space scattering** spreads the forward lobe at
    single-scattering angles (many orders widen it in reality), weights the kernel per pixel only through τ (not per
    source depth), and ignores aerial perspective and underwater fog.
-7. **Wind** is procedural (no pivot-painter data per branch or leaf, no simulation) and does not rotate normals;
-   leaves flutter around their position rather than their stem. A per-vertex wind weight (round 8) holds plants at
-   their roots, but only the procedural vegetation bakes it (imported foliage moves with weight 1, as do voxel LODs and
-   tessellated surfaces), and it is one scalar per vertex, not a bone hierarchy (UE 5.9's skeletal *dynamic wind*). Shadow pages cache static casters separately (as
+7. **Wind**: the procedural plants have bones (round 8, *dynamic wind*): a parametric mode (UE's `Mode 0`) bends them
+   as arcs about their pivots with rotated normals, and a simulated tier gives the plants a push capsule or a gust ring
+   reaches spring states. Simpler than UE 5.9's Dynamic Wind: only the procedural vegetation has bones — imported
+   foliage keeps the procedural wind (no skeletal plant import, no bone weights from content); a vertex follows one
+   bone (no blending at joints; deeper twigs ride rigidly on their depth-2 branch); the parametric rotations reuse the
+   procedural layers' time functions (no drag or vortex-shedding model, no per-bone wind sampling — gusts are one
+   travelling wave per plant); the simulated tier has one force kind each (a capsule following the camera, a radial
+   gust burst; no directional / swirl / cone forces or velocity volumes, no CPU-side API to add them), simulates only
+   plants of up to 512 bones (grass, ferns, bushes — not trees), keeps leaves parametric, and integrates a spring per
+   bone (as UE: no constraint solver); assembly parts hang rigidly on their bone's frame apart from their own leaves;
+   voxels move rigidly per brick with its branch bone (no flutter); bones cost per vertex in every pass that positions
+   geometry (UE evaluates bones once per instance and skins). Shadow pages cache static casters separately (as
    UE's static cache); the wind, `Mobility::Movable` and animated skins make a caster dynamic. Refreshes are decided
    per instance and redraw every dynamic caster in the
    page, so in the forest — where trees, bushes, ferns and grass all sway and only terrain, rocks and logs are
@@ -221,8 +229,8 @@ Honest differences that remain:
     normal and their brick's mean texture coordinate — no per-voxel colour, so textures varying within a brick, vertex colours and alpha-masked (card) foliage's mask
     coverage are averaged away or ignored; coverage along a diagonal is modelled from the three axes (exact for
     axis-aligned and isotropic leaves). Voxels are rasterised as stochastic cubes (no ray-marched depth buckets or
-    front-to-back ordering), rely on TSR to average their dithering, move rigidly with the wind at their centre (no
-    flutter, no bone-driven wind), and have no hardware path: in shadow pages refreshed over a static layer without a
+    front-to-back ordering), rely on TSR to average their dithering, move rigidly with the wind at their centre (a plant's
+    bricks with their branch bone since the dynamic wind; no flutter), and have no hardware path: in shadow pages refreshed over a static layer without a
     scratch tile, or split pages, they sit out that refresh. Voxels win only where pruning reports a larger error than
     the voxel budget allows (4 voxels per kept triangle: the forest's conifers and ferns from mid-distance, the
     broadleaf canopies near their roots). Assemblies are one level deep (no nested parts), their parts take the

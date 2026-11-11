@@ -18,6 +18,7 @@
 use glam::{Mat3, Mat4, Vec3};
 
 use crate::dag::{build_virtual_mesh, BuildConfig, VirtualMesh, ROOT_ERROR};
+use crate::plant_bones::{BoneBounds, PlantBone, PlantBones};
 use crate::{Mesh, Sphere, Vertex};
 
 /// The largest scale factor of an affine transform's axes.
@@ -64,6 +65,40 @@ pub fn build_assembly_base(parts: &[(&VirtualMesh, Mat4)], config: &BuildConfig)
         transition = transition.max(root_error(mesh, transform));
     }
     let mut base = build_virtual_mesh(&merged.build(), config);
+    offset_errors(&mut base, transition);
+    (base, transition)
+}
+
+/// [`build_assembly_base`] for a plant whose parts hang from its bones (`plant`, the wood's):
+/// `parts` are `(part mesh, its source mesh, transform, plant bone)`. The base's vertices follow
+/// their part's bone; its bounds ([`crate::BoneBounds`]) hold every part at full detail, whose
+/// own bones (a spray's leaves) hang from that bone too ([`crate::plant_bones::part_bone_table`]),
+/// since the parts are culled with the base's wind bounds.
+pub fn build_plant_assembly_base(parts: &[(&VirtualMesh, &Mesh, Mat4, u16)], plant: &[PlantBone], config: &BuildConfig) -> (VirtualMesh, f32) {
+    let mut merged = Mesh::default();
+    let mut roots = std::collections::HashMap::new();
+    let mut transition = 0.0f32;
+    let mut points = Vec::new();
+    for &(mesh, source, transform, bone) in parts {
+        let root = roots.entry(mesh as *const VirtualMesh).or_insert_with(|| root_mesh(mesh));
+        let mut copy = root.transformed(transform);
+        crate::plant_bones::bind_all(&mut copy, bone);
+        merged.append(&copy, Mat4::IDENTITY);
+        transition = transition.max(root_error(mesh, &transform));
+        let table = crate::plant_bones::part_bone_table(&source.bones, plant, Some(bone), &transform);
+        let scale = max_scale(&transform);
+        let own = |i: usize| if source.bones.is_empty() { source.bones.len() as u16 } else { source.skin_of(i).dominant_joint() };
+        for (i, v) in source.vertices.iter().enumerate() {
+            let reach = crate::plant_bones::vertex_reach(&table, own(i), v.position()) * scale;
+            points.push((transform.transform_point3(v.position()), reach));
+        }
+    }
+    merged.bones = plant.to_vec();
+    for (v, s) in merged.vertices.iter().zip(&merged.skin) {
+        points.push((v.position(), crate::plant_bones::vertex_reach(plant, s.dominant_joint(), v.position())));
+    }
+    let mut base = build_virtual_mesh(&merged, config);
+    base.bones = Some(PlantBones { bones: plant.to_vec(), bounds: BoneBounds::fit(&points) });
     offset_errors(&mut base, transition);
     (base, transition)
 }

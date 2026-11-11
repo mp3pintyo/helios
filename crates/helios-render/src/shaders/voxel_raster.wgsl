@@ -16,6 +16,7 @@
 #include "geometry.wgsl"
 #include "wind.wgsl"
 #include "voxel.wgsl"
+#include "plant_wind.wgsl"
 
 override PASS: u32 = 0u;
 override LATE: bool = false;
@@ -30,6 +31,8 @@ override LATE: bool = false;
 // [0, w*h): depth bits, [w*h, 2*w*h): payload.
 @group(0) @binding(7) var<storage, read_write> sw_target: array<atomic<u32>>;
 @group(0) @binding(65) var<uniform> wind: Wind;
+@group(0) @binding(170) var plant_bones: texture_2d<f32>;
+@group(0) @binding(171) var plant_sim: texture_2d<f32>;
 
 // Pixels a voxel may cover (it is about a pixel at the LOD threshold; this guards views with a
 // much coarser threshold).
@@ -37,6 +40,8 @@ const MAX_VOXEL_PIXELS: u32 = 1024u;
 
 var<workgroup> brick_first: array<u32, 128>;
 var<workgroup> brick_words: array<vec4<u32>, 128>;
+// World displacement of each brick of a plant with bones.
+var<workgroup> brick_offsets: array<vec3<f32>, 128>;
 
 // Raster position (pixels, y down) of a clip-space point, homogeneous: linear in the clip
 // coordinates, so it maps the half-voxel axes too.
@@ -77,15 +82,23 @@ fn rasterize(
         return; // a triangle cluster (uniform: one cluster per workgroup)
     }
     let v = voxel_cluster(cluster);
+    let instance = instances[entry.x];
+    let strength = wind_strength(instance);
+    // A plant's bricks follow their bones rigidly (plant_wind.wgsl): one pose per brick.
+    let planted = plant_animated(instance, strength);
     if lid < v.bricks {
         let brick = voxel_brick(v, lid);
         brick_words[lid] = brick;
         brick_first[lid] = voxel_brick_first(brick);
+        brick_offsets[lid] = vec3<f32>(0.0);
+        let bone = plant_voxel_bone(v.header, v.attributes, lid);
+        if planted && bone != 0xffffffffu {
+            let a = plant_air(instance, strength, wind_origin(instance), wind.time.x);
+            brick_offsets[lid] = plant_brick_offset(instance, a, bone, v.origin + ((voxel_cell(brick, 0u) + 2.0) * v.size), instance.world);
+        }
     }
     workgroupBarrier();
 
-    let instance = instances[entry.x];
-    let strength = wind_strength(instance);
     let size = view.viewport.xy;
     let half = v.size * 0.5;
     let ax = clip_to_raster(view.view_proj * vec4<f32>(instance.world[0].xyz * half, 0.0), size);
@@ -100,7 +113,11 @@ fn rasterize(
         let b = brick_of(i, v.bricks);
         let brick = brick_words[b];
         let object = v.origin + ((voxel_cell(brick, voxel_nth_bit(brick.xy, i - brick_first[b])) + 0.5) * v.size);
-        let world = wind_world_position(instance, strength, object, 1.0); // voxels: no plant data
+        // Voxels carry no plant data (weight 1); a plant's move with their brick's bone.
+        var world = wind_world_position(instance, strength, object, 1.0);
+        if planted {
+            world = (instance.world * vec4<f32>(object, 1.0)).xyz + brick_offsets[b];
+        }
         let center = clip_to_raster(view.view_proj * vec4<f32>(world, 1.0), size);
         if !voxel_may_cover(center, ax, ay, az, size) {
             continue;

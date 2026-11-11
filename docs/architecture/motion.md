@@ -34,6 +34,55 @@ Part of the `helios-render` GPU pipeline; the pipeline diagram and the index of 
   terms reached them), while a frond tip resting near the ground still sways. The weight only reduces the offset, so
   every bound above holds unchanged; voxels and tessellated surfaces move with weight 1, meshes without plant data
   (imports) too.
+  **Dynamic wind** (round 8, `plant_wind.rs`, `plant_wind.wgsl`, `plant_sim.rs`, `plant_sim.wgsl`,
+  `helios_geometry::plant_bones`; UE 5.9's Dynamic Wind for Nanite foliage, [`dynamic-wind.md`](../round8/dynamic-wind.md)):
+  the procedural plants have **bones**. The generators emit one per trunk, branch (two levels; deeper twigs ride on
+  their ancestor), leaf, grass blade, fern frond and leaflet, conifer branch and needle — pivot, axis, length, parent
+  and attachment, a *class* (bend: stems, blades, fronds; sway: branches; flutter: leaves), an amplitude and a
+  frequency from the bone's mechanics (a cantilever loaded by the wind: stiffness ∝ r⁴/L³, mass and drag area from its
+  wood and the leaves it carries; thin bare twigs whip fast, heavy leafy limbs swing slow and far) — and bind every
+  vertex rigidly to its bone through the skin attribute (the cluster encoding, simplification and LOD already carry it
+  crack-free); the per-mesh table travels in the `.hvm` (**version 6**; versions 4 and 5 still load). In the
+  **parametric mode** (UE's `Mode 0`, stateless) every pass that positions geometry — the four rasterisers, the
+  G-buffer resolve, the voxel rasterisers and resolve — evaluates in closed form each bone's rotation vector (the three
+  procedural layers' time functions: lean with the gust and sway at the plant's frequency, bob up to 2.3× faster,
+  flutter and twist) and walks the chain: the vertex's own bone bends as a **circular arc** (its frame at distance s
+  turns by θ·s/L, so blades and branches curve and nothing stretches), every parent's frame at the attachment carries
+  it, down to the root the ground holds (so the wind weight is not used: a bone's pivot holds what is rooted). Leaves turn about their stems, normals turn with their bone, motion vectors
+  use the previous pose. The bone tables live in one `Rgba32Float` texture (binding **150**; per bone three texels; per
+  assembly part its own table — its needles, then the chain it hangs from, in the part's space; per (mesh, material)
+  a header with the material's response); `GpuInstance` grew to 256 bytes (`plant`: header, table, simulation slot).
+  **Bounds**: the culling, page expansion and shadow invalidation code is unchanged — an instance with bones carries,
+  in `wind`, the procedural layers whose `wind_reach` / `wind_speed` bound its bones' motion (`BoneBounds`, fitted per
+  mesh at bake time: displacement of each class over the chain, rigid frames being isometries, spilled only into
+  faster layers so the speed bound holds too; a CPU mirror of the shader checks displacement and speed for every
+  vertex of grass, fern, tree, bush and conifer at strengths up to 2). **Distance LOD**: leaf flutter fades out where a
+  leaf tip's motion would cover under a pixel (~20 m), branch sway where a branch of 0.4 × the plant's radius would
+  (~35 m for an 18 m tree); a faded level is exactly the identity, so it is skipped (only its parent link is read) — every pass and
+  view decides alike (camera distance). The G-buffer resolve evaluates the parents' frames once per triangle when its
+  corners share a bone, and the previous pose once per pixel; in shadow views a plant's clusters take the software
+  page rasteriser more readily (2.5× the triangle size; the hardware path poses every corner of every (cluster, page)
+  draw, the software path each vertex once). **Voxel LODs** carry a bone per brick (the branch most of its leaves hang
+  from, `voxel_bone`; a flag in the cluster header and 16 bits a brick after the voxels): a brick moves rigidly with its
+  centre's pose, so far voxels follow the branches the triangles they replace follow (leaf flutter, far below a voxel,
+  is dropped). **Assembly parts** (conifer needle sprays, broadleaf leaf sprays) hang from their plant bone; the
+  assembly base's vertices follow it too. **Simulated tier** (UE's promoted instances): small plants (≤ 512 bones:
+  grass, ferns, bushes) that a force reaches — the **push capsule** following the camera (2.2 m down from it, 0.45 m
+  thick: walking through ferns parts them) or a **gust burst** ring (`Numpad1`: a ring travelling out at 7 m/s from
+  5 m ahead of the camera for 3.5 s) — are promoted to one of 256 slots until 2 s after the force last reached them.
+  A compute pass (`plant sim`) keeps a spring per non-leaf bone: its *deviation* from the parametric rotation, driven
+  to the contact or gust target and otherwise back to 0 with a little overshoot (damping 0.3, four sub-steps); the
+  rasterisers add it (a second texture, binding **151**, two texels a bone: this frame's and the previous one). An
+  undisturbed promoted plant moves exactly as the parametric one, so promotion and demotion never pop; the deviation
+  and its rate stay within 3× the bone's parametric bound and speed bound, and a promoted instance's layers are scaled
+  by 4, so culling and shadow invalidation stay valid. As in UE, each bone is a spring of its own (no constraint
+  solver), leaves keep their parametric flutter. Settings: `RenderSettings::wind_bones` (`--no-wind-bones`, editor
+  *Dynamic wind (plant bones)*; off: the same plants move by the procedural wind) and `wind_simulation`
+  (`--no-wind-sim`, editor *Dynamic wind simulation*). Cost (forest at high detail, 1600×900, shared GPU, minima of
+  interleaved runs): default view 8.45 → 9.40 ms against round 8 wave 2 (8.91 ms with the bones off: the bone indices
+  in the clusters, the larger instance records), fern close-up 6.60 → 7.58 ms, grass close-up 8.48 → 9.41 ms — ~0.5–0.7 ms for the per-vertex chains in
+  the rasterisers, the resolve and the shadow pages; ~30 % more (cluster, page) shadow draws from the looser bounds;
+  the `plant sim` pass ~0.01 ms; scenes without plants unchanged. Bone tables 2.2 MiB in the forest.
 * **Skeletal meshes** (`skin.rs`, `skinning.wgsl`, `skin_palette.wgsl`; UE 5.5's Nanite skinned meshes). A
   `SkinHandle` is a joint palette (`Scene::add_skin`, `Scene::set_skin_pose` every frame,
   `Scene::set_instance_skin`); each matrix maps a rest vertex to its posed position in the instance's object space.

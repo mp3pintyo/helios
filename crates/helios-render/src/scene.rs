@@ -680,6 +680,9 @@ impl Default for Water {
 pub struct AssemblyPart {
     pub mesh: MeshHandle,
     pub transform: Mat4,
+    /// For a plant (an assembly whose base has plant bones): the bone the part hangs from
+    /// (`plant_wind.rs`); the part's own bones (a spray's leaves) hang from it.
+    pub bone: Option<u16>,
 }
 
 #[derive(Default)]

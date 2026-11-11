@@ -407,6 +407,14 @@ pub struct RenderSettings {
     pub lumen_light_sampling: bool,
     /// Rivers run their shallow-water simulation (`river.rs`); off, they hold still.
     pub river_simulation: bool,
+    /// Dynamic wind (`plant_wind.rs`, UE 5.9's Dynamic Wind): plants with bones bend them —
+    /// blades and branches curve, leaves turn about their stems, normals follow. Off: the same
+    /// plants move by the procedural wind (`wind.wgsl`).
+    pub wind_bones: bool,
+    /// The dynamic wind's simulated tier (`plant_sim.rs`): the small plants nearest the camera
+    /// get spring states, pushed by a capsule following the camera and by gust bursts
+    /// ([`Renderer::wind_gust`]).
+    pub wind_simulation: bool,
 }
 
 impl Default for RenderSettings {
@@ -479,6 +487,8 @@ impl Default for RenderSettings {
             lumen_lite_adaptive_rate: true,
             lumen_light_sampling: true,
             river_simulation: true,
+            wind_bones: true,
+            wind_simulation: true,
         }
     }
 }
@@ -609,6 +619,12 @@ pub struct Renderer {
 }
 
 impl Renderer {
+    /// A gust burst for the dynamic wind's simulation (`plant_sim.rs`): a ring travelling out
+    /// from `center` (world) bends the plants it passes, which are promoted to simulation slots.
+    pub fn wind_gust(&mut self, center: glam::Vec3) {
+        self.scene.plant_sim.gust(center, self.time);
+    }
+
     pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, output_format: wgpu::TextureFormat, width: u32, height: u32) -> Self {
         Self::with_config(device, queue, output_format, width, height, RendererConfig::default())
     }
@@ -1040,6 +1056,8 @@ impl Renderer {
         }
         let changes = &self.motion.changes;
         self.scene.tessellation_enabled = self.settings.tessellation;
+        self.scene.wind_bones_enabled = self.settings.wind_bones;
+        self.scene.plant_sim.enabled = self.settings.wind_simulation && self.settings.wind_bones;
         let sync = self.scene.sync(&self.device, &self.queue, scene, changes, self.motion.previous(), frame);
         if sync.geometry_changed {
             self.history_valid = false;
@@ -1222,6 +1240,8 @@ impl Renderer {
         // Virtual geometry: assemblies the main view needs as parts get part instances (for
         // every view), then two-pass occlusion culling into the visibility buffer.
         self.scene.assemblies.record(&mut rec, &self.main_view, &self.scene.instances);
+        // Promoted plants' springs (the dynamic wind's simulated tier) before anything draws them.
+        self.scene.plant_sim.record(&mut rec, &self.scene.instances, &self.scene.wind, &self.scene.plants.view);
         let (culling, view, gpu_scene, targets) = (&self.culling, &self.main_view, &self.scene, &self.targets);
         if self.settings.occlusion_culling {
             culling.cull(&mut rec, view, gpu_scene, CullMode::Early, Some(&targets.hzb));
@@ -1583,6 +1603,7 @@ impl Renderer {
         let pixel_angle = 1.0 / camera.lod_scale(output_h);
         let wind = WindUniform::new(&scene.wind, if s.wind { 1.0 } else { 0.0 }, self.time, self.time - delta_time, camera.position, pixel_angle);
         self.scene.write_wind(&self.queue, &wind);
+        self.scene.update_plant_sim(&self.queue, scene, camera.position, self.time, delta_time);
         // Starting or stopping the wind moves vegetation between the shadow pages' static and
         // dynamic layers: the VSM re-renders the pages under it (per instance).
         // Animated skeletal meshes are dynamic casters too (see skin.rs).
