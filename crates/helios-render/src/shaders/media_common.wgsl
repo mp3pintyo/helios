@@ -15,6 +15,7 @@
 #include "lights.wgsl"
 #include "clouds_common.wgsl"
 #include "fog_common.wgsl"
+#include "glass_shadow.wgsl"
 
 @group(0) @binding(0) var<uniform> frame: Frame;
 @group(0) @binding(1) var<uniform> fog: Fog;
@@ -79,6 +80,11 @@ fn media_sun_visibility(p: vec3<f32>) -> f32 {
         }
     }
     return visibility;
+}
+
+// The sun at `p` through the glass panes nearer the sun, per channel (one tap of the glass map).
+fn media_sun_glass(p: vec3<f32>) -> vec3<f32> {
+    return glass_transmission(p, lut_sampler);
 }
 
 // Average radiance around `p` from Lumen's radiance cache (the sky where it has none), split

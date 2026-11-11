@@ -94,3 +94,49 @@ fn fs_front(@builtin(position) position: vec4<f32>) -> FrontOutput {
     }
     return out;
 }
+
+// ---- Adaptive voxel-based OIT (avboit.rs) -----------------------------------------------------
+// The targets hold, per bucket, the weighted premultiplied colour of every particle and
+// order-independent surface (rgb; alpha counts particle fragments) and the product of their
+// transmittances (rgb coloured; alpha the particles' own, for the reactive mask); the volume part
+// is already weighted by the surfaces in front of each step. Two draws in one pass: the
+// background times the transmittances (`Zero, Src` blending), then the light added (`One, One`).
+
+fn avboit_volume(pixel: vec2<i32>, source: texture_2d<f32>) -> vec4<f32> {
+    return volume_at(pixel, source);
+}
+
+@fragment
+fn fs_avboit_modulate(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+    let pixel = vec2<i32>(position.xy);
+    let t = textureLoad(reveal, pixel, 0).rgb * avboit_volume(pixel, volume).a;
+    // Debug view 21: `fs_avboit_front` draws the whole pixel.
+    return select(vec4<f32>(t, 1.0), vec4<f32>(0.0), frame.debug_view == DEBUG_VOLUMES);
+}
+
+@fragment
+fn fs_avboit_back(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+    let pixel = vec2<i32>(position.xy);
+    return vec4<f32>(textureLoad(accum, pixel, 0).rgb + avboit_volume(pixel, volume).rgb, 0.0);
+}
+
+@fragment
+fn fs_avboit_front(@builtin(position) position: vec4<f32>) -> FrontOutput {
+    let pixel = vec2<i32>(position.xy);
+    let a = textureLoad(accum, pixel, 0);
+    let v = avboit_volume(pixel, volume);
+    var out: FrontOutput;
+    out.color = vec4<f32>(a.rgb + v.rgb, 0.0);
+    let coverage = 1.0 - textureLoad(reveal, pixel, 0).a;
+    let other_coverage = 1.0 - textureLoad(other_reveal, pixel, 0).a;
+    let opacity = 1.0 - v.a * avboit_volume(pixel, other_volume).a;
+    out.reactive = vec4<f32>(0.0, 0.0, saturate(max(max(coverage, other_coverage), opacity * VOLUME_REACTIVITY)), 0.0);
+    if frame.debug_view == DEBUG_VOLUMES {
+        // Overdraw (alpha counts particle fragments) and march steps over a grey albedo.
+        let albedo = textureLoad(gbuffer_albedo, pixel, 0).rgb;
+        var color = vec3<f32>(luminance(albedo * albedo) * 0.35) + heat(a.a / 24.0);
+        color += vec3<f32>(0.0, 0.6, 1.0) * saturate(v.r / 96.0) + vec3<f32>(0.0, 0.4, 0.0) * saturate(v.r / 192.0 - 0.5);
+        out.color = vec4<f32>(color, 0.0);
+    }
+    return out;
+}

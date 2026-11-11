@@ -40,6 +40,38 @@ Part of the `helios-render` GPU pipeline; the pipeline diagram and the index of 
   surfaces under water reflect the water around them rather than the sky, and seen from under water they are lit
   and fogged through the water like the opaque scene. The pass writes the surfaces' own motion vectors for TSR.
   `RenderSettings::translucency` / `U` toggles it.
+* **Adaptive voxel-based OIT** (round 8; `avboit.rs`, `avboit*.wgsl`, `oit.rs`; UE 5.9's experimental
+  `r.OIT.Method=1`). The default where the device samples 19 textures per shader stage; `4` /
+  `RenderSettings::avboit` / `--wboit` / `?oit=wboit` / the editor's *Voxel-based OIT* switch back to the round-7 path
+  (depth peeling + weighted blended particles). A camera-aligned grid of **columns** (one per 4² internal pixels up to
+  2048 wide, 8² above) with **16 cells** each, spaced logarithmically between the nearest and farthest translucent
+  fragment of the column's 3×3 neighbourhood (*adaptive*: the cells sit where translucency is; neighbours space them
+  alike). A low-resolution draw of every order-independent surface and particle first records the bounds, then adds
+  each fragment's optical depth `−ln t` per colour channel to its cell with 32-bit atomics on 16-bit fixed-point
+  fields (no rasteriser-ordered views in WebGPU; a sum is order independent); the visible volumes integrate their
+  extinction over the cells (4 samples per box and cell, plus what lies in front of the near bound; volumes never
+  widen the bounds — a lake's mist would spread the cells over metres). A resolve turns each column into the
+  transmittance in front of each cell (rgba16f 3D texture, plus the surfaces-only part in rgba8 for the volume
+  march). Full-resolution fragments then **add** their own light weighted by the transmittance in front of them
+  (bilinear between four columns; within a cell the medium counts as spread evenly, the fragment's own share taken
+  out — continuous in depth, and fragments sharing a cell are ordered by their position in it) and **multiply** the
+  background's transmittance by their own (coloured). The volume march weights each step by the surfaces and
+  particles in front of it (one column per pixel, picked at random with the bilinear weights; its temporal resolve
+  averages the pick). So sparks inside smoke are dimmed by the smoke in front of them, smoke behind a tinted panel is
+  tinted, particles between two panes are composited between them, and crossing panels order per pixel without
+  peeling. **The material contract** (as UE's): an order-independent surface contributes only its own radiance and
+  its transmittance, never a read of the scene colour behind it (the composite applies the background once).
+  Therefore **refracting surfaces** — water, stained or frosted glass, glass with bump — keep the depth-peeled pass,
+  but only their *nearest layer per pixel*: the nearest refracting depth splits the effects into a back and a front
+  part (as before), the back part (order-independent surfaces, refracting glass behind the nearest layer as surface
+  light + transmittance, particles, the volume) is composited before the refracting layer, which refracts and blurs
+  it, the front part after. Where water overlaps another refracting surface (water can't follow the contract: its
+  radiance holds the refracted bed), the refracting surfaces are peeled as before. Non-refracting surfaces in front
+  write their motion vectors; TSR's reactive mask comes from the particles' own transmittance (alpha of the
+  transmittance target). Cost (1600×900, RTX 3090, minima of 3 interleaved runs, all translucency + OIT passes): the
+  lake's crossing panels 1.25 → 0.92 ms (no peeling), the cathedral's aisle screens 0.82 → 0.68 ms, views with only
+  particles and volumes +0.05–0.10 ms (the grid 0.02–0.07 ms, the composite's second draw, the march's grid taps);
+  the grid takes 36 MiB at 1600×900. Details and limits: `docs/round8/translucency.md`.
 * **Coloured light through glass** (`glass_shadow.rs`, `glass_shadow.wgsl`; UE5's translucent shadows). Panes that
   let the sun through (not shadow casters) would light the interior white; instead the visible `Glass` instances are
   drawn from the sun into a map of their own — an orthographic view along the sunlight fitted to their boxes, 256²
@@ -49,7 +81,18 @@ Part of the `helios-render` GPU pipeline; the pipeline diagram and the index of 
   distance behind the pane, ~10 cm under a pane 10 m up), the volumetric fog (coloured shafts) and Lumen's card
   lighting (coloured bounce). Drawn only when the sun, the panes or the scene change (0.034 ms a frame with an
   animated sun); the lighting pays ~0.05 ms at 1440p. `RenderSettings::glass_shadows` / `End` /
-  `--no-glass-shadows` toggles it (`docs/round7/glass-shadows.md`).
+  `--no-glass-shadows` toggles it (`docs/round7/glass-shadows.md`). Since round 8 the translucent surfaces (glass
+  behind glass, blended panels) and the particles' per-particle lighting take the sun through the map too.
+* **Local lights through glass** (round 8; `glass_light.rs`, `glass_light.wgsl`). The 8 local lights nearest the
+  camera whose range reaches a glass pane get a cube map of their own (6 × 256², rgba16f): the panes within range
+  drawn from the light (`fs_glass_light`), per texel the transmittance of the pane nearest the light and its distance.
+  A receiver farther from the light than its texel's pane (5 cm bias) gets the light in the pane's colour: the
+  deferred lighting's clustered loop and MegaLights' shading call `glass_light_transmission(light, position, p)` per
+  light (one bilinear tap; a uniform maps light index → layer). A map is redrawn only when its light moves, the
+  panes or the scene change (the swinging chandeliers: every frame, 0.06 ms). Lighting pays 0.06–0.10 ms at night
+  (33 / 300 candles), MegaLights' shading 0.02 ms. Same switch as the sun's (`End`). 24 MiB once
+  a light near glass exists. Lights beyond the eight, the volumetric fog, particles and Lumen's surface cache see
+  glass as clear for local lights.
 * **Water bodies** (`water.rs`, `water.wgsl`, `shore.wgsl`; UE's Water system for lakes). Every `Water` instance is a
   flat *water body* (its world rectangle and level, from its bounds); one uniform carries them with the medium.
   **Lake bed and shore**: the G-buffer resolve turns the landscape into sediment where a body covers it — sand and

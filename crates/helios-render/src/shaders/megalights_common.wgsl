@@ -7,6 +7,8 @@
 // (resampled from the froxel's light list), each with the unbiased contribution weight of its pick,
 // then one shadow ray each. Every pixel of the block shades with all of the block's samples.
 
+#include "glass_light.wgsl"
+
 const ML_SAMPLES: u32 = 4u;
 // Words per block: per sample the light (low 16 bits; ML_NO_LIGHT: none) and its visibility
 // (unorm16, high 16 bits, written by the trace), then per sample the contribution weight (f32
@@ -135,8 +137,10 @@ fn ml_shade_samples(pixel: vec2<u32>, s: MlSurface) -> MlLighting {
         }
         let weight = bitcast<f32>(samples[base + ML_WEIGHT + k]) * visibility / f32(ML_SAMPLES);
         let c = ml_lighting(s, lights[light]);
-        out.diffuse += c.diffuse * weight;
-        out.specular += c.specular * weight;
+        // Through glass between the light and the pixel, in the panes' colour (glass_light.wgsl).
+        let glass = glass_light_transmission(light, lights[light].position_range.xyz, s.world);
+        out.diffuse += c.diffuse * weight * glass;
+        out.specular += c.specular * weight * glass;
     }
     out.specular /= ml_specular_albedo(s);
     return out;

@@ -43,6 +43,7 @@
 
 mod alpha_mask;
 mod assembly;
+mod avboit;
 mod camera;
 mod cards;
 mod clouds;
@@ -53,6 +54,7 @@ mod context;
 mod dynamic_debug;
 mod vsm_overview;
 mod effects;
+mod glass_light;
 mod glass_shadow;
 mod gpu_scene;
 mod gpu_types;

@@ -24,6 +24,9 @@
 #include "noise.wgsl"
 #include "blackbody.wgsl"
 #include "media_common.wgsl"
+#include "avboit_common.wgsl"
+#include "avboit_read.wgsl"
+#include "avboit_write.wgsl"
 
 const MAX_EMITTERS: u32 = 16u;
 const SHAPE_SPHERE: f32 = 0.0;
@@ -274,7 +277,8 @@ fn light(@builtin(global_invocation_id) gid: vec3<u32>) {
     if em.emission.w > 0.5 {
         let g = em.look.x;
         let sun = normalize(frame.sun_direction.xyz);
-        let sun_light = media_sun_light(p.position) * media_sun_visibility(p.position) * henyey_greenstein(dot(sun, view_dir), g);
+        // Through glass panes nearer the sun, in their colour.
+        let sun_light = media_sun_light(p.position) * media_sun_visibility(p.position) * media_sun_glass(p.position) * henyey_greenstein(dot(sun, view_dir), g);
         let nearby = media_clustered_lights(p.position, uv, clip.w, view_dir, g, size * size);
         radiance = c.rgb * (sun_light + media_ambient(p.position, 1.0) + nearby);
     }
@@ -355,12 +359,12 @@ fn oit_weight(alpha: f32, linear_depth: f32) -> f32 {
     return alpha * clamp(4.0 / (1e-3 + d * d * d), 0.05, 40.0);
 }
 
-@fragment
-fn fs_particle(in: ParticleVertex) -> OitOutput {
-    let pixel = vec2<i32>(in.position.xy);
+// The sprite's coverage at a fragment (`pixel`: the internal pixel it covers, for the opaque
+// depth): x opacity, y the sprite's shape factor; opacity 0 where it is hidden or negligible.
+fn sprite_coverage(in: ParticleVertex, pixel: vec2<i32>) -> vec2<f32> {
     let scene = textureLoad(scene_depth, pixel, 0).r;
     if in.position.z < scene {
-        discard;
+        return vec2<f32>(0.0);
     }
     let r2 = dot(in.corner, in.corner);
     var shape = exp(-4.0 * r2) * (1.0 - smoothstep(0.7, 1.0, r2));
@@ -375,8 +379,21 @@ fn fs_particle(in: ParticleVertex) -> OitOutput {
     }
     let alpha = in.color.a * shape;
     if alpha < 1.0 / 512.0 {
+        return vec2<f32>(0.0);
+    }
+    return vec2<f32>(alpha, shape);
+}
+
+@fragment
+fn fs_particle(in: ParticleVertex) -> OitOutput {
+    let pixel = vec2<i32>(in.position.xy);
+    let coverage = sprite_coverage(in, pixel);
+    if coverage.x <= 0.0 {
         discard;
     }
+    let alpha = coverage.x;
+    let shape = coverage.y;
+    let linear_depth = frame.camera_position.w / in.position.z;
     var out: OitOutput;
     out.front_accum = vec4<f32>(0.0);
     out.front_reveal = vec4<f32>(0.0);
@@ -397,4 +414,66 @@ fn fs_particle(in: ParticleVertex) -> OitOutput {
         out.back_reveal = reveal;
     }
     return out;
+}
+
+// ---- Adaptive voxel-based OIT (avboit.rs) -----------------------------------------------------
+
+// Full resolution: the premultiplied colour weighted by the transmittance in front of the
+// fragment (grid), added; the background's transmittance multiplied by 1 - opacity (alpha: the
+// particles' own share, for TSR's reactive mask). Accumulated alpha counts fragments (debug
+// view 21). Behind the nearest refracting surface, only what lies between it and the fragment
+// weighs (`avboit_weight`).
+@fragment
+fn fs_particle_avboit(in: ParticleVertex) -> OitOutput {
+    let pixel = vec2<i32>(in.position.xy);
+    let coverage = sprite_coverage(in, pixel);
+    if coverage.x <= 0.0 {
+        discard;
+    }
+    let alpha = coverage.x;
+    let linear_depth = frame.camera_position.w / in.position.z;
+    var out: OitOutput;
+    out.front_accum = vec4<f32>(0.0);
+    out.front_reveal = vec4<f32>(1.0);
+    out.back_accum = vec4<f32>(0.0);
+    out.back_reveal = vec4<f32>(1.0);
+    let split = textureLoad(translucent_depth, pixel, 0).r;
+    let front = in.position.z > split;
+    let split_depth = select(frame.camera_position.w / max(split, 1e-9), 0.0, front);
+    let w = avboit_weight(in.position.xy, linear_depth, vec3<f32>(1.0 - alpha), split_depth);
+    var accum = vec4<f32>(in.color.rgb * coverage.y * w, 1.0);
+    if frame.debug_view == DEBUG_VOLUMES {
+        accum = vec4<f32>(0.0, 0.0, 0.0, 1.0);
+    }
+    let transmittance = vec4<f32>(1.0 - alpha);
+    if front {
+        out.front_accum = accum;
+        out.front_reveal = transmittance;
+    } else {
+        out.back_accum = accum;
+        out.back_reveal = transmittance;
+    }
+    return out;
+}
+
+// Low resolution, one fragment per grid column (the column's centre pixel tests the opaque
+// depth): widen the column's bounds.
+@fragment
+fn fs_particle_bounds(in: ParticleVertex) {
+    let column = vec2<u32>(in.position.xy);
+    let pixel = vec2<i32>(column * avboit.grid.w + avboit.grid.w / 2u);
+    if sprite_coverage(in, pixel).x > 0.0 {
+        avboit_extend(avboit_column_index(column), frame.camera_position.w / in.position.z);
+    }
+}
+
+// Low resolution: add the sprite's optical depth to its cell.
+@fragment
+fn fs_particle_inject(in: ParticleVertex) {
+    let column = vec2<u32>(in.position.xy);
+    let pixel = vec2<i32>(column * avboit.grid.w + avboit.grid.w / 2u);
+    let alpha = sprite_coverage(in, pixel).x;
+    if alpha > 0.0 {
+        avboit_add(avboit_column_index(column), frame.camera_position.w / in.position.z, vec3<f32>(1.0 - alpha));
+    }
 }

@@ -38,6 +38,19 @@
 //! * **Motion vectors.** TSR would otherwise reproject translucent pixels with the motion of the
 //!   opaque surface behind them; the pass writes the surface's own motion where it is mostly
 //!   opaque (refracting surfaces, or coverage ≥ 0.5).
+//! * **Adaptive voxel-based OIT** (`avboit.rs`; `RenderSettings::avboit`). Surfaces that don't
+//!   read the background — glass without texture, bump or blur ([`Candidate::refracts`] false)
+//!   and blended surfaces — are composited order-independently with the particles and the
+//!   volumes (`fs_oit_front` / `fs_oit_back`, the effects' targets), so sparks between two
+//!   panes, smoke behind a panel and intersecting panels order correctly. Refracting surfaces
+//!   (water, stained or frosted glass) keep this pass, but only their *nearest* layer per pixel
+//!   (the effects' nearest refracting depth): refracting glass behind it joins the
+//!   order-independent composite as surface light + transmittance (its blur and refraction are
+//!   seen through the nearest layer's anyway), which the nearest layer then refracts. Water
+//!   cannot follow the AVBOIT material contract (its radiance holds the refracted bed), so where
+//!   water overlaps another refracting surface the refracting surfaces are depth-peeled as
+//!   before. No peeling otherwise: one depth-only draw (the nearest refracting depth) and one
+//!   shading pass replace up to three of each.
 //! * **Underwater.** When the camera is below a water body's surface ([`crate::water`]), a
 //!   full-screen draw first fogs the opaque scene with the water's absorption and scattering and
 //!   adds caustics to the bed; water surfaces are drawn two-sided, and seen from below they show
@@ -53,6 +66,7 @@ use crate::camera::frustum_planes;
 use crate::glass_shadow::{GlassShadow, PaneDraw, PaneInputs};
 use crate::gpu_scene::GpuScene;
 use crate::motion::SceneChanges;
+use crate::oit::Bucket;
 use crate::passes::shading::LightingInputs;
 use crate::profiler::Recorder;
 use crate::scene::{MaterialKind, Scene};
@@ -193,6 +207,19 @@ struct Candidate {
     aabb: Aabb,
     /// The instance covers any pixel at most once.
     single_layer: bool,
+    /// Its shading reads the background (refraction, blurred transmission, water's bed): it
+    /// cannot be composited order-independently (the AVBOIT material contract, `avboit.rs`).
+    refracts: bool,
+}
+
+/// Whether a material's shading reads the scene behind it: water, and glass whose texture,
+/// bump or roughness bends or blurs the view (`shade_glass`: blur from roughness 1/16 on).
+fn refracts(material: &crate::scene::Material) -> bool {
+    match material.kind {
+        MaterialKind::Water => true,
+        MaterialKind::Glass => material.texture.is_some() || material.roughness > 1.0 / 16.0 || material.detail_strength > 0.0,
+        _ => false,
+    }
 }
 
 impl Candidate {
@@ -216,6 +243,7 @@ impl Candidate {
                 Shape::Convex => shading != Shading::Water,
                 Shape::Concave => false,
             },
+            refracts: scene.materials.get(instance.material.0 as usize).is_some_and(refracts),
         }
     }
 }
@@ -408,6 +436,14 @@ const NO_LAYER: i32 = -1;
 /// Uniform offset alignment (WebGPU's default `minUniformBufferOffsetAlignment`).
 const LAYER_RANGE_STRIDE: u64 = 256;
 
+/// AVBOIT's fixed ranges (slots after the peeling passes'), with the nearest refracting depth as
+/// layer 0: the fragments at it or in front of it (the nearest refracting layer; the
+/// order-independent surfaces in front of it), and those behind it.
+const NEAREST_SLOT: usize = MAX_LAYERS;
+const BEHIND_NEAREST_SLOT: usize = MAX_LAYERS + 1;
+const NEAREST: LayerRange = LayerRange { far: 0, near: NO_LAYER, behind: NO_LAYER, pad: 0 };
+const BEHIND_NEAREST: LayerRange = LayerRange { far: NO_LAYER, near: 0, behind: NO_LAYER, pad: 0 };
+
 /// The shading passes' ranges with `peel_count` peeled layers, in drawing order: everything
 /// behind the peeled layers, then each layer back to front.
 fn layer_ranges(peel_count: usize) -> Vec<LayerRange> {
@@ -460,6 +496,25 @@ pub struct Translucency {
     glass_shadow: GlassShadow,
     /// A glass pane moved since the glass shadow was last updated.
     glass_moved: bool,
+    /// The glass panes seen from local lights near them (`glass_light.rs`).
+    glass_lights: crate::glass_light::GlassLights,
+    /// Adaptive voxel-based OIT this frame: `draws` holds the refracting surfaces only.
+    avboit: bool,
+    /// AVBOIT: the refracting surfaces composite their nearest layer only (no water overlaps
+    /// another refracting surface); refracting glass behind it is order independent.
+    nearest_only: bool,
+    /// AVBOIT draws, back to front: the order-independent surfaces (in front of and behind the
+    /// nearest refracting layer) and the refracting glass behind that layer.
+    oit_draws: Vec<usize>,
+    behind_nearest: Vec<usize>,
+    oit_layout: wgpu::BindGroupLayout,
+    /// By [glass, blend] and [front, back] bucket.
+    oit_pipelines: [[Lazy<wgpu::RenderPipeline>; 2]; 2],
+    grid_layout: wgpu::BindGroupLayout,
+    /// The low-resolution grid draws: bounds [order-independent, behind the nearest layer],
+    /// transmittance [glass, blend, glass behind the nearest layer].
+    grid_bounds: [Lazy<wgpu::RenderPipeline>; 2],
+    grid_transmittance: [Lazy<wgpu::RenderPipeline>; 3],
 }
 
 impl Translucency {
@@ -487,7 +542,34 @@ impl Translucency {
             ShaderStages::COMPUTE,
             &[(0, bind::texture(true)), (2, bind::sampler()), (3, bind::storage_texture(HDR_FORMAT))],
         );
+        let layer_ranges = uniform_buffer(device, "translucency layer ranges", LAYER_RANGE_STRIDE * (MAX_LAYERS as u64 + 2));
+        queue.write_buffer(&layer_ranges, NEAREST_SLOT as u64 * LAYER_RANGE_STRIDE, bytemuck::bytes_of(&NEAREST));
+        queue.write_buffer(&layer_ranges, BEHIND_NEAREST_SLOT as u64 * LAYER_RANGE_STRIDE, bytemuck::bytes_of(&BEHIND_NEAREST));
+        let oit_layout = oit_layout(device);
+        let oit = |shading: Shading, bucket: Bucket| {
+            let (device, module, layout) = (device.clone(), module.clone(), oit_layout.clone());
+            Lazy::new(move || oit_pipeline(&device, &module, &layout, shading, bucket))
+        };
+        let oit_pipelines = [Shading::Glass, Shading::Blend].map(|s| [oit(s, Bucket::Front), oit(s, Bucket::Back)]);
+        let grid_layout = grid_layout(device);
+        let grid = |shading: Shading, entry: &'static str, behind: bool| {
+            let (device, module, layout) = (device.clone(), module.clone(), grid_layout.clone());
+            Lazy::new(move || grid_pipeline(&device, &module, &layout, shading, entry, behind))
+        };
         Self {
+            avboit: false,
+            nearest_only: false,
+            oit_draws: Vec::new(),
+            behind_nearest: Vec::new(),
+            oit_pipelines,
+            oit_layout,
+            grid_bounds: [grid(Shading::Glass, "fs_grid_bounds", false), grid(Shading::Glass, "fs_grid_bounds", true)],
+            grid_transmittance: [
+                grid(Shading::Glass, "fs_grid_transmittance", false),
+                grid(Shading::Blend, "fs_grid_transmittance", false),
+                grid(Shading::Glass, "fs_grid_transmittance", true),
+            ],
+            grid_layout,
             downsample: compute_pipeline(device, "translucency downsample", &bloom, "downsample", &downsample_layout, &[]),
             downsample_layout,
             water: uniform_buffer(device, "water", std::mem::size_of::<WaterUniform>() as u64),
@@ -511,9 +593,10 @@ impl Translucency {
             scene_color: None,
             peeled: None,
             unbounded: None,
-            layer_ranges: uniform_buffer(device, "translucency layer ranges", LAYER_RANGE_STRIDE * MAX_LAYERS as u64),
+            layer_ranges,
             ranges_written: None,
             glass_shadow: GlassShadow::new(device, queue, &module),
+            glass_lights: crate::glass_light::GlassLights::new(device, queue, &module),
             glass_moved: false,
         }
     }
@@ -521,6 +604,11 @@ impl Translucency {
     /// Sunlight through glass: the map the lighting, fog and Lumen read.
     pub fn glass_shadow(&self) -> &GlassShadow {
         &self.glass_shadow
+    }
+
+    /// Local lights through glass: the maps the lighting and MegaLights read.
+    pub(crate) fn glass_lights(&self) -> &crate::glass_light::GlassLights {
+        &self.glass_lights
     }
 
     /// Whether the camera was inside a water body at the last [`Translucency::update`].
@@ -535,16 +623,26 @@ impl Translucency {
 
     /// Queues the pipelines of the translucent models the scene's visible instances use for the
     /// browser's background compile.
-    pub fn prefetch(&self, scene: &Scene) {
+    pub fn prefetch(&self, scene: &Scene, avboit: bool) {
         for instance in scene.instances.iter().filter(|i| i.visible) {
             let Some(shading) = scene.materials.get(instance.material.0 as usize).and_then(|m| Shading::of(m.kind)) else { continue };
             self.pipelines[shading as usize].prefetch();
             self.peel_pipelines[shading as usize].prefetch();
+            if avboit && shading != Shading::Water {
+                let k = (shading == Shading::Blend) as usize;
+                self.oit_pipelines[k].iter().for_each(Lazy::prefetch);
+                self.grid_bounds.iter().for_each(Lazy::prefetch);
+                self.grid_transmittance[k].prefetch();
+                if shading == Shading::Glass {
+                    self.grid_transmittance[2].prefetch();
+                }
+            }
             if shading == Shading::Water {
                 self.pipelines[Shading::Underwater as usize].prefetch();
             }
             if shading == Shading::Glass {
                 self.glass_shadow.prefetch();
+                self.glass_lights.prefetch();
             }
         }
     }
@@ -567,6 +665,7 @@ impl Translucency {
         enabled: bool,
         layers: bool,
         glass_shadows: bool,
+        avboit: bool,
     ) {
         let versions = (scene.geometry_version, scene.material_version, scene.instance_version);
         if versions != self.versions || changes.structural {
@@ -575,24 +674,42 @@ impl Translucency {
         } else {
             self.move_instances(scene, changes);
         }
-        let panes = self.candidates.iter().filter(|c| c.shading == Shading::Glass).map(|c| c.aabb);
-        self.glass_shadow.update(device, queue, scene.sun.direction, panes, glass_shadows, std::mem::take(&mut self.glass_moved));
+        let panes: Vec<Aabb> = self.candidates.iter().filter(|c| c.shading == Shading::Glass).map(|c| c.aabb).collect();
+        let moved = std::mem::take(&mut self.glass_moved);
+        self.glass_shadow.update(device, queue, scene.sun.direction, panes.iter().copied(), glass_shadows, moved);
+        self.glass_lights.update(device, queue, scene.lights(), &panes, eye, versions, glass_shadows && enabled, moved);
         self.draws = if enabled { sort_back_to_front(&self.candidates, eye, &frustum_planes(view_proj)) } else { Vec::new() };
         self.camera_body = if enabled { self.water_bodies.iter().position(|b| b.contains(eye)) } else { None };
         let uniform = WaterUniform::new(&scene.water, &self.water_bodies, self.camera_body);
         queue.write_buffer(&self.water, 0, bytemuck::bytes_of(&uniform));
-        let peel_count = if layers {
+        // AVBOIT: this pass keeps the refracting surfaces, the rest is order independent.
+        self.avboit = avboit;
+        self.oit_draws.clear();
+        self.behind_nearest.clear();
+        if avboit {
+            let (refracting, independent): (Vec<usize>, Vec<usize>) = self.draws.iter().partition(|&&i| self.candidates[i].refracts);
+            self.draws = refracting;
+            // Only what reaches the screen: the order-independent passes cost a scene-colour copy.
+            self.oit_draws = independent.into_iter().filter(|&i| ScreenRect::of(&self.candidates[i], view_proj).is_some()).collect();
+        }
+        let overlap = {
             let rects: Vec<ScreenRect> = self.draws.iter().filter_map(|&i| ScreenRect::of(&self.candidates[i], view_proj)).collect();
-            max_overlap(&rects).min(MAX_LAYERS).saturating_sub(1)
-        } else {
-            0
+            max_overlap(&rects).min(MAX_LAYERS)
         };
+        // Water can't be composited order-independently: where it overlaps another refracting
+        // surface, peel them as before.
+        let water = self.draws.iter().any(|&i| self.candidates[i].shading == Shading::Water);
+        self.nearest_only = avboit && !(water && overlap > 1);
+        if self.nearest_only && overlap > 1 {
+            self.behind_nearest = self.draws.clone();
+        }
+        let peel_count = if layers && !self.nearest_only { overlap.saturating_sub(1) } else { 0 };
         if peel_count != self.peel_count {
             log::debug!("translucency: peeling {peel_count} layers");
             self.peel_count = peel_count;
         }
         self.refracting = self.draws.iter().any(|&i| self.candidates[i].shading != Shading::Blend);
-        if self.draws.is_empty() && self.camera_body.is_none() {
+        if self.draws.is_empty() && self.oit_draws.is_empty() && self.camera_body.is_none() {
             return;
         }
         if self.scene_color.as_ref().is_none_or(|c| c.size != size) {
@@ -690,7 +807,7 @@ impl Translucency {
     /// reads it: Lumen, fog, lighting).
     pub fn record_glass_shadow(&mut self, rec: &mut Recorder, frame: &wgpu::Buffer, scene: &GpuScene, textures: &TextureLibrary, samplers: &crate::passes::Samplers) {
         let (Some(vertices), Some(indices)) = (&self.vertices, &self.indices) else { return };
-        if !self.glass_shadow.active() {
+        if !self.glass_shadow.active() && !self.glass_lights.active() {
             return;
         }
         let panes: Vec<PaneDraw> = self
@@ -709,17 +826,26 @@ impl Translucency {
             indices,
         };
         self.glass_shadow.record(rec, &inputs, &panes, self.versions);
+        self.glass_lights.record(rec, &inputs, &panes);
     }
 
     /// Records the layer peeling, the scene-colour copies and the translucent draws over
     /// `targets.hdr` (after the deferred lighting, before TSR).
-    pub fn record(&self, rec: &mut Recorder, inputs: &LightingInputs, scene: &GpuScene, textures: &TextureLibrary) {
+    /// `nearest`: AVBOIT's nearest refracting depth (a one-layer array) while the effects drew
+    /// it: only that layer is composited here.
+    pub fn record(&self, rec: &mut Recorder, inputs: &LightingInputs, scene: &GpuScene, textures: &TextureLibrary, nearest: Option<&wgpu::TextureView>) {
         let Some(color) = &self.scene_color else { return };
         if self.draws.is_empty() && self.camera_body.is_none() {
             return;
         }
         let Some(unbounded) = &self.unbounded else { return };
         let t = inputs.targets;
+        if let Some(nearest) = nearest.filter(|_| self.nearest_only && !self.behind_nearest.is_empty()) {
+            // The nearest refracting layer over the order-independent composite behind it.
+            self.copy_scene_color(rec, inputs, color);
+            self.shade(rec, inputs, scene, textures, color, nearest, NEAREST_SLOT, self.camera_body.is_some());
+            return;
+        }
         let peeled = match &self.peeled {
             Some(p) if self.peel_count > 0 => p,
             _ => {
@@ -838,17 +964,154 @@ impl Translucency {
         pass: usize,
         underwater: bool,
     ) {
+        let t = inputs.targets;
+        let entries = self.shading_entries(inputs, scene, textures, color, layers, pass);
+        let group = bind_group(rec.device, "translucency", &self.layout, &entries);
+        let load = wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store };
+        let size = internal_size(t, color.size);
+        let mut pass = rec.render_pass(
+            "translucency",
+            &[
+                Some(wgpu::RenderPassColorAttachment { view: &t.hdr, depth_slice: None, resolve_target: None, ops: load }),
+                Some(wgpu::RenderPassColorAttachment { view: &t.gbuffer_motion, depth_slice: None, resolve_target: None, ops: load }),
+            ],
+            None,
+        );
+        pass.set_viewport(0.0, 0.0, size.0 as f32, size.1 as f32, 0.0, 1.0);
+        pass.set_bind_group(0, &group, &[]);
+        // Under water: the water between the camera and the opaque scene, before any surface.
+        if underwater {
+            pass.set_pipeline(&self.pipelines[Shading::Underwater as usize]);
+            pass.draw(0..3, 0..1);
+        }
+        self.draw_surfaces(&mut pass, &self.pipelines);
+    }
+
+    /// AVBOIT: shades the order-independent surfaces of one `bucket` (in front of / behind the
+    /// nearest refracting layer, `nearest` its depth as a one-layer array) into the effects' OIT
+    /// targets `(accumulation, transmittance)`, weighted by the grid. The front bucket is
+    /// recorded first and copies the opaque scene colour (the reflections' screen trace reads
+    /// it; by the material contract nothing reads it as background).
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_order_independent(
+        &self,
+        rec: &mut Recorder,
+        inputs: &LightingInputs,
+        scene: &GpuScene,
+        textures: &TextureLibrary,
+        avboit: &crate::avboit::Avboit,
+        nearest: &wgpu::TextureView,
+        (accum, transmittance): (&wgpu::TextureView, &wgpu::TextureView),
+        bucket: Bucket,
+    ) {
+        let back = bucket == Bucket::Back;
+        if !self.avboit || (self.oit_draws.is_empty() && (!back || self.behind_nearest.is_empty())) {
+            return;
+        }
+        let Some(color) = &self.scene_color else { return };
+        if !back || self.oit_draws.is_empty() {
+            self.copy_scene_color(rec, inputs, color);
+        }
+        let t = inputs.targets;
+        let slot = if back { BEHIND_NEAREST_SLOT } else { NEAREST_SLOT };
+        let mut entries = self.shading_entries(inputs, scene, textures, color, nearest, slot);
+        entries.extend(avboit.read_resources().into_iter().filter(|(b, _)| *b != 122));
+        let group = bind_group(rec.device, "translucency (avboit)", &self.oit_layout, &entries);
+        let load = wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store };
+        let target = |view| Some(wgpu::RenderPassColorAttachment { view, depth_slice: None, resolve_target: None, ops: load });
+        let mut attachments = vec![target(accum), target(transmittance)];
+        if !back {
+            attachments.push(target(&t.gbuffer_motion));
+        }
+        let size = internal_size(t, color.size);
+        let label = if back { "translucency avboit (behind refraction)" } else { "translucency avboit" };
+        let mut pass = rec.render_pass(label, &attachments, None);
+        pass.set_viewport(0.0, 0.0, size.0 as f32, size.1 as f32, 0.0, 1.0);
+        pass.set_bind_group(0, &group, &[]);
+        let (Some(vertices), Some(indices)) = (&self.vertices, &self.indices) else { return };
+        pass.set_vertex_buffer(0, vertices.slice(..));
+        pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
+        let lists: &[&Vec<usize>] = if back { &[&self.oit_draws, &self.behind_nearest] } else { &[&self.oit_draws] };
+        for &i in lists.iter().flat_map(|l| l.iter()) {
+            let c = &self.candidates[i];
+            pass.set_pipeline(&self.oit_pipelines[(c.shading == Shading::Blend) as usize][back as usize]);
+            let r = c.range;
+            pass.draw_indexed(r.first_index..r.first_index + r.index_count, r.base_vertex, c.instance..c.instance + 1);
+        }
+    }
+
+    /// AVBOIT: the order-independent surfaces (and refracting glass behind the nearest layer)
+    /// into the grid at low resolution (`stage`: bounds or transmittance). `nearest`: the
+    /// nearest refracting depth.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_avboit(
+        &self,
+        device: &wgpu::Device,
+        pass: &mut wgpu::RenderPass,
+        inputs: &LightingInputs,
+        scene: &GpuScene,
+        textures: &TextureLibrary,
+        avboit: &crate::avboit::Avboit,
+        nearest: &wgpu::TextureView,
+        stage: crate::oit::AvboitStage,
+    ) {
+        let (Some(vertices), Some(indices)) = (&self.vertices, &self.indices) else { return };
+        if !self.avboit || (self.oit_draws.is_empty() && self.behind_nearest.is_empty()) {
+            return;
+        }
+        let mut entries = vec![
+            (0, inputs.frame.as_entire_binding()),
+            (1, scene.instances.as_entire_binding()),
+            (2, scene.materials.as_entire_binding()),
+            (4, TextureView(&inputs.targets.depth)),
+            (28, TextureView(&textures.albedo)),
+            (29, TextureView(&textures.data)),
+            (30, Sampler(&inputs.samplers.material)),
+            (108, TextureView(nearest)),
+        ];
+        entries.extend(avboit.write_resources());
+        let group = bind_group(device, "translucency avboit grid", &self.grid_layout, &entries);
+        pass.set_bind_group(0, &group, &[]);
+        pass.set_vertex_buffer(0, vertices.slice(..));
+        pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
+        let bounds = stage == crate::oit::AvboitStage::Bounds;
+        for (behind, list) in [(false, &self.oit_draws), (true, &self.behind_nearest)] {
+            for &i in list {
+                let c = &self.candidates[i];
+                let pipeline = match (bounds, behind) {
+                    (true, _) => &self.grid_bounds[behind as usize],
+                    (false, true) => &self.grid_transmittance[2],
+                    (false, false) => &self.grid_transmittance[(c.shading == Shading::Blend) as usize],
+                };
+                pass.set_pipeline(pipeline);
+                let r = c.range;
+                pass.draw_indexed(r.first_index..r.first_index + r.index_count, r.base_vertex, c.instance..c.instance + 1);
+            }
+        }
+    }
+
+    /// Whether AVBOIT composites translucent surfaces this frame.
+    pub fn order_independent_surfaces(&self) -> bool {
+        self.avboit && !(self.oit_draws.is_empty() && self.behind_nearest.is_empty())
+    }
+
+    /// The bindings of the shading passes (`layout`) for range slot `pass` of `layers`.
+    fn shading_entries<'a>(
+        &'a self,
+        inputs: &'a LightingInputs,
+        scene: &'a GpuScene,
+        textures: &'a TextureLibrary,
+        color: &'a SceneColor,
+        layers: &'a wgpu::TextureView,
+        pass: usize,
+    ) -> Vec<(u32, wgpu::BindingResource<'a>)> {
         let range = wgpu::BufferBinding {
             buffer: &self.layer_ranges,
             offset: pass as u64 * LAYER_RANGE_STRIDE,
             size: wgpu::BufferSize::new(std::mem::size_of::<LayerRange>() as u64),
         };
         let t = inputs.targets;
-        let group = bind_group(
-            rec.device,
-            "translucency",
-            &self.layout,
-            &[
+        vec![
                 (0, inputs.frame.as_entire_binding()),
                 (1, scene.instances.as_entire_binding()),
                 (2, scene.materials.as_entire_binding()),
@@ -882,31 +1145,14 @@ impl Translucency {
                 (30, Sampler(&inputs.samplers.material)),
                 (31, TextureView(&t.gbuffer_normal)),
                 (60, inputs.vsm.local.uniform.as_entire_binding()),
+                (90, self.glass_shadow.uniform.as_entire_binding()),
+                (91, TextureView(self.glass_shadow.view())),
                 (105, TextureView(layers)),
                 (106, wgpu::BindingResource::Buffer(range)),
                 (130, inputs.megalights_volume.uniform().as_entire_binding()),
                 (131, TextureView(inputs.megalights_volume_light[0])),
                 (132, TextureView(inputs.megalights_volume_light[1])),
-            ],
-        );
-        let load = wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store };
-        let size = internal_size(t, color.size);
-        let mut pass = rec.render_pass(
-            "translucency",
-            &[
-                Some(wgpu::RenderPassColorAttachment { view: &t.hdr, depth_slice: None, resolve_target: None, ops: load }),
-                Some(wgpu::RenderPassColorAttachment { view: &t.gbuffer_motion, depth_slice: None, resolve_target: None, ops: load }),
-            ],
-            None,
-        );
-        pass.set_viewport(0.0, 0.0, size.0 as f32, size.1 as f32, 0.0, 1.0);
-        pass.set_bind_group(0, &group, &[]);
-        // Under water: the water between the camera and the opaque scene, before any surface.
-        if underwater {
-            pass.set_pipeline(&self.pipelines[Shading::Underwater as usize]);
-            pass.draw(0..3, 0..1);
-        }
-        self.draw_surfaces(&mut pass, &self.pipelines);
+        ]
     }
 
     /// Draws this frame's surfaces in back-to-front instance order with `pipelines` (by
@@ -934,10 +1180,49 @@ fn internal_size(targets: &FrameTargets, capacity: (u32, u32)) -> (u32, u32) {
     (targets.width.min(capacity.0), targets.height.min(capacity.1))
 }
 
+/// The shading passes' layout: 16 sampled textures in the fragment stage (WebGPU's default
+/// limit).
 fn layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    make_layout(device, "translucency", &shading_entries())
+}
+
+/// AVBOIT's shading passes: plus the grid (a 17th texture: devices offering fewer use the
+/// weighted blended path, `RenderSettings::avboit`).
+fn oit_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    let mut entries = shading_entries();
+    entries.extend(crate::avboit::Avboit::read_entries().into_iter().filter(|(b, _)| *b != 122).map(|(b, t)| (b, ShaderStages::FRAGMENT, t)));
+    make_layout(device, "translucency (avboit)", &entries)
+}
+
+/// AVBOIT's low-resolution grid draws: material evaluation, the opaque and nearest refracting
+/// depths, the grid (written).
+fn grid_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
     let fragment = ShaderStages::FRAGMENT;
     let both = ShaderStages::VERTEX_FRAGMENT;
-    let entries: [(u32, ShaderStages, BindingType); 38] = [
+    let mut entries = vec![
+        (0, both, bind::uniform()),
+        (1, both, bind::storage(true)),
+        (2, fragment, bind::uniform()),
+        (4, fragment, bind::texture(false)),
+        (28, fragment, bind::texture_array(true)),
+        (29, fragment, bind::texture_array(true)),
+        (30, fragment, bind::sampler()),
+        (108, fragment, bind::texture(false)),
+    ];
+    entries.extend(crate::avboit::Avboit::write_entries().map(|(b, t)| (b, fragment, t)));
+    make_layout(device, "translucency avboit grid", &entries)
+}
+
+fn make_layout(device: &wgpu::Device, label: &str, entries: &[(u32, ShaderStages, BindingType)]) -> wgpu::BindGroupLayout {
+    let entries: Vec<wgpu::BindGroupLayoutEntry> =
+        entries.iter().map(|&(binding, visibility, ty)| wgpu::BindGroupLayoutEntry { binding, visibility, ty, count: None }).collect();
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some(label), entries: &entries })
+}
+
+fn shading_entries() -> Vec<(u32, ShaderStages, BindingType)> {
+    let fragment = ShaderStages::FRAGMENT;
+    let both = ShaderStages::VERTEX_FRAGMENT;
+    vec![
         (0, both, bind::uniform()),
         (1, both, bind::storage(true)),
         (2, fragment, bind::uniform()),
@@ -971,15 +1256,15 @@ fn layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
         (30, fragment, bind::sampler()),
         (31, fragment, bind::texture(false)),
         (60, fragment, bind::uniform()),
+        // Sunlight through glass (glass_shadow.wgsl): translucent surfaces behind panes.
+        (90, fragment, bind::uniform()),
+        (91, fragment, bind::texture(true)),
         (105, fragment, bind::texture_array(false)),
         (106, fragment, bind::uniform()),
         (130, fragment, bind::uniform()),
         (131, fragment, bind::texture_3d(true)),
         (132, fragment, bind::texture_3d(true)),
-    ];
-    let entries: Vec<wgpu::BindGroupLayoutEntry> =
-        entries.iter().map(|&(binding, visibility, ty)| wgpu::BindGroupLayoutEntry { binding, visibility, ty, count: None }).collect();
-    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("translucency"), entries: &entries })
+    ]
 }
 
 const VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 5] =
@@ -1049,6 +1334,74 @@ fn pipeline(device: &wgpu::Device, module: &wgpu::ShaderModule, layout: &wgpu::B
             entry_point: Some(fragment_entry),
             compilation_options: wgpu::PipelineCompilationOptions { constants: &constants, ..Default::default() },
             targets: &targets,
+        }),
+        multiview_mask: None,
+        cache: None,
+    })
+}
+
+/// AVBOIT: `shading`'s surfaces into one bucket's OIT targets (weighted light added,
+/// transmittance multiplied; the front bucket also owns the motion where mostly opaque).
+fn oit_pipeline(device: &wgpu::Device, module: &wgpu::ShaderModule, layout: &wgpu::BindGroupLayout, shading: Shading, bucket: Bucket) -> wgpu::RenderPipeline {
+    let pipeline_layout = crate::util::pipeline_layout(device, "translucency (avboit)", &[layout]);
+    let constants = [("SHADING", shading as u32 as f64)];
+    let mut targets = crate::oit::avboit_targets(false);
+    let entry = match bucket {
+        Bucket::Front => {
+            let motion_blend = wgpu::BlendState {
+                color: wgpu::BlendComponent { src_factor: wgpu::BlendFactor::SrcAlpha, dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha, operation: wgpu::BlendOperation::Add },
+                alpha: wgpu::BlendComponent::REPLACE,
+            };
+            targets.push(Some(wgpu::ColorTargetState { format: wgpu::TextureFormat::Rgba16Float, blend: Some(motion_blend), write_mask: wgpu::ColorWrites::RED | wgpu::ColorWrites::GREEN }));
+            "fs_oit_front"
+        }
+        Bucket::Back => "fs_oit_back",
+    };
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("translucency (avboit)"),
+        layout: Some(&pipeline_layout),
+        vertex: wgpu::VertexState {
+            module,
+            entry_point: Some("vs_main"),
+            compilation_options: wgpu::PipelineCompilationOptions { constants: &constants, ..Default::default() },
+            buffers: &[Some(mesh_buffer())],
+        },
+        primitive: primitive(shading),
+        depth_stencil: None,
+        multisample: Default::default(),
+        fragment: Some(wgpu::FragmentState {
+            module,
+            entry_point: Some(entry),
+            compilation_options: wgpu::PipelineCompilationOptions { constants: &constants, ..Default::default() },
+            targets: &targets,
+        }),
+        multiview_mask: None,
+        cache: None,
+    })
+}
+
+/// AVBOIT: a low-resolution draw of `shading`'s surfaces into the grid (`entry`: bounds or
+/// transmittance; `behind`: refracting glass behind the nearest refracting layer).
+fn grid_pipeline(device: &wgpu::Device, module: &wgpu::ShaderModule, layout: &wgpu::BindGroupLayout, shading: Shading, entry: &str, behind: bool) -> wgpu::RenderPipeline {
+    let pipeline_layout = crate::util::pipeline_layout(device, "translucency avboit grid", &[layout]);
+    let constants = [("SHADING", shading as u32 as f64), ("OIT_BEHIND_NEAREST", behind as u32 as f64)];
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("translucency avboit grid"),
+        layout: Some(&pipeline_layout),
+        vertex: wgpu::VertexState {
+            module,
+            entry_point: Some("vs_main"),
+            compilation_options: wgpu::PipelineCompilationOptions { constants: &constants, ..Default::default() },
+            buffers: &[Some(mesh_buffer())],
+        },
+        primitive: primitive(shading),
+        depth_stencil: None,
+        multisample: Default::default(),
+        fragment: Some(wgpu::FragmentState {
+            module,
+            entry_point: Some(entry),
+            compilation_options: wgpu::PipelineCompilationOptions { constants: &constants, ..Default::default() },
+            targets: &[crate::avboit::low_resolution_target()],
         }),
         multiview_mask: None,
         cache: None,
@@ -1128,6 +1481,7 @@ mod tests {
             radius: r * 3f32.sqrt(),
             aabb: Aabb { min: center - r, max: center + r },
             single_layer: true,
+            refracts: false,
         }
     }
 

@@ -52,6 +52,12 @@ Part of the `helios-render` GPU pipeline; the pipeline diagram and the index of 
   one instanced draw of every slot (dead ones collapse in the vertex shader), camera-facing or stretched along the
   screen-space velocity by the distance covered in 40 ms (sparks), procedural glow / puff sprites, cut by the opaque
   depth and faded in front of it (soft particles), bright emitters bloom.
+* **Adaptive voxel-based OIT** (round 8, the default; `avboit.rs`): particles, the volume march and the
+  non-refracting translucent surfaces are weighted by a measured transmittance grid instead of the depth guess below,
+  so sparks inside smoke are dimmed by the smoke in front of them and particles between two panes composite between
+  them; the buckets split at the nearest *refracting* surface. Described in
+  [translucency.md](translucency.md#translucency-coloured-glass-shadows-and-water); `--wboit` / `4` select the
+  path below.
 * **Order-independent transparency** (`oit.rs`, `oit.wgsl`, `effects.rs`). Particles use **weighted blended OIT**
   (McGuire and Bavoil 2013): each fragment adds premultiplied colour × a depth weight to an rgba16f accumulation
   target and multiplies an r16f revealage target by 1 − opacity; a full-screen pass composites average colour ×

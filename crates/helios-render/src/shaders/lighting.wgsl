@@ -19,6 +19,7 @@
 #include "fog_common.wgsl"
 #include "stars.wgsl"
 #include "glass_shadow.wgsl"
+#include "glass_light.wgsl"
 
 @group(0) @binding(0) var<uniform> frame: Frame;
 @group(0) @binding(1) var depth_texture: texture_2d<f32>;
@@ -468,6 +469,8 @@ fn shade(@builtin(global_invocation_id) gid: vec3<u32>) {
             } else if listed_at(selected.traced, index) < MAX_SHADOWED_LIGHTS {
                 radiance *= local_light_shadow(world_position + n * 0.04, light.position_range.xyz, light.color.w);
             }
+            // Through glass between the light and the pixel, in the panes' colour.
+            radiance *= glass_light_transmission(index, light.position_range.xyz, world_position);
             if substrate {
                 let c = evaluate_slab(sh, ls.l);
                 color += (diffuse_color * (c.diffuse * (1.0 - sh.subsurface) + sh.transmission_color * c.back) + c.specular) * radiance;

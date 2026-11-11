@@ -72,6 +72,8 @@ pub struct MegaLightsInputs<'a> {
     pub hzb_traces: bool,
     /// Bind group 1 of the shading's slab variant while the scene has slab materials.
     pub substrate: Option<&'a wgpu::BindGroup>,
+    /// Local lights through glass (`glass_light.rs`).
+    pub glass_lights: &'a crate::glass_light::GlassLights,
 }
 
 /// Textures and buffers at the internal resolution's capacity.
@@ -180,7 +182,9 @@ impl MegaLights {
         );
         let args_layout = bind_group_layout(device, "megalights ray args", C, &[(0, bind::storage(false))]);
         let shade_module = create_module(device, "megalights_shade.wgsl");
-        let surface = [(0, bind::uniform()), (1, tex), (2, tex), (3, tex), (4, tex), (5, bind::storage(true)), (7, bind::storage(true))];
+        let [glass_uniform, glass_maps, glass_sampler] = crate::glass_light::GlassLights::entries();
+        // The G-buffer, the lights, the samples and the local lights' glass maps.
+        let surface = [(0, bind::uniform()), (1, tex), (2, tex), (3, tex), (4, tex), (5, bind::storage(true)), (7, bind::storage(true)), glass_uniform, glass_maps, glass_sampler];
         let out = bind::storage_texture(F::Rgba16Float);
         let shade_layout = bind_group_layout(device, "megalights shade", C, &[&surface[..], &[(8, out), (9, out)]].concat());
         let debug_layout = bind_group_layout(device, "megalights debug", C, &[&surface[..], &[(10, tex), (12, out)]].concat());
@@ -396,10 +400,11 @@ impl MegaLights {
         pass.dispatch_workgroups(workgroups(ft.width, 8), workgroups(ft.height, 8), 1);
     }
 
-    /// Bindings 0–7 of the shading and debug passes: the G-buffer, the lights and the samples.
+    /// Bindings 0–7 of the shading and debug passes: the G-buffer, the lights and the samples;
+    /// 92–94: the local lights' glass maps.
     fn surface_entries<'a>(&self, inputs: &'a MegaLightsInputs, t: &'a Targets) -> Vec<(u32, wgpu::BindingResource<'a>)> {
         let ft = inputs.targets;
-        vec![
+        let mut entries = vec![
             (0, inputs.frame.as_entire_binding()),
             (1, TextureView(&ft.depth)),
             (2, TextureView(&ft.gbuffer_albedo)),
@@ -407,7 +412,9 @@ impl MegaLights {
             (4, TextureView(&ft.gbuffer_motion)),
             (5, inputs.lights.lights.as_entire_binding()),
             (7, t.samples.as_entire_binding()),
-        ]
+        ];
+        entries.extend(inputs.glass_lights.resources());
+        entries
     }
 }
 

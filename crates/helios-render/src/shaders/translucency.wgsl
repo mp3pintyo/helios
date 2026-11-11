@@ -49,8 +49,13 @@
 #include "water.wgsl"
 #include "glass_shadow.wgsl"
 #include "megalights_volume_common.wgsl"
+#include "avboit_common.wgsl"
+#include "avboit_read.wgsl"
+#include "avboit_write.wgsl"
 
 override SHADING: u32 = 0u;
+// The AVBOIT grid draw of refracting glass behind the nearest refracting layer (fs_grid_*).
+override OIT_BEHIND_NEAREST: bool = false;
 const SHADING_WATER: u32 = 0u;
 const SHADING_GLASS: u32 = 1u;
 const SHADING_BLEND: u32 = 2u;
@@ -329,7 +334,8 @@ fn direct_light(input: DirectInput) -> vec3<f32> {
     let sun = normalize(frame.sun_direction.xyz);
     var color = vec3<f32>(0.0);
     if dot(input.n, sun) > 0.0 {
-        color = brdf(input, sun, a) * sun_light_at(input.p) * input.sun_visibility;
+        // Through glass panes nearer the sun, in their colour (glass_shadow.wgsl).
+        color = brdf(input, sun, a) * sun_light_at(input.p) * input.sun_visibility * glass_transmission_soft(input.p, lut_sampler, input.noise);
     }
     if frame.light_count == 0u {
         return color;
@@ -870,7 +876,7 @@ fn shade_glass(in: VertexOutput, input: SurfaceInput, m: Material, px: Pixel) ->
         let cached = ambient_irradiance(p + back * GLASS_PROBE_OFFSET, back);
         var behind = sky_behind * saturate(2.0 * luminance(cached) / max(luminance(sky_behind), 1e-4));
         if dot(back, sun) > 0.0 {
-            behind += sun_light_at(p) * sun_shadow(p, back, px.noise) * dot(back, sun);
+            behind += sun_light_at(p) * sun_shadow(p, back, px.noise) * dot(back, sun) * glass_transmission_soft(p, lut_sampler, px.noise);
         }
         color += tint * diffusion * behind / PI;
     }
@@ -927,8 +933,15 @@ fn shade_blend(in: VertexOutput, input: SurfaceInput, m: Material, px: Pixel) ->
     return s;
 }
 
-@fragment
-fn fs_main(in: VertexOutput, @builtin(front_facing) front_facing: bool) -> FragmentOutput {
+// A translucent fragment shaded: the model's result, the fog in front of it, the pixel.
+struct Fragment {
+    s: Shaded,
+    f: FogTerms,
+    px: Pixel,
+}
+
+// Shades the fragment of this pass's depth range (discards the others).
+fn shade_fragment(in: VertexOutput, front_facing: bool) -> Fragment {
     // Derivatives first, while control flow is uniform.
     let input = surface_input(in, front_facing);
 
@@ -972,6 +985,21 @@ fn fs_main(in: VertexOutput, @builtin(front_facing) front_facing: bool) -> Fragm
         f.transmittance = exp(-water_extinction() * d);
         f.inscatter = underwater_inscatter(eye, px.view_dir, d, level, water_light_along(eye, in.world_position, level), vec3<f32>(1.0));
     }
+    return Fragment(s, f, px);
+}
+
+// The surface's own motion, owning the pixel's where it is mostly opaque.
+fn surface_motion(in: VertexOutput, alpha: f32) -> vec4<f32> {
+    let motion = clip_to_uv(frame.unjittered_view_proj * vec4<f32>(in.world_position, 1.0))
+        - clip_to_uv(frame.prev_unjittered_view_proj * vec4<f32>(in.previous_world, 1.0));
+    return vec4<f32>(motion, 0.0, select(0.0, 1.0, alpha >= 0.5));
+}
+
+@fragment
+fn fs_main(in: VertexOutput, @builtin(front_facing) front_facing: bool) -> FragmentOutput {
+    let fragment = shade_fragment(in, front_facing);
+    let s = fragment.s;
+    let f = fragment.f;
     var out: FragmentOutput;
     if SHADING == SHADING_BLEND {
         out.color = vec4<f32>((s.surface * f.transmittance + f.inscatter) * s.alpha, s.alpha);
@@ -980,10 +1008,136 @@ fn fs_main(in: VertexOutput, @builtin(front_facing) front_facing: bool) -> Fragm
         let t = s.transmittance;
         out.color = vec4<f32>(s.surface * f.transmittance + f.inscatter * (vec3<f32>(1.0) - t) + background * t, 1.0);
     }
-    let motion = clip_to_uv(frame.unjittered_view_proj * vec4<f32>(in.world_position, 1.0))
-        - clip_to_uv(frame.prev_unjittered_view_proj * vec4<f32>(in.previous_world, 1.0));
-    out.motion = vec4<f32>(motion, 0.0, select(0.0, 1.0, s.alpha >= 0.5));
+    out.motion = surface_motion(in, s.alpha);
     return out;
+}
+
+// ---- Adaptive voxel-based OIT (avboit.rs) ----------------------------------------------------------
+//
+// THE AVBOIT MATERIAL CONTRACT (as UE's): a surface composited order-independently contributes
+// only its OWN radiance - lighting, reflections, emission, the fog in front of it - and its
+// transmittance. It never reads the scene colour behind it (`s.background_uv`, refraction, the
+// blurred view through hammered glass): the composite multiplies the background by the summed
+// transmittance once, and a surface that also added its own read of the background would add it
+// twice (washed out). Water, whose model folds the refracted bed into its radiance, and the
+// nearest refracting glass layer therefore stay on the depth-peeled path (translucency.rs);
+// glass and blended surfaces composited here keep only `surface` and `transmittance`.
+
+// Water (SHADING_WATER) is never drawn with these pipelines.
+fn oit_light(fragment: Fragment) -> vec4<f32> {
+    let s = fragment.s;
+    let f = fragment.f;
+    if SHADING == SHADING_BLEND {
+        return vec4<f32>((s.surface * f.transmittance + f.inscatter) * s.alpha, 1.0 - s.alpha);
+    }
+    let t = s.transmittance;
+    return vec4<f32>(s.surface * f.transmittance + f.inscatter * (vec3<f32>(1.0) - t), 0.0);
+}
+
+fn oit_transmittance(fragment: Fragment) -> vec3<f32> {
+    if SHADING == SHADING_BLEND {
+        return vec3<f32>(1.0 - fragment.s.alpha);
+    }
+    return fragment.s.transmittance;
+}
+
+// The view depth a surface fragment looks its weight up at: the grid holds the surface at the
+// depth of its column's centre (low resolution), so a surface steep in depth reaches cells in
+// front of and behind the fragment within the columns the bilinear lookup reads. Looking up in
+// front of the nearest of them keeps the surface from dimming itself (streaks along the columns).
+fn oit_depth(fragment: Fragment, slope: f32) -> f32 {
+    let d = fragment.px.linear_depth;
+    return max(d - slope * f32(avboit.grid.w) * 1.5, d * 0.5);
+}
+
+struct OitOutput {
+    @location(0) accum: vec4<f32>,
+    @location(1) transmittance: vec4<f32>,
+}
+
+struct OitFrontOutput {
+    @location(0) accum: vec4<f32>,
+    @location(1) transmittance: vec4<f32>,
+    @location(2) motion: vec4<f32>,
+}
+
+// Full resolution, in front of the nearest refracting surface (layer_range: from it on): the
+// own light weighted by the transmittance in front of the fragment (added), the transmittance
+// (multiplied; alpha 1: not a particle), the motion.
+@fragment
+fn fs_oit_front(in: VertexOutput, @builtin(front_facing) front_facing: bool) -> OitFrontOutput {
+    let slope = fwidth(frame.camera_position.w / max(in.position.z, 1e-9));
+    let fragment = shade_fragment(in, front_facing);
+    let w = avboit_weight(in.position.xy, oit_depth(fragment, slope), oit_transmittance(fragment), 0.0);
+    var out: OitFrontOutput;
+    out.accum = vec4<f32>(oit_light(fragment).rgb * w, 0.0);
+    out.transmittance = vec4<f32>(oit_transmittance(fragment), 1.0);
+    out.motion = surface_motion(in, fragment.s.alpha);
+    return out;
+}
+
+// Full resolution, behind the nearest refracting surface (layers[0]): weighted by what lies
+// between it and the fragment only.
+@fragment
+fn fs_oit_back(in: VertexOutput, @builtin(front_facing) front_facing: bool) -> OitOutput {
+    let slope = fwidth(frame.camera_position.w / max(in.position.z, 1e-9));
+    let fragment = shade_fragment(in, front_facing);
+    let split = frame.camera_position.w / max(layer_depth(0, vec2<i32>(in.position.xy), 1.0), 1e-9);
+    let w = avboit_weight(in.position.xy, oit_depth(fragment, slope), oit_transmittance(fragment), split);
+    var out: OitOutput;
+    out.accum = vec4<f32>(oit_light(fragment).rgb * w, 0.0);
+    out.transmittance = vec4<f32>(oit_transmittance(fragment), 1.0);
+    return out;
+}
+
+// Low resolution, one fragment per grid column (its centre pixel tests the opaque depth):
+// whether the fragment is in the grid. With OIT_BEHIND_NEAREST (refracting glass behind the
+// nearest refracting layer), the nearest layer itself is not: the depth-peeled pass draws it.
+fn grid_fragment(position: vec4<f32>) -> bool {
+    let column = vec2<u32>(position.xy);
+    let pixel = vec2<i32>(column * avboit.grid.w + avboit.grid.w / 2u);
+    if position.z < textureLoad(depth_texture, pixel, 0).r {
+        return false;
+    }
+    if OIT_BEHIND_NEAREST && position.z >= textureLoad(peel_near, pixel, 0).r * 0.999 {
+        return false;
+    }
+    return true;
+}
+
+@fragment
+fn fs_grid_bounds(in: VertexOutput) {
+    if grid_fragment(in.position) {
+        avboit_extend(avboit_column_index(vec2<u32>(in.position.xy)), frame.camera_position.w / max(in.position.z, 1e-9));
+    }
+}
+
+// The transmittance `shade_glass` / `shade_blend` give the background, without the lighting.
+@fragment
+fn fs_grid_transmittance(in: VertexOutput, @builtin(front_facing) front_facing: bool) {
+    let input = surface_input(in, front_facing);
+    if !grid_fragment(in.position) {
+        return;
+    }
+    var m = materials[instances[in.instance].material];
+    m.base_color *= in.color;
+    var t = vec3<f32>(1.0);
+    if SHADING == SHADING_GLASS {
+        let g = evaluate_glass(m, input);
+        let stained = m.texture != NO_TEXTURE;
+        let n_dot_v = max(dot(g.normal, normalize(frame.camera_position.xyz - in.world_position)), 1e-4);
+        let fresnel = f_schlick(vec3<f32>(GLASS_F0), n_dot_v).x;
+        let tint = g.albedo * select(1.0, GLASS_TRANSMISSION, stained) * (1.0 - fresnel) * saturate(g.emissive);
+        t = tint * (1.0 - select(0.0, GLASS_DIFFUSION, stained));
+    } else {
+        var alpha = m.base_color.a;
+        if m.texture != NO_TEXTURE && m.mapping == MAPPING_UV {
+            let c = texture_coords(m.uv_texture, input);
+            alpha *= textureSampleGrad(material_albedo, material_sampler, c.uv, m.texture, c.ddx, c.ddy).a;
+        }
+        t = vec3<f32>(1.0 - saturate(alpha));
+    }
+    avboit_add(avboit_column_index(vec2<u32>(in.position.xy)), frame.camera_position.w / max(in.position.z, 1e-9), t);
 }
 
 // ---- Layer peeling ---------------------------------------------------------------------------------
@@ -1085,4 +1239,38 @@ fn fs_glass_shadow(in: VertexOutput, @builtin(front_facing) front_facing: bool) 
     let fresnel = f_schlick(vec3<f32>(GLASS_F0), cos_incidence).x;
     let tint = g.albedo * select(1.0, GLASS_TRANSMISSION, stained) * (1.0 - fresnel) * coverage;
     return vec4<f32>(tint, in.position.z);
+}
+
+// ---- Local lights through glass ----------------------------------------------------------------
+
+// One face of a light's glass cube map (glass_light.rs).
+struct GlassLightFace {
+    view_proj: mat4x4<f32>,
+    // xyz: the light's position.
+    light: vec4<f32>,
+}
+
+@group(0) @binding(95) var<uniform> glass_face: GlassLightFace;
+
+@vertex
+fn vs_glass_light(v: VertexInput, @builtin(instance_index) instance_index: u32) -> VertexOutput {
+    return transform_vertex(v, instance_index, glass_face.view_proj);
+}
+
+// As `fs_glass_shadow`, for the light at `glass_face.light`: the pane's transmittance towards it
+// and its distance from it.
+@fragment
+fn fs_glass_light(in: VertexOutput, @builtin(front_facing) front_facing: bool) -> @location(0) vec4<f32> {
+    let to_light = glass_face.light.xyz - in.world_position;
+    let l = normalize(to_light);
+    let input = surface_input_seen(in, front_facing, vec2<f32>(1.0), l);
+    var m = materials[instances[in.instance].material];
+    m.base_color *= in.color;
+    let g = evaluate_glass(m, input);
+    let coverage = saturate(g.emissive);
+    let stained = m.texture != NO_TEXTURE;
+    let cos_incidence = max(abs(dot(normalize(in.normal), l)), 1e-4);
+    let fresnel = f_schlick(vec3<f32>(GLASS_F0), cos_incidence).x;
+    let tint = g.albedo * select(1.0, GLASS_TRANSMISSION, stained) * (1.0 - fresnel) * coverage;
+    return vec4<f32>(tint, length(to_light));
 }

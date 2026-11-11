@@ -456,6 +456,10 @@ async fn run() -> Result<(), String> {
     app.choose_gi(option_string("gi", "gi").as_deref(), &ctx.adapter.get_info());
     // `?megalights=1`: MegaLights instead of the clustered light loop (key `=` toggles).
     app.renderer.settings.mega_lights = matches!(option_string("megaLights", "megalights").as_deref(), Some("1" | "true"));
+    // `?oit=wboit`: weighted blended OIT and depth peeling instead of AVBOIT (key Home toggles).
+    if matches!(option_string("oit", "oit").as_deref(), Some("wboit")) {
+        app.renderer.settings.avboit = false;
+    }
     set_status("");
 
     let hud = document.get_element_by_id("hud").and_then(|e| e.dyn_into::<HtmlElement>().ok());
