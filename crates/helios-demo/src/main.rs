@@ -8,9 +8,11 @@
 //!     [--no-local-exposure | --local-exposure HIGHLIGHT,SHADOW[,BLEND]] [--gi lumen|lite|auto]
 //!     [--dof F_STOP[,FOCUS_M]] [--photo SAMPLES] [--fog-scattering INTENSITY] [--no-tsr-depth-history]
 //! helios --gltf model.glb|model.gltf       a scene built from a glTF 2.0 file [--no-ground]
-//! helios --bake-hvm DIR                    write the scene's baked meshes as .hvm files
+//! helios --bake-hvm DIR [--hvm-raw]        write the scene's baked meshes as .hvm files
+//!                                          (pages entropy coded; --hvm-raw: as the GPU holds them)
 //! helios --stream-from DIR                 build the scene from them, streaming pages from disk
 //!     [--io-latency-ms N]                  (every read takes at least N ms)
+//!     [--io-bandwidth-mbps N]              (reads share a link of N Mbit/s)
 //! helios --scene-file scene.helios.json    a scene saved by the editor (base scene + edits)
 //! ```
 
@@ -21,7 +23,7 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let options = native::Options::parse(&args);
     if let Some(dir) = &options.bake_hvm {
-        if let Err(e) = helios_demo::mesh_store::bake_to(std::path::Path::new(dir), options.scene, options.detail) {
+        if let Err(e) = helios_demo::mesh_store::bake_to(std::path::Path::new(dir), options.scene, options.detail, !options.hvm_raw) {
             log::error!("--bake-hvm {dir}: {e}");
             std::process::exit(1);
         }
@@ -115,10 +117,15 @@ mod native {
         pub no_skinning: bool,
         /// Write the scene's baked meshes into this directory and exit.
         pub bake_hvm: Option<String>,
+        /// `--bake-hvm` writes the pages as the GPU holds them (version 5) instead of entropy
+        /// coded (version 7).
+        pub hvm_raw: bool,
         /// Build the scene from the meshes in this directory, streaming pages from disk.
         pub stream_from: Option<String>,
         /// Minimum latency of every streamed read (emulates slow storage).
         pub io_latency_ms: u64,
+        /// Streamed reads share a link of this many Mbit/s (emulates a network).
+        pub io_bandwidth_mbps: Option<f64>,
         /// Sun azimuth and elevation in degrees (negative elevations give twilight and night).
         pub sun: Option<(f32, f32)>,
         /// Headless: the shadow-casting light nearest the camera circles every frame.
@@ -193,7 +200,7 @@ mod native {
 
     impl Options {
         pub fn parse(args: &[String]) -> Self {
-            let mut o = Options { screenshot: None, size: (1600, 900), frames: 90, view: None, detail: Detail::High, scene: SceneKind::Valley, camera: None, eye: None, at: None, occlusion: true, sw_raster: true, rvt: true, glass_shadows: true, svt: true, animate_sun: false, lod: None, fov: None, pool_mb: None, texture_pool_mb: None, texture_compression: true, switch_to: None, dump_dir: None, dump_count: 16, keys: Vec::new(), keys_at: None, hold: Vec::new(), gltf: None, ground: true, bake_hvm: None, stream_from: None, io_latency_ms: 0, sun: None, move_light: false, full_invalidation: false, moving_lights: Default::default(), moving_light_pages: None, movers: None, static_motion: false, screen_percentage: None, gpu_budget_ms: None, local_exposure: Some(Default::default()), scene_file: None, select: Vec::new(), no_skinning: false, gi: None, megalights: false, tessellation: true, displacement_speed_bound: true, dice_rate: None, speed: None, fog_scattering: None, tsr_depth_history: true, dof: None, photo: None, shadow_refresh_budget: None, shadow_max_staleness: None, shadow_distant: None, megalights_options: (None, true, true, true), avboit: true, shadow_prefiltered: true, shadow_distant_bias: None, volume_shadows: true, short_range_ao: true, world_cache: None, exposure: None, lumen_options: [true; 5] };
+            let mut o = Options { screenshot: None, size: (1600, 900), frames: 90, view: None, detail: Detail::High, scene: SceneKind::Valley, camera: None, eye: None, at: None, occlusion: true, sw_raster: true, rvt: true, glass_shadows: true, svt: true, animate_sun: false, lod: None, fov: None, pool_mb: None, texture_pool_mb: None, texture_compression: true, switch_to: None, dump_dir: None, dump_count: 16, keys: Vec::new(), keys_at: None, hold: Vec::new(), gltf: None, ground: true, bake_hvm: None, hvm_raw: false, stream_from: None, io_latency_ms: 0, io_bandwidth_mbps: None, sun: None, move_light: false, full_invalidation: false, moving_lights: Default::default(), moving_light_pages: None, movers: None, static_motion: false, screen_percentage: None, gpu_budget_ms: None, local_exposure: Some(Default::default()), scene_file: None, select: Vec::new(), no_skinning: false, gi: None, megalights: false, tessellation: true, displacement_speed_bound: true, dice_rate: None, speed: None, fog_scattering: None, tsr_depth_history: true, dof: None, photo: None, shadow_refresh_budget: None, shadow_max_staleness: None, shadow_distant: None, megalights_options: (None, true, true, true), avboit: true, shadow_prefiltered: true, shadow_distant_bias: None, volume_shadows: true, short_range_ao: true, world_cache: None, exposure: None, lumen_options: [true; 5] };
             let mut scene_given = false;
             let mut it = args.iter().skip(1);
             while let Some(arg) = it.next() {
@@ -266,8 +273,10 @@ mod native {
                     "--eye" => o.eye = parse_vec3(&value()),
                     "--at" => o.at = parse_vec3(&value()),
                     "--bake-hvm" => o.bake_hvm = Some(value()),
+                    "--hvm-raw" => o.hvm_raw = true,
                     "--stream-from" => o.stream_from = Some(value()),
                     "--io-latency-ms" => o.io_latency_ms = value().parse().unwrap_or(0),
+                    "--io-bandwidth-mbps" => o.io_bandwidth_mbps = value().parse().ok(),
                     "--screen-percentage" => o.screen_percentage = value().parse().ok(),
                     "--gpu-budget-ms" => o.gpu_budget_ms = value().parse().ok(),
                     "--no-local-exposure" => o.local_exposure = None,
@@ -360,7 +369,7 @@ mod native {
                 let model = self.load_model();
                 return (DemoApp::with_config(&ctx.device, &ctx.queue, format, size.0, size.1, self.scene, self.detail, config, model), None);
             };
-            match mesh_store::open(std::path::Path::new(dir), Duration::from_millis(self.io_latency_ms)) {
+            match mesh_store::open(std::path::Path::new(dir), Duration::from_millis(self.io_latency_ms), self.io_bandwidth_mbps.map(|m| m * 1e6 / 8.0)) {
                 Ok((library, io)) => (DemoApp::from_library(&ctx.device, &ctx.queue, format, size, library, config), Some(io)),
                 Err(e) => {
                     log::error!("--stream-from {dir}: {e}");
@@ -583,6 +592,10 @@ mod native {
         // Shadow pages rendered and shadow micro-triangles per frame over the last frames (cached
         // pages refresh every few frames: one frame's count says little).
         let mut shadow_work: Vec<(u32, u32)> = Vec::new();
+        // Streaming from a library: the first frame (and time) by which every page the views
+        // ask for is resident, and by which streaming is idle (prefetching done too).
+        let (mut settled, mut idle): (Option<(u32, f64)>, Option<(u32, f64)>) = (None, None);
+        let load_start = Instant::now();
         for i in 0..options.frames {
             if let Some(kind) = options.switch_to.filter(|_| i == options.frames / 2) {
                 app.load_scene(kind);
@@ -607,6 +620,18 @@ mod native {
             app.render(&view, 1.0 / 60.0);
             cpu_ms.push(cpu.elapsed().as_secs_f64() * 1000.0);
             let _ = ctx.device.poll(wgpu::PollType::wait_indefinitely());
+            if io.is_some() && i >= 8 {
+                let s = app.renderer.streaming_stats();
+                let now = Some((i, load_start.elapsed().as_secs_f64() * 1000.0));
+                if s.pending == 0 {
+                    settled = settled.or(now);
+                } else {
+                    settled = None;
+                }
+                if s.pending == 0 && s.in_flight == 0 && s.decoding == 0 && s.waiting == 0 {
+                    idle = idle.or(now);
+                }
+            }
             if i >= mean_from {
                 means.add(&app);
             }
@@ -671,6 +696,15 @@ mod native {
             percentile(1.0)
         );
         if let Some(io) = io {
+            let st = app.renderer.streaming_stats();
+            let when = |at: Option<(u32, f64)>| at.map_or("never".to_string(), |(frame, ms)| format!("at frame {frame} ({ms:.0} ms)"));
+            log::info!(
+                "streaming: {:.1} MiB read, {:.1} MiB decoded into the pool; every wanted page resident {}, streaming idle {}",
+                st.streamed_mb,
+                st.decoded_mb,
+                when(settled),
+                when(idle)
+            );
             let s = io.stats();
             log::info!(
                 "streaming I/O: {} reads ({} failed), {:.1} MiB, latency mean {:.2} ms / max {:.2} ms, {:.0} MiB/s per read",

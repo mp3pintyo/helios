@@ -212,6 +212,10 @@ pub struct VirtualMesh {
     pub page_data: Vec<u32>,
     /// First page whose payload is held in `page_data`.
     pub payload_first_page: u32,
+    /// For a mesh read from a `.hvm` with entropy-coded pages (version 7, [`crate::page_codec`]):
+    /// the byte offset of every stored page in the file's payload section (`pages.len() + 1`
+    /// entries). Empty when the payloads are stored as their words (version 5, and baked meshes).
+    pub page_stored: Vec<u32>,
     /// Pages that must be resident before page `i` may be (`dependency_offsets[i]..[i+1]`).
     pub dependency_offsets: Vec<u32>,
     pub dependencies: Vec<u32>,
@@ -842,6 +846,7 @@ impl VirtualMesh {
             + size_of_val(self.page_data.as_slice())
             + size_of_val(self.dependency_offsets.as_slice())
             + size_of_val(self.dependencies.as_slice())
+            + size_of_val(self.page_stored.as_slice())
             + self.sdf.as_ref().map_or(0, |s| size_of_val(s.words.as_slice()))
     }
 
@@ -919,13 +924,18 @@ impl VirtualMesh {
     /// clusters ([`crate::voxel`]) and per-level voxel counts; version 3 files (triangles only, no
     /// voxel statistics) and version 2 files (float vertices) must be baked again.
     const MAGIC: [u8; 4] = *b"HVM5";
+    /// Version 7: the version-5 layout with entropy-coded page payloads ([`crate::page_codec`]):
+    /// the header ends with every stored page's byte offset ([`VirtualMesh::page_stored`]) and
+    /// the payload section holds the stored pages ([`VirtualMesh::to_coded_bytes`]).
+    const MAGIC_CODED: [u8; 4] = *b"HVM7";
     /// Bytes at the start of a `.hvm` that determine its header length ([`VirtualMesh::header_len`]).
     pub const PREFIX_BYTES: usize = 28;
     const SDF_HEADER_WORDS: usize = 14;
 
     /// Header length for the section counts stored in the prefix
-    /// (`clusters, pages, dependencies, levels, payload words, sdf words`).
-    fn header_len_for(counts: &[usize; 6]) -> usize {
+    /// (`clusters, pages, dependencies, levels, payload words, sdf words`), with the stored-page
+    /// offsets of a file with coded pages (`coded`).
+    fn header_len_for(counts: &[usize; 6], coded: bool) -> usize {
         let [clusters, pages, dependencies, levels, _, sdf_words] = *counts;
         let sdf = if sdf_words > 0 { (Self::SDF_HEADER_WORDS + sdf_words) * 4 } else { 0 };
         Self::PREFIX_BYTES
@@ -936,28 +946,43 @@ impl VirtualMesh {
             + 2 * (pages + 1) * 4
             + dependencies * 4
             + 3 * levels * 4
+            + if coded { (pages + 1) * 4 } else { 0 }
     }
 
-    /// Byte length of the serialised header (everything but the page payloads), i.e. the file
-    /// offset at which the payload section starts.
-    pub fn header_bytes(&self) -> usize {
-        Self::header_len_for(&[
+    fn counts(&self) -> [usize; 6] {
+        [
             self.clusters.len(),
             self.pages.len(),
             self.dependencies.len(),
             self.stats.clusters_per_level.len(),
             self.payload_bytes() / 4,
             self.sdf.as_ref().map_or(0, |s| s.words.len()),
-        ])
+        ]
     }
 
-    fn check_magic(magic: &[u8]) -> Result<(), String> {
+    /// Byte length of the serialised header (everything but the page payloads), i.e. the file
+    /// offset at which the payload section starts — of the file the mesh was read from (with
+    /// coded pages if [`VirtualMesh::is_coded`]), else of [`VirtualMesh::to_bytes`].
+    pub fn header_bytes(&self) -> usize {
+        Self::header_len_for(&self.counts(), self.is_coded())
+    }
+
+    /// Whether the mesh was read from a `.hvm` with entropy-coded pages: page reads
+    /// ([`VirtualMesh::page_byte_range`]) then return stored pages, which
+    /// [`crate::page_codec::decode_page`] turns into payload words.
+    pub fn is_coded(&self) -> bool {
+        !self.page_stored.is_empty()
+    }
+
+    /// Whether a file with this magic has coded pages.
+    fn check_magic(magic: &[u8]) -> Result<bool, String> {
         match magic {
-            m if m == Self::MAGIC => Ok(()),
-            b"HVM4" => Ok(()),
+            m if m == Self::MAGIC_CODED => Ok(true),
+            m if m == Self::MAGIC => Ok(false),
+            b"HVM4" => Ok(false),
             b"HVM3" => Err("virtual mesh version 3 (no voxel LODs) is no longer supported: bake it again".into()),
             b"HVM2" => Err("virtual mesh version 2 (uncompressed vertices) is no longer supported: bake it again".into()),
-            _ => Err("not a helios virtual mesh (HVM5)".into()),
+            _ => Err("not a helios virtual mesh (HVM5 or HVM7)".into()),
         }
     }
 
@@ -967,16 +992,31 @@ impl VirtualMesh {
         if prefix.len() < Self::PREFIX_BYTES {
             return Err("truncated virtual mesh header".into());
         }
-        Self::check_magic(&prefix[..4])?;
+        let coded = Self::check_magic(&prefix[..4])?;
         let count = |i: usize| u32::from_le_bytes(prefix[4 + i * 4..8 + i * 4].try_into().unwrap()) as usize;
-        Ok(Self::header_len_for(&std::array::from_fn(count)))
+        Ok(Self::header_len_for(&std::array::from_fn(count), coded))
     }
 
-    /// Byte range of `page`'s payload inside the serialised `.hvm`. Payloads are stored in page
-    /// order, so adjacent pages are adjacent on disk.
+    /// Byte offset of page `page` in the payload section of the mesh's file.
+    fn stored_offset(&self, page: usize) -> u64 {
+        if self.is_coded() {
+            self.page_stored[page] as u64
+        } else {
+            self.page_offsets[page] as u64 * 4
+        }
+    }
+
+    /// Byte range of `page`'s payload inside the serialised `.hvm` (with coded pages: of the
+    /// stored page, see [`VirtualMesh::is_coded`]). Payloads are stored in page order, so
+    /// adjacent pages are adjacent on disk.
     pub fn page_byte_range(&self, page: usize) -> std::ops::Range<u64> {
         let base = self.header_bytes() as u64;
-        base + self.page_offsets[page] as u64 * 4..base + self.page_offsets[page + 1] as u64 * 4
+        base + self.stored_offset(page)..base + self.stored_offset(page + 1)
+    }
+
+    /// Bytes of the payload section of the mesh's file (the stored pages of a coded file).
+    pub fn stored_payload_bytes(&self) -> usize {
+        self.stored_offset(self.pages.len()) as usize
     }
 
     /// First page of the trailing run of root pages. Roots must always be resident, so a
@@ -989,27 +1029,111 @@ impl VirtualMesh {
     /// File byte range of the payloads of pages `first_page..` (up to the end of the file).
     pub fn tail_byte_range(&self, first_page: usize) -> std::ops::Range<u64> {
         let base = self.header_bytes() as u64;
-        base + self.page_offsets[first_page] as u64 * 4..base + self.payload_bytes() as u64
+        base + self.stored_offset(first_page)..base + self.stored_offset(self.pages.len())
     }
 
     /// Supplies the payloads of pages `first_page..` (the bytes of [`VirtualMesh::tail_byte_range`]),
-    /// e.g. the root tail of a mesh loaded with [`VirtualMesh::from_header_bytes`].
+    /// e.g. the root tail of a mesh loaded with [`VirtualMesh::from_header_bytes`]. Coded pages
+    /// are decoded.
     pub fn set_tail_payload(&mut self, first_page: usize, bytes: &[u8]) -> Result<(), String> {
         let range = self.tail_byte_range(first_page);
         if bytes.len() as u64 != range.end - range.start {
             return Err(format!("tail payload has {} bytes, expected {}", bytes.len(), range.end - range.start));
         }
-        self.page_data = bytemuck::pod_collect_to_vec(bytes);
+        self.page_data = self.decode_pages(first_page, bytes)?;
         self.payload_first_page = first_page as u32;
         Ok(())
+    }
+
+    /// The payload words of pages `first_page..` from their stored bytes (from the start of
+    /// `first_page`'s).
+    fn decode_pages(&self, first_page: usize, bytes: &[u8]) -> Result<Vec<u32>, String> {
+        if !self.is_coded() {
+            return Ok(bytemuck::pod_collect_to_vec(bytes));
+        }
+        let base = self.page_offsets[first_page];
+        let mut words = Vec::with_capacity((self.page_offsets[self.pages.len()] - base) as usize);
+        for p in first_page..self.pages.len() {
+            let start = (self.page_stored[p] - self.page_stored[first_page]) as usize;
+            let end = (self.page_stored[p + 1] - self.page_stored[first_page]) as usize;
+            let page = crate::page_codec::decode_page(bytes.get(start..end).ok_or("truncated page payloads")?).map_err(|e| format!("page {p}: {e}"))?;
+            if page.len() != (self.page_offsets[p + 1] - self.page_offsets[p]) as usize {
+                return Err(format!("page {p}: {} words, expected {}", page.len(), self.page_offsets[p + 1] - self.page_offsets[p]));
+            }
+            words.extend_from_slice(&page);
+        }
+        Ok(words)
+    }
+
+    /// The page's cluster records.
+    pub fn page_clusters(&self, page: usize) -> &[GpuCluster] {
+        let p = &self.pages[page];
+        &self.clusters[p.cluster_offset as usize..(p.cluster_offset + p.cluster_count) as usize]
+    }
+
+    /// Serialises the mesh like [`VirtualMesh::to_bytes`], but with entropy-coded pages
+    /// ([`crate::page_codec`]; `.hvm` version 7): 2–2.6 times smaller page payloads, decoded on
+    /// load. Coding is slow (~10–20 MB/s per core), so it uses every core natively.
+    pub fn to_coded_bytes(&self) -> Vec<u8> {
+        assert_eq!(self.payload_first_page, 0, "serialising a virtual mesh needs every page payload in memory");
+        let pages: Vec<Vec<u8>> = self.code_pages();
+        let mut stored = Vec::with_capacity(pages.len() + 1);
+        stored.push(0u32);
+        for page in &pages {
+            stored.push(stored.last().unwrap() + page.len() as u32);
+        }
+        let mut out = self.header_to_bytes(Self::MAGIC_CODED);
+        out.extend_from_slice(bytemuck::cast_slice(&stored));
+        debug_assert_eq!(out.len(), Self::header_len_for(&self.counts(), true));
+        for page in pages {
+            out.extend_from_slice(&page);
+        }
+        out
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn code_pages(&self) -> Vec<Vec<u8>> {
+        let threads = std::thread::available_parallelism().map_or(1, |n| n.get()).min(self.pages.len().max(1));
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let mut pages: Vec<(usize, Vec<u8>)> = std::thread::scope(|scope| {
+            let workers: Vec<_> = (0..threads)
+                .map(|_| {
+                    scope.spawn(|| {
+                        let mut done = Vec::new();
+                        loop {
+                            let p = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            if p >= self.pages.len() {
+                                break done;
+                            }
+                            done.push((p, crate::page_codec::encode_page(self.page_payload(p), self.page_clusters(p))));
+                        }
+                    })
+                })
+                .collect();
+            workers.into_iter().flat_map(|w| w.join().expect("page coding thread")).collect()
+        });
+        pages.sort_unstable_by_key(|p| p.0);
+        pages.into_iter().map(|p| p.1).collect()
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn code_pages(&self) -> Vec<Vec<u8>> {
+        (0..self.pages.len()).map(|p| crate::page_codec::encode_page(self.page_payload(p), self.page_clusters(p))).collect()
     }
 
     /// Serialises the mesh into a little-endian binary blob (`.hvm`). The page payloads come
     /// last, so a reader can load the header and stream page byte ranges on demand.
     pub fn to_bytes(&self) -> Vec<u8> {
         assert_eq!(self.payload_first_page, 0, "serialising a virtual mesh needs every page payload in memory");
+        let mut out = self.header_to_bytes(Self::MAGIC);
+        out.extend_from_slice(bytemuck::cast_slice(&self.page_data));
+        out
+    }
+
+    /// Everything but the page payloads (and a coded file's stored-page offsets).
+    fn header_to_bytes(&self, magic: [u8; 4]) -> Vec<u8> {
         let mut out = Vec::new();
-        out.extend_from_slice(&Self::MAGIC);
+        out.extend_from_slice(&magic);
         let sdf_words = self.sdf.as_ref().map_or(0, |s| s.words.len());
         for len in [
             self.clusters.len(),
@@ -1052,7 +1176,6 @@ impl VirtualMesh {
         out.extend_from_slice(bytemuck::cast_slice(&self.stats.clusters_per_level));
         out.extend_from_slice(bytemuck::cast_slice(&self.stats.triangles_per_level));
         out.extend_from_slice(bytemuck::cast_slice(&self.stats.voxels_per_level));
-        out.extend_from_slice(bytemuck::cast_slice(&self.page_data));
         out
     }
 
@@ -1089,7 +1212,7 @@ impl VirtualMesh {
         }
 
         let mut r = Reader(bytes);
-        Self::check_magic(r.take(4)?)?;
+        let coded = Self::check_magic(r.take(4)?)?;
         let counts: Vec<usize> = (0..6).map(|_| r.u32()).collect::<Result<_, _>>()?;
         let header: Vec<f32> = r.vec(10)?;
         let sdf = if counts[5] > 0 {
@@ -1123,12 +1246,16 @@ impl VirtualMesh {
             },
             page_data: Vec::new(),
             payload_first_page: counts[1] as u32,
+            page_stored: Vec::new(),
         };
-        if with_payload {
-            mesh.page_data = r.vec(counts[4])?;
-            mesh.payload_first_page = 0;
+        if coded {
+            mesh.page_stored = r.vec(counts[1] + 1)?;
         }
         mesh.validate(counts[4])?;
+        if with_payload {
+            mesh.page_data = if coded { mesh.decode_pages(0, r.take(mesh.stored_payload_bytes())?)? } else { r.vec(counts[4])? };
+            mesh.payload_first_page = 0;
+        }
         Ok(mesh)
     }
 
@@ -1137,7 +1264,9 @@ impl VirtualMesh {
     fn validate(&self, payload_words: usize) -> Result<(), String> {
         let monotonic = |v: &[u32], last: usize| v.first() == Some(&0) && v.windows(2).all(|w| w[0] <= w[1]) && v.last() == Some(&(last as u32));
         let pages = self.pages.len() as u32;
+        let stored_ok = !self.is_coded() || (self.page_stored.len() == self.pages.len() + 1 && monotonic(&self.page_stored, *self.page_stored.last().unwrap() as usize));
         let ok = monotonic(&self.page_offsets, payload_words)
+            && stored_ok
             && monotonic(&self.dependency_offsets, self.dependencies.len())
             && self.dependencies.iter().all(|&d| d < pages)
             && self.clusters.iter().all(|c| c.page < pages && (c.child_page == INVALID_PAGE || c.child_page < pages));
@@ -1322,6 +1451,40 @@ mod tests {
         }
         assert!(streamed.cpu_bytes() < vm.cpu_bytes());
         assert!(VirtualMesh::from_header_bytes(&bytes[..header_len - 1]).is_err());
+    }
+
+    /// Version 7: the same mesh with entropy-coded pages, whole or streamed page by page.
+    #[test]
+    fn coded_files_round_trip_and_stream() {
+        let vm = build_virtual_mesh(&primitives::icosphere(3), &BuildConfig::default());
+        let coded = vm.to_coded_bytes();
+        assert_eq!(&coded[..4], b"HVM7");
+        assert!(coded.len() < vm.to_bytes().len());
+        let back = VirtualMesh::from_bytes(&coded).unwrap();
+        assert_eq!((&back.clusters, &back.pages, &back.page_data, &back.sdf), (&vm.clusters, &vm.pages, &vm.page_data, &vm.sdf));
+        assert!(back.is_coded() && !vm.is_coded());
+
+        let vm = build_rock();
+        let bytes = vm.to_coded_bytes();
+        let header_len = VirtualMesh::header_len(&bytes[..VirtualMesh::PREFIX_BYTES]).unwrap();
+        let mut streamed = VirtualMesh::from_header_bytes(&bytes[..header_len]).unwrap();
+        assert_eq!(header_len, streamed.header_bytes());
+        assert_eq!(bytes.len(), header_len + streamed.stored_payload_bytes());
+        assert!(streamed.stored_payload_bytes() * 3 < vm.payload_bytes() * 2, "coded pages are smaller");
+        for p in 0..vm.pages.len() {
+            let range = streamed.page_byte_range(p);
+            assert_eq!(crate::page_codec::decode_page(&bytes[range.start as usize..range.end as usize]).unwrap(), vm.page_payload(p));
+        }
+        let tail = streamed.root_tail_start();
+        let range = streamed.tail_byte_range(tail);
+        streamed.set_tail_payload(tail, &bytes[range.start as usize..]).unwrap();
+        for p in tail..vm.pages.len() {
+            assert_eq!(streamed.page_payload(p), vm.page_payload(p));
+        }
+        // A damaged stored-page table is caught when the header is read.
+        let mut bad = bytes.clone();
+        bad[header_len - 4..header_len].copy_from_slice(&0u32.to_le_bytes());
+        assert!(VirtualMesh::from_header_bytes(&bad[..header_len]).is_err());
     }
 
     /// Watertight LOD cuts (full and partial residency) on a deliberately coarse position grid,

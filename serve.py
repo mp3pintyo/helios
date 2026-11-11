@@ -64,4 +64,7 @@ if __name__ == "__main__":
     directory = sys.argv[2] if len(sys.argv) > 2 else "web"
     handler = partial(RangeRequestHandler, directory=directory)
     print(f"serving {os.path.abspath(directory)} on http://localhost:{port} (with Range support)")
+    # A page streaming geometry opens dozens of range requests at once; the default listen
+    # backlog (5) made Windows refuse some of them (ERR_CONNECTION_REFUSED).
+    ThreadingHTTPServer.request_queue_size = 128
     ThreadingHTTPServer(("", port), handler).serve_forever()

@@ -37,6 +37,7 @@ mod mesh;
 pub mod modeling;
 mod morton;
 pub mod noise;
+pub mod page_codec;
 mod partition;
 pub mod primitives;
 pub mod progress;

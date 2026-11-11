@@ -75,6 +75,7 @@ mod motion;
 mod near_field;
 mod oit;
 mod page_cache;
+mod page_decode;
 pub mod page_source;
 mod particles;
 mod passes;

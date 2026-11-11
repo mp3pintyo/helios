@@ -495,7 +495,7 @@ impl DemoApp {
             stream.resident_mb,
             stream.pool_mb,
             stream.pending,
-            stream.in_flight,
+            stream.in_flight + stream.decoding,
             self.scene.instance_count(),
             self.scene.source_triangle_count() as f64 / 1e6,
             if !s.global_illumination {
