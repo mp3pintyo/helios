@@ -247,7 +247,10 @@ impl Culling {
             )
         };
         let sw_pipeline = |pass: u32, late: bool, masked: bool, background: bool| sw_pipeline_with(pass, late, masked, background, false);
-        let sw_plants = |pass: u32, late: bool, masked: bool| sw_pipeline_with(pass, late, masked, false, true);
+        // The set the first scene is expected to need compiles in the background from the start
+        // (`expect_plant_bones`), the other when a scene needs it.
+        let expected = crate::plant_pose::plant_bones_expected();
+        let sw_plants = |pass: u32, late: bool, masked: bool| sw_pipeline_with(pass, late, masked, expected && !masked, true);
         let voxel_module = create_module(device, "voxel_raster.wgsl");
         let voxel_pipeline = |pass: u32, late: bool| {
             let constants = [("PASS", pass as f64), ("LATE", if late { 1.0 } else { 0.0 })];
@@ -256,8 +259,9 @@ impl Culling {
         let raster_with = |late: bool, masked: bool, plants: bool| {
             let (device, module, layout) = (device.clone(), raster_module.clone(), raster_layout.clone());
             // Made for the scene's content (prefetched by `prefetch`): with or without the plant
-            // code, alpha-masked only where materials need it.
-            Lazy::new(move || raster_pipeline(&device, &module, &layout, late, masked, plants))
+            // code, alpha-masked only where materials need it; the expected opaque set at once.
+            let make = move || raster_pipeline(&device, &module, &layout, late, masked, plants);
+            if !masked && plants == expected { Lazy::background(make) } else { Lazy::new(make) }
         };
         let raster = |late: bool, masked: bool| raster_with(late, masked, false);
         // The late (second occlusion) pass of every rasteriser.
@@ -288,7 +292,7 @@ impl Culling {
             raster_masked_early: raster(false, true),
             raster_masked_late: in_group(Group::OcclusionCulling, || raster(true, true)),
             // Every scene has opaque clusters: with or without the plant code (`prefetch`).
-            sw_raster: [sw_pipeline(0, false, false, false), sw_pipeline(1, false, false, false), late(&|| sw_pipeline(0, true, false, false)), late(&|| sw_pipeline(1, true, false, false))],
+            sw_raster: [sw_pipeline(0, false, false, !expected), sw_pipeline(1, false, false, !expected), late(&|| sw_pipeline(0, true, false, !expected)), late(&|| sw_pipeline(1, true, false, !expected))],
             sw_raster_masked: [sw_pipeline(0, false, true, false), sw_pipeline(1, false, true, false), late(&|| sw_pipeline(0, true, true, false)), late(&|| sw_pipeline(1, true, true, false))],
             voxel_raster: [voxel_pipeline(0, false), voxel_pipeline(1, false), late(&|| voxel_pipeline(0, true)), late(&|| voxel_pipeline(1, true))],
             raster_plants: [
@@ -478,8 +482,9 @@ impl Culling {
             self.passes[2].prefetch();
         }
         // One of the two rasteriser sets: with the plant code where plants have bones.
-        let plants = scene.plant_pose.any();
-        if plants {
+        let plants = scene.plant_code();
+        if scene.instance_count == 0 {
+        } else if plants {
             self.raster_plants[..2].iter().for_each(Lazy::prefetch);
             self.sw_raster_plants.iter().for_each(Lazy::prefetch);
         } else {
@@ -545,7 +550,7 @@ impl Culling {
             );
             // The internal resolution's corner of the targets (see `targets.rs`).
             pass.set_viewport(0.0, 0.0, targets.width as f32, targets.height as f32, 0.0, 1.0);
-            let plants = scene.plant_pose.any();
+            let plants = scene.plant_code();
             pass.set_pipeline(match (plants, late) {
                 (true, _) => &self.raster_plants[late as usize],
                 (false, true) => &self.raster_late,
@@ -590,7 +595,7 @@ impl Culling {
         // The depth pass of all clusters (opaque, alpha-masked, voxels and tessellated), then the
         // payload pass.
         let (sw_raster, sw_raster_masked) =
-            if scene.plant_pose.any() { (&self.sw_raster_plants, &self.sw_raster_masked_plants) } else { (&self.sw_raster, &self.sw_raster_masked) };
+            if scene.plant_code() { (&self.sw_raster_plants, &self.sw_raster_masked_plants) } else { (&self.sw_raster, &self.sw_raster_masked) };
         for stage in [base, base + 1] {
             pass.set_bind_group(0, &sw_group, &[]);
             pass.set_pipeline(&sw_raster[stage]);

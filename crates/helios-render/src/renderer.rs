@@ -1102,11 +1102,12 @@ impl Renderer {
         let tessellation = self.scene.has_displacement() || (pipelines::deferring() && tessellation_wanted);
         let debug_views = self.settings.debug_view != DebugView::Lit;
         let (uv_extensions, skinning, kinds) = (self.scene.uv_extensions, self.scene.skins.skinned_instances, self.scene.resolve_kinds);
-        // Only the shading models of plants with bones carry the plant code (none with the
-        // bones off: `plant_pose.any()`).
-        let plant_kinds = if self.scene.plant_pose.any() { self.scene.plant_kinds() } else { 0 };
+        // Only the shading models of plants carry the plant code (none with the bones off).
+        let plant_kinds = if self.scene.plant_code() { self.scene.plant_kinds() } else { 0 };
         self.material.sync(&self.device, uv_extensions, skinning, tessellation, tessellation_wanted, debug_views, kinds, plant_kinds, &self.extended, substrate);
-        self.vsm.prefetch(self.scene.plant_pose.any(), skinning, self.scene.masks.any());
+        if self.scene.instance_count > 0 {
+            self.vsm.prefetch(self.scene.plant_code(), skinning, self.scene.masks.any());
+        }
         let slab_lighting = self.extended.lighting.then_some(&self.extended.lighting_layout);
         self.lighting.sync_substrate(&self.device, slab_lighting);
         // MegaLights' slab variant only once MegaLights is asked for (a scene switch to the

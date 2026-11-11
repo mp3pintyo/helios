@@ -22,6 +22,22 @@ use crate::profiler::Recorder;
 use crate::shader::create_module;
 use crate::util::{bind, bind_group, bind_group_layout, lazy_compute_pipeline, storage_buffer, uniform_buffer};
 
+/// Whether the browser's background compile starts with the rasterisers carrying the plant code
+/// ([`expect_plant_bones`]).
+static PLANTS_EXPECTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Which rasteriser set (`PLANTS` in plant_wind.wgsl) renderers created from now on compile in
+/// the background from the start — in the browser, while the first scene is baked: with the
+/// plant code for a scene with plant bones, without it otherwise (the default). The other set
+/// is made when a scene first needs it. Only the first image's wait depends on it.
+pub fn expect_plant_bones(expected: bool) {
+    PLANTS_EXPECTED.store(expected, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub(crate) fn plant_bones_expected() -> bool {
+    PLANTS_EXPECTED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Binding of the plant motion texture (simulated deviations, pose entries) in every shader that
 /// positions geometry.
 pub const BINDING_PLANT_MOTION: u32 = 171;

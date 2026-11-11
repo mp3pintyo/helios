@@ -92,6 +92,7 @@ mod scene;
 mod scene_edit;
 mod selection;
 mod shader;
+pub use plant_pose::expect_plant_bones;
 pub use shader::{allow_half_precision, half_precision};
 mod skin;
 mod stats;

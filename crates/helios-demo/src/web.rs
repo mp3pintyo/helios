@@ -436,6 +436,8 @@ async fn run() -> Result<(), String> {
 
     // The renderer first: its core pipelines are queued now (Chromium: every pipeline starts
     // compiling in parallel) and compile in the GPU process while the scene loads and bakes.
+    // The forest's and the gallery's plants have bones: their rasterisers carry the plant code.
+    helios_render::expect_plant_bones(matches!(scene_from_url(), SceneKind::Forest | SceneKind::Gallery));
     let renderer = Renderer::with_config(&ctx.device, &ctx.queue, format, width, height, renderer_config());
     // Firefox: yielding between the renderer's shader modules and the first pipelines kept the
     // main thread from blocking 5 s (until the GPU process had compiled the core set) at the

@@ -53,7 +53,7 @@ pub struct GpuScene {
     pub resolve_kinds: u32,
     /// Per material its plain resolve slot (shading model).
     material_kinds: Vec<u32>,
-    /// The materials of instances with plant bones.
+    /// The materials of the instances in the wind (plants).
     plant_materials: Vec<u32>,
     /// Counts uploads of `materials` (extended materials patch their resolve slots after each).
     pub material_uploads: u64,
@@ -189,10 +189,17 @@ impl GpuScene {
         (self.windy && self.wind_blowing.load(std::sync::atomic::Ordering::Relaxed)) || self.displaced || self.skins.skinned_instances
     }
 
-    /// The plain resolve slots (shading models) of the materials of plants with bones, a bit each:
-    /// only their resolve pipelines carry the plant code (`PLANTS` in plant_wind.wgsl).
+    /// The plain resolve slots (shading models) of the materials of plants (instances in the wind),
+    /// a bit each: only their resolve pipelines carry the plant code (`PLANTS` in plant_wind.wgsl).
     pub fn plant_kinds(&self) -> u32 {
         self.plant_materials.iter().filter_map(|&m| self.material_kinds.get(m as usize)).fold(0, |kinds, &k| kinds | (1 << k.min(31)))
+    }
+
+    /// Whether the passes that place geometry carry the plant code (`PLANTS` in plant_wind.wgsl):
+    /// the bones are on and some plant has them — or will have them: the browser's first frames
+    /// draw the scene before its final bake ([`crate::expect_plant_bones`]).
+    pub fn plant_code(&self) -> bool {
+        self.wind_bones_enabled && (self.plant_pose.any() || crate::plant_pose::plant_bones_expected())
     }
 
     /// Whether the wind blows this frame (`write_wind`).
@@ -525,7 +532,9 @@ impl GpuScene {
         let visibility_bits = self.assemblies.upload_instances(device, queue, scene, visibility_bits);
         // The pose pass visits the plants with bones and the assembly part slots.
         let plants: Vec<u32> = instances.iter().enumerate().filter(|(_, gpu)| gpu.plant[0] != 0).map(|(i, _)| i as u32).collect();
-        self.plant_materials = plants.iter().map(|&i| instances[i as usize].material).collect();
+        // The materials in the wind: the plants' shading models (their bones may arrive later in
+        // the browser, whose first frames draw the scene's meshes before their final bake).
+        self.plant_materials = scene.instances.iter().filter(|i| instance_wind(scene, i) != Vec4::ZERO).map(|i| i.material.0).collect();
         self.plant_materials.sort_unstable();
         self.plant_materials.dedup();
         self.plant_pose.set_instances(device, queue, &plants, count as u32 + self.assemblies.record_count(), self.assemblies.part_capacity());

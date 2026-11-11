@@ -168,6 +168,9 @@ impl DemoApp {
 
     /// Replaces the scene with one built beforehand.
     pub(crate) fn set_scene(&mut self, kind: SceneKind, setup: SceneSetup) {
+        // The forest's and the gallery's plants have bones (the renderer's rasterisers with the
+        // plant code from the first frame on).
+        helios_render::expect_plant_bones(matches!(kind, SceneKind::Forest | SceneKind::Gallery));
         self.kind = kind;
         self.editor = Editor::new(&setup.scene, crate::app_editor::base_scene(kind, self.detail, self.model.as_ref()), &setup.outline);
         self.scene = setup.scene;
