@@ -26,7 +26,7 @@ Part of the `helios-render` GPU pipeline; the pipeline diagram and the index of 
   are diced as they are). **Dicing**: an edge with factor c gets 2^ceil(log2(c/√2)) segments (lengths within √2
   of the dice rate), the inside a uniform grid of F = 2^level segments per side with the finest edge's level
   (F = 1, 2, 4, 8 — up to 64 micro-triangles per patch); grid vertices on an edge with fewer segments snap to its
-  segments (a zipper of degenerate triangles). Vertices new at a level are **geomorphed**: they grow out of the
+  segments (a zipper of degenerate triangles). Levels 0 and 1 are diced by a thread per patch, 2 and 3 by a workgroup per patch group in shared memory; since round 8 (`webperf`) one indirect dispatch dices two levels (`tess_dice_level` finds a workgroup's level from the lists' counts), one pipeline per path and raster pass (`GRID` override) instead of one per level: 6 pipelines per view instead of 12 for the browser to compile, the same GPU time, the shadow pages' dicing 0.052 → 0.045 ms and the late pass 0.099 → 0.084 ms (fewer dispatches and barriers). Vertices new at a level are **geomorphed**: they grow out of the
   coarser segment they split, from its midpoint to their displaced place as the factor goes from 2^(level−1) to
   2^level — in displaced space (as CDLOD does for terrain): morphing the parameter instead slides the
   displacement across the surface, which swims. Both sides of an edge snap and morph its vertices alike, so the

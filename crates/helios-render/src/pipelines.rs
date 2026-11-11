@@ -70,10 +70,14 @@ pub enum Group {
     OcclusionCulling,
     /// Heterogeneous volumes and particles.
     Effects,
+    /// Views the camera may soon reach (the underwater view near a water body's surface):
+    /// queued when it comes close, compiled last, and no feature waits for them (a frame that
+    /// needs one before it is in skips its draw).
+    OnDemand,
 }
 
 impl Group {
-    pub const ALL: [Group; 10] = [
+    pub const ALL: [Group; 11] = [
         Group::Core,
         Group::Shadows,
         Group::Clouds,
@@ -84,6 +88,7 @@ impl Group {
         Group::Tessellation,
         Group::OcclusionCulling,
         Group::Effects,
+        Group::OnDemand,
     ];
 
     pub fn name(self) -> &'static str {
@@ -98,6 +103,7 @@ impl Group {
             Group::Tessellation => "tessellation",
             Group::OcclusionCulling => "occlusion culling",
             Group::Effects => "volumes and particles",
+            Group::OnDemand => "underwater view",
         }
     }
 }

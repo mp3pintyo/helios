@@ -357,7 +357,7 @@ Each subsystem is described in its own page under [`docs/architecture/`](docs/ar
 | [Translucency and water](docs/architecture/translucency.md) | Depth-peeled forward translucency, coloured light through glass, water bodies |
 | [Volumes and particles](docs/architecture/volumes-particles.md) | Heterogeneous volumes (fluid simulation), GPU particles, order-independent transparency |
 | [Post-processing](docs/architecture/post.md) | Temporal stability, TSR and dynamic resolution, camera, local exposure, profiling |
-| [Browser platform](docs/architecture/browser.md) | Start-up order, scene bake on Web Workers, device limits, f16 shaders, browser measurement hooks |
+| [Browser platform](docs/architecture/browser.md) | Start-up order, scene bake on Web Workers, frames held for new pipelines, fewer pipelines, device limits, f16 shaders, browser measurement hooks |
 
 ### 3. Editor, scene files and PCG — `helios-demo`, `helios-pcg`, `web/editor`
 
