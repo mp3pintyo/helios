@@ -24,6 +24,15 @@ Honest differences that remain:
    cathedral, the valley and the forest all request more), so they are thinned at random each frame; they cost
    0.3–0.4 ms at 1600×900 (the final gather goes from 0.5–0.55 to 0.8–0.95 ms). Remaining slow flicker on thin geometry
    comes from the surface caches' incremental updates (cards, voxels, radiance cache), not from probe placement.
+   The **world cache** (round 8, default; UE 5.9's Lumen World Cache) replaces the cards and the voxel lighting at ray
+   hits with sparse world-space cells filled by paths from the screen — indoors within 12–15 % of a path-traced
+   reference where the cards and voxels were 3–6 times too bright (their 15 % open-sky term and the voxel leak through
+   thin walls) — but it is traced against the distance fields, not hardware ray tracing: rays still miss skinned
+   meshes, particles and volumes (their cells exist on screen only), paths shade two vertices with one sampled local
+   light each and global-field shadows, cells are 2.5–5 % of their distance across (finer bounce detail is averaged),
+   a surface no path reached in 64 frames falls back to the voxel lighting (and its sky term) — briefly after a cut —,
+   and there is no far field beyond the clipmap. With the world cache off or behind the cards (A/B), what this item
+   says about the cards and the voxel lighting applies as before.
    The surface caches see neither skinned meshes, volumes nor particles (only a fire's driven light), and follow
    moved instances over a few frames (item 9); they see displaced surfaces to the resolution of their baked
    variants, animated ones as their mean surface (item 14). **Lumen Lite**'s irradiance field covers ±64 m around

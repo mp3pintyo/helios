@@ -105,7 +105,7 @@ micro-triangles), `--eye x,h,z` /
 `--at x,h,z` (heights relative to the ground), `--camera x,y,z,yaw,pitch`, `--lod px`, `--pool-mb N`
 (geometry pool size, to exercise streaming), `--texture-pool-mb N` (texture tile atlases), `--no-texture-compression` (uncompressed tiles; in
 the browser `?texture-compression=0`), `--no-occlusion`, `--no-sw-raster`,
-`--no-rvt`, `--no-glass-shadows` (sun and local lights through glass stay white), `--wboit` (round 7's OIT instead of AVBOIT), `--no-svt` (image textures from the 512² arrays only), `--animate-sun`, `--sun AZ,EL` (sun azimuth and
+`--no-rvt`, `--no-glass-shadows` (sun and local lights through glass stay white), `--wboit` (round 7's OIT instead of AVBOIT), `--world-cache off|on|replace` (Lumen world cache: off, behind the mesh cards, in place of them — the default; key `5`), `--no-svt` (image textures from the 512² arrays only), `--animate-sun`, `--sun AZ,EL` (sun azimuth and
 elevation in degrees; e.g. `200,-30` for a starry night),
 `--keys KeyG,KeyH` (press hotkeys after loading; with `--keys-at N` at frame N instead), `--hold KeyW` (hold keys every frame: a moving camera),
 `--screen-percentage N` (render at N % of the output, 25–100, and upscale with TSR), `--gpu-budget-ms N` (dynamic

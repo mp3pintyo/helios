@@ -86,6 +86,44 @@ Part of the `helios-render` GPU pipeline; the pipeline diagram and the index of 
   the variants of a scene arrive in one Lumen re-upload. Debug view 14 shows the gallery's mushroom bed and cloth
   in card lighting where they were voxel fallback (purple) before, and fewer unmatched card texels on the
   valley's displaced boulders (19 → 14 % of their pixels). Scenes without displacement upload and render as before.
+  **World cache** (`world_cache.rs`, `lumen_world_cache_common.wgsl`, `lumen_world_cache.wgsl`; round 8,
+  `docs/round8/world-cache.md`; UE 5.9's Lumen World Cache, traced against the distance fields instead of hardware
+  ray tracing): a world-space lighting cache in sparse hashed cells, filled by paths traced from the screen.
+  *Cells*: 2¹⁸ hash slots (linear probing, 32-bit checksum) keyed by a camera-distance level (20 cm within 8 m,
+  doubling with every doubling of the distance), the dominant axis and sign of the surface normal — the two faces of a
+  thin wall never share a cell — and the grid cell (twice as deep along the normal, centred on the grid planes); each
+  holds the irradiance its surface receives (running mean of up to 16 frames), its albedo and emission. *Paths*: each
+  frame one random pixel per 8×8 tile starts a path at its G-buffer surface; a cosine ray through the near field and the
+  global field finds a second vertex and a second ray from there is shaded by the caches (the world cache itself, so
+  light keeps bouncing over frames). Each vertex gets the sun (virtual shadow map where resident, distance-field
+  shadows otherwise, coloured by glass) and one local light chosen in proportion to its contribution (weighted
+  reservoir sampling, global-field shadow); its irradiance along the path is added to its cell (fixed point relative
+  to the exposure, atomics), and a resolve pass blends each cell's samples over up to 16 frames (4 after a large
+  change) and evicts cells no path visited for 64 frames. *Material at a hit* (no hit shaders): a cell learns the
+  albedo and emission of the pixels on screen that land in it — exact for everything ever seen, textured, skinned,
+  displaced or wind-blown — and keeps it; cells never seen take the mesh cards' captured texel at the hit, else the
+  global field's mean of the instance's material; glass ends a path with the voxel lighting (translucent surfaces
+  are not cached, as in UE). *Readers*: the screen probes', reflections', Lumen Lite's and the radiance cache's hits
+  read the cell of the surface they hit, blended over the voxel lighting by its confidence. `RenderSettings::world_cache`:
+  `Off` (round 7), `Fallback` (`--world-cache on`: cards first, the cache in place of the voxel lighting; paths end at
+  surfaces the cards hold) and `Replace` (`--world-cache replace`, UE's behaviour: the cache in place of cards and
+  voxels, the card lighting pass skipped); key `5` cycles, editor *Lumen world cache*, `?world-cache=on|replace`.
+  Debug view 27 shows the radiance each pixel's cell holds (purple-tinted voxel lighting where no cell does).
+  `HELIOS_WORLD_CACHE_STATS=1` logs the live cells, `HELIOS_WORLD_CACHE_REFERENCE=1` replaces the final gather by a
+  brute-force path tracer through the same fields, materials and lights (8 bounces, accumulated while the camera rests)
+  for comparisons. **Accuracy** against that reference (indirect light, fixed exposure, mean): outdoors every mode is
+  within 3–7 % (valley, forest, gallery); indoors round 7's caches are 2.8× (nave) and 5.6× (aisle) too bright — the
+  voxel lighting leaks the sunlit exterior through the 1.2 m aisle wall and both caches add 15 % of an open sky that
+  the hall does not see — while *Replace* is within 15 % and 12 % (*Fallback* +40 / +86 %: the cards keep their sky
+  term). **Default**: `Replace`. **Cost** (shared GPU, 1600×900, minimum of 3 interleaved runs): the paths and the
+  resolve take 0.18–0.31 ms (`lumen world cache`), the card lighting pass goes away and the final gather gets cheaper
+  without card lookups (cathedral 0.90 → 0.75 ms), so all of GI costs +0.04–0.15 ms (cathedral 1.55 → 1.62, valley
+  1.11 → 1.20, forest 1.26 → 1.35, gallery 1.33 → 1.48 ms); behind the cards +0.23–0.40 ms. 14–58 k live cells (at
+  most 22 % of the slots); 20 MiB (16 MiB of per-slot records, a 4 MiB cell texture), allocated when first enabled.
+  Temporal stability (static camera, 24 frames, pixels changing by > 4/255 · > 24/255): cathedral 4.72 · 0.0048 % →
+  4.63 · 0.0082 %, valley 3.91 · 0.014 % → 4.79 · 0.023 %, forest 9.23 · 0.111 % → 9.18 · 0.119 %; a moving sun
+  (`--animate-sun`) moves the indirect light by at most 0.2 % per frame (no steps); walking down the nave, frames
+  change 16 % more (cells fill in as surfaces come into view).
 * **Lumen Lite** (`lumen_lite.rs`, `lumen_lite.wgsl`, `lumen_trace.wgsl`; UE 5.8's `r.Lumen.FinalGatherMethod 0`).
   An alternative final gather for weak GPUs (`RenderSettings::gi_method = GiMethod::LumenLite`): instead of tracing
   64 rays from every 16×16 screen tile (plus adaptive probes) every frame, diffuse GI is gathered from a world-space
