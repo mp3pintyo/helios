@@ -41,3 +41,16 @@ Part of the `helios-render` GPU pipeline; the pipeline diagram and the index of 
   one as *cluster candidates* after the page work items, 64 to a workgroup (round 6: the forest's needle sprays have
   17 clusters over 6 pages, so their pages kept ~5 % of a workgroup's lanes busy); beyond the candidates' capacity a
   page falls back to a work item. The sixteen shadow clipmap levels, culled one after another, share one work buffer.
+  Round 8 ([`nanite-culling.md`](../round8/nanite-culling.md); UE 5.9's culling rework): instances with at most 16
+  pages likewise list their pages as *page candidates*, 64 to a page workgroup from any instances, instead of a
+  64-lane batch each (not the local lights' view, whose lanes of one instance share its loads, nor assembly culling
+  records; forest main view 5 432 → 1 070 batches, page pass 0.028 → 0.020 ms); a sun clipmap level without any
+  dirty page leaves the instance pass before a thread loads its instance (most levels in calm scenes); and culling
+  is specialised on deformation (`DEFORMING` in `cull.wgsl`): frames in which nothing deforms — no wind blowing on an
+  instance with a wind response, no displaced or skinned instance (`GpuScene::deforms`) — use pipelines without the
+  wind, displacement and skin bound code (UE's simple/complex split, per frame rather than per instance). Automatic,
+  no settings; results identical. `cull` + `cull (late)` at 1600×900: valley 0.210 → 0.195 ms, cathedral
+  0.277 → 0.263 ms, forest 0.472 → 0.469 ms. `HELIOS_CULL_STAGES=1` times every stage of every view as its own pass
+  (`cull instances [main]`, `cull pages [shadow]` …) for profiling. Testing several DAG levels at once (a per-mesh
+  level table skipping the finer levels of distant instances in the instance pass) was built, proved conservative and
+  measured: it cost the instance pass what it saved the page pass, so it was removed.

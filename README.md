@@ -301,7 +301,7 @@ run on decoded positions, including on a deliberately coarse grid.
 ```
 sky LUTs ─ fire-driven light colours (volume emission) ─ light culling (froxels, ≤ 255 lights each)
 assembly expansion: assembly bases too coarse for the main view → part instances + one culling record each (every view)
-cull instances (+ assembly records) → page batches → pages (residency + LOD prune) → clusters, small pages' one by one
+cull instances (+ assembly records) → page batches, small instances' pages one by one → pages (residency + LOD prune) → clusters, small pages' one by one
   (EARLY: visible last frame)
   → HW raster (big triangles; alpha-masked ones in a second bin) + SW raster (tiny triangles)
     + voxel raster (foliage voxel clusters, compute)

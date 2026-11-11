@@ -268,3 +268,11 @@ Honest differences that remain:
     per texel (light through two panes in a row takes the nearer one's colour) and spans every visible pane (glass
     spread over a large world gets coarse texels); Lumen's voxel surface cache, translucent surfaces and local
     lights still see glass as clear (`docs/round7/glass-shadows.md`).
+17. **Nanite culling** (round 8, `nanite-culling-split`): no persistent-thread BVH traversal — every view runs a
+    fixed chain of six dispatches (instances → pages → clusters with their argument passes), the twelve sun clipmap
+    levels one after another, so fixed per-view costs dominate shadow culling (a clean level still costs its
+    dispatches and barriers). UE 5.9's simple/complex split is per frame (a lean specialisation when nothing
+    deforms), not per instance: windy frames cull every instance with the deformation bounds code. There is no
+    multi-level DAG step: a per-mesh level table skipping finer levels at once cost as much as it saved and was
+    removed; coarse pages above the LOD cut still send every cluster to the cluster test
+    (`docs/round8/nanite-culling.md`).
