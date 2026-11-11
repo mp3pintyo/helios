@@ -71,6 +71,8 @@ const GLASS_BLUR: f32 = 3.0;
 const GLASS_PROBE_OFFSET: f32 = 2.5;
 const WATER_F0: f32 = 0.02;
 const GLASS_F0: f32 = 0.04;
+// Glass reflectance above which reflection rays trace the distance field (grazing angles).
+const GLASS_TRACED_REFLECTANCE: f32 = 0.1;
 // fp16 render targets saturate at 65504; sun glints stay well below that.
 const MAX_SPECULAR: f32 = 400.0;
 // Screen-space reflections: march length (metres) and steps.
@@ -851,15 +853,22 @@ fn shade_glass(in: VertexOutput, input: SurfaceInput, m: Material, px: Pixel) ->
     direct.uv = px.uv;
     direct.linear_depth = px.linear_depth;
     direct.noise = px.noise;
-    // Panes sit in walls, away from the lights: no light shadows. Their reflections are faint
-    // (a few percent): the radiance cache stands in for the distance-field trace.
+    // Panes sit in walls, away from the lights: no light shadows.
     direct.light_shadows = false;
     direct.sun_visibility = sun_shadow(p, n, px.noise);
     var color = direct_light(direct);
     // Lead came: diffuse ambient; both: reflections.
     color += direct.diffuse * ambient_irradiance(p, n) / PI;
     let r = reflect(-v, n);
-    color += surface_reflection(p, n, r, roughness, px.noise, false) * env_brdf(vec3<f32>(GLASS_F0), roughness, n_dot_v);
+    // Reflections are faint (a few percent) where the pane is seen face on: the radiance
+    // cache's blurry view stands in for the distance-field trace. At grazing angles they are
+    // not: a pane's edge seen from just above (its top face, a few centimetres wide) reflects
+    // half the light, and the cache's hemisphere around a near-horizontal ray is half sky -
+    // it drew a bright line across the landscape behind the pane where the reflection should
+    // show that landscape. Strong reflections trace the distance field like water's.
+    let reflectance = env_brdf(vec3<f32>(GLASS_F0), roughness, n_dot_v);
+    let traced = reflectance.x > GLASS_TRACED_REFLECTANCE;
+    color += surface_reflection(p, n, r, roughness, px.noise, traced) * reflectance;
 
     let fresnel = f_schlick(vec3<f32>(GLASS_F0), n_dot_v).x;
     let tint = g.albedo * select(1.0, GLASS_TRANSMISSION, stained) * (1.0 - fresnel) * coverage;
