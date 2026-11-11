@@ -38,8 +38,11 @@ quantity baked by the vegetation generators and carried through the whole geomet
   1 from 0.8 m (or a quarter of a small plant's height) up — on the wood, and on bushes' leaves too, so a leaf moves with
   the twig it sits on. `MeshBuilder::plant_vertex`, `add_leaf_with_plant` and `add_strip` carry it.
 * Encoding (`encoding.rs`): an optional cluster attribute like the second UV set and the colours — extension word bit
-  29, then per vertex 2 × 5 bits (wind weight, occlusion; fixed width, no per-cluster range: a handful of values per
-  blade) after the colour. Meshes without plant data encode exactly as before; the DAG builder carries it through
+  29 and widths word bit 31 — with 2 × 5 bits per vertex (fixed width, no per-cluster range: a handful of values per
+  blade). The **wind weight follows each vertex's position offsets** in the position stream, so the position-only
+  passes (rasterisers, shadow pages) read it from the bits they already fetch; the occlusion follows the colour among
+  the attributes, which only the resolve reads. (A first version kept both among the attributes: reading the weight
+  there cost the four rasterisers ~0.17 ms in the forest.) Meshes without plant data encode exactly as before; the DAG builder carries it through
   simplification and pruning copies like the colours (`plant_data_survives_simplification`). `.hvm` → **version 5**
   (`HVM5`; version 4 files have no bit 29 set and still load).
 * Shaders: `geometry.wgsl` `vertex_plant` / `vertex_wind_weight` (only read when the instance moves:
@@ -79,8 +82,10 @@ after, the bottom of the tuft is still and the motion grows towards the tips.
   a slope or a residual terrain error never shows a floating base.
 * **Grass tufts** (`grass_clump`): blades rise from a tuft 6 cm in radius (they used to stand on a ±15 cm square) and
   fan out — outer blades lean further — widest at the base and tapering to the tip, arching away from the centre, as
-  a strip of 3 segments (10 triangles a blade instead of 8). **Ferns** get a tapering stalk (rachis) following each
-  frond from below the ground to its tip; before, a straight half-length blade left the leaflets floating.
+  a strip of 2 segments (6 triangles a blade instead of 8; a first version with 3 segments, 10 triangles and 40 %
+  more vertices, cost ~0.4 ms of shadow-page rasterisation in the forest). **Ferns** get a tapering stalk (rachis)
+  following each frond from below the ground to its tip (3 segments); before, a straight half-length blade left the
+  leaflets floating.
 * **Baked occlusion** (`Mesh::plant.y`): darker towards the crowded base of a tuft (inner blades darkest: 0.35–0.6 at
   the root → 1 at 70 % of the blade) and a fern's crown (0.35 → 1 at half the frond). The G-buffer resolve multiplies
   the material's AO by it, so it darkens indirect light only, like UE's foliage vertex AO into the material AO.
@@ -92,7 +97,9 @@ after, the bottom of the tuft is still and the motion grows towards the tips.
   out towards the radius); the mean of the horizons is the occluded fraction of the cosine-weighted hemisphere
   (horizon-based AO as HBAO/GTAO, without their slice integration). It multiplies the occlusion that darkens Lumen's
   diffuse light and the specular occlusion. Samples beyond the radius are ignored, so a blade in front of distant
-  ground casts no halo. The ground under a tuft, around a fern's crown and where rocks and logs meet it darkens.
+  ground casts no halo. The ground under a tuft, around a fern's crown and where rocks and logs meet it darkens
+  (`foliage-grounding/ao-indirect-off-on.jpg`, indirect light only).
+* Images: `grass-before-after.jpg`, `side-before-after.jpg`, `fern-before-after.jpg`, `default-before-after.jpg`.
 * **Terrain bump** (content): the forest floor's height-to-normal strengths 1.0 / 0.6 / 0.6 (litter, moss, dirt) →
   0.3 / 0.2 / 0.25, see item 225 — the ground's lumpy relief also read as noise next to the plants by day.
 * **Sun shadows of grass and ferns** (checked, unchanged): the VSM resolves blade shadows near the camera (soft
@@ -106,7 +113,7 @@ after, the bottom of the tuft is still and the motion grows towards the tips.
 **Diagnosis.** `--view 15` (local shadow pages) showed the ground around the fire covered with dark grey blotches,
 and the lit image with dark speckles that looked like the light's shadow. They are **neither shadow nor acne**:
 
-* a receiver bias 4× larger left them unchanged (`foliage-grounding/campfire-debug-before-after.jpg`), and replacing
+* a receiver bias 4× larger left them unchanged, and replacing
   the shading normal by the depth buffer's geometric normal for the filter's receiver plane did too;
 * the debug view paints a pixel `0.08` grey where the strongest light contributes nothing, and that is
   `saturate(dot(n, l)) = 0`: with the fire 0.8 m high, the light reaches the ground at 9–25° from 2–5 m away, and the
@@ -119,7 +126,10 @@ and the lit image with dark speckles that looked like the light's shadow. They a
 relief by day), and the fire's `source_radius` 0.25 → 0.15 m (a ~30 cm wide flame; the PCSS penumbra of a leaflet 0.3 m
 above the ground 1.5 m from the fire is now ≈ 2–3 cm, so fronds and blades cast soft but readable shadows). With the
 plants rooted (227), the fronds' and tufts' shadows now radiate from the fire across the clearing; the stones' and the
-teepee logs' shadows were already right and are unchanged. **No change to `vsm_local*.rs/.wgsl`.**
+teepee logs' shadows were already right and are unchanged. **No change to `vsm_local*.rs/.wgsl`.** Images:
+`foliage-grounding/campfire-debug-before-after.jpg` (`--view 15`: the blotches are gone), `campfire-top-before-after.jpg`,
+`campfire-low-before-after.jpg`, `campfire-night-before-after.jpg` (the default view at night: fern and grass shadows
+radiate across the foreground).
 
 **Rejected:** flattening normal maps for local lights at grazing angles in the lighting (a geometric normal per pixel
 from the depth buffer; physically a bumpy ground under a grazing light *is* contrasty, and the cost lands in every
@@ -127,7 +137,29 @@ scene), a larger receiver bias (no effect, as shown).
 
 ## Measurements
 
-TBD
+RTX 3090 shared with up to four other agents' renders: per-pass **minima** of 3–5 interleaved runs per configuration
+(round-7 baseline binary 06306df, this branch with short-range AO on and off), forest at high detail, 1600×900, 300
+frames; whole-frame totals were partly swamped by the other load.
+
+| Pass (ms) | default view: base → AO off → AO on | grass close-up: base → AO off → AO on | night (campfire): base → AO on |
+|---|---|---|---|
+| GPU frame (median) | 8.87 → 9.23 → 9.72 | 9.89 → 9.96 → 10.05 | 8.28 → 8.88 |
+| raster hw / sw + merge | 0.212 / 2.067 → 0.226 / 2.108 → 0.231 / 2.111 | 0.223 / 2.172 → 0.235 / 2.218 → 0.240 / 2.218 | 0.210 / 2.067 → 0.228 / 2.096 |
+| material classify + resolve | 0.431 → 0.507 → 0.509 | 0.432 → 0.503 → 0.509 | 0.428 → 0.498 |
+| vsm raster sw / hw | 0.828 / 0.672 → 0.874 / 0.883 → 0.874 / 0.887 | 0.658 / 1.221 → 0.550 / 1.319 → 0.487 / 1.385 | 0.588 / 0.323 → 0.709 / 0.560 |
+| lighting | 0.586 → 0.595 → 0.740 | 0.682 → 0.697 → 0.888 | 0.621 → 0.752 |
+
+* **Short-range AO**: lighting +0.15 ms (default view) to +0.19 ms (grass filling the screen).
+* **Plant data and geometry**: +0.3–0.4 ms, mostly shadow-page rasterisation (+0.05 software, +0.2 hardware) and the
+  resolve (+0.07: reading the occlusion). The grass and fern meshes now carry plant data (extended clusters: 4 header
+  words and 10 bits a vertex), fern fronds a stalk (+18 triangles a frond), grass blades 6 triangles instead of 8.
+  Two earlier variants were measured and replaced: wind weights among the attributes (+0.17 ms in the four
+  rasterisers, now read with the positions) and 3-segment blades (+0.4 ms of shadow rasterisation).
+* **Memory**: the forest's grass and fern meshes carry 4 extension words per cluster and 10 bits per vertex more; other meshes are bit-identical except tree and bush wood, which got wind weights (root flares).
+* **Tests**: `plant_data_round_trips`, `plant_data_survives_simplification`, `plants_are_rooted_in_the_ground`,
+  `plants_stand_on_the_terrain_mesh` (the 14 / 3.3 cm figures).
+* **Browser** (headless Chromium, WebGPU, `?scene=forest`, medium detail): Tint compiles every changed shader, no
+  console errors; `Home` toggles the AO.
 
 ## Remaining limits
 

@@ -78,3 +78,22 @@ Part of the `helios-render` GPU pipeline; the pipeline diagram and the index of 
   branches. Coverage tests on a leaf cloud: within 3.4 % of the full mesh along each axis at 30–2000 m (9 %
   diagonally at the finest voxels), where the triangle cut is off by up to 13 %. Temporal stability (2560×1440,
   static camera, % px > 24/255): 0.077 → 0.083 % with wind, 0.027 → 0.033 % calm.
+* **Grounded foliage** (round 8, [`foliage-grounding.md`](../round8/foliage-grounding.md); `vegetation.rs`,
+  `Mesh::plant`, `encoding.rs`, `geometry.wgsl`, `wind.wgsl`, `short_range_ao.wgsl`; the forest's
+  `terrain_mesh_height`). Plants stand in the ground rather than on it. **Plant data**: the vegetation generators bake
+  per vertex a *wind weight* — the attachment, 0 where the plant is rooted, 1 where it moves freely, from the distance
+  along the plant from its root (see [*Wind*](motion.md)) — and an *ambient occlusion* (a grass tuft's crowded base, a
+  fern's crown), stored as an optional cluster attribute (5 + 5 bits a vertex: the weight right after the position
+  offsets, which the rasterisers fetch anyway; the occlusion after the other attributes) and carried through every LOD.
+  The G-buffer resolve multiplies the material's AO by the occlusion (indirect light only). **Geometry**: grass blades
+  and fern stalks start 4 cm below the ground (`ROOT_DEPTH`); a tuft's blades rise from a 6 cm tuft, widest at the
+  base, tapering and arching outwards (2 segments, 6 triangles a blade); every fern frond has a tapering stalk from the
+  soil to its tip. **Placement**: the forest places its plants, rocks, logs and the campfire on the terrain *mesh* —
+  its height function sampled at the grid's vertices and interpolated over the grid triangle as the mesh is
+  rasterised — instead of the analytic height, which floated up to 14 cm (medium detail, the browser's) / 3.3 cm
+  (high) above the mesh on crests; the scene's floor (camera, PCG) follows it too. **Short-range AO** (see
+  [*Lumen*](lumen.md)) darkens the ground under tufts and fronds and where rocks and logs meet it. The forest floor's
+  bump is gentler (litter / moss / dirt 1.0 / 0.6 / 0.6 → 0.3 / 0.2 / 0.25): under the campfire's grazing light its
+  normal maps turned large parts of the ground away from the light in 10–20 cm blotches that drowned the plants'
+  shadows, and the fire's source radius matches a ~30 cm flame (0.25 → 0.15 m), so fronds and tufts cast soft but
+  readable shadows across the clearing.

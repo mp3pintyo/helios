@@ -144,3 +144,15 @@ Part of the `helios-render` GPU pipeline; the pipeline diagram and the index of 
   by more than 4/255 in 1.05 % of the pixels (Lumen 0.30 %) — a fine uniform grain from the probe refreshes rather
   than the screen probes' blotches. Moving camera: within 2 % of Lumen's frame-to-frame change, no pops as slabs
   scroll in.
+* **Short-range AO** (round 8, `short_range_ao.wgsl`, [`foliage-grounding.md`](../round8/foliage-grounding.md); UE's
+  Lumen short range AO). The occlusion within 0.4 m of a pixel is what both GI methods miss: screen probes sit one
+  per 16² pixels at half resolution and their filter smears it, the distance fields hold no thin foliage, and a grass
+  tuft or a fern stood on fully lit ground. The lighting pass marches, per pixel, 4 screen directions (rotated per
+  pixel and frame by interleaved gradient noise; TSR averages them) in 4 steps within 0.4 m (at most 64 px at 900
+  rows) through the depth buffer, keeps each direction's horizon — the highest sample's sine of elevation above the
+  tangent plane, `cos(v, n)`, biased by 0.15 and faded towards the radius — and takes their mean as the occluded part
+  of the cosine-weighted hemisphere (horizon-based AO, as HBAO / GTAO without their slice integral). It multiplies the
+  material AO, so it darkens Lumen's diffuse light (or the sky's) and the specular occlusion, never direct light.
+  Samples beyond the radius are skipped: a blade in front of distant ground casts no halo. `RenderSettings::short_range_ao`
+  (on), `--no-short-range-ao`, `Home`, editor *Short-range AO*; frame flag 4096. Cost (forest, 1600×900, shared GPU, minima of interleaved runs): lighting +0.15 ms in the default view,
+  +0.19 ms with grass filling the screen.
