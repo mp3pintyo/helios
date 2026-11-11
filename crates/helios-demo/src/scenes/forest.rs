@@ -326,6 +326,15 @@ fn build_scene(detail: Detail) -> Scene {
 /// Where the campfire burns, in the clearing in front of the initial view.
 const CAMPFIRE: Vec2 = Vec2::new(7.0, -1.0);
 
+/// Scale of the campfire's soot (f32 bits; 1 by default): `--campfire-smoke 6` builds the forest
+/// with a smokier fire (a damp log), whose shadow on the clearing shows plainly.
+static CAMPFIRE_SMOKE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0x3f80_0000);
+
+/// Scales the soot of the campfire of forests built from now on.
+pub fn set_campfire_smoke(scale: f32) {
+    CAMPFIRE_SMOKE.store(scale.max(0.0).to_bits(), std::sync::atomic::Ordering::Relaxed);
+}
+
 /// Ferns and grass don't grow in the fire ring.
 fn in_campfire(x: f32, z: f32) -> bool {
     Vec2::new(x, z).distance(CAMPFIRE) < 1.4
@@ -368,7 +377,13 @@ fn campfire(scene: &mut Scene, x: f32, z: f32) {
     // In the flames just above the teepee: the logs below it stripe the clearing with shadows, the
     // smoke above is lit without their shadow cone.
     let light = scene.add_light(Light { source_radius: 0.25, ..Light::point(base + Vec3::Y * 0.8, Vec3::new(1.0, 0.48, 0.18), 4.0, 18.0) });
-    scene.volumes.push(VolumeEmitter { light: Some(light), ..VolumeEmitter::campfire(base) });
+    let mut fire = VolumeEmitter::campfire(base);
+    if let helios_render::VolumeSource::Simulated(sim) = &mut fire.source {
+        let smoke = f32::from_bits(CAMPFIRE_SMOKE.load(std::sync::atomic::Ordering::Relaxed));
+        sim.soot_rate *= smoke;
+        sim.soot_yield *= smoke;
+    }
+    scene.volumes.push(VolumeEmitter { light: Some(light), ..fire });
     scene.particles.push(ParticleEmitter::sparks(base + Vec3::Y * 0.3));
     scene.particles.push(ParticleEmitter::embers(base + Vec3::Y * 0.25));
 }

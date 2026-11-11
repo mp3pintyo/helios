@@ -56,6 +56,7 @@ use crate::util::{bind, bind_group, bind_group_layout, compute_pipeline, pipelin
 use crate::vsm_local::{self, LocalCull, LocalFrame, LocalShadows};
 use crate::skin::{skin_entry, skin_resource};
 use crate::vsm_motion::{self, MoveFootprints, ShadowMove};
+use crate::vsm_moments::{MomentInputs, VsmMoments};
 use crate::wind::{wind_entry, wind_resource};
 use crate::Camera;
 use crate::pipelines::Lazy;
@@ -169,9 +170,18 @@ pub struct VsmUniform {
     refresh: [u32; 4],
     /// Per level its light view (distant levels may lag a moving sun).
     level_light: [Mat4; MAX_LEVELS],
+    /// Prefiltered distant levels: resolution bias, on, moment bias, light bleeding reduction
+    /// (`Vsm::prefilter` in vsm_common.wgsl).
+    prefilter: Vec4,
 }
 
-const _: () = assert!(std::mem::size_of::<VsmUniform>() == 64 + 64 * 16 + 16 * 16 * 2 + 48 + 16 + 16 + 64 * 16);
+const _: () = assert!(std::mem::size_of::<VsmUniform>() == 64 + 64 * 16 + 16 * 16 * 2 + 48 + 16 + 16 + 64 * 16 + 16);
+/// Moment bias of the prefiltered distant levels' Hamburger 4MSM (vsm_prefiltered.wgsl): rgba16f
+/// moments need more than the 3e-5 Peters and Klein use for 32-bit floats.
+const MOMENT_BIAS: f32 = 3e-4;
+/// Light bleeding reduction of the prefiltered distant levels: visibilities below this count as
+/// shadow (where layers of casters overlap in a filter, moments let some light through).
+const LIGHT_BLEEDING: f32 = 0.25;
 
 /// Per-frame inputs to [`VirtualShadowMap::update`].
 pub struct VsmFrame<'a> {
@@ -221,6 +231,10 @@ pub struct VsmFrame<'a> {
     /// their moving casters every `far_interval` frames, in turns, instead of every frame.
     pub far_level: u32,
     pub far_interval: u32,
+    /// Distant levels at a lower resolution, filtered as moment shadow maps (vsm_moments.rs);
+    /// `distant_bias`: how many levels coarser.
+    pub prefiltered: bool,
+    pub distant_bias: f32,
 }
 
 pub struct VirtualShadowMap {
@@ -293,6 +307,10 @@ pub struct VirtualShadowMap {
     /// sun; zero: none yet).
     level_sun: [Vec3; MAX_LEVELS],
     enabled: bool,
+    /// Prefiltered distant levels (their moment atlas and its pass).
+    pub moments: VsmMoments,
+    /// The prefiltering state (on, bias bits) the distant levels' pages were rendered with.
+    prefilter_state: (bool, u32),
 }
 
 impl VirtualShadowMap {
@@ -532,6 +550,8 @@ impl VirtualShadowMap {
             cache,
             atlas,
             level_sun: [Vec3::ZERO; MAX_LEVELS],
+            moments: VsmMoments::new(device, TILES_PER_ROW),
+            prefilter_state: (false, 0),
             residency_changed: true,
             wind: false,
             animated_displacement: false,
@@ -591,6 +611,16 @@ impl VirtualShadowMap {
                 invalidate |= 1 << level;
             }
         }
+        // Switching the prefiltered distant levels on or off (or their resolution) changes what
+        // their pages hold: they are rendered again.
+        let prefiltered = f.prefiltered && first_distant < levels;
+        let prefilter_state = (prefiltered, f.distant_bias.to_bits());
+        if prefilter_state != self.prefilter_state {
+            self.prefilter_state = prefilter_state;
+            for level in first_distant..levels {
+                invalidate |= 1 << level;
+            }
+        }
         // Levels beyond the active count start afresh when they are enabled.
         for aimed in &mut self.level_sun[levels as usize..] {
             *aimed = Vec3::ZERO;
@@ -616,6 +646,7 @@ impl VirtualShadowMap {
             eye: f.camera.position.extend(f.volume_distance),
             refresh: [f.refresh_budget, f.max_staleness.max(1), first_distant, interval],
             level_light: [light_view; MAX_LEVELS],
+            prefilter: Vec4::new(f.distant_bias.max(0.0), if prefiltered { 1.0 } else { 0.0 }, MOMENT_BIAS, LIGHT_BLEEDING),
         };
         if f.scene_changed {
             self.moves.reset();
@@ -963,10 +994,23 @@ impl VirtualShadowMap {
             pass.set_pipeline(&self.capture_static);
             pass.dispatch_workgroups(self.cache.physical_count, 1, 1);
         }
-        let mut pass = self.atlas_pass(rec, "vsm raster");
-        pass.set_pipeline(&self.raster[scene.skins.skinned_instances as usize]);
-        pass.set_bind_group(0, &draw_groups[1], &[]);
-        pass.draw_indirect(&self.draws, SPLIT_DRAWS_OFFSET);
+        {
+            let mut pass = self.atlas_pass(rec, "vsm raster");
+            pass.set_pipeline(&self.raster[scene.skins.skinned_instances as usize]);
+            pass.set_bind_group(0, &draw_groups[1], &[]);
+            pass.draw_indirect(&self.draws, SPLIT_DRAWS_OFFSET);
+        }
+        // Distant pages rendered this frame become moment shadow maps.
+        if self.prefilter_state.0 {
+            let inputs = MomentInputs {
+                vsm: &self.uniform,
+                entries: &self.cache.entries,
+                owner: &self.cache.owner,
+                depth: &self.atlas,
+                physical_count: self.cache.physical_count,
+            };
+            self.moments.record(rec, &inputs);
+        }
     }
 
     /// A render pass that keeps and updates the physical depth atlas.

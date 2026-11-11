@@ -16,6 +16,7 @@
 #include "clouds_common.wgsl"
 #include "fog_common.wgsl"
 #include "glass_shadow.wgsl"
+#include "volume_shadow_sample.wgsl"
 
 @group(0) @binding(0) var<uniform> frame: Frame;
 @group(0) @binding(1) var<uniform> fog: Fog;
@@ -62,8 +63,8 @@ fn media_sun_light(p: vec3<f32>) -> vec3<f32> {
 
 // Sun visibility at `p`: one filtered tap of the virtual shadow map at the level volumetric fog
 // requests pages for (media are soft; their pages are resident wherever the fog's are) times the
-// cloud shadow.
-fn media_sun_visibility(p: vec3<f32>) -> f32 {
+// cloud shadow and the heterogeneous volumes' shadows (all but the volume box `skip`).
+fn media_sun_visibility(p: vec3<f32>, skip: u32) -> f32 {
     var visibility = 1.0;
     if vsm.enabled != 0u && has_flag(frame.flags, FLAG_SHADOWS) {
         let l = vsm_lookup(p, min(vsm_level(p) + FOG_SHADOW_LEVEL_BIAS, vsm.level_count - 1u));
@@ -79,7 +80,7 @@ fn media_sun_visibility(p: vec3<f32>) -> f32 {
             visibility *= textureSampleLevel(cloud_shadow_map, lut_sampler, uv, 0.0).r;
         }
     }
-    return visibility;
+    return visibility * volume_sun_transmittance(p, skip);
 }
 
 // The sun at `p` through the glass panes nearer the sun, per channel (one tap of the glass map).
@@ -129,8 +130,10 @@ fn media_clustered_lights(p: vec3<f32>, uv: vec2<f32>, linear_depth: f32, view_d
     let base = cluster_index(uv, linear_depth) * CLUSTER_WORDS;
     let count = light_grid[base];
     for (var i = 0u; i < count; i++) {
-        let ls = media_local_light(lights[light_grid[base + 1u + i]], p, soften);
-        radiance += ls.radiance * henyey_greenstein(dot(ls.l, view_dir), g);
+        let index = light_grid[base + 1u + i];
+        let ls = media_local_light(lights[index], p, soften);
+        let volumes = volume_light_transmittance(index, lights[index].position_range.xyz, p);
+        radiance += ls.radiance * volumes * henyey_greenstein(dot(ls.l, view_dir), g);
     }
     return radiance;
 }

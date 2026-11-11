@@ -7,6 +7,7 @@
 #include "sh.wgsl"
 #include "vsm_common.wgsl"
 #include "vsm_sample.wgsl"
+#include "vsm_prefiltered.wgsl"
 #include "vsm_local_common.wgsl"
 #include "vsm_local_sample.wgsl"
 #include "lumen_common.wgsl"
@@ -20,6 +21,7 @@
 #include "stars.wgsl"
 #include "glass_shadow.wgsl"
 #include "glass_light.wgsl"
+#include "volume_shadow_sample.wgsl"
 
 @group(0) @binding(0) var<uniform> frame: Frame;
 @group(0) @binding(1) var depth_texture: texture_2d<f32>;
@@ -169,11 +171,12 @@ fn cloud_shadow(world_position: vec3<f32>) -> f32 {
 }
 
 fn sun_shadow(world_position: vec3<f32>, n: vec3<f32>, noise: f32) -> f32 {
-    let clouds = cloud_shadow(world_position);
+    // Clouds and the shadows of smoke, fire and mist (heterogeneous volumes).
+    let clouds = cloud_shadow(world_position) * volume_sun_transmittance(world_position, 0xffffffffu);
     if !has_flag(frame.flags, FLAG_SHADOWS) {
         return clouds;
     }
-    return vsm_shadow(world_position, n, normalize(frame.sun_direction.xyz), noise) * clouds;
+    return vsm_shadow_prefiltered(world_position, n, normalize(frame.sun_direction.xyz), noise) * clouds;
 }
 
 // Ray-marches the global distance field from the eye: shaded by the hit normal, red where the
@@ -471,6 +474,8 @@ fn shade(@builtin(global_invocation_id) gid: vec3<u32>) {
             }
             // Through glass between the light and the pixel, in the panes' colour.
             radiance *= glass_light_transmission(index, light.position_range.xyz, world_position);
+            // Through the smoke of the fire that drives the light.
+            radiance *= volume_light_transmittance(index, light.position_range.xyz, world_position);
             if substrate {
                 let c = evaluate_slab(sh, ls.l);
                 color += (diffuse_color * (c.diffuse * (1.0 - sh.subsurface) + sh.transmission_color * c.back) + c.specular) * radiance;
