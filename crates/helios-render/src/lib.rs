@@ -53,6 +53,8 @@ mod photo;
 mod context;
 mod dynamic_debug;
 mod vsm_overview;
+mod vsm_moments;
+mod volume_shadow;
 mod effects;
 mod glass_light;
 mod glass_shadow;

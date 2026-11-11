@@ -36,6 +36,7 @@ use crate::shader::create_module;
 use crate::avboit::Avboit;
 use crate::util::{bind, bind_group, bind_group_layout, lazy_compute_pipeline, storage_buffer, uniform_buffer, workgroups};
 use crate::pipelines::Lazy;
+use crate::volume_shadow::{Caster, VolumeShadows};
 
 /// Volumes marched per frame (the nearest visible ones).
 pub(crate) const MAX_VISIBLE: usize = 4;
@@ -270,6 +271,8 @@ struct ShadingUniform {
     emission: Vec4,
     lights: [u32; 8],
     params: [u32; 4],
+    /// x: the emitter's box in the volume shadows (its own shadow is the cache's march).
+    shadow: [u32; 4],
 }
 
 /// `VolumeMarch` in volume_render.wgsl.
@@ -441,6 +444,8 @@ pub(crate) struct HeterogeneousVolumes {
     empty: wgpu::TextureView,
     time: f32,
     frame: usize,
+    /// The volumes' shadows on the scene, the fog, particles and each other.
+    pub(crate) shadows: VolumeShadows,
 }
 
 impl HeterogeneousVolumes {
@@ -546,6 +551,7 @@ impl HeterogeneousVolumes {
             empty: volume_texture(device, "volume empty", UVec3::ONE),
             time: 0.0,
             frame: 0,
+            shadows: VolumeShadows::new(device),
         }
     }
 
@@ -574,6 +580,7 @@ impl HeterogeneousVolumes {
                 pipeline.prefetch();
             }
             self.pressure.iter().for_each(Lazy::prefetch);
+            self.shadows.prefetch();
         }
     }
 
@@ -592,6 +599,7 @@ impl HeterogeneousVolumes {
         eye: Vec3,
         view_proj: &Mat4,
         enabled: bool,
+        shadows: bool,
         delta_time: f32,
         internal: (u32, u32),
         capacity: (u32, u32),
@@ -607,6 +615,7 @@ impl HeterogeneousVolumes {
         }
         let emitters = if enabled { &scene.volumes[..scene.volumes.len().min(MAX_EMITTERS)] } else { &[] };
         if emitters.is_empty() {
+            self.shadows.update(device, queue, &[], &[]);
             return;
         }
         let dt = delta_time.clamp(1.0 / 240.0, 1.0 / 30.0);
@@ -650,7 +659,7 @@ impl HeterogeneousVolumes {
                 Some(u) => [u[0].min(r[0]), u[1].min(r[1]), u[2].max(r[2]), u[3].max(r[3])],
                 None => r,
             });
-            let shading = shading_uniform(emitter, lights);
+            let shading = shading_uniform(emitter, lights, i);
             march.volumes[self.visible.len()] = shading;
             queue.write_buffer(&self.emitters[i].shading, 0, bytemuck::bytes_of(&shading));
             self.emitters[i].visible = true;
@@ -660,6 +669,24 @@ impl HeterogeneousVolumes {
         march.rect = self.rect;
         march.count[0] = self.visible.len() as u32;
         queue.write_buffer(&self.march_uniform, 0, bytemuck::bytes_of(&march));
+
+        // Shadow casters: the emitters whose grid is current.
+        let voxels: Vec<UVec3> = self.emitters.iter().map(|g| g.cache_size).collect();
+        let casters: Vec<Option<Caster>> = emitters
+            .iter()
+            .zip(&self.emitters)
+            .map(|(emitter, gpu)| {
+                (shadows && gpu.update).then(|| Caster {
+                    origin: emitter.origin(),
+                    size: emitter.size,
+                    extinction: emitter.extinction,
+                    light: emitter
+                        .light
+                        .and_then(|h| lights.get(h.0 as usize).filter(|_| (h.0 as usize) < crate::lights::MAX_LIGHTS).map(|l| (h.0 as u32, l.position, l.source_radius))),
+                })
+            })
+            .collect();
+        self.shadows.update(device, queue, &voxels, &casters);
 
         for (i, emitter) in emitters.iter().enumerate() {
             let gpu = &mut self.emitters[i];
@@ -754,6 +781,8 @@ impl HeterogeneousVolumes {
                 }
             }
         }
+        let states: Vec<&wgpu::TextureView> = self.emitters.iter().map(|g| &g.state[0]).collect();
+        self.shadows.record(rec, inputs.frame, &self.sampler, &states);
         if !self.visible() {
             return;
         }
@@ -931,7 +960,7 @@ fn sim_uniform(emitter: &VolumeEmitter, index: usize, dt: f32, time: f32) -> (Si
 }
 
 /// The emitter's look, with the brightest local lights whose range reaches its box.
-fn shading_uniform(emitter: &VolumeEmitter, lights: &[crate::scene::Light]) -> ShadingUniform {
+fn shading_uniform(emitter: &VolumeEmitter, lights: &[crate::scene::Light], index: usize) -> ShadingUniform {
     let origin = emitter.origin();
     let (lo, hi) = (origin, origin + emitter.size);
     let mut reaching: Vec<(u32, f32)> = lights
@@ -954,6 +983,7 @@ fn shading_uniform(emitter: &VolumeEmitter, lights: &[crate::scene::Light]) -> S
         emission: Vec4::new(emitter.emission_kelvin.x, emitter.emission_kelvin.y, 0.75 * cell.min_element(), emitter.ambient),
         lights: indices,
         params: [reaching.len().min(MAX_CACHE_LIGHTS) as u32, emitter.resolution.x, emitter.resolution.y, emitter.resolution.z],
+        shadow: [index as u32, 0, 0, 0],
     }
 }
 
@@ -1009,7 +1039,7 @@ mod tests {
         let fire = VolumeEmitter::campfire(Vec3::ZERO);
         let near = crate::scene::Light::point(Vec3::new(0.0, 0.5, 0.0), Vec3::ONE, 2.0, 8.0);
         let far = crate::scene::Light::point(Vec3::new(30.0, 0.5, 0.0), Vec3::ONE, 2.0, 8.0);
-        let shading = shading_uniform(&fire, &[far, near]);
+        let shading = shading_uniform(&fire, &[far, near], 0);
         assert_eq!(shading.params[0], 1);
         assert_eq!(shading.lights[0], 1);
     }

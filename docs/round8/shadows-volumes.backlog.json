@@ -1,0 +1,53 @@
+[
+  {
+    "id": "vsm-distant-prefiltered-moments",
+    "title": "Előszűrt távoli árnyékok: a távoli VSM-szintek fél felbontáson, momentum-árnyéktérképként szűrve",
+    "area": "Árnyékok",
+    "kind": "performance",
+    "status": "done",
+    "phase": "8. kör – 2. hullám",
+    "summary": "Az UE 5.8 „Prefiltered Distant” virtuális árnyéktérképének másik fele. Az 1. hullám a távoli clipmap-szinteket (7-től) saját ütemben frissítette a mozgó nap alatt, de továbbra is teljes felbontáson rajzoltak, és a 12 mintás mélység-összehasonlító szűrő a vékony távoli geometrián (tűlevelek, ágak, a lombkorona felülről) villódzó, recés árnyékot adott. Mostantól a távoli szintet mintavevő pixelek egy szinttel durvább lapot kérnek (fél felbontás, negyed annyi lap), és minden ilyen lap a raszterizálás után momentum-árnyéktérképpé alakul: a mélység négy hatványmomentuma 2×2 texelenként átlagolva egy rgba16f atlaszban, két mip-szinttel. A fény a vevő pixelének lábnyomával szűr (ferde nézetben szélesebben), négy mintából, a Hamburger 4MSM-mel – lágy, élsimított távoli árnyék kevesebb lapból, kevesebb rajzolással.",
+    "details": "vsm_moments.rs + shaders/vsm_moments.wgsl: VsmMoments (2048² rgba16f, 7 mip; a 0–2. mip a szűrőé, a 6. mip laponként egy texel: a lap mélységtartománya, félpontosra kifelé kerekítve), a build pass laponként egy 16×16-os munkacsoport, csak az ebben a képkockában rajzolt távoli lapokra (entries.w == frame), a lapraszterek után. A félpontos momentumokat a lap saját [zmin, zmax] tartományára normalizálja (a teljes jelenet mélységtartományán ~0,5 m-es kvantálás lenne). vsm_common.wgsl: vsm_level – távoli szinten +shadow_distant_bias szint (a jelölés és minden mintavevő ugyanígy választ), Vsm::prefilter (bias, be, momentum-bias 3·10⁻⁴, fényszivárgás-csökkentés 0,25). shaders/vsm_prefiltered.wgsl: vsm_shadow_prefiltered – lábnyom szerinti szűrőszélesség és mip (két mip keverve), 4 Vogel-minta a vevő síkján, laponkénti tartomány, Hamburger 4MSM (Peters–Klein 2015, 3. algoritmus), a vevőt a napirányban a lejtése × fél minta szélességgel emeli (önárnyék ellen). Csak a halasztott megvilágítás (lighting.wgsl sun_shadow) használja; köd, részecskék, Lumen kártyák a durvább lapok mélységét hasonlítják. vsm.rs: a beállítás vagy a bias váltása újrarajzoltatja a távoli szinteket. RenderSettings::shadow_distant_prefiltered (alap be), shadow_distant_bias (1), --no-shadow-prefiltered, --shadow-distant-bias x, szerkesztő: 'Prefiltered distant shadows', 7-es billentyű (a volumenárnyékkal együtt ciklikusan). Kötés: lighting 150 (momentum-atlasz). Mérlegelt és elvetett: valódi 64²-es távoli lapok (minden raszterizálót érintene), EVSM (rgba16f-ben ~5,5-ös kitevő: sokkal több szivárgás), külön tartomány-puffer/textúra (a lighting layout korlátai), momentumok minden mintavevőben (két layout a mintavételezett textúrák határán), időbeli újravetítés/akkumuláció (második 43 MiB-os atlasz vagy másolás kellene; a saját fénynézetű távoli szintek egzaktak).",
+    "metrics": "Erdő, mozgó nap (P): kért lapok 286 → 249, képkockánként rajzolt lapok 186 → 177; 30 m-ről a lombkorona fölött 105 → 55 kért, 43 → 30 rajzolt lap; völgy 123 → 92 kért lap. Csendes futásban: lighting 0,50 → 0,38 ms (erdő felülről), 0,38 → 0,32 ms (völgy); vsm moments 0,005–0,02 ms. Memória: 42,7 MiB momentum-atlasz (csak bekapcsolva). A GPU a mérés alatt erősen megosztott volt, a pass-időket a kör végén érdemes újramérni. Böngésző: a Tint lefordítja, konzolhiba nincs.",
+    "showcase": "Erdő 30 m magasból (--eye 0,30,0 --at 200,0,-60), --no-shadow-prefiltered összevetve; völgy alapnézet; 7-es billentyű – docs/round8/shadows-volumes/forest-high-off-vs-on.jpg, valley-off-vs-on.jpg.",
+    "modules": [
+      "crates/helios-render/src/vsm_moments.rs",
+      "crates/helios-render/src/shaders/vsm_moments.wgsl",
+      "crates/helios-render/src/shaders/vsm_prefiltered.wgsl",
+      "crates/helios-render/src/shaders/vsm_common.wgsl",
+      "crates/helios-render/src/vsm.rs",
+      "crates/helios-render/src/shaders/lighting.wgsl",
+      "crates/helios-render/src/passes/shading.rs",
+      "crates/helios-render/src/renderer.rs"
+    ],
+    "order": 228,
+    "updated": "2026-11-11"
+  },
+  {
+    "id": "volume-shadows-lumen",
+    "title": "Volumenárnyékok: a füst, a tűz és a köd árnyékot vet a jelenetre, a ködre, a részecskékre és egymásra",
+    "area": "Árnyékok",
+    "kind": "feature",
+    "status": "done",
+    "phase": "8. kör – 2. hullám",
+    "summary": "A heterogén volumenek (a tábortűz füstje, a füstölő, a völgy tavi párája) eddig maguk meg voltak világítva, de árnyékot nem vetettek: a füstoszlop alatt ugyanúgy sütött a nap, és a tűz saját fénye akadálytalanul hatolt át a saját füstjén. Mostantól minden szimulált volumen egy közös 3D áteresztés-atlaszba írja, mennyi fény jut át rajta voxelenként a nap felé és az általa vezérelt tűzfény felé. Bármely pont – a dobozon belül, alatta vagy mellette – a nap felé tartó sugara belépési pontjában egyetlen mintával kiolvassa a doboz árnyékát: a füst árnyéka az erdő talaján (alacsony napnál 10+ méteres csík), sötétebb sáv a ködben, a füst árnyékában halványabb szikrák, és a füstoszlop felfelé sötétedik, mert a saját tüze alulról világítja. A tűz fényét csak a hidegebb füst nyeli el – a forró láng a fény forrása, nem takarás.",
+    "details": "volume_shadow.rs + shaders/volume_shadow.wgsl: VolumeShadows – rgba8unorm 3D atlasz, emitterenként a fényesítési cache felbontásán (fél szimulációs rács, a tábortűz 20×40×20 voxel), régiók x mentén egymás mellett; voxelenként r = áteresztés a doboz széléig a nap felé, g = a vezérelt fény felé, 16-16 lépés a sűrűségrácson; a fény menetelése a sűrűséget 1 − smoothstep(0,05; 0,3; hőmérséklet)-tel súlyozza és a fény forrássugaránál megáll. A szimuláció után, a fényesítési cache előtt fut. shaders/volume_shadow_sample.wgsl: volume_sun_transmittance (sugár–doboz metszés, minta a belépési pontban, egy doboz kihagyható) és volume_light_transmittance (a fény→vevő szakasz kilépési pontjában). Használja: lighting.wgsl (sun_shadow, a fürtözött fényhurok vezérelt fénye), fog.wgsl (napsugarak és a tűzfény szórása), media_common.wgsl (részecskék, a volumenek cache-e: a többi doboz árnyéka és a vezérelt fény önárnyéka). A halasztott megvilágítás és a köd a szimuláció előtt fut, ezért az előző képkocka atlaszát látják. Kötések: 151 (uniform: dobozok, régiók), 152 (atlasz) a lighting, fog és media layoutban. RenderSettings::volume_shadows (alap be), --no-volume-shadows, szerkesztő: 'Volume shadows (smoke, fire, mist)', 7-es billentyű; bemutatóhoz --campfire-smoke 8 (füstösebb tűz). Lumen: nem készült el – a tűz izzását a szimuláció által vezérelt fény már beviszi a felületi cache-be (kettős számolás lenne), a maradék másodrendű hatás egy 1,6 m-es füstoszlopnál a környezeti fény néhány százaléka, a radiance cache-be injektálás pedig a szimulációval villogna. Mérlegelt és elvetett: volumenek a VSM-be (bináris, és a mozgó füst alatt minden lapot minden képkockában érvénytelenítene), napirányú adaptív volumetrikus árnyéktérkép (saját raszter és csomópont-összevonás 8 kis dobozért), a fényesítési cache-ek közvetlen mintavétele (a VSM-et is tartalmazzák: dupla árnyék, emitterenként egy kötés), minden helyi fény minden volumenen át.",
+    "metrics": "volume shadows pass 0,007–0,013 ms, atlasz < 1 MiB; a vevők doboztesztje a megosztott GPU-n nem mérhető. Az alap tábortűz füstje vékony (halvány árnyék); --campfire-smoke 8 mellett jól látható, ~4 m-es füstárnyék. Böngésző: hibátlan.",
+    "showcase": "Erdő, tábortűz felülről: --campfire-smoke 8 --sun 143,40 --eye 11,4,2.5 --at 7.5,0,-2, --no-volume-shadows-szal összevetve; 7-es billentyű – docs/round8/shadows-volumes/smoke-shadow-off-vs-on.jpg, smoke-shadow.jpg, browser-forest.jpg.",
+    "modules": [
+      "crates/helios-render/src/volume_shadow.rs",
+      "crates/helios-render/src/shaders/volume_shadow.wgsl",
+      "crates/helios-render/src/shaders/volume_shadow_sample.wgsl",
+      "crates/helios-render/src/volumes.rs",
+      "crates/helios-render/src/shaders/volume_render.wgsl",
+      "crates/helios-render/src/shaders/media_common.wgsl",
+      "crates/helios-render/src/shaders/lighting.wgsl",
+      "crates/helios-render/src/shaders/fog.wgsl",
+      "crates/helios-render/src/media.rs",
+      "crates/helios-render/src/fog.rs",
+      "crates/helios-demo/src/scenes/forest.rs"
+    ],
+    "order": 218,
+    "updated": "2026-11-11"
+  }
+]

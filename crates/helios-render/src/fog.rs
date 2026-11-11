@@ -70,6 +70,8 @@ pub struct FogInputs<'a> {
     /// MegaLights' in-scattered local light (`megalights_volume.rs`), which replaces the light
     /// loop; a 1×1×1 volume while that is off.
     pub megalights_light: &'a wgpu::TextureView,
+    /// Shadows of heterogeneous volumes.
+    pub volume_shadows: &'a crate::volume_shadow::VolumeShadows,
 }
 
 pub struct VolumetricFog {
@@ -117,6 +119,8 @@ impl VolumetricFog {
                 (90, bind::uniform()),
                 (91, bind::texture(true)),
                 (140, bind::texture_3d(true)),
+                (151, bind::uniform()),
+                (152, bind::texture_3d(true)),
             ],
         );
         let integrate_layout = bind_group_layout(
@@ -214,6 +218,8 @@ impl VolumetricFog {
                 (90, inputs.glass.uniform.as_entire_binding()),
                 (91, TextureView(inputs.glass.view())),
                 (140, TextureView(inputs.megalights_light)),
+                (151, inputs.volume_shadows.uniform.as_entire_binding()),
+                (152, TextureView(inputs.volume_shadows.atlas())),
             ],
         );
         let integrate = bind_group(

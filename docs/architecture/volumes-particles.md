@@ -35,6 +35,24 @@ Part of the `helios-render` GPU pipeline; the pipeline diagram and the index of 
   one-thread-per-light pass sets its colour to the scene's colour × the simulation's summed blackbody emission
   (workgroup sums into fixed-point atomics) relative to its running average — the flicker the viewer sees, on the
   clearing, the logs' shadows and Lumen's surface cache, a frame late and without a read-back.
+* **Volume shadows** (round 8 wave 2, `volume_shadow.rs`, `volume_shadow.wgsl`, `volume_shadow_sample.wgsl`; UE's
+  heterogeneous volumes cast shadows through an adaptive volumetric shadow map). Every emitter simulated this frame
+  writes its region of one shared 3D **transmittance atlas** (rgba8unorm, at its lighting cache's resolution — the
+  campfire 20×40×20 voxels): per voxel the medium's transmittance to the box's boundary towards the sun (r, 16 steps
+  through the density grid) and towards the scene light the fire drives (g). That light sits in its own flames, which
+  are its source rather than an occluder: its march weights the soot by `1 − smoothstep(0.05, 0.3, temperature)` and
+  skips the light's source radius. A receiver anywhere — inside, under or beside a box — intersects its ray towards the
+  sun with each box and samples the atlas where the ray enters it (inside: at the receiver); for the driven light,
+  where the segment from the light leaves the box towards the receiver. One trilinear tap per box crossed, a ray–box
+  test per box otherwise (at most 8). Sampled by the deferred lighting (sun shadow and the driven light), the froxel
+  fog (shafts of shade under smoke and mist, the fire light's shafts through its smoke), the particles (sparks in
+  the smoke's shade) and the lighting caches of the volumes (the other boxes' shadows on the sun; the driven light's
+  self-shadowing, so a smoke column is lit by its fire from below and darkens upwards). Opaque lighting and fog run
+  before the simulation, so they see last frame's atlas. Bindings 151 (uniform: boxes, regions) and 152 (atlas) in
+  the lighting, fog and media layouts — one more sampled texture each. `RenderSettings::volume_shadows` (on;
+  `--no-volume-shadows`, the editor's *Volume shadows*, `7` cycles it with the prefiltered distant shadows). The forest
+  campfire's smoke is thin (its shadow on the clearing is faint); `--campfire-smoke 8` builds a smokier fire whose
+  shadow shows plainly. Not done: volumes feeding Lumen (see [round 8 note](../round8/shadows-volumes.md)).
 * **GPU particles** (`particles.rs`, `particles.wgsl`; a Niagara-lite). `Scene::particles` holds `ParticleEmitter`s
   (spawn rate and bursts, sphere / box / disc shapes, lifetime range, a velocity cone, gravity, drag, curl-noise
   turbulence, collision, size and a 4-key colour/opacity gradient over life, lit or emissive — colour or blackbody

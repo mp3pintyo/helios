@@ -361,6 +361,17 @@ pub struct RenderSettings {
     /// their nearest layer. Off: weighted blended OIT for particles and depth peeling for every
     /// translucent surface (round 7). Needs 19 sampled textures per shader stage (the shading layout's 18 + the grid).
     pub avboit: bool,
+    /// Prefiltered distant shadows (UE 5.8's "Prefiltered Distant"; `vsm_moments.rs`): the
+    /// distant virtual shadow map levels (from `shadow_distant_level`) are rendered
+    /// `shadow_distant_bias` levels coarser and filtered as moment shadow maps at the receiver's
+    /// footprint — soft, alias-free far shadows from fewer pages. Off: distant levels are sampled
+    /// like the others (a 12-tap comparison filter) at full resolution.
+    pub shadow_distant_prefiltered: bool,
+    pub shadow_distant_bias: f32,
+    /// Heterogeneous volumes cast shadows (`volume_shadow.rs`): the sun's and their fire light's
+    /// transmittance through smoke, fire and mist darkens the scene, the fog, particles and the
+    /// other volumes under them.
+    pub volume_shadows: bool,
 }
 
 impl Default for RenderSettings {
@@ -422,6 +433,9 @@ impl Default for RenderSettings {
             mega_lights_hzb_traces: true,
             mega_lights_volume: true,
             avboit: true,
+            shadow_distant_prefiltered: true,
+            shadow_distant_bias: 1.0,
+            volume_shadows: true,
         }
     }
 }
@@ -1079,6 +1093,7 @@ impl Renderer {
                 eye: camera.position,
                 view_proj: &view_proj,
                 volumes: effects && self.settings.volumes,
+                volume_shadows: self.settings.volume_shadows && self.settings.shadows,
                 particles: effects && self.settings.particles,
                 delta_time,
                 internal: size,
@@ -1186,6 +1201,7 @@ impl Renderer {
                 samplers: &self.samplers,
                 glass,
                 megalights_light: self.megalights_volume.fog_light(current),
+                volume_shadows: self.effects.volume_shadows(),
             };
             self.fog.record(&mut rec, &inputs, current);
         }
@@ -1228,6 +1244,7 @@ impl Renderer {
             megalights_volume: &self.megalights_volume,
             megalights_volume_light: self.megalights_volume.incident(current),
             glass_lights: self.translucency.glass_lights(),
+            volume_shadows: self.effects.volume_shadows(),
         };
         self.lighting.record(&mut rec, &lighting);
         if self.extended.subsurface && lit {
@@ -1429,6 +1446,9 @@ impl Renderer {
         let wind_moves_shadows = (wind.is_active() && self.scene.wind_moves_shadows()) || self.scene.skins.moving_shadows;
 
         let (scene_min, scene_max) = self.scene.bounds();
+        if s.shadow_distant_prefiltered {
+            self.vsm.moments.ensure(&self.device);
+        }
         self.vsm.update(
             &self.queue,
             &VsmFrame {
@@ -1463,6 +1483,8 @@ impl Renderer {
                 max_staleness: s.shadow_max_staleness,
                 far_level: s.shadow_distant_level,
                 far_interval: s.shadow_distant_interval,
+                prefiltered: s.shadow_distant_prefiltered,
+                distant_bias: s.shadow_distant_bias,
             },
         );
         unjittered

@@ -278,7 +278,7 @@ fn light(@builtin(global_invocation_id) gid: vec3<u32>) {
         let g = em.look.x;
         let sun = normalize(frame.sun_direction.xyz);
         // Through glass panes nearer the sun, in their colour.
-        let sun_light = media_sun_light(p.position) * media_sun_visibility(p.position) * media_sun_glass(p.position) * henyey_greenstein(dot(sun, view_dir), g);
+        let sun_light = media_sun_light(p.position) * media_sun_visibility(p.position, 0xffffffffu) * media_sun_glass(p.position) * henyey_greenstein(dot(sun, view_dir), g);
         let nearby = media_clustered_lights(p.position, uv, clip.w, view_dir, g, size * size);
         radiance = c.rgb * (sun_light + media_ambient(p.position, 1.0) + nearby);
     }

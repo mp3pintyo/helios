@@ -36,6 +36,8 @@ pub(crate) struct EffectsFrame<'a> {
     /// Unjittered.
     pub view_proj: &'a Mat4,
     pub volumes: bool,
+    /// Volumes cast shadows (`volume_shadow.rs`).
+    pub volume_shadows: bool,
     pub particles: bool,
     pub delta_time: f32,
     /// Internal resolution of the frame and the capacity of the internal targets.
@@ -73,7 +75,7 @@ impl Effects {
     }
 
     pub fn update(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, f: &EffectsFrame) {
-        self.volumes.update(device, queue, f.scene, f.eye, f.view_proj, f.volumes, f.delta_time, f.internal, f.capacity);
+        self.volumes.update(device, queue, f.scene, f.eye, f.view_proj, f.volumes, f.volume_shadows, f.delta_time, f.internal, f.capacity);
         self.particles.update(device, queue, f.scene, f.particles, f.delta_time);
         let media = self.volumes.visible() || self.particles.active();
         self.active = media || (f.avboit && f.translucent_surfaces);
@@ -94,6 +96,11 @@ impl Effects {
     /// pass composites the fragments at it), while the effects run.
     pub fn nearest_refracting(&self) -> Option<&wgpu::TextureView> {
         self.oit.translucent_depth_array().filter(|_| self.active && self.oit.uses_avboit())
+    }
+
+    /// The heterogeneous volumes' shadows (last frame's until the simulation records).
+    pub fn volume_shadows(&self) -> &crate::volume_shadow::VolumeShadows {
+        &self.volumes.shadows
     }
 
     /// Before the light culling: fire-driven light colours.

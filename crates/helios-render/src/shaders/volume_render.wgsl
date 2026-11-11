@@ -47,6 +47,7 @@ struct VolumeShading {
     lights: vec4<u32>,      // indices of the local lights that reach the box
     more_lights: vec4<u32>,
     params: vec4<u32>,      // x: light count, yzw: grid resolution
+    shadow: vec4<u32>,      // x: the emitter's box in the volume shadows (volume_shadow.rs)
 }
 
 struct VolumeMarch {
@@ -129,7 +130,8 @@ fn light_cache(@builtin(global_invocation_id) gid: vec3<u32>) {
     let sun = normalize(frame.sun_direction.xyz);
     var sun_transmittance = 0.0;
     if sun.y > -0.05 {
-        sun_transmittance = self_transmittance(p, sun, 16u) * media_sun_visibility(p);
+        // Its own medium by the march, the other volumes by their shadow boxes.
+        sun_transmittance = self_transmittance(p, sun, 16u) * media_sun_visibility(p, shading.shadow.x);
     }
     // Ambient light from above passes through the volume above this voxel.
     var radiance = media_ambient(p, self_transmittance(p, vec3<f32>(0.0, 1.0, 0.0), 8u)) * shading.emission.w;
@@ -137,8 +139,10 @@ fn light_cache(@builtin(global_invocation_id) gid: vec3<u32>) {
     let cell = shading.size.xyz / vec3<f32>(dims);
     let soften = dot(cell, cell) / 12.0;
     for (var i = 0u; i < min(shading.params.x, 8u); i++) {
-        let ls = media_local_light(lights[shading_light(i)], p, soften);
-        radiance += ls.radiance / (4.0 * PI);
+        let index = shading_light(i);
+        let ls = media_local_light(lights[index], p, soften);
+        // The fire's light through its own smoke (and any volume's light through it).
+        radiance += ls.radiance * volume_light_transmittance(index, lights[index].position_range.xyz, p) / (4.0 * PI);
     }
     textureStore(cache_out, gid, finite(vec4<f32>(radiance, sun_transmittance), vec4<f32>(0.0)));
 }

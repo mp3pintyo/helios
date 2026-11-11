@@ -162,9 +162,14 @@ Honest differences that remain:
    Nanite LOD changes this way and keeps WPO-animated pages current); the priority ignores how many pixels sample a
    page. Distant clipmap levels (`vsm-prefiltered-distant`, from level 7) follow a moving sun every 4 frames in turns,
    not every frame: their shadows lag the sun by up to 4 frames or 0.5° (a seam where they meet the level before them,
-   below a texel at the demo's sun speeds), and are not *prefiltered* as UE 5.8's experimental Prefiltered Distant
-   pages are (no lower-resolution moment / filtered representation, no temporal reprojection): distant casters render
-   at full resolution, only less often.
+   below a texel at the demo's sun speeds). Since wave 2 (`vsm-distant-prefiltered-moments`) they render one level
+   coarser and are filtered as moment shadow maps (Hamburger 4MSM over a per-page normalised rgba16f moment tile) in
+   the deferred lighting only — fog, particles, translucency, Lumen's cards and MegaLights still compare depths of the
+   coarser pages; there is a resolution step where the last full-resolution level meets the first distant one; moments
+   let some light through overlapping layers of casters (a light bleeding reduction trades it for darker penumbrae, and
+   distant canopies come out ~2 % brighter than with the comparison filter); no temporal reprojection or accumulation
+   of the moments (each distant level stays exact for the light view it was rendered with); the moment atlas costs
+   43 MiB whether the distant levels hold few pages or many.
 8. **Skeletal meshes**: linear blend skinning with up to 4 influences per vertex (glTF's first joint set; UE allows
    8–12) and 8-bit weights; no dual-quaternion skinning, morph targets (imported files with them render their base
    shape, with a warning), cloth or physics. Culling bounds are per instance (posed joint spheres) and per cluster only
@@ -212,11 +217,17 @@ Honest differences that remain:
     sequences, at most 8 emitters simulated and 4 marched per frame, each up to 192 steps per ray); the fluid solver
     is a single-grid red-black SOR (no multigrid), collocated (no MAC grid), with a solid floor only (no obstacles from
     the scene's geometry, no interaction with other emitters or particles) and a fixed time step clamped to 1/30 s.
-    The lighting cache holds the sun's transmittance plus isotropic ambient and up to 8 local lights (no
-    self-shadowing for local lights; multiple scattering is one approximate octave of the sun, not simulated), the
+    The lighting cache holds the sun's transmittance plus isotropic ambient and up to 8 local lights (self-shadowing
+    only for the fire's own driven light; multiple scattering is one approximate octave of the sun, not simulated), the
     march samples it trilinearly at half the grid resolution; close up, a 4 cm campfire grid shows its resolution in
-    the smoke's edges. Volumes don't cast shadows on the scene or into the virtual shadow map, don't feed Lumen (only
-    the fire's driven light does) and are not seen by reflections or refraction outside the screen. Overlapping
+    the smoke's edges. Volume shadows (round 8, `volume-shadows-lumen`) are a per-emitter transmittance grid at the
+    lighting cache's resolution (8 bits, towards the sun and towards the emitter's own driven light only), not UE's
+    adaptive volumetric shadow map: other local lights (shadow-mapped or not) pass through smoke unattenuated, the
+    shadow is a frame late in the opaque lighting and the fog, emitters beyond the 250 m simulation distance cast none,
+    and translucent surfaces (AVBOIT / forward translucency: their layouts are at the sampled-texture limit), Lumen's
+    surface cache and MegaLights ignore it. Volumes still don't write into the virtual shadow map and don't feed Lumen
+    (only the fire's driven light does: its light is the emission's share of the scene) and are not seen by
+    reflections or refraction outside the screen. Overlapping
     volume boxes are composited box by box in entry order, not interleaved. With AVBOIT (round 8) particles, volume
     steps and non-refracting surfaces are weighted by the transmittance in front of them (sparks inside smoke are
     dimmed by the smoke in front, smoke behind a panel is tinted by it), at the grid's resolution: the volume enters
