@@ -127,9 +127,9 @@ Honest differences that remain:
    the screen-space copy (what is off screen or hidden is not refracted; where a nearer layer covers the displaced
    lookup it falls back to the pixel behind); translucent surfaces don't request shadow pages (where the
    opaque scene didn't request theirs, they fall back to coarser resident levels) and are drawn without LOD. **Water**
-   is a normal-mapped plane (no displacement or tessellation, no FFT spectrum, no simulation or interaction with
-   objects, no flow maps or rivers / oceans, no spline-shaped bodies: a body is its instance's bounding rectangle, at
-   most 4 per scene); the waves ignore `Scene::wind`. Caustics come from the analytic waves (a single preimage, so
+   bodies (lakes) are normal-mapped planes (no displacement or tessellation, no FFT spectrum, no spline-shaped bodies:
+   a body is its instance's bounding rectangle, at most 4 per scene, no oceans); rivers are simulated (item 18); the
+   waves ignore `Scene::wind`. Caustics come from the analytic waves (a single preimage, so
    overlapping folds are not summed; no chromatic dispersion) and only light the bed seen through the water or from
    inside it, not the fog or other translucent surfaces. Underwater fog is lit by the light entering the surface above
    the middle of each view ray (no light shafts or volumetric shadowing along it), total internal reflection shows
@@ -328,3 +328,19 @@ Honest differences that remain:
     multi-level DAG step: a per-mesh level table skipping finer levels at once cost as much as it saved and was
     removed; coarse pages above the LOD cut still send every cluster to the cluster test
     (`docs/round8/nanite-culling.md`).
+18. **Terrain and rivers** (round 8, `mesh-terrain`, `shallow-water-rivers`): the mesh terrain replaces a rectangle of
+    the landscape, not the whole landscape (no world-sized mesh terrain, no streaming of terrain regions, no paging of
+    modifiers); its modifier stack is code (rock boxes with taper, capsule tunnels, polyline channels, flatten — no
+    sculpt or paint brushes, no editor tools, no spline modifiers, no erosion), and it is meshed once when the scene is
+    built (no live re-meshing of edited chunks; ~1 s of surface nets for the valley's 80 × 80 m natively). Resolution
+    is two fixed levels per chunk (0.25 / 0.5 m) joined by overlapping skirts rather than a crack-free transition mesh
+    (Transvoxel); the seam with the landscape relies on the landscape's grid. Its material is the landscape's layers
+    evaluated per pixel (no runtime virtual texture for the mesh terrain, no per-region paint layers or weight maps).
+    Collision is the CPU triangle grid (no physics engine; the camera and placement use it). Rivers: one simulated
+    river per scene on a fixed grid (no spline-defined river, no grid following the river's course, no paintable water
+    input in the editor — sources are code); the shallow-water model is the virtual-pipes scheme (no momentum
+    advection, so no hydraulic jumps or eddies behind obstacles beyond what the pipes' flow does; Manning friction only;
+    first-order, a little diffusive). Obstacles are static (boulders baked into the bed; the raft and other moving
+    instances don't push water, nothing floats on the river), the river has no underwater view, Lumen and shadows don't
+    see its water, and its surface is the sim grid (no tessellation beyond it; waves are the lake's normal-mapped ones
+    advected by a two-phase flow map, which can show its period as gentle pulsing on slow water).

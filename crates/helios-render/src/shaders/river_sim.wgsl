@@ -213,6 +213,12 @@ fn drawn_height(c: vec2<i32>) -> f32 {
     return bed.x + water_in[i].x;
 }
 
+// Whether the drawn surface shows water at `c` (outlet cells show the lake's own surface).
+fn wet_drawn(c: vec2<i32>) -> bool {
+    let i = index_of(c);
+    return water_in[i].x > WET && terrain[i].y < 0.5;
+}
+
 // The water level used for the surface's slope at `n`: its own where wet, `fallback` (the centre
 // cell's) where dry, so the shoreline doesn't tilt the normals.
 fn slope_level(n: vec2<i32>, fallback: f32) -> f32 {
@@ -230,11 +236,19 @@ fn vertex_step(@builtin(global_invocation_id) id: vec3<u32>) {
         return;
     }
     let base = (river.first_vertex + id.x) * VERTEX_FLOATS;
-    let xz = vec2<f32>(vertices[base], vertices[base + 2u]);
-    let c = clamp_cell(vec2<i32>(floor((xz - river.origin) / river.cell)));
+    // The UV holds the vertex's quad (its corner cell) and which corner it is.
+    let uv = vec2<f32>(vertices[base + 6u], vertices[base + 7u]);
+    let quad = clamp_cell(vec2<i32>(floor(uv)));
+    let c = clamp_cell(quad + vec2<i32>(step(vec2<f32>(0.5), fract(uv))));
     let i = index_of(c);
     let w = water_in[i];
-    let y = drawn_height(c);
+    // A quad with no water at any corner collapses to a point: nothing to rasterise.
+    let wet_quad = wet_drawn(quad) || wet_drawn(clamp_cell(quad + vec2<i32>(1, 0))) || wet_drawn(clamp_cell(quad + vec2<i32>(0, 1))) || wet_drawn(clamp_cell(quad + vec2<i32>(1, 1)));
+    let at = select(quad, c, wet_quad);
+    let center = river.origin + (vec2<f32>(at) + 0.5) * river.cell;
+    vertices[base] = center.x;
+    vertices[base + 2u] = center.y;
+    let y = drawn_height(at);
     let own = select(y, terrain[i].x + w.x, w.x > WET);
     let hx = slope_level(c + vec2<i32>(1, 0), own) - slope_level(c - vec2<i32>(1, 0), own);
     let hz = slope_level(c + vec2<i32>(0, 1), own) - slope_level(c - vec2<i32>(0, 1), own);

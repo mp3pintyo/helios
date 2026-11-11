@@ -26,7 +26,9 @@ Part of the `helios-render` GPU pipeline; the pipeline diagram and the index of 
   Shading: GGX sun with VSM + cloud shadows, clustered local lights (with MegaLights: MegaLights' froxel volume,
   every light shadowed, [lights](lights.md)), Lumen radiance
   cache for ambient light, reflections from a screen-space trace against the opaque depth and colour, then Lumen's
-  global distance field + surface cache, then sky with the on-screen clouds; aerial perspective and volumetric fog are
+  global distance field + surface cache, then sky with the on-screen clouds (glass seen face on reflects only a few
+  percent and takes the radiance cache's blurry view instead of the distance-field trace; above 10 % reflectance —
+  grazing angles, a pane's edge seen from just above it — it traces, round 8); aerial perspective and volumetric fog are
   applied at the surface depth exactly (`A·surface + B·(1 − T) + T·background`, the background already carries the
   fog behind). **Water**: 16 directional waves (3 m down to 5 cm, directions fanning out wider for shorter ones,
   each crest bent sideways by its own slow sinusoids, evaluated on a gently warped domain) with sharpened crests and
@@ -93,6 +95,8 @@ Part of the `helios-render` GPU pipeline; the pipeline diagram and the index of 
   (33 / 300 candles), MegaLights' shading 0.02 ms. Same switch as the sun's (`End`). 24 MiB once
   a light near glass exists. Lights beyond the eight, the volumetric fog, particles and Lumen's surface cache see
   glass as clear for local lights.
+* **Rivers** are simulated shallow water drawn by the same water shading (flow-mapped waves, simulated foam): see
+  [terrain and rivers](terrain.md).
 * **Water bodies** (`water.rs`, `water.wgsl`, `shore.wgsl`; UE's Water system for lakes). Every `Water` instance is a
   flat *water body* (its world rectangle and level, from its bounds); one uniform carries them with the medium.
   **Lake bed and shore**: the G-buffer resolve turns the landscape into sediment where a body covers it — sand and

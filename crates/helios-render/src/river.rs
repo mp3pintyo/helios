@@ -100,22 +100,25 @@ impl River {
         self.origin + (Vec2::new(x as f32, z as f32) + 0.5) * self.cell
     }
 
-    /// The surface's resting mesh: a vertex at every cell centre at the initial water surface
-    /// (just under the bed where dry), two triangles between four centres.
+    /// The surface's resting mesh: a quad between every four cell centres, each with vertices
+    /// of its own (so a quad with only dry corners can collapse to a point and cost nothing to
+    /// rasterise) at the initial water surface (just under the bed where dry). A vertex's UV is
+    /// its quad's corner cell plus 0.25 + 0.5 × its corner (`vertex_step` finds its cell there).
     pub fn surface_mesh(&self) -> helios_geometry::Mesh {
         let [w, h] = self.size;
-        let vertices = (0..(w * h) as usize)
-            .map(|i| {
-                let c = self.center(i);
-                let y = if self.depth[i] > 0.01 { self.bed[i] + self.depth[i] } else { self.hide[i].min(self.bed[i]) - 0.12 };
-                helios_geometry::Vertex::new(Vec3::new(c.x, y, c.y), Vec3::Y, (c - self.origin) / self.cell)
-            })
-            .collect();
+        let mut vertices = Vec::with_capacity(((w - 1) * (h - 1) * 4) as usize);
         let mut indices = Vec::with_capacity(((w - 1) * (h - 1) * 6) as usize);
         for z in 0..h - 1 {
             for x in 0..w - 1 {
-                let i = z * w + x;
-                indices.extend_from_slice(&[i, i + w, i + 1, i + 1, i + w, i + w + 1]);
+                let base = vertices.len() as u32;
+                for (dx, dz) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                    let i = ((z + dz) * w + x + dx) as usize;
+                    let c = self.center(i);
+                    let y = if self.depth[i] > 0.01 { self.bed[i] + self.depth[i] } else { self.hide[i].min(self.bed[i]) - 0.12 };
+                    let uv = glam::Vec2::new(x as f32 + 0.25 + 0.5 * dx as f32, z as f32 + 0.25 + 0.5 * dz as f32);
+                    vertices.push(helios_geometry::Vertex::new(Vec3::new(c.x, y, c.y), Vec3::Y, uv));
+                }
+                indices.extend_from_slice(&[base, base + 2, base + 1, base + 1, base + 2, base + 3]);
             }
         }
         helios_geometry::Mesh::new(vertices, indices)
@@ -347,13 +350,19 @@ mod tests {
         let mut river = River::new(Vec2::new(-1.0, 2.0), 0.5, [4, 3], |p| p.x * 0.1);
         river.depth[5] = 0.4;
         let mesh = river.surface_mesh();
-        assert_eq!(mesh.vertices.len(), 12);
+        assert_eq!(mesh.vertices.len(), 3 * 2 * 4);
         assert_eq!(mesh.indices.len(), 3 * 2 * 6);
-        let v = mesh.vertices[5].position();
+        // Cell 5 = (1, 1): the first quad's last corner.
+        let v = mesh.vertices[3].position();
         let c = river.center(5);
         assert_eq!(c, Vec2::new(-1.0 + 0.75, 2.0 + 0.75));
+        assert_eq!(Vec2::new(v.x, v.z), c);
         assert!((v.y - (c.x * 0.1 + 0.4)).abs() < 1e-6);
+        assert_eq!(mesh.vertices[3].uv(), Vec2::new(0.75, 0.75));
         assert!(mesh.vertices[0].position[1] < river.bed[0], "dry cells sink under the bed");
+        // Counter-clockwise from above (+Y up).
+        let p: Vec<Vec3> = mesh.indices[..3].iter().map(|&i| mesh.vertices[i as usize].position()).collect();
+        assert!((p[1] - p[0]).cross(p[2] - p[0]).y > 0.0);
         assert_eq!(std::mem::size_of::<RiverParams>(), 112);
     }
 }

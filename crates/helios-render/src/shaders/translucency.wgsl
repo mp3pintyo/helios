@@ -74,6 +74,8 @@ const GLASS_F0: f32 = 0.04;
 // Period (seconds) of the river's two-phase flow map: how far the waves drift before a phase
 // restarts.
 const RIVER_FLOW_PERIOD: f32 = 1.6;
+// A river's waves start at the fifth (1 m and shorter: no lake swell on a stream).
+const RIVER_FIRST_WAVE: u32 = 4u;
 // Glass reflectance above which reflection rays trace the distance field (grazing angles).
 const GLASS_TRACED_REFLECTANCE: f32 = 0.1;
 // fp16 render targets saturate at 65504; sun glints stay well below that.
@@ -742,8 +744,8 @@ fn shade_water(in: VertexOutput, input: SurfaceInput, m: Material, px: Pixel) ->
         // Two-phase flow map: the waves drift with the current, each phase restarting from
         // the undisplaced pattern while the other carries the look; ripples grow choppier with
         // the speed and calm down in pools.
-        let w0 = water_surface(p.xz - flow * (flow_phase * RIVER_FLOW_PERIOD), frame.time, footprint);
-        let w1 = water_surface(p.xz - flow * (fract(flow_phase + 0.5) * RIVER_FLOW_PERIOD), frame.time, footprint);
+        let w0 = water_surface_from(p.xz - flow * (flow_phase * RIVER_FLOW_PERIOD), frame.time, footprint, RIVER_FIRST_WAVE);
+        let w1 = water_surface_from(p.xz - flow * (fract(flow_phase + 0.5) * RIVER_FLOW_PERIOD), frame.time, footprint, RIVER_FIRST_WAVE);
         let wn = normalize(mix(w0.normal, w1.normal, flow_blend));
         let chop = clamp(0.35 + 0.5 * length(flow), 0.35, 1.4);
         waves.normal = normalize(vec3<f32>(wn.x * chop, wn.y, wn.z * chop));

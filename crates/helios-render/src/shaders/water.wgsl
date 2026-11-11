@@ -102,10 +102,15 @@ struct WaterSurface {
 }
 
 fn water_surface(xz: vec2<f32>, time: f32, footprint: f32) -> WaterSurface {
+    return water_surface_from(xz, time, footprint, 0u);
+}
+
+// The waves from the `first` on (a river carries no swell: it starts at the shorter ones).
+fn water_surface_from(xz: vec2<f32>, time: f32, footprint: f32, first: u32) -> WaterSurface {
     let x = wave_domain(xz, time);
     var gradient = vec2<f32>(0.0);
     var variance = 0.0;
-    for (var i = 0u; i < WATER_WAVES; i++) {
+    for (var i = first; i < WATER_WAVES; i++) {
         let w = water_wave(i);
         let p = wave_phase(w, x, time);
         // Slope along the travel direction: A k cos(phase) exp(sin(phase) - 1).

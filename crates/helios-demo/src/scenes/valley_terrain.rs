@@ -65,7 +65,7 @@ pub fn mesh_terrain(ground: fn(f32, f32) -> f32, size: f32, resolution: u32) -> 
         // The cave through the cliff, a little above the meadow at its mouth.
         Modifier::Tunnel {
             a: turned(MESA, MESA_YAW, Vec3::new(-5.0, -3.5, 10.0)),
-            b: turned(MESA, MESA_YAW, Vec3::new(-5.0, -1.9, -10.0)),
+            b: turned(MESA, MESA_YAW, Vec3::new(-5.0, -0.8, -10.0)),
             radius: 2.4,
             blend: 1.0,
             roughness: 0.7,
@@ -308,7 +308,6 @@ const STREAM_BOULDERS: [(f32, f32, f32); 4] = [(-8.9, -28.0, 0.75), (-7.2, -17.5
 /// read from the terrain's density field (the cave's floor under its roof, rock walls as high
 /// cells), boulders in the stream raising the bed, a spring in the cave and the lake as outlet.
 pub fn add_river(scene: &mut Scene, terrain: &MeshTerrain, ground: fn(f32, f32) -> f32, rocks: &[MeshHandle], rock_materials: &[MaterialHandle]) {
-    if std::env::var("HELIOS_NO_RIVER").is_ok() { return; }
     let start = web_time::Instant::now();
     let volumes = terrain.volume_bounds();
     let bed_at = |p: Vec2| {
