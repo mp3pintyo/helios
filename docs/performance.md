@@ -27,3 +27,7 @@ Chromium and in Firefox (was 31–50 s), Firefox's full set ~33 s; the displaced
 Round 8 grounded foliage ([`foliage-grounding.md`](round8/foliage-grounding.md); 1600×900, shared GPU, per-pass minima):
 forest default view 8.87 → 9.72 ms (plant data and stalks +0.3–0.4 ms of shadow rasterisation and resolve,
 short-range AO +0.15 ms of lighting).
+Round 8 dynamic wind ([`dynamic-wind.md`](round8/dynamic-wind.md); 1600×900, shared GPU, minima of interleaved runs):
+forest default view 8.45 → 9.40 ms (8.91 with `--no-wind-bones`: bone data in the clusters and larger instance
+records), fern close-up 6.60 → 7.58 ms, grass close-up 8.48 → 9.41 ms; the bones themselves cost ~0.5–0.7 ms (per-vertex chains in the rasterisers,
+the resolve and the shadow pages). Scenes without plants are unchanged (cathedral within ±0.02 ms per pass).
