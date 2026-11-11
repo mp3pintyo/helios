@@ -82,12 +82,8 @@ impl DemoApp {
         };
         let angle = frame as f32 * std::f32::consts::TAU / 120.0;
         let to = Mat4::from_translation(Vec3::new(angle.cos() - 1.0, 0.0, angle.sin())) * start;
+        self.editor.static_drags = as_static;
         self.edit(|editor, world| editor.preview_actors(world, &[(id, to)]));
-        if as_static {
-            for h in self.editor.subtree_instances(id) {
-                self.scene.set_mobility(h, helios_render::Mobility::Static);
-            }
-        }
         if frame == 0 {
             log::info!("dragging actor {id} '{name}' ({} instances, {})", self.editor.subtree_instances(id).len(), if as_static { "static" } else { "movable while dragged" });
         }

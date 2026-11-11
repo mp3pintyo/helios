@@ -794,6 +794,9 @@ impl Editor {
     }
 
     fn mark_moving(&mut self, scene: &mut Scene, h: InstanceHandle) {
+        if self.static_drags {
+            return;
+        }
         let entry = self.interactive.entry(h).or_insert_with(|| (scene.mobility(h), 0));
         entry.1 = SETTLE_FRAMES;
         scene.set_mobility(h, Mobility::Movable);

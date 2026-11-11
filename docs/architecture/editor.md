@@ -72,7 +72,11 @@ Back to the [README](../../README.md).
   shadow casting, light. Older operations addressed by instance or light index still work (they edit the component,
   or the actor of a single component). `Editor::sync` re-resolves only the actors whose definition changed and places
   them and everything below them; the outline's parent / child links are rebuilt only when parents change or actors
-  come and go.
+  come and go. Costs (wasm, forest): moving one actor 4 ms, all 1 500 trees in one edit 33 ms; dragging the campfire
+  costs 10.95 ms GPU against 9.32 ms without a drag (13.93 ms when its instances stayed static: 214 instead of 123
+  shadow pages, 109 k instead of 31 k shadow draws per frame); a pew in the cathedral 7.33 against 6.93 ms (9.12 ms
+  static). `--drag-actor NAME [--drag-static]` (native) and `heliosEditorMovableDrags(false)` (browser) reproduce the
+  measurement; see `docs/round8/editor-hierarchy.md`.
 * **Scene files** (`.helios.json`, `editor/doc.rs`, serde; version 2). A base scene — a procedural scene and detail
   (both change the instance list) or a glTF URL — plus only the edits: base-actor overrides by key (name, parent,
   relative transform, visibility, deleted, and per component name its transform, visibility, material, shadow

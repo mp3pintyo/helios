@@ -89,7 +89,38 @@ per primitive). Levels save actors by name / GUID, not by spawn order.
 
 ## Measurements
 
-See the bottom of this note (filled in with the measurement runs).
+RTX 3090 shared with other agents' builds and renders. Native runs stalled for minutes at their first frame for
+every binary (main's too) while the GPU was saturated by others, so the A/B was taken in the browser (headless
+Chromium, WebGPU/D3D12, `web/editor.html`, 1600×900 page, dynamic resolution at 100 %): the actor nearest the start
+view is dragged through `heliosEditorPreviewActors` on a 1 m circle (one turn per 2 s) for 180 frames, sampling the
+HUD over the last 120; `heliosEditorMovableDrags(false)` gives the path before actors (static instances). Three
+interleaved rounds of none / movable / static; GPU = minimum over rounds of the per-round median.
+
+| Drag | GPU ms | shadow pages rendered / frame (dynamic-casters-only) | shadow draws / frame |
+|---|---|---|---|
+| Forest, *Campfire* (18 instances + light + fire): no drag | 9.32 | 96 (96) | 11–18 k |
+| — movable while dragged (actors) | **10.95** | 123 (95) | 31–33 k |
+| — static (before) | 13.93 | 214 (95) | 109 k |
+| Cathedral, *Pew* (1 instance): no drag | 6.93 | 43 (41) | 1.8–1.9 k |
+| — movable while dragged (actors) | **7.33** | 97 (95) | 2.0–2.4 k |
+| — static (before) | 9.12 | 174 (28) | 23 k |
+
+A static mover invalidates the cached pages under its old and new bounds every frame and re-renders them with
+everything in them (the forest's canopy over the clearing: 109 k draws); as a movable it is redrawn over the cached
+static layer of those pages (the pages count, the draws are its own). The forest's ~96 dynamic-only pages are the
+swaying foliage, present without a drag. Native, before the GPU was saturated (one run each, forest, 240 frames):
+movable 121 pages / 38.9 k draws, static 169 pages / 114 k draws.
+
+Editing and loading (wasm, forest medium, 6 218 actors over 8 278 instances): one edit moving all 1 500 trees
+33 ms (undo 10 ms, redo 11 ms); moving one actor 4 ms; the state JSON for the outliner 5.4 ms (166 KB); loading a
+file of 1 501 actor edits (531 KB) 9.5–12.5 ms after a reset to the base (6–9 ms); the same tree moves as a
+version-1 file of 3 000 instance edits, migrated on load, 16–19 ms; the 2-edit file from the UI test 10–16 ms.
+Compacting 80 free slots (40 deleted trees) 7–10 ms of CPU plus one structural change; undo after it restores all.
+Browser UI test (`pw_editor.py`, Playwright): editor ready 6.7 s after navigation; a gizmo X-arrow drag moved the
+campfire 1 m with its 18 instances movable during the drag and 0 after it settled; drag-and-drop re-parenting onto
+*Camp lantern* kept the world position; Ctrl+Z / Ctrl+Y restored parent and position; Ctrl+G / Shift+G grouped and
+ungrouped; Ctrl+S saved a version-2 file (989 bytes, keys `Campfire@700,-150,-100`), which reloaded to the same
+place; a version-1 file migrated without warnings; no console errors. Screenshots: `editor-hierarchy/browser-*.jpg`.
 
 ## Remaining limits
 

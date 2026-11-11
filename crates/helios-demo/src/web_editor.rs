@@ -153,6 +153,14 @@ pub fn helios_editor_revert_preview(_instances: Vec<u32>) {
     with_state(|st| st.app.edit(|editor, world| editor.revert_preview(world)));
 }
 
+/// Measurements: `false` makes drags move instances as they are (static: the shadow pages under
+/// them re-render in full every frame), the behaviour before actors; `true` (default) makes them
+/// movable while dragged.
+#[wasm_bindgen(js_name = heliosEditorMovableDrags)]
+pub fn helios_editor_movable_drags(on: bool) {
+    with_state(|st| st.app.editor.static_drags = !on);
+}
+
 /// One actor for the Details panel and the gizmo (see `editor::describe::actor`).
 #[wasm_bindgen(js_name = heliosEditorActor)]
 pub fn helios_editor_actor(id: u32) -> String {

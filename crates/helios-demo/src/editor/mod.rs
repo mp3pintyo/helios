@@ -92,6 +92,9 @@ pub struct Editor {
     idle_frames: u32,
     /// Compactions so far.
     pub compactions: u32,
+    /// Drags move instances as they are (static ones re-render the shadow pages under them in
+    /// full every frame): the behaviour before actors, for A/B measurements.
+    pub static_drags: bool,
     /// What the selection outline shows.
     selected_actors: Vec<u32>,
     selected_components: Vec<(u32, String)>,
@@ -146,6 +149,7 @@ impl Editor {
             interactive: HashMap::new(),
             idle_frames: 0,
             compactions: 0,
+            static_drags: false,
             selected_actors: Vec::new(),
             selected_components: Vec::new(),
             base_materials: HashMap::new(),
