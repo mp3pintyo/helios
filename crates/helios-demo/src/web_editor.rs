@@ -96,17 +96,93 @@ fn transforms(values: &[f32]) -> Vec<Trs> {
     values.chunks_exact(10).map(|v| Trs { t: [v[0], v[1], v[2]], r: [v[3], v[4], v[5], v[6]], s: [v[7], v[8], v[9]] }).collect()
 }
 
-/// Moves instances during a gizmo drag without an undo step: 10 numbers per instance
-/// (translation, rotation quaternion, scale).
+/// Moves instances' components during a gizmo drag without an undo step: 10 numbers per
+/// instance (translation, rotation quaternion, scale).
 #[wasm_bindgen(js_name = heliosEditorPreview)]
 pub fn helios_editor_preview(instances: Vec<u32>, values: Vec<f32>) {
-    with_state(|st| st.app.edit(|editor, world| editor.preview(world, &instances, &transforms(&values))));
+    with_state(|st| {
+        st.app.edit(|editor, world| {
+            let items: Vec<(u32, String, glam::Mat4)> = instances
+                .iter()
+                .zip(transforms(&values))
+                .filter_map(|(&i, t)| {
+                    let (actor, c) = editor.instance_component(i)?;
+                    Some((actor, editor.actor(actor)?.components[c].name.clone(), t.to_mat4()))
+                })
+                .collect();
+            editor.preview_components(world, &items);
+        })
+    });
 }
 
-/// Puts previewed instances back where the document has them (a cancelled drag).
+/// Moves actors (with their children and components) during a gizmo drag without an undo
+/// step: 10 numbers of world transform per actor. Their instances move as movable ones until
+/// the drag settles.
+#[wasm_bindgen(js_name = heliosEditorPreviewActors)]
+pub fn helios_editor_preview_actors(actors: Vec<u32>, values: Vec<f32>) {
+    with_state(|st| {
+        st.app.edit(|editor, world| {
+            let items: Vec<(u32, glam::Mat4)> = actors.iter().zip(transforms(&values)).map(|(&a, t)| (a, t.to_mat4())).collect();
+            editor.preview_actors(world, &items);
+        })
+    });
+}
+
+/// Moves components during a drag: JSON `[{actor, component, t, r, s}]` (world transforms).
+#[wasm_bindgen(js_name = heliosEditorPreviewComponents)]
+pub fn helios_editor_preview_components(json: &str) {
+    #[derive(serde::Deserialize)]
+    struct Item {
+        actor: u32,
+        component: String,
+        #[serde(flatten)]
+        transform: Trs,
+    }
+    let Ok(items) = serde_json::from_str::<Vec<Item>>(json) else { return };
+    with_state(|st| {
+        st.app.edit(|editor, world| {
+            let items: Vec<(u32, String, glam::Mat4)> = items.into_iter().map(|i| (i.actor, i.component, i.transform.to_mat4())).collect();
+            editor.preview_components(world, &items);
+        })
+    });
+}
+
+/// Puts previewed actors and components back where the document has them (a cancelled drag).
 #[wasm_bindgen(js_name = heliosEditorRevertPreview)]
-pub fn helios_editor_revert_preview(instances: Vec<u32>) {
-    with_state(|st| st.app.edit(|editor, world| editor.revert_preview(world, &instances)));
+pub fn helios_editor_revert_preview(_instances: Vec<u32>) {
+    with_state(|st| st.app.edit(|editor, world| editor.revert_preview(world)));
+}
+
+/// One actor for the Details panel and the gizmo (see `editor::describe::actor`).
+#[wasm_bindgen(js_name = heliosEditorActor)]
+pub fn helios_editor_actor(id: u32) -> String {
+    with_state(|st| describe::actor(&st.app.editor, &st.app.scene, id).to_string()).unwrap_or_default()
+}
+
+/// The selection: JSON `{actors: [id…], components: [[actor, name]…]}`; the viewport outlines
+/// their instances (an actor's children too).
+#[wasm_bindgen(js_name = heliosEditorSelect)]
+pub fn helios_editor_select(json: &str) {
+    #[derive(serde::Deserialize, Default)]
+    struct Selection {
+        #[serde(default)]
+        actors: Vec<u32>,
+        #[serde(default)]
+        components: Vec<(u32, String)>,
+    }
+    let selection: Selection = serde_json::from_str(json).unwrap_or_default();
+    with_state(|st| st.app.select(selection.actors, selection.components));
+}
+
+/// Removes the free instance and light slots of deleted things now (otherwise done once the
+/// editor has been idle for a while); returns [instances, lights] removed.
+#[wasm_bindgen(js_name = heliosEditorCompact)]
+pub fn helios_editor_compact() -> Vec<u32> {
+    with_state(|st| {
+        let (i, l) = st.app.compact_editor(true);
+        vec![i as u32, l as u32]
+    })
+    .unwrap_or_default()
 }
 
 #[wasm_bindgen(js_name = heliosEditorUndo)]
@@ -119,12 +195,18 @@ pub fn helios_editor_redo() -> bool {
     with_state(|st| st.app.edit(|editor, world| editor.redo(world))).unwrap_or(false)
 }
 
-/// Instances outlined in the viewport.
+/// Instances outlined in the viewport (their components; see [`helios_editor_select`]).
 #[wasm_bindgen(js_name = heliosEditorSetSelection)]
 pub fn helios_editor_set_selection(instances: Vec<u32>) {
     with_state(|st| {
-        let handles: Vec<_> = instances.iter().filter_map(|&i| st.app.scene.instance_handle(i)).collect();
-        st.app.renderer.set_selection(&handles);
+        let components: Vec<(u32, String)> = instances
+            .iter()
+            .filter_map(|&i| {
+                let (actor, c) = st.app.editor.instance_component(i)?;
+                Some((actor, st.app.editor.actor(actor)?.components[c].name.clone()))
+            })
+            .collect();
+        st.app.select(Vec::new(), components);
     });
 }
 

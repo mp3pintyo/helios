@@ -4,15 +4,17 @@
 //!
 //! **Document, then reconcile.** Every edit produces a new document; [`Editor::sync`] compares
 //! it with the document the scene currently reflects and touches only what differs — an
-//! instance's transform, a material's parameters, a PCG volume's spawned instances. Undo and
-//! redo just swap documents (snapshots are small: they hold edits, not the scene; generated
-//! PCG output lives in a cache keyed by the volume definition's hash). Loading a scene file is
-//! the same operation from an empty document.
+//! actor's transform (and everything below it), a material's parameters, a PCG volume's
+//! spawned instances. Undo and redo just swap documents (snapshots are small: they hold edits,
+//! not the scene; generated PCG output lives in a cache keyed by the volume definition's hash).
+//! Loading a scene file is the same operation from an empty document.
 //!
-//! **Stable handles.** Instances are never removed (see `helios_render::scene_edit`): deleting
-//! hides, and hidden instances are reused for the next instance of the same mesh, so handles
-//! shown in the outliner and returned by picking stay valid. Lights work the same way.
+//! **Actors** (`actors.rs`): the scene is a hierarchy of actors with components — mesh
+//! instances, lights, volumes and particle emitters — addressed by stable keys in documents and
+//! by live ids in the UI. Instance and light slots of removed components are hidden and reused,
+//! and compacted away once the editor is idle (`Editor::compaction`).
 
+pub mod actors;
 pub mod content;
 pub mod describe;
 pub mod doc;
@@ -24,11 +26,13 @@ pub mod settings;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use glam::{Mat4, Vec2, Vec3};
-use helios_render::{InstanceHandle, Light, LightKind, Material, MaterialHandle, MeshHandle, RenderSettings, Scene};
+use helios_render::{InstanceHandle, Light, LightKind, Material, MaterialHandle, MeshHandle, Mobility, RenderSettings, Scene};
 
+use self::actors::{Actor, BaseActor, BaseEmitters};
 use self::content::{Content, PrefabPart};
 use self::doc::*;
 pub use self::materials::with_params;
+use crate::scenes::outline::Outline;
 
 /// What edits act on: the scene, the render settings and the demo's sun.
 pub struct World<'a> {
@@ -40,25 +44,15 @@ pub struct World<'a> {
     pub floor: fn(f32, f32) -> f32,
 }
 
-/// Who an instance belongs to.
+/// Who an instance slot belongs to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Owner {
-    /// The base scene's instance with this index.
-    Base(u32),
-    /// An added instance (its id).
-    Added(u32),
+    /// Component `component` of live actor `actor`.
+    Actor { actor: u32, component: u16 },
     /// Spawned by a PCG volume (its id).
     Pcg(u32),
-    /// Hidden, waiting for reuse.
+    /// Hidden, waiting for reuse or compaction.
     Spare,
-}
-
-#[derive(Clone, Copy)]
-struct BaseInstance {
-    mesh: MeshHandle,
-    material: MaterialHandle,
-    transform: Mat4,
-    visible: bool,
 }
 
 /// A volume's spawned instances and the output they show.
@@ -74,8 +68,33 @@ pub struct Editor {
     applied: SceneDoc,
     undo: Vec<SceneDoc>,
     redo: Vec<SceneDoc>,
-    base_instances: Vec<BaseInstance>,
-    base_lights: Vec<Light>,
+    /// The base scene's actors and their index by key.
+    base_actors: Vec<BaseActor>,
+    base_index: HashMap<String, usize>,
+    /// Live actors by id, ids by key (never reused), the next id.
+    actors: BTreeMap<u32, Actor>,
+    ids: HashMap<String, u32>,
+    next_live_id: u32,
+    /// Per instance slot and per light slot: who has it.
+    owners: Vec<Owner>,
+    light_owners: Vec<Option<(u32, usize)>>,
+    /// Free slots (hidden instances by mesh, disabled lights).
+    spares: HashMap<MeshHandle, Vec<InstanceHandle>>,
+    spare_lights: Vec<usize>,
+    /// The base scene's emitters (the scene's lists are rebuilt from the live components).
+    emitters: BaseEmitters,
+    emitters_dirty: bool,
+    /// Actors shown elsewhere than the document has them (a gizmo drag), and their world.
+    preview_worlds: HashMap<u32, Mat4>,
+    /// Instances made movable by a drag: their own mobility and the frames until it returns.
+    interactive: HashMap<InstanceHandle, (Mobility, u32)>,
+    /// Frames since the last edit or preview.
+    idle_frames: u32,
+    /// Compactions so far.
+    pub compactions: u32,
+    /// What the selection outline shows.
+    selected_actors: Vec<u32>,
+    selected_components: Vec<(u32, String)>,
     /// Values before the first override, captured lazily (materials by name, settings by key).
     base_materials: HashMap<String, Material>,
     /// The base scene's graphs and material parameter values the document overrides.
@@ -83,11 +102,6 @@ pub struct Editor {
     base_parameters: HashMap<String, Vec<(String, helios_render::ParameterValue)>>,
     base_settings: HashMap<String, serde_json::Value>,
     base_environment: Option<Environment>,
-    owners: Vec<Owner>,
-    added: BTreeMap<u32, InstanceHandle>,
-    spares: HashMap<MeshHandle, Vec<InstanceHandle>>,
-    added_lights: BTreeMap<u32, usize>,
-    spare_lights: Vec<usize>,
     pcg: BTreeMap<u32, PcgState>,
     /// Generated output by volume id (the latest per volume).
     pcg_cache: BTreeMap<u32, PcgOutputDef>,
@@ -108,31 +122,37 @@ pub struct Editor {
 const UNDO_LIMIT: usize = 200;
 
 impl Editor {
-    /// An editor over the scene as built (the base scene described by `base`).
-    pub fn new(scene: &Scene, base: BaseScene) -> Self {
-        let base_instances: Vec<BaseInstance> = scene
-            .instance_handles()
-            .map(|h| BaseInstance { mesh: scene.instance_mesh(h), material: scene.instance_material(h), transform: scene.transform(h), visible: scene.is_visible(h) })
-            .collect();
-        let owners = (0..base_instances.len() as u32).map(Owner::Base).collect();
+    /// An editor over the scene as built (the base scene described by `base`, its actors by the
+    /// builder's `outline`).
+    pub fn new(scene: &Scene, base: BaseScene, outline: &Outline) -> Self {
         let doc = SceneDoc::new(base);
-        Self {
+        let mut editor = Self {
             applied: doc.clone(),
             doc,
             undo: Vec::new(),
             redo: Vec::new(),
-            base_instances,
-            base_lights: scene.lights().to_vec(),
+            base_actors: actors::base_actors(scene, outline),
+            base_index: HashMap::new(),
+            actors: BTreeMap::new(),
+            ids: HashMap::new(),
+            next_live_id: 1,
+            owners: Vec::new(),
+            light_owners: Vec::new(),
+            spares: HashMap::new(),
+            spare_lights: Vec::new(),
+            emitters: BaseEmitters::default(),
+            emitters_dirty: false,
+            preview_worlds: HashMap::new(),
+            interactive: HashMap::new(),
+            idle_frames: 0,
+            compactions: 0,
+            selected_actors: Vec::new(),
+            selected_components: Vec::new(),
             base_materials: HashMap::new(),
             base_graphs: HashMap::new(),
             base_parameters: HashMap::new(),
             base_settings: HashMap::new(),
             base_environment: None,
-            owners,
-            added: BTreeMap::new(),
-            spares: HashMap::new(),
-            added_lights: BTreeMap::new(),
-            spare_lights: Vec::new(),
             pcg: BTreeMap::new(),
             pcg_cache: BTreeMap::new(),
             prefabs: BTreeMap::new(),
@@ -141,7 +161,9 @@ impl Editor {
             warnings: Vec::new(),
             revision: 0,
             last_merge: None,
-        }
+        };
+        editor.init_actors(scene);
+        editor
     }
 
     pub fn can_undo(&self) -> bool {
@@ -156,22 +178,19 @@ impl Editor {
         self.owners.get(instance as usize).copied().unwrap_or(Owner::Spare)
     }
 
-    pub fn base_instance_count(&self) -> usize {
-        self.base_instances.len()
+    /// The live actors of the base scene.
+    pub fn base_actor_count(&self) -> usize {
+        self.base_actors.len()
     }
 
-    pub fn base_light_count(&self) -> usize {
-        self.base_lights.len()
+    /// Free instance and light slots (waiting for reuse or compaction).
+    pub fn free_slots(&self) -> (usize, usize) {
+        (self.spares.values().map(Vec::len).sum(), self.spare_lights.len())
     }
 
-    /// The scene light index of an added light.
-    pub fn added_light_index(&self, id: u32) -> Option<usize> {
-        self.added_lights.get(&id).copied()
-    }
-
-    /// The handle of an added instance.
-    pub fn added_handle(&self, id: u32) -> Option<InstanceHandle> {
-        self.added.get(&id).copied()
+    /// The live id of an added actor.
+    pub fn added_actor(&self, id: u32) -> Option<u32> {
+        self.actor_id(&actors::added_key(id))
     }
 
     pub fn pcg_instances(&self, id: u32) -> usize {
@@ -222,18 +241,23 @@ impl Editor {
         true
     }
 
-    /// Replaces the document with a loaded one (no undo step): its saved PCG output seeds the
-    /// cache, so volumes show exactly what was saved. Its imports must have been imported
-    /// already (see `DemoApp::import_model`).
+    /// Replaces the document with a loaded one (no undo step): version 1 documents are migrated
+    /// to actors first, and saved PCG output seeds the cache, so volumes show exactly what was
+    /// saved. Its imports must have been imported already (see `DemoApp::import_model`).
     pub fn load(&mut self, mut doc: SceneDoc, world: &mut World) {
+        self.warnings.clear();
+        self.migrate(&mut doc, world.scene);
+        let migration = std::mem::take(&mut self.warnings);
         doc.imports.clear();
         for output in std::mem::take(&mut doc.pcg_output) {
             self.pcg_cache.insert(output.id, output);
         }
         self.undo.clear();
         self.redo.clear();
+        self.last_merge = None;
         self.doc = doc;
         self.sync(world);
+        self.warnings.extend(migration);
     }
 
     /// The document to save: the edits plus the current PCG output and `camera`.
@@ -245,33 +269,6 @@ impl Editor {
         doc
     }
 
-    /// Temporarily moves instances during a gizmo drag (no document change; the drag's end
-    /// commits a transform edit, a cancelled drag calls [`Editor::revert_preview`]).
-    pub fn preview(&self, world: &mut World, instances: &[u32], transforms: &[Trs]) {
-        for (&i, trs) in instances.iter().zip(transforms) {
-            if let Some(h) = world.scene.instance_handle(i) {
-                world.scene.set_transform(h, trs.to_mat4());
-            }
-        }
-    }
-
-    pub fn revert_preview(&mut self, world: &mut World, instances: &[u32]) {
-        for &i in instances {
-            if let (Some(h), Some(t)) = (world.scene.instance_handle(i), self.effective_transform(world.scene, i)) {
-                world.scene.set_transform(h, t);
-            }
-        }
-    }
-
-    /// The transform an instance has in the current document.
-    pub fn effective_transform(&self, scene: &Scene, instance: u32) -> Option<Mat4> {
-        match self.owner(instance) {
-            Owner::Base(i) => Some(self.doc.instances.get(&i).and_then(|e| e.transform).map_or(self.base_instances[i as usize].transform, |t| t.to_mat4())),
-            Owner::Added(id) => self.doc.added.iter().find(|a| a.id == id).map(|a| a.transform.to_mat4()),
-            Owner::Pcg(_) | Owner::Spare => scene.instance_handle(instance).map(|h| scene.transform(h)),
-        }
-    }
-
     // ---- Reconciling the scene with the document ------------------------------------------------
 
     /// Applies every difference between the document and what the scene reflects.
@@ -279,9 +276,9 @@ impl Editor {
         self.warnings.clear();
         self.sync_graphs(world);
         self.sync_materials(world);
-        self.sync_base_instances(world);
-        self.sync_added(world);
-        self.sync_lights(world);
+        // A gesture's commits (gizmo drags, scrubbed fields) move instances as movable ones.
+        let interactive = self.last_merge.is_some();
+        self.sync_actors(world, interactive);
         self.sync_environment(world);
         self.sync_render(world);
         self.sync_pcg(world);
@@ -321,56 +318,21 @@ impl Editor {
         }
     }
 
-    fn sync_base_instances(&mut self, world: &mut World) {
-        let keys: BTreeSet<u32> = self.doc.instances.keys().chain(self.applied.instances.keys()).copied().collect();
-        for index in keys {
-            let edit = self.doc.instances.get(&index);
-            if edit == self.applied.instances.get(&index) {
-                continue;
-            }
-            let Some(base) = self.base_instances.get(index as usize).copied() else {
-                self.warnings.push(format!("instance {index} is not in the base scene"));
-                continue;
-            };
-            if let Some(edit) = edit {
-                let actual = world.scene.mesh_name(base.mesh);
-                if !edit.mesh.is_empty() && edit.mesh != actual {
-                    self.warnings.push(format!("instance {index} is '{actual}', the file expected '{}' (scene changed since saving?)", edit.mesh));
-                    continue;
-                }
-            }
-            let handle = world.scene.instance_handle(index).expect("base instances exist");
-            let transform = edit.and_then(|e| e.transform).map_or(base.transform, |t| t.to_mat4());
-            world.scene.set_transform(handle, transform);
-            let deleted = edit.is_some_and(|e| e.deleted);
-            world.scene.set_visible(handle, !deleted && edit.and_then(|e| e.visible).unwrap_or(base.visible));
-            let material = match edit.and_then(|e| e.material.clone()) {
-                Some(name) => self.material_handle(world.scene, &name).unwrap_or(base.material),
-                None => base.material,
-            };
-            world.scene.set_instance_material(handle, material);
-        }
-    }
-
-    /// A hidden instance of `mesh` to reuse, or a new one.
+    /// A free instance of `mesh` to reuse, or a new one (PCG output).
     fn instance_for(&mut self, scene: &mut Scene, mesh: MeshHandle, material: MaterialHandle, owner: Owner) -> InstanceHandle {
         let handle = match self.spares.get_mut(&mesh).and_then(Vec::pop) {
             Some(handle) => handle,
             None => scene.add_instance(mesh, material, Mat4::IDENTITY),
         };
+        if !self.interactive.contains_key(&handle) {
+            scene.set_mobility(handle, Mobility::Static);
+        }
         let index = handle.index() as usize;
         if self.owners.len() <= index {
             self.owners.resize(index + 1, Owner::Spare);
         }
         self.owners[index] = owner;
         handle
-    }
-
-    fn retire(&mut self, scene: &mut Scene, handle: InstanceHandle) {
-        scene.set_visible(handle, false);
-        let index = handle.index() as usize;
-        self.owners[index] = Owner::Spare;
-        self.spares.entry(scene.instance_mesh(handle)).or_default().push(handle);
     }
 
     fn place(&mut self, scene: &mut Scene, handle: InstanceHandle, material: MaterialHandle, transform: Mat4, cast_shadow: bool) {
@@ -380,68 +342,6 @@ impl Editor {
             scene.set_cast_shadow(handle, cast_shadow);
         }
         scene.set_visible(handle, true);
-    }
-
-    fn sync_added(&mut self, world: &mut World) {
-        let wanted: BTreeMap<u32, AddedInstance> = self.doc.added.iter().map(|a| (a.id, a.clone())).collect();
-        let applied: BTreeMap<u32, AddedInstance> = self.applied.added.iter().map(|a| (a.id, a.clone())).collect();
-        for id in applied.keys().filter(|id| !wanted.contains_key(id)) {
-            if let Some(handle) = self.added.remove(id) {
-                self.retire(world.scene, handle);
-            }
-        }
-        for (id, added) in wanted {
-            if applied.get(&id) == Some(&added) && self.added.contains_key(&id) {
-                continue;
-            }
-            let (Some(mesh), Some(material)) = (self.mesh_handle(world.scene, &added.mesh), self.material_handle(world.scene, &added.material)) else { continue };
-            let handle = match self.added.get(&id) {
-                Some(&h) => h,
-                None => {
-                    let h = self.instance_for(world.scene, mesh, material, Owner::Added(id));
-                    self.added.insert(id, h);
-                    h
-                }
-            };
-            self.place(world.scene, handle, material, added.transform.to_mat4(), added.cast_shadow);
-        }
-    }
-
-    fn sync_lights(&mut self, world: &mut World) {
-        let keys: BTreeSet<u32> = self.doc.lights.keys().chain(self.applied.lights.keys()).copied().collect();
-        for index in keys {
-            let def = self.doc.lights.get(&index);
-            if def == self.applied.lights.get(&index) {
-                continue;
-            }
-            let Some(base) = self.base_lights.get(index as usize).copied() else { continue };
-            world.scene.lights_mut()[index as usize] = def.map_or(base, light_from_def);
-        }
-        let wanted: BTreeMap<u32, LightDef> = self.doc.added_lights.iter().map(|l| (l.id, l.light.clone())).collect();
-        let applied: BTreeMap<u32, LightDef> = self.applied.added_lights.iter().map(|l| (l.id, l.light.clone())).collect();
-        for id in applied.keys().filter(|id| !wanted.contains_key(id)) {
-            if let Some(index) = self.added_lights.remove(id) {
-                world.scene.lights_mut()[index] = light_from_def(&LightDef { enabled: false, ..light_def(&world.scene.lights()[index]) });
-                self.spare_lights.push(index);
-            }
-        }
-        for (id, def) in wanted {
-            if applied.get(&id) == Some(&def) && self.added_lights.contains_key(&id) {
-                continue;
-            }
-            let index = match self.added_lights.get(&id) {
-                Some(&i) => i,
-                None => {
-                    let i = self.spare_lights.pop().unwrap_or_else(|| {
-                        world.scene.add_light(light_from_def(&def));
-                        world.scene.lights().len() - 1
-                    });
-                    self.added_lights.insert(id, i);
-                    i
-                }
-            };
-            world.scene.lights_mut()[index] = light_from_def(&def);
-        }
     }
 
     /// The environment as the scene has it now.
@@ -554,7 +454,7 @@ impl Editor {
             }
             let output = match self.pcg_cache.get(&id).filter(|o| o.hash == hash) {
                 Some(output) => Ok(output.clone()),
-                None => pcg::generate(&def, world.scene, world.floor),
+                None => pcg::generate(&def, world.scene, world.floor, self.surface_instance(world.scene, &def.surface)),
             };
             let mut state = self.pcg.remove(&id).unwrap_or_default();
             state.hash = hash;

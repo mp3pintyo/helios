@@ -254,16 +254,25 @@ Honest differences that remain:
     collision), no ribbons, meshes, sub-UV flipbooks, events or GPU sorting; lighting is per particle (no per-pixel
     normal-mapped lighting). Memory: 72 bytes per internal pixel while volumes and particles are on screen (volume
     march + history front/back, OIT targets, nearest translucent depth: 104 MiB at 1600×900).
-12. **Editor**: no actors or hierarchy — a tree's trunk and foliage are two instances, selected separately; deleted
-    instances and lights stay as hidden / disabled slots (reused, never compacted); undo history is in memory (200
-    steps); no landscape sculpting or painting, no multi-viewport, no editor-only billboards in the renderer (light and
-    volume icons are a 2D overlay without depth test), the gizmo draws over everything; typed transform values apply to
-    the primary selection only; the native window has the editor core without panels. Edited instances stay
-    `Static`, so the shadow pages under a dragged object are rendered in full every preview frame, and hiding,
-    deleting, duplicating, reassigning materials and PCG regeneration are structural changes (all instance data
-    re-uploaded, Lumen's instance lists rebuilt). Scene files address base instances by build order (a changed scene
-    builder is detected by mesh name and the edit skipped with a warning); dropped `.glb` files are referenced by file
-    name and must be hosted next to the page to reload; glTF imports bake on the main thread in the browser.
+12. **Editor**: actors with components and a hierarchy exist (round 8), but simpler than UE's: no actor classes or
+    Blueprints, no sockets (children attach to the actor, not to a component or bone), no outliner folders separate
+    from actors (a builder's folder is an actor without components), no per-component mobility settings in the UI,
+    no level instances / sub-levels or World Partition; glTF node hierarchies are not imported as actors (each
+    instance of a model scene is an actor of its own); PCG volumes are their own list, not components of actors;
+    duplicated actors leave out volume and particle components (base-scene emitters are not serialisable); props the
+    demo animates (key 0) are moved by their motion every frame and ignore the editor's transform while it runs.
+    Actor keys of scattered objects contain their position, so a builder that moves an object orphans its edits
+    (reported, skipped). Removed components' slots are compacted lazily (idle 1.5 s with ≥ 32 free instances or
+    ≥ 8 free lights, or idle 30 s), and compaction itself is a structural change; a deleted prop the demo animated
+    comes back static on undo. Dragging makes the moved instances `Movable` (cached static shadow pages, dynamic
+    casters redrawn) and restores them 30 frames after the last move, which re-renders the static layer under them
+    once; hiding, deleting, duplicating, reassigning materials and PCG regeneration are still structural changes
+    (all instance data re-uploaded, Lumen's instance lists rebuilt). Undo history is in memory (200 steps); no
+    landscape sculpting or painting, no multi-viewport, no editor-only billboards in the renderer (light and volume
+    icons are a 2D overlay without depth test), the gizmo draws over everything; typed transform values apply to the
+    primary selection only; the native window has the editor core without panels (click selects an actor, Delete /
+    Ctrl+D act on it with its children). Dropped `.glb` files are referenced by file name and must be hosted next to
+    the page to reload; glTF imports bake on the main thread in the browser.
 13. **PCG**: a fixed node set without a graph canvas (nodes and their parameters are edited in the Details panel; the
     graph's structure comes from the presets / the file), no attribute system or custom nodes, no spline editing in
     the viewport (distance targets are volume-local data), spawners reference meshes and materials by name, generation

@@ -17,6 +17,7 @@ use helios_render::{
     TexturePattern, VolumeEmitter, Wind, WindResponse,
 };
 
+use super::outline;
 use super::{add_baked_with, add_built, smoothstep, Detail, Rng, SceneSetup};
 
 const SIZE: f32 = 900.0;
@@ -103,6 +104,7 @@ impl Meshes<'_> {
 type Placer<'a> = dyn FnMut(&mut Scene, f32, f32, &mut Rng) + 'a;
 
 struct Species {
+    name: &'static str,
     wood: MeshHandle,
     foliage: MeshHandle,
     bark: MaterialHandle,
@@ -226,6 +228,7 @@ fn build_scene(detail: Detail) -> Scene {
             gravitropism: 0.3 + i as f32 * 0.1,
         });
         species.push(Species {
+            name: "Broadleaf tree",
             wood: m.add("broadleaf wood", &tree.wood, true),
             foliage: m.add_foliage("broadleaf foliage", &tree.foliage, true),
             bark: oak_bark_m,
@@ -235,6 +238,7 @@ fn build_scene(detail: Detail) -> Scene {
     for (i, height) in [22.0f32, 15.0].iter().enumerate() {
         let tree = vegetation::conifer_assembly(41 + i as u32, *height, height * 0.018, detail.pick(34, 56), detail.pick(10, 14));
         species.push(Species {
+            name: "Conifer",
             wood: m.add("conifer wood", &tree.wood, true),
             foliage: m.add_assembly("conifer needles", &tree),
             bark: pine_bark_m,
@@ -269,7 +273,7 @@ fn build_scene(detail: Detail) -> Scene {
     };
 
     // ---- Scatter ---------------------------------------------------------------------------------------
-    scene.add_instance(terrain, terrain_material, Mat4::IDENTITY);
+    outline::actor(&mut scene, "Landscape", Mat4::IDENTITY, |scene| scene.add_instance(terrain, terrain_material, Mat4::IDENTITY));
     let mut rng = Rng(0x1234_5678);
     // On the terrain mesh as rendered (not the analytic height it approximates).
     let place = |x: f32, z: f32, sink: f32, scale: Vec3, yaw: f32| {
@@ -279,6 +283,7 @@ fn build_scene(detail: Detail) -> Scene {
     let target = detail.pick(1500, 3200);
     let radius = detail.pick(260.0, 380.0);
     let mut attempts = 0;
+    outline::folder("Trees");
     while placed_trees.len() < target && attempts < target * 20 {
         attempts += 1;
         let (x, z) = (rng.range(-radius, radius), rng.range(-radius, radius));
@@ -293,9 +298,12 @@ fn build_scene(detail: Detail) -> Scene {
         let s = &species[(rng.next() * species.len() as f32) as usize % species.len()];
         let scale = rng.range(0.8, 1.25);
         let xf = place(x, z, 0.3, Vec3::splat(scale), rng.range(0.0, 6.3));
-        scene.add_instance(s.wood, s.bark, xf);
-        scene.add_instance(s.foliage, s.leaves, xf);
+        outline::actor(&mut scene, s.name, xf, |scene| {
+            scene.add_instance(s.wood, s.bark, xf);
+            scene.add_instance(s.foliage, s.leaves, xf);
+        });
     }
+    outline::end_folder();
     let mut scatter = |count: usize, range: f32, mut f: Box<Placer>| {
         let mut n = 0;
         let mut tries = 0;
@@ -309,43 +317,59 @@ fn build_scene(detail: Detail) -> Scene {
             n += 1;
         }
     };
+    outline::folder("Bushes");
     scatter(detail.pick(500, 900), 160.0, Box::new(|scene, x, z, rng| {
         let (wood, leaves) = bushes[(rng.next() * 2.0) as usize % 2];
         let xf = place(x, z, 0.05, Vec3::splat(rng.range(0.7, 1.4)), rng.range(0.0, 6.3));
-        scene.add_instance(wood, oak_bark_m, xf);
-        scene.add_instance(leaves, leaves_m[2], xf);
+        outline::actor(scene, "Bush", xf, |scene| {
+            scene.add_instance(wood, oak_bark_m, xf);
+            scene.add_instance(leaves, leaves_m[2], xf);
+        });
     }));
+    outline::end_folder();
+    outline::folder("Ferns");
     scatter(detail.pick(2500, 5000), 120.0, Box::new(|scene, x, z, rng| {
         let fern = ferns[(rng.next() * 3.0) as usize % 3];
         let xf = place(x, z, 0.02, Vec3::splat(rng.range(0.7, 1.5)), rng.range(0.0, 6.3));
         if !in_campfire(x, z) {
-            scene.add_instance(fern, fern_m, xf);
+            outline::actor(scene, "Fern", xf, |scene| scene.add_instance(fern, fern_m, xf));
         }
     }));
+    outline::end_folder();
+    outline::folder("Grass");
     scatter(detail.pick(1500, 3000), 70.0, Box::new(|scene, x, z, rng| {
         let clump = grass[(rng.next() * 2.0) as usize % 2];
         let xf = place(x, z, 0.0, Vec3::splat(rng.range(0.8, 1.4)), rng.range(0.0, 6.3));
         if !in_campfire(x, z) {
-            scene.add_instance(clump, grass_m, xf);
+            outline::actor(scene, "Grass clump", xf, |scene| scene.add_instance(clump, grass_m, xf));
         }
     }));
+    outline::end_folder();
+    outline::folder("Rocks");
     scatter(160, 250.0, Box::new(|scene, x, z, rng| {
         let rock = rocks[(rng.next() * 3.0) as usize % 3];
         let s = rng.range(0.5, 2.6);
         let xf = place(x, z, s * 0.25, Vec3::new(s * rng.range(0.8, 1.3), s * rng.range(0.6, 1.0), s * rng.range(0.8, 1.3)), rng.range(0.0, 6.3));
-        scene.add_instance(rock, mossy_rock, xf);
+        outline::actor(scene, "Mossy boulder", xf, |scene| scene.add_instance(rock, mossy_rock, xf));
     }));
+    outline::end_folder();
+    outline::folder("Fallen logs");
     scatter(50, 150.0, Box::new(|scene, x, z, rng| {
         let yaw = rng.range(0.0, 6.3);
         let xf = place(x, z, 0.15, Vec3::splat(rng.range(0.8, 1.3)), yaw);
+        let token = outline::begin(scene, "Fallen log", xf);
         scene.add_instance(log, mossy_log, xf);
         let side = xf.transform_point3(Vec3::new(rng.range(1.0, 7.0), 0.0, 0.5));
         scene.add_instance(mushrooms, mushroom_m, place(side.x, side.z, 0.0, Vec3::splat(rng.range(0.8, 1.6)), rng.range(0.0, 6.3)));
+        outline::end(scene, token);
     }));
+    outline::end_folder();
 
     // A camp lantern near the start: a warm local light that bounces under the canopy.
     let lantern = Vec3::new(9.0, ground_height(9.0, -4.0) + 0.6, -4.0);
-    scene.add_light(Light { source_radius: 0.1, ..Light::point(lantern, Vec3::new(1.0, 0.65, 0.3), 2.0, 12.0) });
+    outline::actor(&mut scene, "Camp lantern", Mat4::from_translation(lantern), |scene| {
+        scene.add_light(Light { source_radius: 0.1, ..Light::point(lantern, Vec3::new(1.0, 0.65, 0.3), 2.0, 12.0) })
+    });
     // Built last, so pre-baked mesh libraries of the rest of the scene stay valid.
     campfire(&mut scene, CAMPFIRE.x, CAMPFIRE.y, terrain_resolution);
     scene
@@ -373,6 +397,8 @@ fn in_campfire(x: f32, z: f32) -> bool {
 fn campfire(scene: &mut Scene, x: f32, z: f32, terrain_resolution: u32) {
     let ground = |x: f32, z: f32| terrain_mesh_height(x, z, terrain_resolution);
     let base = Vec3::new(x, ground(x, z), z);
+    // One actor: stones, coals, logs, the light, the fire volume, sparks and embers.
+    let token = outline::begin(scene, "Campfire", Mat4::from_translation(base));
     let stone_m = scene.add_material(Material { kind: MaterialKind::Rock, base_color: Vec3::new(0.3, 0.29, 0.27), roughness: 0.85, detail_scale: 8.0, detail_strength: 0.3, ..Default::default() });
     let charred = scene.add_material(Material::standard(Vec3::new(0.045, 0.035, 0.03), 0.9, 0.0));
     let coals_m = scene.add_material(Material { base_color: Vec3::new(1.0, 0.32, 0.07), emissive: 1.2, roughness: 0.9, ..Default::default() });
@@ -415,6 +441,7 @@ fn campfire(scene: &mut Scene, x: f32, z: f32, terrain_resolution: u32) {
     scene.volumes.push(VolumeEmitter { light: Some(light), ..fire });
     scene.particles.push(ParticleEmitter::sparks(base + Vec3::Y * 0.3));
     scene.particles.push(ParticleEmitter::embers(base + Vec3::Y * 0.25));
+    outline::end(scene, token);
 }
 
 fn initial_camera() -> Camera {
@@ -434,7 +461,7 @@ fn floor_high(x: f32, z: f32) -> f32 {
 
 pub fn build(detail: Detail) -> SceneSetup {
     let floor: fn(f32, f32) -> f32 = detail.pick(floor_medium, floor_high);
-    SceneSetup { scene: build_scene(detail), camera: initial_camera(), sun: SUN, floor, animation: None, motion: Default::default() }
+    SceneSetup { scene: build_scene(detail), camera: initial_camera(), sun: SUN, floor, animation: None, motion: Default::default(), outline: Default::default() }
 }
 
 #[cfg(test)]

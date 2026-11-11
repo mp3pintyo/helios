@@ -23,6 +23,7 @@ use helios_render::{
 };
 
 use super::candles::{self, Fixture};
+use super::outline;
 use super::{add_baked, add_baked_with, Detail, SceneSetup};
 use crate::motion::{DemoMotion, Motion};
 
@@ -754,14 +755,14 @@ fn build_scene(detail: Detail) -> (Scene, DemoMotion) {
         t
     };
     let terrain = add_baked_with(b.scene, "terrain", &terrain, BuildConfig { sdf: SdfMode::Heightfield { resolution: 512 }, ..Default::default() });
-    b.place(terrain, m.terrain, Mat4::IDENTITY);
+    outline::actor(b.scene, "Terrain", Mat4::IDENTITY, |scene| scene.add_instance(terrain, m.terrain, Mat4::IDENTITY));
     // Large flat slabs: a heightfield field keeps them exact (a volume's coarse voxels would
     // either lose the thin slab or inflate it by half a voxel, swallowing the pews).
     let heightfield = |resolution| BuildConfig { sdf: SdfMode::Heightfield { resolution }, ..Default::default() };
     let plaza = add_baked_with(b.scene, "plaza", &stone(&cuboid(Vec3::new(-40.0, -0.6, -40.0), Vec3::new(LENGTH + 30.0, -0.05, 40.0)), detail.pick(4.0, 2.0), 0.0, 62), heightfield(256));
-    b.place(plaza, m.plaza, Mat4::IDENTITY);
+    outline::actor(b.scene, "Plaza", Mat4::IDENTITY, |scene| scene.add_instance(plaza, m.plaza, Mat4::IDENTITY));
     let floor = add_baked_with(b.scene, "floor", &cuboid(Vec3::new(-1.0, -0.4, -AISLE_WALL), Vec3::new(LENGTH + NAVE_HALF, 0.0, AISLE_WALL)), heightfield(256));
-    b.place(floor, m.floor, Mat4::IDENTITY);
+    outline::actor(b.scene, "Floor", Mat4::IDENTITY, |scene| scene.add_instance(floor, m.floor, Mat4::IDENTITY));
 
     // Piers, arcades and nave walls with clerestory glass and tracery.
     let pier = b.mesh("pier", &pier(detail));
@@ -772,19 +773,22 @@ fn build_scene(detail: Detail) -> (Scene, DemoMotion) {
     let clerestory_tracery = b.mesh("clerestory tracery", &stone(&tracery(4.0, 18.6, 24.6, WALL_TOP - 0.7, detail), detail.pick(0.5, 0.25), 0.003, 63));
     let triforium_back = b.mesh("triforium back", &cuboid(Vec3::new(-half, 13.6, 1.0), Vec3::new(half, 18.0, 1.6)));
     let _ = triforium_holes;
+    outline::folder("Nave");
     for i in 0..=BAYS {
         let x = i as f32 * BAY;
         for (z, rot) in [(NAVE_HALF, Mat4::IDENTITY), (-NAVE_HALF, flip)] {
             // Piers face the nave with their vaulting shaft (+z local -> towards the axis).
             let face_in = if z > 0.0 { flip } else { Mat4::IDENTITY };
-            b.place(pier, m.smooth, at(x, z) * face_in);
+            outline::actor(b.scene, "Pier", at(x, z) * face_in, |scene| scene.add_instance(pier, m.smooth, at(x, z) * face_in));
             if i < BAYS {
                 let cx = x + half;
+                let bay = outline::begin(b.scene, "Nave wall bay", at(cx, z) * rot);
                 b.place(nave_wall, m.ashlar, at(cx, z) * rot);
                 b.place(arcade, m.smooth, at(cx, z) * rot);
                 b.glass(clerestory_glass, m.glass[i % 2], at(cx, z) * rot);
                 b.place(clerestory_tracery, m.smooth, at(cx, z) * rot);
                 b.place(triforium_back, m.ashlar, at(cx, z) * rot);
+                outline::end(b.scene, bay);
             }
         }
     }
@@ -795,9 +799,11 @@ fn build_scene(detail: Detail) -> (Scene, DemoMotion) {
     let aisle_center = (AISLE_WALL + NAVE_HALF) * 0.5;
     for i in 0..BAYS {
         let cx = i as f32 * BAY + half;
+        let vaults = outline::begin(b.scene, "Vault bay", at(cx, 0.0));
         b.place(nave_vault, m.vault, at(cx, 0.0));
         b.place(aisle_vault, m.vault, at(cx, aisle_center));
         b.place(aisle_vault, m.vault, at(cx, -aisle_center));
+        outline::end(b.scene, vaults);
     }
 
     // Aisle walls, windows, buttresses and roofs.
@@ -810,17 +816,21 @@ fn build_scene(detail: Detail) -> (Scene, DemoMotion) {
     for i in 0..BAYS {
         let cx = i as f32 * BAY + half;
         for (z, rot) in [(AISLE_WALL, Mat4::IDENTITY), (-AISLE_WALL, flip)] {
+            let bay = outline::begin(b.scene, "Aisle wall bay", at(cx, z) * rot);
             b.place(aisle_wall, m.ashlar, at(cx, z) * rot);
             b.glass(aisle_glass, m.glass[(i + 1) % 2], at(cx, z) * rot);
             b.place(aisle_tracery, m.smooth, at(cx, z) * rot);
+            outline::end(b.scene, bay);
         }
-        b.place(roof, m.slate, at(cx, 0.0));
+        outline::actor(b.scene, "Roof bay", at(cx, 0.0), |scene| scene.add_instance(roof, m.slate, at(cx, 0.0)));
     }
     for i in 0..=BAYS {
         let x = i as f32 * BAY;
-        b.place(buttress, m.ashlar, at(x, AISLE_WALL + WALL_T * 0.5));
-        b.place(buttress, m.ashlar, at(x, -AISLE_WALL - WALL_T * 0.5) * flip);
+        for t in [at(x, AISLE_WALL + WALL_T * 0.5), at(x, -AISLE_WALL - WALL_T * 0.5) * flip] {
+            outline::actor(b.scene, "Buttress", t, |scene| scene.add_instance(buttress, m.ashlar, t));
+        }
     }
+    outline::end_folder();
 
     // West front with portal and rose window; twin towers.
     let (front_mesh, rose, side_window) = west_front(detail);
@@ -829,18 +839,22 @@ fn build_scene(detail: Detail) -> (Scene, DemoMotion) {
     let rose_tracery = b.mesh("rose tracery", &stone(&rose_tracery(detail).transformed(Mat4::from_translation(Vec3::new(0.0, 22.5, 0.0))), detail.pick(0.5, 0.25), 0.003, 65));
     let west_glass = b.mesh("west glass", &glass_pane(&side_window));
     let face_west = Mat4::from_rotation_y(-std::f32::consts::FRAC_PI_2);
+    let west = outline::begin(b.scene, "West front", at(-0.6, 0.0) * face_west);
     b.place(front, m.ashlar, at(-0.6, 0.0) * face_west);
     b.glass(rose_glass, m.glass[2], at(-0.6, 0.0) * face_west);
     b.place(rose_tracery, m.smooth, at(-0.6, 0.0) * face_west);
     b.glass(west_glass, m.glass[1], at(-0.6, 0.0) * face_west);
     b.glass(west_glass, m.glass[0], at(-0.6, 0.0) * face_west * Mat4::from_translation(Vec3::new(21.0, 0.0, 0.0)));
+    outline::end(b.scene, west);
     let tower = b.mesh("tower", &tower(detail));
-    b.place(tower, m.ashlar, at(-5.4, AISLE_WALL - 2.3));
-    b.place(tower, m.ashlar, at(-5.4, -AISLE_WALL + 2.3));
+    for t in [at(-5.4, AISLE_WALL - 2.3), at(-5.4, -AISLE_WALL + 2.3)] {
+        outline::actor(b.scene, "Tower", t, |scene| scene.add_instance(tower, m.ashlar, t));
+    }
 
     // Apse with tall windows and a half dome.
     let (apse_mesh, apse_window, face_width) = apse(detail);
     let apse = b.mesh("apse", &apse_mesh);
+    let apse_actor = outline::begin(b.scene, "Apse", at(LENGTH, 0.0));
     b.place(apse, m.ashlar, at(LENGTH, 0.0));
     let apse_glass = b.mesh("apse glass", &glass_pane(&apse_window));
     let apothem = NAVE_HALF * (std::f32::consts::PI / 14.0).cos();
@@ -855,28 +869,39 @@ fn build_scene(detail: Detail) -> (Scene, DemoMotion) {
     let east = b.mesh("aisle east wall", &stone(&cuboid(Vec3::new(-0.6, 0.0, NAVE_HALF + 0.7), Vec3::new(0.6, AISLE_SPRING + AISLE_RISE + 0.5, AISLE_WALL + 0.6)), detail.pick(0.7, 0.35), 0.006, 66));
     b.place(east, m.ashlar, at(LENGTH, 0.0));
     b.place(east, m.ashlar, at(LENGTH, 0.0) * Mat4::from_scale(Vec3::new(1.0, 1.0, -1.0)));
+    outline::end(b.scene, apse_actor);
 
     // Furnishings: pews, altar, candelabra, chandeliers — with candle lights.
     let pew = b.mesh("pew", &pew());
+    outline::folder("Furnishings");
+    outline::folder("Pews");
     for row in 0..30 {
         let x = 9.0 + row as f32 * 1.15;
-        b.place(pew, m.wood, at(x, -3.4) * Mat4::from_rotation_y(-std::f32::consts::FRAC_PI_2));
-        b.place(pew, m.wood, at(x, 3.4) * Mat4::from_rotation_y(-std::f32::consts::FRAC_PI_2));
+        for z in [-3.4, 3.4] {
+            let t = at(x, z) * Mat4::from_rotation_y(-std::f32::consts::FRAC_PI_2);
+            outline::actor(b.scene, "Pew", t, |scene| scene.add_instance(pew, m.wood, t));
+        }
     }
+    outline::end_folder();
     let (altar_stone, altar_cloth, altar_gold) = altar(detail);
     let altar_x = LENGTH - 6.0;
     let altar_mesh = b.mesh("altar", &altar_stone);
-    b.place(altar_mesh, m.smooth, at(altar_x, 0.0));
     let cloth = b.mesh("altar cloth", &altar_cloth);
-    b.place(cloth, m.cloth, at(altar_x, 0.0));
     let gold = b.mesh("altar gold", &altar_gold);
+    // The altar actor takes its candles below and their lights at the end.
+    let altar_actor = outline::begin(b.scene, "Altar", at(altar_x, 0.0));
+    b.place(altar_mesh, m.smooth, at(altar_x, 0.0));
+    b.place(cloth, m.cloth, at(altar_x, 0.0));
     b.place(gold, m.gold, at(altar_x, 0.0));
+    outline::end(b.scene, altar_actor);
     let (stand, waxes, flames, flame_offsets) = candelabrum(detail);
     let stand = b.mesh("candelabrum", &stand);
     let wax = b.mesh("candles", &waxes);
     let flame = b.mesh("flames", &flames);
     let warm = Vec3::new(1.0, 0.62, 0.3);
     let mut lights = Vec::new();
+    // The actor each of `lights` belongs to.
+    let mut light_actors = Vec::new();
     // Every candle flame, for the candle-lit variant (candles.rs); by default one light per
     // fixture.
     let candle_lit = candles::candle_lights();
@@ -885,11 +910,14 @@ fn build_scene(detail: Detail) -> (Scene, DemoMotion) {
         let x = i as f32 * BAY;
         for z in [NAVE_HALF - 1.9, -NAVE_HALF + 1.9] {
             let t = at(x, z) * Mat4::from_rotation_y(std::f32::consts::FRAC_PI_2);
+            let fixture = outline::begin(b.scene, "Candelabrum", t);
             b.place(stand, m.iron, t);
             b.place(wax, m.wax, t);
             let h = b.scene.add_instance(flame, m.flame, t);
             b.scene.set_cast_shadow(h, false);
+            outline::end(b.scene, fixture);
             lights.push(t.transform_point3(flame_offsets[1]));
+            light_actors.push(fixture);
             flames.extend(flame_offsets.map(|o| (t.transform_point3(o), Fixture::Candelabrum)));
         }
     }
@@ -898,10 +926,13 @@ fn build_scene(detail: Detail) -> (Scene, DemoMotion) {
         let wm = b.mesh("altar candle", &w);
         let fm = b.mesh("altar flame", &f);
         let t = at(altar_x, z) * Mat4::from_translation(Vec3::Y * 1.76);
+        let candle = outline::begin(b.scene, "Altar candle", t);
         b.place(wm, m.wax, t);
         let h = b.scene.add_instance(fm, m.flame, t);
         b.scene.set_cast_shadow(h, false);
+        outline::end(b.scene, candle);
         lights.push(t.transform_point3(Vec3::Y * 0.46));
+        light_actors.push(candle);
         flames.push((t.transform_point3(Vec3::Y * 0.46), Fixture::Altar));
     }
     let (ring, ring_wax, ring_flames, ring_flame_centres) = chandelier(detail);
@@ -915,6 +946,8 @@ fn build_scene(detail: Detail) -> (Scene, DemoMotion) {
     let mut swinging_flames = Vec::new();
     for i in 0..BAYS {
         let t = at(i as f32 * BAY + half, 0.0) * Mat4::from_translation(Vec3::Y * 7.5);
+        // The chandelier with its light (or its candles' lights).
+        let fixture = outline::begin(b.scene, "Chandelier", t);
         let parts = [b.scene.add_instance(ring, m.iron, t), b.scene.add_instance(ring_wax, m.wax, t), b.scene.add_instance(ring_flames, m.flame, t)];
         b.scene.set_cast_shadow(parts[2], false);
         let first_flame = flames.len();
@@ -922,6 +955,7 @@ fn build_scene(detail: Detail) -> (Scene, DemoMotion) {
         // One light per chandelier by default; candle-lit, its candles' lights (added with the
         // others below) join its swing.
         let light = candle_lit.is_none().then(|| b.scene.add_light(Light { source_radius: 1.4, ..Light::point(t.transform_point3(Vec3::Y * 0.35), warm, 3.0, 16.0) }));
+        outline::end(b.scene, fixture);
         let k = i as f32;
         let swing = Motion::Pendulum {
             pivot: t.transform_point3(Vec3::Y * 12.0),
@@ -931,11 +965,12 @@ fn build_scene(detail: Detail) -> (Scene, DemoMotion) {
             phase: k * 2.4,
         };
         let group = motion.add(b.scene, swing, &parts, light.as_slice());
-        swinging_flames.push((group, first_flame..flames.len()));
+        swinging_flames.push((group, first_flame..flames.len(), fixture));
     }
     if candle_lit.is_none() {
-        for p in lights {
-            b.scene.add_light(Light { source_radius: 0.15, ..Light::point(p, warm, 0.6, 9.0) });
+        for (p, fixture) in lights.into_iter().zip(light_actors) {
+            let light = b.scene.add_light(Light { source_radius: 0.15, ..Light::point(p, warm, 0.6, 9.0) });
+            outline::add_lights(fixture, &[light]);
         }
     }
 
@@ -954,7 +989,8 @@ fn build_scene(detail: Detail) -> (Scene, DemoMotion) {
     let screen = b.mesh("choir screen", &screen_panel(8.0 * SCREEN_TILE.x));
     for i in BAYS - 3..BAYS {
         for z in [NAVE_HALF, -NAVE_HALF] {
-            b.place(screen, screen_material, at(i as f32 * BAY + half, z));
+            let t = at(i as f32 * BAY + half, z);
+            outline::actor(b.scene, "Choir screen", t, |scene| scene.add_instance(screen, screen_material, t));
         }
     }
 
@@ -968,19 +1004,27 @@ fn build_scene(detail: Detail) -> (Scene, DemoMotion) {
     let small = add_baked_with(b.scene, "small glass screen", &glass_pane(&lancet(2.2, 0.3, 2.2, 3.2)), no_sdf);
     let across = Mat4::from_rotation_y(std::f32::consts::FRAC_PI_2);
     let aisle = (AISLE_WALL + NAVE_HALF) * 0.5;
+    let screens = outline::begin(b.scene, "Glass screens", at(2.5, aisle));
     b.glass(large, m.glass[2], at(2.5, aisle) * across);
     for (angle, tint) in [(0.6, Vec3::new(1.0, 0.72, 0.3)), (-0.6, Vec3::new(0.4, 0.62, 1.0))] {
         let clear = b.scene.add_material(Material { kind: MaterialKind::Glass, base_color: tint, roughness: 0.05, ..Default::default() });
         b.glass(small, clear, at(6.0, aisle + 0.9) * across * Mat4::from_rotation_y(angle));
     }
+    outline::end(b.scene, screens);
 
     // Dust motes drifting through the nave, lit where the clerestory's sun shafts cross them,
     // and incense rising from a censer before the altar.
     let censer = b.mesh("censer", &censer());
     let censer_at = Vec3::new(altar_x - 2.6, 0.0, 1.9);
+    outline::actor(b.scene, "Dust motes", Mat4::from_translation(Vec3::new(38.0, 7.0, 0.0)), |scene| {
+        scene.particles.push(ParticleEmitter::dust_motes(Vec3::new(38.0, 7.0, 0.0), Vec3::new(32.0, 6.0, 6.0), 24000));
+    });
+    // The censer and its incense smoke.
+    let censer_actor = outline::begin(b.scene, "Censer", at(censer_at.x, censer_at.z));
     b.place(censer, m.gold, at(censer_at.x, censer_at.z));
-    b.scene.particles.push(ParticleEmitter::dust_motes(Vec3::new(38.0, 7.0, 0.0), Vec3::new(32.0, 6.0, 6.0), 24000));
     b.scene.volumes.push(VolumeEmitter::incense(censer_at + Vec3::Y * CENSER_HEIGHT));
+    outline::end(b.scene, censer_actor);
+    outline::end_folder();
 
     // Candle-lit variant: votive racks against the aisle walls of every bay, then a light per
     // flame (built last, like the screens); the chandeliers' candle lights swing with them.
@@ -989,9 +1033,10 @@ fn build_scene(detail: Detail) -> (Scene, DemoMotion) {
         let racks: Vec<Mat4> = (0..BAYS).flat_map(|i| [at(i as f32 * BAY + half, rack_offset), at(i as f32 * BAY + half, -rack_offset) * flip]).collect();
         flames.extend(candles::place_votive_racks(b.scene, &racks, m.iron, m.wax, m.flame));
         let lit = candles::light_flames(b.scene, &flames, count);
-        for (group, range) in swinging_flames {
+        for (group, range, fixture) in swinging_flames {
             let lights = &lit[range.start.min(lit.len())..range.end.min(lit.len())];
             motion.attach_lights(b.scene, group, lights);
+            outline::add_lights(fixture, lights);
         }
     }
 
@@ -1004,9 +1049,11 @@ fn build_scene(detail: Detail) -> (Scene, DemoMotion) {
         let iron = b.mesh("lantern", &iron);
         let wax = b.mesh("lantern candle", &wax);
         let flame = b.mesh("lantern flame", &flame);
+        let token = outline::begin(b.scene, "Lantern", t);
         let parts = [b.scene.add_instance(iron, m.iron, t), b.scene.add_instance(wax, m.wax, t), b.scene.add_instance(flame, m.flame, t)];
         b.scene.set_cast_shadow(parts[2], false);
         let light = b.scene.add_light(Light { source_radius: 0.02, ..Light::point(hand + light_at, warm, 12.0, 10.0) });
+        outline::end(b.scene, token);
         // 22 m in 22 s each way (up to 1.6 m/s), a quarter of the way down the aisle after the
         // first 2.5 s.
         let carry = Motion::Carry { from: hand, to: Vec3::new(30.0, 0.9, 0.5), period: 44.0, phase: 0.1, sway: 0.2 };
@@ -1075,7 +1122,7 @@ fn initial_camera() -> Camera {
 
 pub fn build(detail: Detail) -> SceneSetup {
     let (scene, motion) = build_scene(detail);
-    SceneSetup { scene, camera: initial_camera(), sun: SUN, floor: floor_height, animation: None, motion }
+    SceneSetup { scene, camera: initial_camera(), sun: SUN, floor: floor_height, animation: None, motion, outline: Default::default() }
 }
 
 #[cfg(test)]

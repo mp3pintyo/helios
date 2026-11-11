@@ -8,6 +8,7 @@ use helios_geometry::modeling::cuboid;
 use helios_geometry::{noise, primitives, BuildConfig, SdfMode};
 use helios_render::{Camera, Material, MaterialKind, Scene, Sun, TextureDesc, TextureMapping, TexturePattern, VolumeEmitter};
 
+use super::outline;
 use super::{add_baked, add_baked_with, smoothstep, Detail, Rng, SceneSetup};
 use crate::motion::{DemoMotion, Motion};
 
@@ -137,12 +138,15 @@ fn build_scene(detail: Detail) -> (Scene, DemoMotion) {
     scene.set_material_name(water, "lake water");
 
     // ---- Instances ----------------------------------------------------------------------------
-    scene.add_instance(terrain, terrain_material, Mat4::IDENTITY);
-    let lake = scene.add_instance(lake, water, Mat4::IDENTITY);
-    scene.set_cast_shadow(lake, false);
+    outline::actor(&mut scene, "Landscape", Mat4::IDENTITY, |scene| scene.add_instance(terrain, terrain_material, Mat4::IDENTITY));
+    outline::actor(&mut scene, "Lake", Mat4::IDENTITY, |scene| {
+        let lake = scene.add_instance(lake, water, Mat4::IDENTITY);
+        scene.set_cast_shadow(lake, false);
+    });
 
     // Hero arrangement: a plinth boulder carrying the sculpture.
     let plinth_height = ground_height(0.0, 0.0);
+    let hero = outline::begin(&scene, "Sculpture on plinth", Mat4::from_translation(Vec3::new(0.0, plinth_height, 0.0)));
     scene.add_instance(
         rocks[0],
         rock_materials[1],
@@ -150,14 +154,17 @@ fn build_scene(detail: Detail) -> (Scene, DemoMotion) {
     );
     let sculpture_center = Vec3::new(0.0, plinth_height + 6.6, 0.0);
     let sculpture = scene.add_instance(knot, gold, Mat4::from_scale_rotation_translation(Vec3::splat(3.2), Quat::from_rotation_x(0.25), sculpture_center));
+    outline::end(&scene, hero);
     // The sculpture slowly turns on its plinth.
     motion.add(&mut scene, Motion::Spin { center: sculpture_center, period: 45.0 }, &[sculpture], &[]);
 
+    outline::folder("Boulders");
     // Boulders in the lake, some breaking its surface.
     for (i, (x, z, size)) in [(-8.0, 15.5, 1.7), (-2.5, 26.0, 1.2), (-7.0, 31.0, 2.1), (-3.5, 19.0, 0.9), (-1.0, 12.5, 1.4)].into_iter().enumerate() {
         let shape = Vec3::new(1.3, 0.8, 1.1) * size;
         let at = Vec3::new(x, ground_height(x, z) + size * 0.25, z);
-        scene.add_instance(rocks[i % 3], rock_materials[i % 3], Mat4::from_scale_rotation_translation(shape, Quat::from_rotation_y(i as f32 * 1.9), at));
+        let t = Mat4::from_scale_rotation_translation(shape, Quat::from_rotation_y(i as f32 * 1.9), at);
+        outline::actor(&mut scene, "Lake boulder", t, |scene| scene.add_instance(rocks[i % 3], rock_materials[i % 3], t));
     }
 
     // Scattered boulders: dense near the valley, sparse and huge on the slopes.
@@ -181,18 +188,23 @@ fn build_scene(detail: Detail) -> (Scene, DemoMotion) {
             continue;
         }
         let y = low + scale * 0.15;
-        scene.add_instance(rocks[variant], rock_materials[variant], Mat4::from_scale_rotation_translation(stretch, rotation, Vec3::new(x, y, z)));
+        let t = Mat4::from_scale_rotation_translation(stretch, rotation, Vec3::new(x, y, z));
+        outline::actor(&mut scene, "Boulder", t, |scene| scene.add_instance(rocks[variant], rock_materials[variant], t));
         placed += 1;
     }
+    outline::end_folder();
 
     // (Added last, so pre-baked mesh libraries of the rest of the scene stay valid.)
     translucency_corner(&mut scene);
     // Mist drifting low over the lake (a procedural heterogeneous volume; behind the glass of
     // the translucency corner it is seen through the panes).
-    scene.volumes.push(VolumeEmitter::mist(Vec3::new(LAKE_CENTER.x, WATER_LEVEL - 0.2, LAKE_CENTER.y), Vec3::new(22.0, 3.5, 32.0)));
+    let mist_at = Vec3::new(LAKE_CENTER.x, WATER_LEVEL - 0.2, LAKE_CENTER.y);
+    outline::actor(&mut scene, "Lake mist", Mat4::from_translation(mist_at), |scene| scene.volumes.push(VolumeEmitter::mist(mist_at, Vec3::new(22.0, 3.5, 32.0))));
     raft(&mut scene, &mut motion, detail);
     // Displaced (tessellated) cobblestones and boulders behind the initial view.
+    outline::folder("Stone path");
     super::stone_path::add(&mut scene, &mut motion, detail, ground_height);
+    outline::end_folder();
     (scene, motion)
 }
 
@@ -210,7 +222,8 @@ fn raft(scene: &mut Scene, motion: &mut DemoMotion, detail: Detail) {
     let wood = scene.add_texture(TextureDesc::new(TexturePattern::Wood, Vec3::new(0.3, 0.2, 0.12), Vec3::new(0.17, 0.11, 0.06)).roughness(0.8, 0.85).seed(16));
     let material = scene.add_material(Material::textured(MaterialKind::Standard, wood, TextureMapping::ObjectTriplanar, 0.8));
     let center = Vec3::new(-7.5, WATER_LEVEL - 0.04, 22.5);
-    let instance = scene.add_instance(mesh, material, Mat4::from_rotation_translation(Quat::from_rotation_y(0.5), center));
+    let pose = Mat4::from_rotation_translation(Quat::from_rotation_y(0.5), center);
+    let instance = super::outline::actor(scene, "Raft", pose, |scene| scene.add_instance(mesh, material, pose));
     motion.add(scene, Motion::Float { center, drift: 1.2, period: 70.0 }, &[instance], &[]);
 }
 
@@ -228,10 +241,12 @@ fn translucency_corner(scene: &mut Scene) {
     let red = scene.add_material(tinted(Vec3::new(0.8, 0.1, 0.06)));
     let blue = scene.add_material(tinted(Vec3::new(0.08, 0.25, 0.85)));
     let at = |x: f32, z: f32, angle: f32| Mat4::from_rotation_translation(Quat::from_rotation_y(angle), Vec3::new(x, WATER_LEVEL, z));
+    let corner = super::outline::begin(scene, "Translucency corner", at(-2.2, 28.4, 0.0));
     for (mesh, material, transform) in [(pane, glass, at(-2.2, 28.4, 0.9)), (panel, red, at(-1.4, 30.6, 1.6)), (panel, blue, at(-1.4, 30.6, 0.2))] {
         let instance = scene.add_instance(mesh, material, transform);
         scene.set_cast_shadow(instance, false);
     }
+    super::outline::end(scene, corner);
 }
 
 fn initial_camera() -> Camera {
@@ -246,5 +261,5 @@ fn initial_camera() -> Camera {
 
 pub fn build(detail: Detail) -> SceneSetup {
     let (scene, motion) = build_scene(detail);
-    SceneSetup { scene, camera: initial_camera(), sun: SUN, floor: camera_floor, animation: None, motion }
+    SceneSetup { scene, camera: initial_camera(), sun: SUN, floor: camera_floor, animation: None, motion, outline: Default::default() }
 }

@@ -132,7 +132,7 @@ pub use material_graphs::{MaterialGraphHandle, ParameterValue};
 pub use substrate::{features as slab_features, Slab};
 /// Material graphs: data model, validation, WGSL code generation, presets.
 pub use helios_material as material_graph;
-pub use scene_edit::transformed_bounds;
+pub use scene_edit::{transformed_bounds, Compaction};
 pub use skin::SkinHandle;
 pub use stats::RenderStats;
 pub use streaming::StreamingStats;

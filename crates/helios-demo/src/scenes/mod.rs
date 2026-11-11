@@ -6,6 +6,7 @@ pub mod cathedral;
 pub mod forest;
 pub mod gallery;
 pub mod model;
+pub mod outline;
 pub mod skeletal;
 pub mod stone_path;
 pub mod valley;
@@ -86,6 +87,8 @@ pub struct SceneSetup {
     pub animation: Option<skeletal::SkeletalAnimation>,
     /// Props that move every frame.
     pub motion: crate::motion::DemoMotion,
+    /// The builder's actors and folders (filled in by [`build_with`]).
+    pub outline: outline::Outline,
 }
 
 /// Builds a scene. `SceneKind::Model` needs `model`; without one it falls back to the valley.
@@ -98,18 +101,21 @@ pub fn build(kind: SceneKind, detail: Detail, model: Option<&model::Model>) -> S
 /// their meshes (see [`mesh_store`]).
 pub fn build_with(kind: SceneKind, detail: Detail, model: Option<&model::Model>, store: MeshStore) -> (SceneSetup, MeshStore) {
     let start = Instant::now();
-    let (setup, store) = mesh_store::scoped(store, || match (kind, model) {
-        (SceneKind::Valley, _) => valley::build(detail),
-        (SceneKind::Cathedral, _) => cathedral::build(detail),
-        (SceneKind::Forest, _) => forest::build(detail),
-        (SceneKind::Gallery, _) => gallery::build(detail),
-        (SceneKind::Model, Some(m)) => model::build(m),
-        (SceneKind::Model, None) => {
-            log::warn!("no model loaded (use --gltf FILE or ?gltf=URL); showing the valley");
-            valley::build(detail)
-        }
+    let ((setup, store), outline) = outline::scoped(|| {
+        mesh_store::scoped(store, || match (kind, model) {
+            (SceneKind::Valley, _) => valley::build(detail),
+            (SceneKind::Cathedral, _) => cathedral::build(detail),
+            (SceneKind::Forest, _) => forest::build(detail),
+            (SceneKind::Gallery, _) => gallery::build(detail),
+            (SceneKind::Model, Some(m)) => model::build(m),
+            (SceneKind::Model, None) => {
+                log::warn!("no model loaded (use --gltf FILE or ?gltf=URL); showing the valley");
+                valley::build(detail)
+            }
+        })
     });
     let mut setup = setup;
+    setup.outline = outline;
     name_materials(&mut setup.scene);
     log::info!(
         "scene '{}': {} instances, {:.1} M source triangles, {} lights, {:.1} MiB geometry in RAM (built in {:.1} s)",

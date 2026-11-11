@@ -16,7 +16,9 @@ use helios_render::material_graph::MaterialGraph;
 use serde::{Deserialize, Serialize};
 
 pub const FORMAT: &str = "helios-scene";
-pub const VERSION: u32 = 1;
+/// 2: actors and their hierarchy, addressed by stable keys (1: instances and lights by build
+/// order, migrated on load).
+pub const VERSION: u32 = 2;
 
 fn yes() -> bool {
     true
@@ -75,7 +77,104 @@ pub struct ImportDef {
     pub url: String,
 }
 
-/// Overrides of a base instance (absent fields keep the base value).
+impl Trs {
+    pub const IDENTITY: Trs = Trs { t: [0.0; 3], r: [0.0, 0.0, 0.0, 1.0], s: [1.0; 3] };
+}
+
+impl Default for Trs {
+    fn default() -> Self {
+        Self::IDENTITY
+    }
+}
+
+fn is_identity(t: &Trs) -> bool {
+    *t == Trs::IDENTITY
+}
+
+/// Overrides of an actor of the base scene, by its key (absent fields keep the base value).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ActorEdit {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Another parent: an actor key (`+ID` for an added actor), or `""` for the world root.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
+    /// Transform relative to the parent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transform: Option<Trs>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visible: Option<bool>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub deleted: bool,
+    /// Component overrides by component name.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub components: BTreeMap<String, ComponentEdit>,
+}
+
+/// Overrides of a base actor's component.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ComponentEdit {
+    /// Transform relative to the actor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transform: Option<Trs>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visible: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub material: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cast_shadow: Option<bool>,
+    /// A light component's light, its position and direction relative to the actor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub light: Option<LightDef>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub deleted: bool,
+}
+
+/// An actor added in the editor (placed content, a light, a duplicate, a group); its key is
+/// `+ID`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AddedActor {
+    pub id: u32,
+    pub name: String,
+    /// The parent's key (none: the world root).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
+    /// Transform relative to the parent.
+    #[serde(default, skip_serializing_if = "is_identity")]
+    pub transform: Trs,
+    #[serde(default = "yes", skip_serializing_if = "is_true")]
+    pub visible: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub components: Vec<ComponentDef>,
+}
+
+/// A component of an added actor.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ComponentDef {
+    pub name: String,
+    /// Transform relative to the actor.
+    #[serde(default, skip_serializing_if = "is_identity")]
+    pub transform: Trs,
+    #[serde(default = "yes", skip_serializing_if = "is_true")]
+    pub visible: bool,
+    #[serde(flatten)]
+    pub kind: ComponentKindDef,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ComponentKindDef {
+    Mesh {
+        mesh: String,
+        material: String,
+        #[serde(default = "yes", skip_serializing_if = "is_true")]
+        cast_shadow: bool,
+    },
+    /// Position and direction relative to the actor.
+    Light { light: LightDef },
+}
+
+/// Version 1: overrides of a base instance by build order (migrated on load).
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct InstanceEdit {
     /// The base instance's mesh name, checked on load.
@@ -91,7 +190,7 @@ pub struct InstanceEdit {
     pub deleted: bool,
 }
 
-/// An instance added in the editor.
+/// Version 1: an instance added in the editor (migrated on load).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AddedInstance {
     pub id: u32,
@@ -272,8 +371,10 @@ pub struct Environment {
 pub enum SurfaceDef {
     /// The scene's ground (landscape heightfield).
     Landscape,
-    /// The triangles of a mesh instance (its finest in-memory level of detail).
+    /// Version 1: the triangles of a mesh instance by index (migrated on load).
     Instance { instance: u32 },
+    /// The triangles of an actor's mesh component (its finest in-memory level of detail).
+    Component { actor: String, component: String },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -308,8 +409,15 @@ pub struct SceneDoc {
     pub camera: Option<CameraDef>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub imports: Vec<ImportDef>,
+    /// Overrides of the base scene's actors by key.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub actors: BTreeMap<String, ActorEdit>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub added_actors: Vec<AddedActor>,
+    /// Version 1 (migrated on load, never saved): base instance overrides by build order.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub instances: BTreeMap<u32, InstanceEdit>,
+    /// Version 1: added instances.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub added: Vec<AddedInstance>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -318,8 +426,10 @@ pub struct SceneDoc {
     /// graph of the same name).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub graphs: BTreeMap<String, MaterialGraph>,
+    /// Version 1: base lights by index.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub lights: BTreeMap<u32, LightDef>,
+    /// Version 1: added lights.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub added_lights: Vec<AddedLight>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -346,6 +456,8 @@ impl SceneDoc {
             base,
             camera: None,
             imports: Vec::new(),
+            actors: BTreeMap::new(),
+            added_actors: Vec::new(),
             instances: BTreeMap::new(),
             added: Vec::new(),
             materials: BTreeMap::new(),
@@ -409,6 +521,27 @@ mod tests {
         assert!(json.contains("\"12\"") && !json.contains("cast_shadow"));
         assert_eq!(SceneDoc::parse(&json).unwrap(), doc);
         assert!(SceneDoc::parse("{\"format\":\"other\"}").is_err());
+    }
+
+    #[test]
+    fn actors_round_trip_compactly() {
+        let mut doc = SceneDoc::new(BaseScene::Procedural { scene: "forest".into(), detail: "medium".into() });
+        let mut edit = ActorEdit { parent: Some(String::new()), ..Default::default() };
+        edit.components.insert("rock".into(), ComponentEdit { material: Some("gold".into()), ..Default::default() });
+        doc.actors.insert("Rocks/Mossy boulder@100,0,-200".into(), edit);
+        let id = doc.take_id();
+        doc.added_actors.push(AddedActor {
+            id,
+            name: "Tree".into(),
+            parent: None,
+            transform: Trs::from_mat4(&Mat4::from_translation(Vec3::X)),
+            visible: true,
+            components: vec![ComponentDef { name: "trunk".into(), transform: Trs::IDENTITY, visible: true, kind: ComponentKindDef::Mesh { mesh: "engine/tree-wood".into(), material: "engine/bark".into(), cast_shadow: true } }],
+        });
+        let json = doc.to_json();
+        assert!(json.contains("\"kind\": \"mesh\"") && !json.contains("cast_shadow") && !json.contains("visible"), "{json}");
+        assert_eq!(SceneDoc::parse(&json).unwrap(), doc);
+        assert_eq!(doc.version, 2);
     }
 
     #[test]

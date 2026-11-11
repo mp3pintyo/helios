@@ -128,7 +128,7 @@ impl DemoApp {
     }
 
     fn from_setup(renderer: Renderer, setup: SceneSetup, kind: SceneKind, detail: Detail, model: Option<Model>) -> Self {
-        let editor = Editor::new(&setup.scene, crate::app_editor::base_scene(kind, detail, model.as_ref()));
+        let editor = Editor::new(&setup.scene, crate::app_editor::base_scene(kind, detail, model.as_ref()), &setup.outline);
         Self {
             renderer,
             camera: setup.camera,
@@ -161,6 +161,7 @@ impl DemoApp {
     pub fn load_scene(&mut self, kind: SceneKind) {
         let setup = scenes::build(kind, self.detail, self.model.as_ref());
         self.kind = kind;
+        self.editor = Editor::new(&setup.scene, crate::app_editor::base_scene(kind, self.detail, self.model.as_ref()), &setup.outline);
         self.scene = setup.scene;
         self.camera = setup.camera;
         self.initial_camera = setup.camera;
@@ -174,7 +175,6 @@ impl DemoApp {
         self.sun_elevation = setup.sun.1;
         self.sun_intensity = setup.sun.2;
         self.tour = None;
-        self.editor = Editor::new(&self.scene, crate::app_editor::base_scene(kind, self.detail, self.model.as_ref()));
         self.renderer.set_selection(&[]);
         self.renderer.reset_history();
     }
@@ -426,6 +426,7 @@ impl DemoApp {
         }
         self.scene.set_time_of_day(self.sun_azimuth, self.sun_elevation, self.sun_intensity);
         self.motion.update(&mut self.scene, dt);
+        self.maintain_editor();
         // Night stays dark: exposure adapts, but not all the way to daylight brightness.
         self.renderer.settings.exposure_compensation = self.day_exposure - 1.6 * Scene::night_factor(self.sun_elevation);
     }
