@@ -314,8 +314,8 @@ pick (editor: one thread, on request)
 runtime virtual texture: allocate + render requested landscape pages
 virtual shadow maps: mark (sun + local lights) → page cache (+ moved casters' footprints) → clear dirty pages
   → cull per clipmap level and once for all local lights → (cluster, page) draws → HW + SW + voxel + tessellated page raster
-Lumen: global SDF clipmap (+ recompose bricks under moved instances) → surface cache (mesh cards + voxel lighting)
-  → radiance cache → final gather: screen probes, or Lumen Lite's irradiance field → reflections → GI temporal
+Lumen: global SDF clipmap (+ recompose bricks under moved instances) → light grid → surface cache (mesh cards + voxel lighting, sampled local lights)
+  → radiance cache → final gather: screen probes, or Lumen Lite's irradiance field → reflections (Lite: HZB screen traces) → GI temporal
 clouds: half-resolution checkerboard march → temporal · cloud shadow map
 volumetric fog: froxel injection (sun and local lights via VSM, radiance cache) → temporal → front-to-back integration
 MegaLights (when on): sample lights per 2×2 block → shadow rays (screen, VSM march, distance fields) → shade

@@ -32,8 +32,12 @@ Honest differences that remain:
    few hundred milliseconds and a refreshed probe changes in small steps (fine grain in the indirect light: 1.05 % of
    pixels change by > 4/255 per frame on a static camera vs 0.30 % with screen probes); classification uses the
    global distance field only (alpha-masked foliage is not in it, so probes in tree crowns can sleep); there is no
-   per-probe variability-driven update rate or probe-to-probe irradiance feedback into the surface cache (the bounce
-   still comes from the radiance cache); glossy reflections still trace per pixel; the adapter-based default can only
+   probe-to-probe irradiance feedback into the surface cache (the bounce still comes from the radiance cache); the
+   refresh rate follows each probe's variability (round 8) but only through the schedule's score (UE also
+   classifies probes by it); Lite's glossy reflections are screen traces (round 8): off-screen and back-facing
+   objects come from the irradiance field (a cosine-wide lobe, no reflected image), the closest-depth pyramid is
+   built separately from MegaLights' one, and where few pixels are glossy it costs more than the traced path did
+   (forest +0.03 ms); height fog on reflections leaves out the fog's noise and local lights; the adapter-based default can only
    see integrated GPUs natively (browsers hide the adapter type, so there only the dynamic-resolution fallback
    switches).
 3. **Materials**: streamed image tiles are block-compressed only where BC is available (no ETC2 / ASTC encoders: mobile
@@ -105,9 +109,11 @@ Honest differences that remain:
    sample per froxel and frame, ~10 frames of history without clipping, so it lags moving lights; one dominant
    direction per froxel for translucency, no per-pixel front-layer pass as UE has, the clustered loop beyond the
    volume's depth range); particles keep their own path. The sun stays on its classic path (virtual shadow map).
-   Lumen's surface cache still lights every card texel and voxel with every light in range (one global-field shadow
-   cone each), which becomes the dominant light-count-dependent cost (cathedral 33 → 1000 lights: surface + radiance
-   cache 1.5 → 2.4 ms, cards 0.07 → 0.35 ms, in both modes). Light culling is a two-level grid (coarse cells of 4 × 3 tiles × 4 slices,
+   Lumen's surface cache samples two local lights per texel / voxel and refresh from a world light grid (round 8,
+   32 candidates per cell, resampled where more lights reach it) and accumulates over refreshes: its cost is flat
+   from 300 lights on, but light changes reach card texels only over two of their page's refreshes, cells with
+   hundreds of lights add selection noise, and shadows are still one global-field cone per sampled light (no mesh
+   SDFs, no shadow maps); points beyond 128 m from the camera keep the loop over every light. Light culling is a two-level grid (coarse cells of 4 × 3 tiles × 4 slices,
    0.07 ms at 1000 lights), not UE's z-binning or a light BVH; still up to 255 lights per froxel, 1024 per scene. The denoiser lags behind moving lights by up to
    24 frames where the variance clip does not catch the change, and its spatial filter softens lighting detail on
    fresh (disoccluded) pixels. The shadow overview (debug view 26, round 8) shows the shared pool's pages per light and its pressure as
