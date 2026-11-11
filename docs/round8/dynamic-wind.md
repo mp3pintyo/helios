@@ -196,9 +196,12 @@ detail, 1600×900, 300 frames; *main* is the round-8 wave-2 build (75b098f), *of
   `fitted_bounds_hold_every_point`, `part_tables_hang_the_part_on_its_bone`; the workspace's 354 tests pass.
 * **Images** (`dynamic-wind/`): `grass-procedural-vs-bones.jpg` and `fern-procedural-vs-bones.jpg` (frames 1/6 s
   apart and the per-pixel change over 0.5 s: blades curve and swing individually, leaflets turn about the rachis and
-  their shading changes with them, and under TSR the bones' exact motion vectors keep blades sharp where the
-  procedural wind's smear), `walk-through-sim-off-on.jpg` (walking into a grass tuft at 1 m/s: the push capsule parts
-  it), `gust-burst.jpg` (a gust ring crossing the clearing from above, against the same frames without it).
+  their shading changes with them — the fern view's change image also holds the campfire's flicker on the ground; motion blur, on by default, follows the bones' exact motion vectors), `walk-through-sim-off-on.jpg` (walking into a grass tuft at 1 m/s: the push capsule parts
+  it), `gust-burst.jpg` (a gust burst over the clearing, `--eye 3.0,2.6,2.5 --at 7.0,0.0,-2.0 --keys Numpad1 --keys-at 100`,
+  and its per-pixel difference from the same frames without it — the frames are deterministic: the ferns and bushes bend
+  as the ring passes at 0.25–0.6 s and spring back; up to 25 000 pixels change by more than 24/255), `far-motion.jpg`
+  (the default view, its voxel-cluster debug view 22 and the change over 0.5 s: the distant conifers' needle bases and
+  voxels sway with their branches; a visual check, no per-pixel LOD-switch measurement).
 
 ## Remaining limits
 
