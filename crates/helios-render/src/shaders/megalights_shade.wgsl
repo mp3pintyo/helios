@@ -52,11 +52,13 @@ fn debug(@builtin(global_invocation_id) gid: vec3<u32>) {
     var color = vec3<f32>(0.0);
     if frame.debug_view == DEBUG_MEGALIGHTS_SAMPLES {
         let base = ml_block_base(pixel / 2u);
-        let word = samples[base + (pixel.x & 1u) + 2u * (pixel.y & 1u)];
-        if (samples[base + ML_HEADER] & ML_VALID) != 0u && (word & 0xffffu) != ML_NO_LIGHT {
+        let k = (pixel.x & 1u) + 2u * (pixel.y & 1u);
+        let word = samples[base + k];
+        let header = samples[base + ML_HEADER];
+        if (header & ML_VALID) != 0u && (word & 0xffffu) != ML_NO_LIGHT {
             let hue = f32(pcg_hash(word & 0xffffu) & 0xffffu) / 65536.0;
             let rgb = saturate(abs(fract(hue + vec3<f32>(0.0, 2.0 / 3.0, 1.0 / 3.0)) * 6.0 - 3.0) - 1.0);
-            color = rgb * (0.1 + 0.9 * f32(word >> 16u) / 65535.0);
+            color = rgb * (0.1 + 0.9 * ml_sample_visibility(base, header, k));
         }
     } else {
         if pixel.x < size.x / 2u {

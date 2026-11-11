@@ -1,4 +1,8 @@
 //! Local lights: GPU upload and clustered (froxel) culling (see `shaders/lights.wgsl`).
+//!
+//! Culling is hierarchical (`light_cull.wgsl`): one workgroup per coarse cell of 4 × 3 tiles ×
+//! 4 slices streams the lights through shared memory, tests each against the cell once and only
+//! the survivors against the cell's 48 froxels.
 
 use bytemuck::{Pod, Zeroable};
 use glam::Vec4;
@@ -7,12 +11,14 @@ use wgpu::ShaderStages;
 use crate::profiler::Recorder;
 use crate::scene::{LightKind, Scene};
 use crate::shader::create_module;
-use crate::util::{bind, bind_group, bind_group_layout, compute_pipeline, storage_buffer, workgroups};
+use crate::util::{bind, bind_group, bind_group_layout, compute_pipeline, storage_buffer};
 use crate::pipelines::Lazy;
 
 pub const MAX_LIGHTS: usize = 1024;
 const CLUSTERS: u32 = 16 * 9 * 24;
 const CLUSTER_WORDS: u32 = 256;
+/// Coarse cells of the hierarchical culling (`light_cull.wgsl`: 4 × 3 tiles × 4 slices each).
+const COARSE_CELLS: u32 = (16 / 4) * (9 / 3) * (24 / 4);
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
@@ -27,6 +33,8 @@ pub struct LightCulling {
     pub lights: wgpu::Buffer,
     pub grid: wgpu::Buffer,
     pub count: u32,
+    /// Importance threshold of the culling (`light_cull.wgsl`), 0: off.
+    params: wgpu::Buffer,
     layout: wgpu::BindGroupLayout,
     pipeline: Lazy<wgpu::ComputePipeline>,
 }
@@ -38,12 +46,13 @@ impl LightCulling {
             device,
             "light cull",
             ShaderStages::COMPUTE,
-            &[(0, bind::uniform()), (1, bind::storage(true)), (2, bind::storage(false))],
+            &[(0, bind::uniform()), (1, bind::storage(true)), (2, bind::storage(false)), (3, bind::uniform()), (4, bind::storage(true))],
         );
         Self {
             lights: storage_buffer(device, "lights", (MAX_LIGHTS * std::mem::size_of::<GpuLight>()) as u64, wgpu::BufferUsages::empty()),
             grid: storage_buffer(device, "light grid", (CLUSTERS * CLUSTER_WORDS) as u64 * 4, wgpu::BufferUsages::empty()),
             count: 0,
+            params: crate::util::uniform_buffer(device, "light cull params", 16),
             pipeline: compute_pipeline(device, "light cull", &module, "cull_lights", &layout, &[]),
             layout,
         }
@@ -76,7 +85,14 @@ impl LightCulling {
         }
     }
 
-    pub fn record(&self, rec: &mut Recorder, frame: &wgpu::Buffer) {
+    /// Sets the importance cull: each light's bounding sphere shrinks to where its incident
+    /// radiance at last frame's exposure falls below `threshold` (0: off).
+    pub fn set_importance_threshold(&self, queue: &wgpu::Queue, threshold: f32) {
+        queue.write_buffer(&self.params, 0, bytemuck::cast_slice(&[threshold.max(0.0), 0.0, 0.0, 0.0]));
+    }
+
+    /// `exposure`: last frame's exposure (`exposure.rs`), for the importance cull.
+    pub fn record(&self, rec: &mut Recorder, frame: &wgpu::Buffer, exposure: &wgpu::Buffer) {
         if self.count == 0 {
             return;
         }
@@ -84,11 +100,17 @@ impl LightCulling {
             rec.device,
             "light cull",
             &self.layout,
-            &[(0, frame.as_entire_binding()), (1, self.lights.as_entire_binding()), (2, self.grid.as_entire_binding())],
+            &[
+                (0, frame.as_entire_binding()),
+                (1, self.lights.as_entire_binding()),
+                (2, self.grid.as_entire_binding()),
+                (3, self.params.as_entire_binding()),
+                (4, exposure.as_entire_binding()),
+            ],
         );
         let mut pass = rec.compute_pass("light culling");
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &group, &[]);
-        pass.dispatch_workgroups(workgroups(CLUSTERS, 64), 1, 1);
+        pass.dispatch_workgroups(COARSE_CELLS, 1, 1);
     }
 }

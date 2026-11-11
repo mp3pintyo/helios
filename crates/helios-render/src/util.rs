@@ -154,6 +154,18 @@ pub fn lazy_compute_pipeline(
     Lazy::new(compute_pipeline_maker(device, label, module, entry_point, &[layout], constants))
 }
 
+/// [`lazy_compute_pipeline`] over several bind groups (group `i` = `layouts[i]`).
+pub fn lazy_compute_pipeline_with(
+    device: &wgpu::Device,
+    label: &str,
+    module: &wgpu::ShaderModule,
+    entry_point: &str,
+    layouts: &[&wgpu::BindGroupLayout],
+    constants: &[(&str, f64)],
+) -> Lazy<wgpu::ComputePipeline> {
+    Lazy::new(compute_pipeline_maker(device, label, module, entry_point, layouts, constants))
+}
+
 /// The constructor of a compute pipeline: owns what the descriptor refers to, so it can run
 /// later (and twice in the browser: once to warm the compile, once to make the pipeline).
 fn compute_pipeline_maker(

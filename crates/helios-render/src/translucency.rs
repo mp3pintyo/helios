@@ -884,6 +884,9 @@ impl Translucency {
                 (60, inputs.vsm.local.uniform.as_entire_binding()),
                 (105, TextureView(layers)),
                 (106, wgpu::BindingResource::Buffer(range)),
+                (130, inputs.megalights_volume.uniform().as_entire_binding()),
+                (131, TextureView(inputs.megalights_volume_light[0])),
+                (132, TextureView(inputs.megalights_volume_light[1])),
             ],
         );
         let load = wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store };
@@ -934,7 +937,7 @@ fn internal_size(targets: &FrameTargets, capacity: (u32, u32)) -> (u32, u32) {
 fn layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
     let fragment = ShaderStages::FRAGMENT;
     let both = ShaderStages::VERTEX_FRAGMENT;
-    let entries: [(u32, ShaderStages, BindingType); 35] = [
+    let entries: [(u32, ShaderStages, BindingType); 38] = [
         (0, both, bind::uniform()),
         (1, both, bind::storage(true)),
         (2, fragment, bind::uniform()),
@@ -970,6 +973,9 @@ fn layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
         (60, fragment, bind::uniform()),
         (105, fragment, bind::texture_array(false)),
         (106, fragment, bind::uniform()),
+        (130, fragment, bind::uniform()),
+        (131, fragment, bind::texture_3d(true)),
+        (132, fragment, bind::texture_3d(true)),
     ];
     let entries: Vec<wgpu::BindGroupLayoutEntry> =
         entries.iter().map(|&(binding, visibility, ty)| wgpu::BindGroupLayoutEntry { binding, visibility, ty, count: None }).collect();

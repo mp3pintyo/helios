@@ -1,11 +1,13 @@
-//! Hierarchical-Z pyramid construction from the early-pass depth buffer.
+//! Hierarchical-Z pyramids: the farthest depth of the early pass (occlusion culling) and, for
+//! screen traces (`hzb_trace.wgsl`), the closest depth of the final depth buffer
+//! ([`ClosestHzb`], built only while a consumer runs: MegaLights).
 
 use wgpu::{BindingType, BufferBindingType, ShaderStages, TextureFormat};
 
 use crate::profiler::Recorder;
 use crate::shader::create_module;
 use crate::targets::FrameTargets;
-use crate::util::{bind, bind_group, bind_group_layout, compute_pipeline, workgroups};
+use crate::util::{bind, bind_group, bind_group_layout, compute_pipeline, lazy_compute_pipeline, mip_count, mip_view, texture, workgroups, TextureSpec};
 use crate::pipelines::Lazy;
 
 /// Uniform offset alignment: one [`HzbLevel`] per mip at this stride (dynamic offsets).
@@ -24,6 +26,9 @@ struct HzbLevel {
 pub struct Hzb {
     from_depth: Lazy<wgpu::ComputePipeline>,
     downsample: Lazy<wgpu::ComputePipeline>,
+    /// The closest-depth pyramid's (compiled when first used).
+    from_depth_closest: Lazy<wgpu::ComputePipeline>,
+    downsample_closest: Lazy<wgpu::ComputePipeline>,
     depth_layout: wgpu::BindGroupLayout,
     down_layout: wgpu::BindGroupLayout,
     levels: wgpu::Buffer,
@@ -48,6 +53,8 @@ impl Hzb {
         Self {
             from_depth: compute_pipeline(device, "hzb from depth", &module, "from_depth", &depth_layout, &[]),
             downsample: compute_pipeline(device, "hzb downsample", &module, "downsample", &down_layout, &[]),
+            from_depth_closest: lazy_compute_pipeline(device, "hzb closest from depth", &module, "from_depth_closest", &depth_layout, &[]),
+            downsample_closest: lazy_compute_pipeline(device, "hzb closest downsample", &module, "downsample_closest", &down_layout, &[]),
             depth_layout,
             down_layout,
             levels: device.create_buffer(&wgpu::BufferDescriptor {
@@ -79,18 +86,28 @@ impl Hzb {
         queue.write_buffer(&self.levels, 0, &data[..sizes.len().saturating_sub(1) * LEVEL_STRIDE as usize]);
     }
 
+    /// Builds the farthest-depth pyramid (`targets.hzb`) from the early pass's depth.
     pub fn record(&self, rec: &mut Recorder, targets: &FrameTargets) {
+        self.record_pyramid(rec, targets, "hzb", [&*self.from_depth, &*self.downsample], &targets.hzb_mips);
+    }
+
+    /// Builds the closest-depth pyramid from the final depth buffer.
+    pub fn record_closest(&self, rec: &mut Recorder, targets: &FrameTargets, closest: &ClosestHzb) {
+        self.record_pyramid(rec, targets, "hzb closest", [&*self.from_depth_closest, &*self.downsample_closest], &closest.mips);
+    }
+
+    fn record_pyramid(&self, rec: &mut Recorder, targets: &FrameTargets, label: &str, pipelines: [&wgpu::ComputePipeline; 2], mips: &[wgpu::TextureView]) {
         let device = rec.device;
-        let mut pass = rec.compute_pass("hzb");
+        let mut pass = rec.compute_pass(label);
         let level = wgpu::BindingResource::Buffer(wgpu::BufferBinding {
             buffer: &self.levels,
             offset: 0,
             size: wgpu::BufferSize::new(std::mem::size_of::<HzbLevel>() as u64),
         });
         let sizes: Vec<(u32, u32)> = Self::covered_sizes(targets).skip(1).collect();
-        for (mip, destination) in targets.hzb_mips.iter().enumerate() {
+        for (mip, destination) in mips.iter().enumerate().take(targets.hzb_mips.len()) {
             let group = if mip == 0 {
-                pass.set_pipeline(&self.from_depth);
+                pass.set_pipeline(pipelines[0]);
                 bind_group(
                     device,
                     "hzb",
@@ -102,13 +119,13 @@ impl Hzb {
                     ],
                 )
             } else {
-                pass.set_pipeline(&self.downsample);
+                pass.set_pipeline(pipelines[1]);
                 bind_group(
                     device,
                     "hzb",
                     &self.down_layout,
                     &[
-                        (1, wgpu::BindingResource::TextureView(&targets.hzb_mips[mip - 1])),
+                        (1, wgpu::BindingResource::TextureView(&mips[mip - 1])),
                         (2, wgpu::BindingResource::TextureView(destination)),
                         (3, level.clone()),
                     ],
@@ -118,5 +135,24 @@ impl Hzb {
             let (w, h) = sizes[mip];
             pass.dispatch_workgroups(workgroups(w, 8), workgroups(h, 8), 1);
         }
+    }
+}
+
+/// The closest-depth pyramid (reverse-Z maximum) at the internal resolution's capacity: mip 0
+/// is half resolution like the farthest-depth one, so texel (x, y) of mip L covers pixels
+/// [x, x + 1) · 2^(L+1).
+pub struct ClosestHzb {
+    /// All mips (the traces read them with `textureLoad(.., mip)`).
+    pub view: wgpu::TextureView,
+    pub mips: Vec<wgpu::TextureView>,
+}
+
+impl ClosestHzb {
+    pub fn new(device: &wgpu::Device, capacity: (u32, u32)) -> Self {
+        let (w, h) = (capacity.0.div_ceil(2).max(1), capacity.1.div_ceil(2).max(1));
+        let levels = mip_count(w, h);
+        let usage = wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING;
+        let t = texture(device, TextureSpec { label: "hzb closest", width: w, height: h, layers: 1, mips: levels, format: TextureFormat::R32Float, usage });
+        Self { view: t.create_view(&Default::default()), mips: (0..levels).map(|m| mip_view(&t, m)).collect() }
     }
 }

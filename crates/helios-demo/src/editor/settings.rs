@@ -51,6 +51,13 @@ pub fn all() -> Vec<Setting> {
         number("gi_intensity", "GI intensity", "Lighting", (0.0, 4.0, 0.05), |s| json!(s.gi_intensity), |s, v| s.gi_intensity = f(v)),
         flag("shadows", "Virtual shadow maps", "Lighting", |s| json!(s.shadows), |s, v| s.shadows = b(v)),
         flag("local_light_shadow_maps", "Local light shadow maps", "Lighting", |s| json!(s.local_light_shadow_maps), |s, v| s.local_light_shadow_maps = b(v)),
+        flag("mega_lights", "MegaLights", "Lighting", |s| json!(s.mega_lights), |s, v| s.mega_lights = b(v)),
+        number("mega_lights_importance_cull", "MegaLights importance cull", "Lighting", (0.0, 0.1, 0.0025), |s| json!(s.mega_lights_importance_cull), |s, v| {
+            s.mega_lights_importance_cull = f(v)
+        }),
+        flag("mega_lights_shared_rays", "MegaLights shared rays", "Lighting", |s| json!(s.mega_lights_shared_rays), |s, v| s.mega_lights_shared_rays = b(v)),
+        flag("mega_lights_hzb_traces", "MegaLights HZB screen traces", "Lighting", |s| json!(s.mega_lights_hzb_traces), |s, v| s.mega_lights_hzb_traces = b(v)),
+        flag("mega_lights_volume", "MegaLights fog + translucency", "Lighting", |s| json!(s.mega_lights_volume), |s, v| s.mega_lights_volume = b(v)),
         flag("auto_exposure", "Auto exposure", "Lighting", |s| json!(s.auto_exposure), |s, v| s.auto_exposure = b(v)),
         flag("local_exposure", "Local exposure", "Lighting", |s| json!(s.local_exposure.is_some()), |s, v| {
             s.local_exposure = b(v).then(LocalExposure::default)

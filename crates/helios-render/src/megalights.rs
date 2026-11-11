@@ -11,9 +11,12 @@
 //!    candidates; longer lists are thinned to an unbiased stratified subset). Lights whose rays
 //!    were all blocked in the same screen tile last frame get a tenth of their weight (visibility
 //!    guiding), so the rays go where light arrives.
-//! 2. **Trace** (`trace`): one shadow ray per sample, to a random point of the light's disk (soft
-//!    shadows from the source radius): a short screen trace against the depth buffer for contact
-//!    shadows, and over the whole ray the light's virtual shadow map where it has one (shadow-map
+//!    A light picked more than once where last frame's rays to it in the tile all agreed (fully
+//!    lit or fully shadowed, no penumbra) traces one ray for all its picks (UE 5.8); the rays
+//!    left are compacted into a list that sizes the trace's indirect dispatch.
+//! 2. **Trace** (`trace`): one shadow ray per listed sample, to a random point of the light's
+//!    disk (soft shadows from the source radius): a short screen trace over the closest-depth
+//!    HZB (`hzb_trace.wgsl`) for contact shadows, and over the whole ray the light's virtual shadow map where it has one (shadow-map
 //!    ray marching), otherwise Lumen's distance fields (mesh SDFs within 2 m of either end, the
 //!    global field between). Every light casts shadows; the 32-light shadow-map budget only
 //!    decides which method.
@@ -37,11 +40,12 @@ use wgpu::{ShaderStages, TextureFormat as F, TextureUsages as U};
 
 use crate::lights::LightCulling;
 use crate::lumen::Lumen;
+use crate::passes::hzb::{ClosestHzb, Hzb};
 use crate::passes::Samplers;
 use crate::profiler::Recorder;
 use crate::shader::create_module;
 use crate::targets::FrameTargets;
-use crate::util::{bind, bind_group, bind_group_layout, lazy_compute_pipeline, Lazy, storage_buffer, texture, workgroups, TextureSpec};
+use crate::util::{bind, bind_group, bind_group_layout, lazy_compute_pipeline, lazy_compute_pipeline_with, Lazy, storage_buffer, texture, workgroups, TextureSpec};
 use crate::vsm::VirtualShadowMap;
 
 const C: ShaderStages = ShaderStages::COMPUTE;
@@ -49,7 +53,7 @@ const C: ShaderStages = ShaderStages::COMPUTE;
 const BLOCK_WORDS: u64 = 9;
 /// Pixels per side of a guiding tile and words per tile (`ML_GUIDE_TILE`, `ML_GUIDE_WORDS`).
 const GUIDE_TILE: u32 = 8;
-const GUIDE_WORDS: u64 = 16;
+const GUIDE_WORDS: u64 = 24;
 /// Strides of the à-trous iterations (3×3 taps each: a 31-pixel footprint in all).
 const SPATIAL_STRIDES: [u32; 4] = [1, 2, 4, 8];
 
@@ -61,6 +65,11 @@ pub struct MegaLightsInputs<'a> {
     pub vsm: &'a VirtualShadowMap,
     pub lumen: &'a Lumen,
     pub samplers: &'a Samplers,
+    /// Builds the closest-depth HZB of the screen traces.
+    pub hzb: &'a Hzb,
+    /// Shared rays outside penumbrae and HZB screen traces ([`crate::RenderSettings`]).
+    pub shared_rays: bool,
+    pub hzb_traces: bool,
     /// Bind group 1 of the shading's slab variant while the scene has slab materials.
     pub substrate: Option<&'a wgpu::BindGroup>,
 }
@@ -74,8 +83,15 @@ struct Targets {
     /// frame's set is free once the temporal pass has read it and holds spatial iterations.
     history: [[wgpu::TextureView; 3]; 2],
     samples: wgpu::Buffer,
-    /// Visibility guiding masks: this frame's (written by the trace) and last frame's.
-    guide: [wgpu::Buffer; 2],
+    /// Visibility guiding masks, two halves of `guide_half` bytes: this frame's (frame parity,
+    /// written by the trace) and last frame's.
+    guide: wgpu::Buffer,
+    guide_half: u64,
+    /// The rays to trace (count, then block · 4 + sample) and the trace's indirect arguments.
+    rays: wgpu::Buffer,
+    ray_args: wgpu::Buffer,
+    /// Closest-depth pyramid of the final depth buffer, for the screen traces.
+    hzb: ClosestHzb,
 }
 
 impl Targets {
@@ -96,7 +112,11 @@ impl Targets {
                 ]
             }),
             samples: storage_buffer(device, "megalights samples", blocks * BLOCK_WORDS * 4, wgpu::BufferUsages::empty()),
-            guide: [0, 1].map(|i| storage_buffer(device, &format!("megalights guide {i}"), tiles * GUIDE_WORDS * 4, wgpu::BufferUsages::empty())),
+            guide: storage_buffer(device, "megalights guide", 2 * tiles * GUIDE_WORDS * 4, wgpu::BufferUsages::empty()),
+            guide_half: tiles * GUIDE_WORDS * 4,
+            rays: storage_buffer(device, "megalights rays", (blocks * 4 + 1) * 4, wgpu::BufferUsages::empty()),
+            ray_args: storage_buffer(device, "megalights ray args", 16, wgpu::BufferUsages::INDIRECT),
+            hzb: ClosestHzb::new(device, capacity),
         }
     }
 }
@@ -105,8 +125,13 @@ impl Targets {
 /// browser compiles every pipeline the renderer creates before its first frame.
 pub struct MegaLights {
     sample_layout: wgpu::BindGroupLayout,
-    generate: Lazy<wgpu::ComputePipeline>,
-    trace: Lazy<wgpu::ComputePipeline>,
+    /// Group 1 of generate and ray_args: the trace's indirect arguments.
+    args_layout: wgpu::BindGroupLayout,
+    /// Per permutation: [one ray per sample, shared rays outside penumbrae].
+    generate: [Lazy<wgpu::ComputePipeline>; 2],
+    ray_args: Lazy<wgpu::ComputePipeline>,
+    /// Per permutation: [linear screen traces, HZB screen traces].
+    trace: [Lazy<wgpu::ComputePipeline>; 2],
     shade_layout: wgpu::BindGroupLayout,
     shade: Lazy<wgpu::ComputePipeline>,
     /// Shading with Substrate slabs (`substrate_gpu.rs`), compiled when first needed.
@@ -139,7 +164,6 @@ impl MegaLights {
                 (5, bind::storage(true)),
                 (6, bind::storage(true)),
                 (7, bind::storage(false)),
-                (8, bind::storage(true)),
                 (9, bind::storage(false)),
                 (10, bind::uniform()),
                 (11, bind::texture_3d(true)),
@@ -150,8 +174,11 @@ impl MegaLights {
                 (16, bind::storage(true)),
                 (17, bind::texture_depth()),
                 (18, bind::uniform()),
+                (22, tex),
+                (23, bind::storage(false)),
             ],
         );
+        let args_layout = bind_group_layout(device, "megalights ray args", C, &[(0, bind::storage(false))]);
         let shade_module = create_module(device, "megalights_shade.wgsl");
         let surface = [(0, bind::uniform()), (1, tex), (2, tex), (3, tex), (4, tex), (5, bind::storage(true)), (7, bind::storage(true))];
         let out = bind::storage_texture(F::Rgba16Float);
@@ -176,9 +203,14 @@ impl MegaLights {
             })
             .collect();
         Self {
-            generate: lazy_compute_pipeline(device, "megalights generate", &sample_module, "generate", &sample_layout, &[]),
-            trace: lazy_compute_pipeline(device, "megalights trace", &sample_module, "trace", &sample_layout, &[]),
+            generate: [0.0, 1.0].map(|shared| {
+                let layouts = [&sample_layout, &args_layout];
+                lazy_compute_pipeline_with(device, "megalights generate", &sample_module, "generate", &layouts, &[("ML_SHARED_RAYS", shared)])
+            }),
+            ray_args: lazy_compute_pipeline_with(device, "megalights ray args", &sample_module, "ray_args_main", &[&sample_layout, &args_layout], &[]),
+            trace: [0.0, 1.0].map(|hzb| lazy_compute_pipeline(device, "megalights trace", &sample_module, "trace", &sample_layout, &[("ML_HZB_TRACE", hzb)])),
             sample_layout,
+            args_layout,
             shade: lazy_compute_pipeline(device, "megalights shade", &shade_module, "shade", &shade_layout, &[]),
             shade_substrate: None,
             shade_layout,
@@ -231,7 +263,11 @@ impl MegaLights {
         let (blocks_x, blocks_y) = (w.div_ceil(2), h.div_ceil(2));
         let (global_sdf, _) = inputs.lumen.debug_views();
         let (mesh_sdf_data, mesh_sdf_atlas) = inputs.lumen.near_field();
-        rec.encoder.clear_buffer(&t.guide[current], 0, None);
+        rec.encoder.clear_buffer(&t.guide, current as u64 * t.guide_half, Some(t.guide_half));
+        rec.encoder.clear_buffer(&t.ray_args, 0, None);
+        if inputs.hzb_traces {
+            inputs.hzb.record_closest(rec, ft, &t.hzb);
+        }
 
         let sample_group = bind_group(
             device,
@@ -246,8 +282,7 @@ impl MegaLights {
                 (5, inputs.lights.lights.as_entire_binding()),
                 (6, inputs.lights.grid.as_entire_binding()),
                 (7, t.samples.as_entire_binding()),
-                (8, t.guide[1 - current].as_entire_binding()),
-                (9, t.guide[current].as_entire_binding()),
+                (9, t.guide.as_entire_binding()),
                 (10, inputs.lumen.uniform().as_entire_binding()),
                 (11, TextureView(global_sdf)),
                 (12, Sampler(&inputs.samplers.linear)),
@@ -257,19 +292,25 @@ impl MegaLights {
                 (16, inputs.vsm.cache.entries.as_entire_binding()),
                 (17, TextureView(&inputs.vsm.atlas)),
                 (18, inputs.vsm.local.uniform.as_entire_binding()),
+                (22, TextureView(&t.hzb.view)),
+                (23, t.rays.as_entire_binding()),
             ],
         );
+        let args_group = bind_group(device, "megalights ray args", &self.args_layout, &[(0, t.ray_args.as_entire_binding())]);
         {
             let mut pass = rec.compute_pass("megalights sample");
-            pass.set_pipeline(&self.generate);
+            pass.set_pipeline(&self.generate[inputs.shared_rays as usize]);
             pass.set_bind_group(0, &sample_group, &[]);
+            pass.set_bind_group(1, &args_group, &[]);
             pass.dispatch_workgroups(workgroups(blocks_x, 8), workgroups(blocks_y, 8), 1);
+            pass.set_pipeline(&self.ray_args);
+            pass.dispatch_workgroups(1, 1, 1);
         }
         {
             let mut pass = rec.compute_pass("megalights trace");
-            pass.set_pipeline(&self.trace);
+            pass.set_pipeline(&self.trace[inputs.hzb_traces as usize]);
             pass.set_bind_group(0, &sample_group, &[]);
-            pass.dispatch_workgroups(workgroups(blocks_x * 2, 8), workgroups(blocks_y * 2, 8), 1);
+            pass.dispatch_workgroups_indirect(&t.ray_args, 0);
         }
 
         let shade_group = bind_group(

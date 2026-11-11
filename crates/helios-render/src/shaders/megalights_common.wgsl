@@ -15,13 +15,17 @@ const ML_BLOCK_WORDS: u32 = 9u;
 const ML_WEIGHT: u32 = 4u;
 const ML_HEADER: u32 = 8u;
 const ML_NO_LIGHT: u32 = 0xffffu;
-// Header: index (0-3) of the representative pixel in its block | ML_VALID.
+// Header: index (0-3) of the representative pixel in its block | ML_VALID | per sample, two bits
+// from ML_SOURCE_SHIFT on: the sample whose ray it shares (itself when it traced its own; a
+// light picked again where last frame's rays to it all agreed traces once, UE 5.8).
 const ML_VALID: u32 = 4u;
+const ML_SOURCE_SHIFT: u32 = 3u;
 
 // Visibility guiding: per tile of ML_GUIDE_TILE² pixels, a bit per light (light index modulo 256)
-// set when some sample traced a ray towards it this frame, and one when such a ray reached it.
+// set when some sample traced a ray towards it this frame, one when such a ray reached it and
+// one when such a ray was blocked: a light with both is in penumbra in the tile.
 const ML_GUIDE_TILE: u32 = 8u;
-const ML_GUIDE_WORDS: u32 = 16u;  // 8 words "sampled", then 8 words "visible"
+const ML_GUIDE_WORDS: u32 = 24u;  // 8 words "sampled", 8 words "visible", 8 words "shadowed"
 
 fn ml_blocks() -> vec2<u32> {
     return viewport_extent(frame.viewport, 2u);
@@ -55,6 +59,16 @@ fn ml_guide_word(light: u32) -> u32 {
 
 fn ml_guide_bit(light: u32) -> u32 {
     return 1u << (light & 31u);
+}
+
+// The sample whose ray sample `k` of a block uses.
+fn ml_sample_source(header: u32, k: u32) -> u32 {
+    return (header >> (ML_SOURCE_SHIFT + 2u * k)) & 3u;
+}
+
+// Visibility (0-1) of sample `k` of the block at `base` (its own ray's or the one it shares).
+fn ml_sample_visibility(base: u32, header: u32, k: u32) -> f32 {
+    return f32(samples[base + ml_sample_source(header, k)] >> 16u) / 65535.0;
 }
 
 // A stateful random sequence (PCG hash chain) for the per-pixel sampling decisions.
@@ -108,13 +122,14 @@ fn ml_shade_samples(pixel: vec2<u32>, s: MlSurface) -> MlLighting {
     out.specular = vec3<f32>(0.0);
     out.radiance = vec3<f32>(0.0);
     let base = ml_block_base(pixel / 2u);
-    if !s.valid || (samples[base + ML_HEADER] & ML_VALID) == 0u {
+    let header = samples[base + ML_HEADER];
+    if !s.valid || (header & ML_VALID) == 0u {
         return out;
     }
     for (var k = 0u; k < ML_SAMPLES; k++) {
         let word = samples[base + k];
         let light = word & 0xffffu;
-        let visibility = f32(word >> 16u) / 65535.0;
+        let visibility = ml_sample_visibility(base, header, k);
         if light == ML_NO_LIGHT || visibility <= 0.0 {
             continue;
         }
