@@ -52,6 +52,7 @@ const ICONS = {
   world: '<path d="M8 1.5 14 5v6l-6 3.5L2 11V5z"/>',
   local: '<rect x="3" y="3" width="10" height="10" transform="rotate(20 8 8)"/>',
   grid: '<path d="M1.5 5.5h13 M1.5 10.5h13 M5.5 1.5v13 M10.5 1.5v13"/>',
+  close: '<path d="M4.5 4.5l7 7 M11.5 4.5l-7 7"/>',
   import: '<path d="M8 1.5v9 M4.5 7 8 10.5 11.5 7 M2 12v2.5h12V12"/>',
 };
 

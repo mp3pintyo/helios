@@ -6,6 +6,7 @@ use serde_json::json;
 
 use super::ops::EditOp;
 use super::*;
+use crate::scenes::outline::Outline;
 
 fn flat(_x: f32, _z: f32) -> f32 {
     0.0
@@ -40,7 +41,7 @@ impl Fixture {
     }
 
     fn editor(&mut self) -> Editor {
-        Editor::new(&self.scene, BaseScene::Procedural { scene: "test".into(), detail: "medium".into() })
+        Editor::new(&self.scene, BaseScene::Procedural { scene: "test".into(), detail: "medium".into() }, &Outline::default())
     }
 }
 
@@ -199,45 +200,41 @@ fn transforms_undo_and_redo() {
     assert_eq!(f.scene.transform(handle(&f, 1)), Mat4::from_translation(Vec3::X));
     assert!(editor.redo(&mut f.world()));
     assert_eq!(f.scene.transform(handle(&f, 1)), moved.to_mat4());
-    assert_eq!(editor.doc.instances[&1].mesh, "rock");
+    // A lone instance is an actor of one component, keyed by mesh and position.
+    assert!(editor.doc.actors["rock@100,0,0"].transform.is_some());
 }
 
 #[test]
-fn deleted_instances_hide_and_their_slots_are_reused() {
+fn deleted_slots_are_reused_then_compacted_and_undo_survives() {
     let mut f = Fixture::new();
     let mut editor = f.editor();
     op(&mut editor, &mut f, json!({ "op": "delete", "instances": [0] }));
     assert!(!f.scene.is_visible(handle(&f, 0)));
+    assert_eq!(editor.free_slots(), (1, 0));
+    // A copy of a rock reuses the free rock slot.
     let created = op(&mut editor, &mut f, json!({ "op": "duplicate", "instances": [2], "offset": [0.0, 0.0, 4.0] }));
-    assert_eq!(created.instances, vec![3]);
-    assert_eq!(f.scene.transform(handle(&f, 3)), Mat4::from_translation(Vec3::new(2.0, 0.0, 4.0)));
-    assert_eq!(editor.owner(3), Owner::Added(editor.doc.added[0].id));
-    // Deleting the copy hides it; the next copy of the same mesh reuses its slot.
-    op(&mut editor, &mut f, json!({ "op": "delete", "instances": [3] }));
-    assert!(!f.scene.is_visible(handle(&f, 3)));
-    let again = op(&mut editor, &mut f, json!({ "op": "duplicate", "instances": [1], "offset": [0.0, 1.0, 0.0] }));
-    assert_eq!(again.instances, vec![3]);
-    assert_eq!(f.scene.instance_count(), 4);
-    // Undo everything: back to the base scene.
+    assert_eq!(created.instances, vec![0]);
+    assert_eq!(f.scene.transform(handle(&f, 0)), Mat4::from_translation(Vec3::new(2.0, 0.0, 4.0)));
+    assert_eq!(f.scene.instance_count(), 3);
+    // Delete it again and compact: the slot is gone, the others shift down.
+    op(&mut editor, &mut f, json!({ "op": "delete", "actors": created.actors }));
+    let (instances, lights) = editor.compaction(&f.scene, true).expect("a free slot");
+    let map = f.scene.compact(&instances, &lights);
+    editor.compacted(&mut f.scene, &map);
+    assert_eq!(f.scene.instance_count(), 2);
+    assert_eq!(editor.free_slots(), (0, 0));
+    assert_eq!(f.scene.transform(handle(&f, 0)), Mat4::from_translation(Vec3::X));
+    // Undo everything: the deleted base rock comes back in a new slot, at its place.
     while editor.undo(&mut f.world()) {}
-    assert!((0..3).all(|i| f.scene.is_visible(handle(&f, i))));
-    assert!(!f.scene.is_visible(handle(&f, 3)));
-}
-
-#[test]
-fn material_overrides_revert_to_the_base_values() {
-    let mut f = Fixture::new();
-    let mut editor = f.editor();
-    let gold = f.scene.find_material("gold").unwrap();
-    op(&mut editor, &mut f, json!({ "op": "material", "name": "gold", "params": { "roughness": 0.7, "base_color": [0.1, 0.2, 0.3] } }));
-    assert_eq!(f.scene.material(gold).roughness, 0.7);
-    assert_eq!(f.scene.material(gold).metallic, 1.0);
-    op(&mut editor, &mut f, json!({ "op": "assign_material", "instances": [2], "material": "gold" }));
-    assert_eq!(f.scene.instance_material(handle(&f, 2)), gold);
-    editor.undo(&mut f.world());
-    editor.undo(&mut f.world());
-    assert_eq!(f.scene.material(gold).roughness, 0.2);
-    assert_ne!(f.scene.instance_material(handle(&f, 2)), gold);
+    assert_eq!(f.scene.instance_count(), 3);
+    let mut positions: Vec<f32> = f.scene.instance_handles().filter(|&h| f.scene.is_visible(h)).map(|h| f.scene.transform(h).w_axis.x).collect();
+    positions.sort_by(f32::total_cmp);
+    assert_eq!(positions, vec![0.0, 1.0, 2.0]);
+    // Every slot's owner points back at it.
+    for h in f.scene.instance_handles() {
+        let (actor, c) = editor.instance_component(h.index()).expect("owned");
+        assert!(matches!(editor.actor(actor).unwrap().components[c].kind, actors::Kind::Mesh { slot: Some(s), .. } if s == h));
+    }
 }
 
 #[test]
@@ -250,6 +247,7 @@ fn lights_environment_and_settings_round_trip() {
     assert_eq!(f.scene.lights()[0].intensity, 7.0);
     let created = op(&mut editor, &mut f, json!({ "op": "add_light", "def": def }));
     assert_eq!(created.lights, vec![1]);
+    assert_eq!(f.scene.lights()[1].position, Vec3::Y * 3.0);
     op(&mut editor, &mut f, json!({ "op": "delete", "lights": [1] }));
     assert_eq!(f.scene.lights()[1].intensity, 0.0);
     let mut env = Editor::current_environment(&f.world());
@@ -263,6 +261,190 @@ fn lights_environment_and_settings_round_trip() {
     assert!(f.settings.global_illumination);
     assert_eq!(f.scene.lights()[0].intensity, 2.0);
     assert_eq!(f.sun[1], 0.4);
+}
+
+/// A scene with a builder outline: a "Tree" (trunk + foliage) in a "Trees" folder and a
+/// "Campfire" (stone, light, fire volume).
+fn outlined() -> (Fixture, Outline) {
+    use crate::scenes::outline;
+    let mut f = Fixture::new();
+    let rock = f.scene.find_mesh("rock").unwrap();
+    let stone = f.scene.find_material("stone").unwrap();
+    let ((), outline) = outline::scoped(|| {
+        let scene = &mut f.scene;
+        outline::folder("Trees");
+        let at = Mat4::from_translation(Vec3::new(10.0, 0.0, 0.0));
+        outline::actor(scene, "Tree", at, |scene| {
+            scene.add_instance(rock, stone, at);
+            scene.add_instance(rock, stone, at * Mat4::from_translation(Vec3::Y * 2.0));
+        });
+        outline::end_folder();
+        let fire = Vec3::new(0.0, 0.0, 10.0);
+        outline::actor(scene, "Campfire", Mat4::from_translation(fire), |scene| {
+            scene.add_instance(rock, stone, Mat4::from_translation(fire));
+            let light = scene.add_light(Light::point(fire + Vec3::Y, Vec3::ONE, 4.0, 10.0));
+            scene.volumes.push(helios_render::VolumeEmitter { light: Some(light), ..helios_render::VolumeEmitter::campfire(fire) });
+        });
+    });
+    (f, outline)
+}
+
+fn actor_named(editor: &Editor, name: &str) -> u32 {
+    editor.actors().find(|(_, a)| a.name == name).map(|(id, _)| id).unwrap_or_else(|| panic!("no actor '{name}'"))
+}
+
+#[test]
+fn actors_move_their_components_and_children() {
+    let (mut f, outline) = outlined();
+    let mut editor = Editor::new(&f.scene, BaseScene::Procedural { scene: "test".into(), detail: "medium".into() }, &outline);
+    let tree = actor_named(&editor, "Tree");
+    let fire = actor_named(&editor, "Campfire");
+    let a = editor.actor(tree).unwrap();
+    assert_eq!(a.key, "Trees/Tree@1000,0,0");
+    assert_eq!(a.components.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["rock", "rock #2"]);
+    assert_eq!(editor.actor(a.parent.unwrap()).unwrap().name, "Trees");
+    // The fixture's loose light became an actor of its own.
+    assert!(editor.actors().any(|(_, a)| a.name == "Point light"));
+    assert_eq!(editor.actor(fire).unwrap().components.len(), 3);
+    // Moving the tree moves trunk and foliage.
+    let to = Trs::from_mat4(&Mat4::from_translation(Vec3::new(10.0, 0.0, 5.0)));
+    op(&mut editor, &mut f, json!({ "op": "actor_transform", "actors": [tree], "transforms": [to] }));
+    assert_eq!(f.scene.transform(handle(&f, 3)).w_axis.truncate(), Vec3::new(10.0, 0.0, 5.0));
+    assert_eq!(f.scene.transform(handle(&f, 4)).w_axis.truncate(), Vec3::new(10.0, 2.0, 5.0));
+    // Attach the campfire to the tree: it stays where it is, then follows the tree.
+    op(&mut editor, &mut f, json!({ "op": "reparent", "actors": [fire], "parent": tree }));
+    assert_eq!(editor.actor(fire).unwrap().parent, Some(tree));
+    assert!(f.scene.transform(handle(&f, 5)).w_axis.truncate().abs_diff_eq(Vec3::new(0.0, 0.0, 10.0), 1e-5));
+    let up = Trs::from_mat4(&Mat4::from_translation(Vec3::new(10.0, 1.0, 5.0)));
+    op(&mut editor, &mut f, json!({ "op": "actor_transform", "actors": [tree], "transforms": [up] }));
+    assert!(f.scene.transform(handle(&f, 5)).w_axis.truncate().abs_diff_eq(Vec3::new(0.0, 1.0, 10.0), 1e-5));
+    assert!(f.scene.lights()[1].position.abs_diff_eq(Vec3::new(0.0, 2.0, 10.0), 1e-5), "the light follows");
+    assert!(f.scene.volumes[0].position.abs_diff_eq(Vec3::new(0.0, 1.0, 10.0), 1e-5), "the fire follows");
+    assert_eq!(f.scene.volumes[0].light.map(|l| l.index()), Some(1), "and still drives its light");
+    // A cycle is refused.
+    let refused: EditOp = serde_json::from_value(json!({ "op": "reparent", "actors": [tree], "parent": fire })).unwrap();
+    assert!(editor.apply(refused, &mut f.world()).is_err());
+    // Hiding the tree hides everything below it, the fire's volume too.
+    op(&mut editor, &mut f, json!({ "op": "actor_visibility", "actors": [tree], "visible": false }));
+    assert!(!f.scene.is_visible(handle(&f, 5)) && f.scene.volumes.is_empty() && f.scene.lights()[1].intensity == 0.0);
+    // Undo all: as built.
+    while editor.undo(&mut f.world()) {}
+    assert_eq!(editor.actor(fire).unwrap().parent, None);
+    assert_eq!(f.scene.transform(handle(&f, 4)).w_axis.truncate(), Vec3::new(10.0, 2.0, 0.0));
+    assert_eq!(f.scene.volumes.len(), 1);
+}
+
+#[test]
+fn groups_duplicates_and_deletes_act_on_subtrees() {
+    let (mut f, outline) = outlined();
+    let mut editor = Editor::new(&f.scene, BaseScene::Procedural { scene: "test".into(), detail: "medium".into() }, &outline);
+    let tree = actor_named(&editor, "Tree");
+    let rocks: Vec<u32> = editor.actors().filter(|(_, a)| a.name == "rock").map(|(id, _)| id).collect();
+    assert_eq!(rocks.len(), 3);
+    let group = op(&mut editor, &mut f, json!({ "op": "group", "actors": [rocks[0], rocks[1]], "name": "Pair" })).actors[0];
+    let g = editor.actor(group).unwrap();
+    assert_eq!((g.name.as_str(), g.children.len()), ("Pair", 2));
+    assert!(g.world.w_axis.truncate().abs_diff_eq(Vec3::new(0.5, 0.0, 0.0), 1e-6), "at the centre");
+    assert_eq!(f.scene.transform(handle(&f, 1)), Mat4::from_translation(Vec3::X), "grouping moves nothing");
+    // Duplicate the group: a copy with copies of both rocks, one metre up.
+    let count = f.scene.instance_count();
+    let copy = op(&mut editor, &mut f, json!({ "op": "duplicate", "actors": [group], "offset": [0.0, 1.0, 0.0] }));
+    assert_eq!(copy.instances.len(), 2);
+    assert_eq!(f.scene.instance_count(), count + 2);
+    assert_eq!(editor.subtree(copy.actors[0]).len(), 3);
+    assert!(copy.instances.iter().all(|&i| f.scene.transform(f.scene.instance_handle(i).unwrap()).w_axis.y == 1.0));
+    // Deleting the copy deletes its children; ungrouping the original keeps the rocks in place.
+    op(&mut editor, &mut f, json!({ "op": "delete", "actors": copy.actors }));
+    assert!(copy.instances.iter().all(|&i| !f.scene.is_visible(f.scene.instance_handle(i).unwrap())));
+    op(&mut editor, &mut f, json!({ "op": "ungroup", "actors": [group] }));
+    assert!(editor.actor(group).is_none());
+    assert!(editor.actor(rocks[0]).unwrap().parent.is_none());
+    assert_eq!(f.scene.transform(handle(&f, 1)), Mat4::from_translation(Vec3::X));
+    // Renaming and deleting a base actor's component.
+    op(&mut editor, &mut f, json!({ "op": "rename", "actor": tree, "name": "Old oak" }));
+    op(&mut editor, &mut f, json!({ "op": "delete", "components": [{ "actor": tree, "component": "rock #2" }] }));
+    assert_eq!(editor.actor(tree).unwrap().name, "Old oak");
+    assert!(!f.scene.is_visible(handle(&f, 4)) && f.scene.is_visible(handle(&f, 3)));
+    let edit = &editor.doc.actors["Trees/Tree@1000,0,0"];
+    assert!(edit.name.is_some() && edit.components["rock #2"].deleted);
+}
+
+#[test]
+fn scene_files_keep_actors_by_key_and_old_files_migrate() {
+    let (mut f, outline) = outlined();
+    let base = BaseScene::Procedural { scene: "test".into(), detail: "medium".into() };
+    let mut editor = Editor::new(&f.scene, base.clone(), &outline);
+    let tree = actor_named(&editor, "Tree");
+    let to = Trs::from_mat4(&Mat4::from_translation(Vec3::new(12.0, 0.0, 0.0)));
+    op(&mut editor, &mut f, json!({ "op": "actor_transform", "actors": [tree], "transforms": [to] }));
+    let placed = op(&mut editor, &mut f, json!({ "op": "place", "item": "mesh:rock", "transform": Trs::IDENTITY, "parent": tree }));
+    let saved = editor.save(CameraDef { position: [0.0; 3], yaw_deg: 0.0, pitch_deg: 0.0, fov_deg: 60.0 }).to_json();
+    assert!(saved.contains("\"Trees/Tree@1000,0,0\"") && saved.contains("\"version\": 2"));
+    // A fresh base scene with the file: the same instances where they were.
+    let (mut g, outline_g) = outlined();
+    let mut loaded = Editor::new(&g.scene, base.clone(), &outline_g);
+    loaded.load(SceneDoc::parse(&saved).unwrap(), &mut g.world());
+    let visible = |f: &Fixture| f.scene.instance_handles().filter(|&h| f.scene.is_visible(h)).map(|h| f.scene.transform(h)).collect::<Vec<_>>();
+    assert_eq!(visible(&f), visible(&g));
+    let copy = loaded.actors().find(|(_, a)| a.added).map(|(id, _)| id).unwrap();
+    assert_eq!(loaded.actor(copy).unwrap().parent, Some(actor_named(&loaded, "Tree")));
+    assert_eq!(placed.instances.len(), 1);
+
+    // Version 1: instance 3 (the tree's trunk) moved, instance 0 deleted, light 0 dimmed, an
+    // added cube and light.
+    let mut light = light_def(&f.scene.lights()[0]);
+    light.intensity = 0.5;
+    let v1 = json!({
+        "format": "helios-scene", "version": 1, "base": base,
+        "instances": {
+            "0": { "mesh": "rock", "deleted": true },
+            "3": { "mesh": "rock", "transform": Trs::from_mat4(&Mat4::from_translation(Vec3::new(10.0, 0.5, 0.0))) },
+        },
+        "added": [{ "id": 7, "mesh": "rock", "material": "stone", "transform": Trs::from_mat4(&Mat4::from_translation(Vec3::Z * 3.0)) }],
+        "lights": { "0": light },
+        "added_lights": [{ "id": 8, "light": light }],
+        "next_id": 9,
+    });
+    let (mut h, outline_h) = outlined();
+    let mut old = Editor::new(&h.scene, base, &outline_h);
+    old.load(SceneDoc::parse(&v1.to_string()).unwrap(), &mut h.world());
+    assert_eq!(old.doc.version, 2);
+    assert!(old.doc.instances.is_empty() && old.doc.added.is_empty());
+    assert!(!h.scene.is_visible(handle(&h, 0)));
+    // The trunk is one of two components: a component transform; the foliage stays.
+    assert_eq!(h.scene.transform(handle(&h, 3)).w_axis.truncate(), Vec3::new(10.0, 0.5, 0.0));
+    assert_eq!(h.scene.transform(handle(&h, 4)).w_axis.truncate(), Vec3::new(10.0, 2.0, 0.0));
+    assert!(old.doc.actors["Trees/Tree@1000,0,0"].components["rock"].transform.is_some());
+    assert_eq!(h.scene.lights()[0].intensity, 0.5);
+    assert_eq!(old.doc.added_actors.len(), 2);
+    assert!(old.actors().any(|(_, a)| a.added && a.name == "Point light"));
+}
+
+#[test]
+fn drags_make_instances_movable_until_they_settle() {
+    let (mut f, outline) = outlined();
+    let mut editor = Editor::new(&f.scene, BaseScene::Procedural { scene: "test".into(), detail: "medium".into() }, &outline);
+    let tree = actor_named(&editor, "Tree");
+    for k in 0..3 {
+        editor.preview_actors(&mut f.world(), &[(tree, Mat4::from_translation(Vec3::new(10.0 + k as f32, 0.0, 0.0)))]);
+    }
+    assert_eq!(f.scene.mobility(handle(&f, 3)), helios_render::Mobility::Movable);
+    assert_eq!(f.scene.transform(handle(&f, 4)).w_axis.truncate(), Vec3::new(12.0, 2.0, 0.0));
+    assert!(editor.doc.actors.is_empty(), "previews are not edits");
+    // The drag ends with one transform edit (a gesture: merge key).
+    let to = Trs::from_mat4(&Mat4::from_translation(Vec3::new(12.0, 0.0, 0.0)));
+    let end: EditOp = serde_json::from_value(json!({ "op": "actor_transform", "actors": [tree], "transforms": [to] })).unwrap();
+    editor.apply_merged(end, &mut f.world(), Some("drag-1".into())).unwrap();
+    assert_eq!(f.scene.mobility(handle(&f, 3)), helios_render::Mobility::Movable);
+    for _ in 0..actors::SETTLE_FRAMES {
+        editor.tick(&mut f.scene);
+    }
+    assert_eq!(f.scene.mobility(handle(&f, 3)), helios_render::Mobility::Static);
+    assert_eq!(editor.moving_count(), 0);
+    // A cancelled drag puts everything back.
+    editor.preview_actors(&mut f.world(), &[(tree, Mat4::from_translation(Vec3::new(0.0, 9.0, 0.0)))]);
+    editor.revert_preview(&mut f.world());
+    assert_eq!(f.scene.transform(handle(&f, 3)).w_axis.truncate(), Vec3::new(12.0, 0.0, 0.0));
 }
 
 fn scatter_volume(id: u32) -> PcgVolumeDef {

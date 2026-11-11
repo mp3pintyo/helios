@@ -42,8 +42,8 @@ impl SceneChanges {
 
 /// Turns the scene's per-instance versions into each frame's [`SceneChanges`].
 pub(crate) struct MotionTracker {
-    /// Geometry and instance versions last seen (structural changes).
-    versions: (u64, u64),
+    /// Geometry, instance and instance layout versions last seen (structural changes).
+    versions: (u64, u64, u64),
     /// Transform version last seen.
     seen: u64,
     /// Every instance's transform as of the previous frame.
@@ -59,7 +59,7 @@ pub(crate) struct MotionTracker {
 impl Default for MotionTracker {
     fn default() -> Self {
         Self {
-            versions: (u64::MAX, u64::MAX),
+            versions: (u64::MAX, u64::MAX, u64::MAX),
             seen: 0,
             previous: Vec::new(),
             moving: Vec::new(),
@@ -72,11 +72,13 @@ impl Default for MotionTracker {
 impl MotionTracker {
     /// Collects this frame's changes of `scene` into [`MotionTracker::changes`].
     pub fn update(&mut self, scene: &Scene) {
-        let versions = (scene.geometry_version, scene.instance_version);
+        let versions = (scene.geometry_version, scene.instance_version, scene.layout_version());
         let count = scene.instances.len();
         let mut changes = SceneChanges { structural: versions != self.versions || self.previous.len() != count, ..Default::default() };
+        // Compacted: indices shifted, so last frame's transforms belong to other instances.
+        let relaid = versions.2 != self.versions.2;
         self.versions = versions;
-        if self.previous.len() != count {
+        if self.previous.len() != count || relaid {
             // A new instance layout: nothing has a previous frame to move from.
             self.previous = scene.instances.iter().map(|i| i.transform).collect();
             self.moving.clear();

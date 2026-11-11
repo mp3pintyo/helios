@@ -7,10 +7,11 @@ Back to the [README](../../README.md).
   without a build step or CDN: toolbar (file, undo / redo, W/E/R gizmo modes, world / local axes, grid, rotation and
   scale snapping, scene switch, Play, Material Graph), a Content browser (engine shapes and nature prefabs, point /
   spot lights, PCG presets, the scene's materials and meshes, glTF import by URL or by dropping a `.glb`), a World
-  Outliner (World → Environment / Render settings, lights, PCG volumes, the instances grouped by mesh or material,
-  search, eye toggles; virtualised rows, so the forest's 8 278 instances scroll smoothly) and a Details panel
-  (transform with scrubbable X/Y/Z fields and a uniform-scale lock, mesh, material slot and the material's
-  parameters, graph, Substrate slab and displacement (magnitude, centre, height channel), rendering; light colour, intensity, attenuation radius, source radius,
+  Outliner (World → Environment / Render settings, PCG volumes and the **actor hierarchy** — see *Actors* below —
+  with search, eye toggles, drag-and-drop re-parenting and inline renaming; virtualised rows, so the forest's 6 218
+  actors scroll smoothly) and a Details panel (an actor's name, parent, key, transform relative to its parent and
+  its component list; a mesh component's relative transform, mesh, material slot and the material's
+  parameters, graph, Substrate slab and displacement (magnitude, centre, height channel), rendering; a light component's colour, intensity, attenuation radius, source radius,
   shadows, spot aim and cones; PCG volume, surface, seed and every node's parameters; sun / fog / clouds / wind;
   render settings). The engine owns the scene: the UI reads it as JSON and sends edit operations through the wasm
   page API (`heliosEditorState`, `heliosEditorApply`, `heliosEditorPreview`, `heliosEditorPick`, `heliosEditorCamera`,
@@ -18,18 +19,24 @@ Back to the [README](../../README.md).
   documents**: every operation produces a new `SceneDoc` (one undo step; slider drags carry a merge key and form one
   step), and `Editor::sync` reconciles the scene with it, touching only what differs (an instance's transform, a
   material's parameters, one PCG volume's instances), so undo / redo are document swaps and loading a file is the
-  same reconcile from an empty document. Instances are never removed — `Scene::set_visible` hides them (the
+  same reconcile from an empty document. A removed component's instance is first hidden (`Scene::set_visible`: the
   `HIDDEN` instance flag, culled for every view; translucency, water bodies, Lumen and assembly expansion skip hidden
-  instances) and hidden slots are reused for the next instance of the same mesh — so handles in the outliner, the
-  selection and picking stay valid. Transform edits and gizmo previews go through `Scene::set_transform`, i.e. the
-  per-instance path of *Dynamic world* (edited instances stay `Static`, so the shadow pages under them are rendered
-  in full); hiding, deleting, duplicating, reassigning materials and PCG regeneration are structural changes.
+  instances) and put on a free list per mesh, which the next component of the same mesh takes; once the editor has
+  been idle for 1.5 s with at least 32 free instance or 8 free light slots (or for 30 s with any), `Scene::compact`
+  removes them and every holder of handles (the editor, the demo motion, the selection outline) maps them through the
+  returned `Compaction` — documents never hold slots, so undo after a compaction simply takes new ones. Transform
+  edits and gizmo previews go through `Scene::set_transform`, i.e. the per-instance path of *Dynamic world*; a drag
+  (gizmo preview or the commits of one gesture) makes the moved instances `Movable` — dynamic casters over the cached
+  static shadow pages — and gives them their own mobility back 30 frames after the last move, so only the release
+  re-renders the static layer under them once. Hiding, deleting, duplicating, reassigning materials and PCG
+  regeneration are structural changes.
   **Picking** reads the visibility buffer: a request maps the clicked output pixel to the internal resolution, a
   one-thread compute pass (`pick.wgsl`) decodes the visible-cluster entry into its instance (an assembly part into
   its owning tree) and reconstructs the world position and normal, and the 48-byte result is read back
   asynchronously (it arrives 1–2 frames later) — exact per pixel, so alpha-tested holes, swaying leaves, voxels and
   software-rasterised clusters pick what is drawn; translucent surfaces (not in the visibility buffer) are tested
-  against their oriented bounds on the CPU and win when nearer. PCG-spawned instances select their volume. The
+  against their oriented bounds on the CPU and win when nearer. A click selects the picked instance's actor,
+  Alt+click its component; PCG-spawned instances select their volume. The
   **selection outline** (`selection.rs`, `selection.wgsl`) is a full-screen pass after tone mapping that tints
   selected instances and draws a 2-px orange outline from eight visibility taps per output pixel, against a
   per-instance selection bit set; it is only recorded while something is selected. The **gizmo** (translate arrows
@@ -42,13 +49,45 @@ Back to the [README](../../README.md).
   viewport centre (or the drop point) on the GPU. Natively, Tab switches the same editor core on without panels.
   Cost (shared GPU): selection outline 0.05 ms (a first version with 20 taps cost 0.34–0.57 ms), pick ≈ 0 (one
   thread, once per click); with nothing selected the frame is unchanged.
-* **Scene files** (`.helios.json`, `editor/doc.rs`, serde). A base scene — a procedural scene and detail (both change
-  the instance list) or a glTF URL — plus only the edits: base-instance overrides keyed by index with the mesh name
-  for validation (transform as TRS, visibility, material, deleted), added instances by mesh and material *name*,
-  material parameter overrides by name, material graphs (`graphs`) and slabs, base light definitions by index and
-  added lights, the environment, render-setting overrides by key, imported models (name + URL), PCG volumes (volume,
+* **Actors** (`editor/actors.rs`, `scenes/outline.rs`; UE's actors, components and attachment). An actor is a named
+  node with a transform relative to an optional parent and components: mesh instances with their materials, lights,
+  volumes and particle emitters. A component's world transform is its actor's world transform times its own, an
+  actor's is its parent's times its own, so moving an actor moves its components and its children (instances through
+  the per-instance path, lights and emitters with them; a fire keeps driving its light). The scene builders record
+  their actors while they build (`outline::begin` / `end` around the instances, lights and emitters of one actor,
+  `folder` / `end_folder` around groups): the forest's trees are one actor each (trunk + foliage) in a *Trees* folder,
+  bushes, ferns, grass, rocks and fallen logs (log + mushrooms) in theirs, the campfire one actor of 18 instances, its
+  light, fire volume, sparks and embers; the cathedral's nave wall bays (wall, arcade, clerestory glass and tracery,
+  triforium), piers, vault bays, aisle bays, buttresses, west front, towers, apse, pews, the altar, candelabra and
+  altar candles with their lights, chandeliers with theirs, choir screens, glass screens, the censer with its incense
+  and the dust motes; the valley's landscape, lake, sculpture on its plinth, boulders, mist, raft, translucency
+  corner and stone path; the gallery's specimens (plinth + objects + lamp), terraces, beds, turntable and sign.
+  Whatever a builder leaves out becomes an actor of its own (forest: 6 218 actors over 8 278 instances). Every actor
+  has a stable **key** — its folder path, name and, for actors, its pivot in centimetres
+  (`Trees/Conifer@1250,-30,-4510`) — that scene files address it by; the UI uses live ids. Operations: actor
+  transforms (world, from the gizmo; relative, from Details), visibility (with everything below), rename (F2 or a
+  double click in the outliner), re-parent keeping the world transform (drag rows onto an actor, onto *Level* to
+  detach; cycles are refused), group (Ctrl+G: a new actor at the centre of the selection) and ungroup (Shift+G),
+  duplicate and delete (an actor with everything below it), and per component transform, visibility, material,
+  shadow casting, light. Older operations addressed by instance or light index still work (they edit the component,
+  or the actor of a single component). `Editor::sync` re-resolves only the actors whose definition changed and places
+  them and everything below them; the outline's parent / child links are rebuilt only when parents change or actors
+  come and go. Costs (wasm, forest): moving one actor 4 ms, all 1 500 trees in one edit 33 ms; dragging the campfire
+  costs 10.95 ms GPU against 9.32 ms without a drag (13.93 ms when its instances stayed static: 214 instead of 123
+  shadow pages, 109 k instead of 31 k shadow draws per frame); a pew in the cathedral 7.33 against 6.93 ms (9.12 ms
+  static). `--drag-actor NAME [--drag-static]` (native) and `heliosEditorMovableDrags(false)` (browser) reproduce the
+  measurement; see `docs/round8/editor-hierarchy.md`.
+* **Scene files** (`.helios.json`, `editor/doc.rs`, serde; version 2). A base scene — a procedural scene and detail
+  (both change the instance list) or a glTF URL — plus only the edits: base-actor overrides by key (name, parent,
+  relative transform, visibility, deleted, and per component name its transform, visibility, material, shadow
+  casting, light), added actors (`+ID` keys: name, parent key, relative transform and their components — meshes by
+  mesh and material *name*, lights), material parameter overrides by name, material graphs (`graphs`) and slabs, the
+  environment, render-setting overrides by key, imported models (name + URL), PCG volumes (volume,
   surface, graph) **and their generated output** (parts + per-instance TRS), so a file reloads with exactly the
-  instances it was saved with. Meshes get stable names where scenes create them (`mesh_store::add` names every baked
+  instances it was saved with. Version 1 files (base instances and lights by build order, added instances and
+  lights) are migrated on load: an edit of a single-component actor's instance becomes an actor edit, one of a
+  multi-component actor a component edit, added instances and lights become added actors, a PCG surface given by
+  instance index a component reference. Meshes get stable names where scenes create them (`mesh_store::add` names every baked
   mesh, duplicates become `rock #2`; glTF imports are `MODEL/MESH`), materials get explicit names in the valley and
   the forest and `<shading model> <n>` elsewhere. Save downloads the file (Ctrl+S), Open uses a file picker (Ctrl+O),
   `?scene-file=URL` builds the file's base scene directly; natively `--scene-file PATH` (relative glTF paths resolve

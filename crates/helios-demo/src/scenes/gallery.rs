@@ -22,6 +22,7 @@ use helios_render::{
     TexturePattern,
 };
 
+use super::outline;
 use super::{add_baked, add_baked_with, Detail, SceneSetup};
 use crate::motion::{DemoMotion, Motion};
 
@@ -53,6 +54,8 @@ struct Gallery<'a> {
     sphere: MeshHandle,
     plinth: MeshHandle,
     plinth_material: MaterialHandle,
+    /// The specimen actor being built.
+    open: Option<outline::Token>,
 }
 
 impl Gallery<'_> {
@@ -62,11 +65,19 @@ impl Gallery<'_> {
         handle
     }
 
-    /// A plinth at row position `slot` (0 = leftmost); returns the centre of its top.
-    fn plinth(&mut self, slot: f32) -> Vec3 {
+    /// A plinth at row position `slot` (0 = leftmost) starting the actor of specimen `name`
+    /// (ending the previous one); returns the centre of its top.
+    fn plinth(&mut self, slot: f32, name: &str) -> Vec3 {
         let x = (slot - 3.5) * SPACING;
+        self.close();
+        self.open = outline::begin(self.scene, name, Mat4::from_translation(Vec3::new(x, 0.0, 0.0)));
         self.scene.add_instance(self.plinth, self.plinth_material, Mat4::from_translation(Vec3::new(x, 0.0, 0.0)));
         Vec3::new(x, PLINTH_HEIGHT, 0.0)
+    }
+
+    /// Ends the open specimen's actor.
+    fn close(&mut self) {
+        outline::end(self.scene, self.open.take());
     }
 
     fn sphere(&mut self, material: MaterialHandle, center: Vec3, scale: Vec3) {
@@ -130,17 +141,18 @@ fn build_scene(detail: Detail) -> (Scene, DemoMotion) {
     scene.set_material_name(stone, "gallery/flagstone");
     let plinth_material = scene.add_material(Material::textured(MaterialKind::Standard, marble, TextureMapping::ObjectTriplanar, 0.8));
     scene.set_material_name(plinth_material, "gallery/plinth");
-    scene.add_instance(ground, stone, Mat4::IDENTITY);
-    let mut g = Gallery { scene: &mut scene, sphere, plinth, plinth_material };
+    outline::actor(&mut scene, "Courtyard", Mat4::IDENTITY, |scene| scene.add_instance(ground, stone, Mat4::IDENTITY));
+    let mut g = Gallery { scene: &mut scene, sphere, plinth, plinth_material, open: None };
+    outline::folder("Specimens");
 
     // 0: car paint — red metallic flakes under a glossy clear coat.
-    let top = g.plinth(0.0);
+    let top = g.plinth(0.0, "Car paint");
     let paint = g.material("car paint", Material { slab: Slab::clearcoat(1.0, 0.03), ..Material::standard(Vec3::new(0.55, 0.02, 0.03), 0.42, 0.7) });
     g.sphere(paint, top + Vec3::Y * 0.62, Vec3::new(0.95, 0.6, 0.62));
     g.scene.add_instance(knot, paint, Mat4::from_scale_rotation_translation(Vec3::splat(0.85), Quat::from_rotation_x(1.2), top + Vec3::new(0.0, 1.55, 0.0)));
 
     // 1: velvet — a cushion with a pink sheen over deep burgundy.
-    let top = g.plinth(1.0);
+    let top = g.plinth(1.0, "Velvet");
     let velvet = g.material(
         "velvet",
         Material {
@@ -152,12 +164,12 @@ fn build_scene(detail: Detail) -> (Scene, DemoMotion) {
     g.scene.add_instance(knot, velvet, Mat4::from_scale_rotation_translation(Vec3::splat(0.7), Quat::from_rotation_z(0.4), top + Vec3::new(0.0, 1.25, 0.0)));
 
     // 2: skin — a head-sized sphere scattering red furthest.
-    let top = g.plinth(2.0);
+    let top = g.plinth(2.0, "Skin");
     let skin = g.material("skin", Material { slab: Slab::subsurface(1.0, Vec3::new(1.0, 0.38, 0.22), 0.012), ..Material::standard(Vec3::new(0.78, 0.5, 0.4), 0.45, 0.0) });
     g.sphere(skin, top + Vec3::Y * 0.55, Vec3::new(0.42, 0.55, 0.48));
 
     // 3: candle wax and a marble egg, the candle lit.
-    let top = g.plinth(3.0);
+    let top = g.plinth(3.0, "Candle and marble");
     let wax = g.material("wax", Material { slab: Slab::subsurface(1.0, Vec3::new(1.0, 0.75, 0.45), 0.035), ..Material::standard(Vec3::new(0.92, 0.86, 0.7), 0.35, 0.0) });
     g.scene.add_instance(candle, wax, Mat4::from_translation(top + Vec3::new(-0.25, 0.0, 0.0)));
     let marble_slab = g.material(
@@ -170,7 +182,7 @@ fn build_scene(detail: Detail) -> (Scene, DemoMotion) {
     g.scene.add_light(Light { source_radius: 0.02, ..Light::point(top + Vec3::new(-0.25, 1.0, 0.0), Vec3::new(1.0, 0.62, 0.3), 1.2, 4.0) });
 
     // 4: leaves — thin transmission lets the low sun through.
-    let top = g.plinth(4.0);
+    let top = g.plinth(4.0, "Leaves");
     let leaves = g.material(
         "leaves",
         Material {
@@ -188,7 +200,7 @@ fn build_scene(detail: Detail) -> (Scene, DemoMotion) {
 
     // 5: brushed metal — highlights stretched along a pot's axis; dielectrics of different IOR and a
     // specular colour around it.
-    let top = g.plinth(5.0);
+    let top = g.plinth(5.0, "Brushed metal");
     let brushed = g.material(
         "brushed metal",
         Material { slab: Slab { anisotropy: 0.8, anisotropy_rotation: std::f32::consts::FRAC_PI_2, ..Default::default() }, ..Material::standard(Vec3::new(0.91, 0.92, 0.93), 0.3, 1.0) },
@@ -207,7 +219,7 @@ fn build_scene(detail: Detail) -> (Scene, DemoMotion) {
     }
 
     // 6: graph — animated lava in a pool, and a lava egg.
-    let top = g.plinth(6.0);
+    let top = g.plinth(6.0, "Lava");
     let lava_graph = g.scene.add_material_graph(presets::lava());
     let lava = g.material("lava", Material { graph: Some(lava_graph), ..Material::standard(Vec3::splat(0.1), 0.8, 0.0) });
     g.sphere(lava, top + Vec3::Y * 0.5, Vec3::new(0.45, 0.5, 0.45));
@@ -215,7 +227,7 @@ fn build_scene(detail: Detail) -> (Scene, DemoMotion) {
     g.scene.add_instance(ring, plinth_material, Mat4::from_translation(Vec3::new(top.x, 0.0, 3.0)));
 
     // 7: graph — stylised water in a basin, a brighter instance of the same graph on the plinth.
-    let top = g.plinth(7.0);
+    let top = g.plinth(7.0, "Stylised water");
     let water_graph = g.scene.add_material_graph(presets::stylized_water());
     let water = g.material("stylised water", Material { graph: Some(water_graph), ..Material::standard(Vec3::splat(0.5), 0.1, 0.0) });
     g.scene.add_instance(pool, water, Mat4::from_translation(Vec3::new(top.x, 0.04, 3.0)));
@@ -224,11 +236,13 @@ fn build_scene(detail: Detail) -> (Scene, DemoMotion) {
     g.scene.set_material_parameter(tropical, "Shallow Color", ParameterValue::Vector([0.1, 0.75, 0.6, 1.0]));
     g.scene.set_material_parameter(tropical, "Deep Color", ParameterValue::Vector([0.0, 0.25, 0.35, 1.0]));
     g.sphere(tropical, top + Vec3::Y * 0.5, Vec3::splat(0.5));
+    g.close();
+    outline::end_folder();
 
     // Graph — wet stone with puddles: the terrace in front of the row (the same flagstone).
     let wet_graph = g.scene.add_material_graph(presets::wet_stone());
     let wet = g.material("wet stone", Material { graph: Some(wet_graph), ..Material::textured(MaterialKind::Standard, flagstone, TextureMapping::WorldTriplanar, 0.25) });
-    g.scene.add_instance(puddles, wet, Mat4::IDENTITY);
+    outline::actor(g.scene, "Wet stone", Mat4::IDENTITY, |scene| scene.add_instance(puddles, wet, Mat4::IDENTITY));
 
     // Graph — a brick pavement whose Displacement output carves the mortar joints (Nanite
     // tessellation driven by the graph, not a texture): the terrace in front of the wet stone.
@@ -237,6 +251,7 @@ fn build_scene(detail: Detail) -> (Scene, DemoMotion) {
         "brick pavement",
         Material { graph: Some(brick_graph), displacement: Some(Displacement::height(0.035, 0.9)), ..Material::standard(Vec3::new(0.4, 0.16, 0.09), 0.85, 0.0) },
     );
+    let terrace_actor = outline::begin(g.scene, "Brick terrace", Mat4::from_translation(Vec3::new(0.0, 0.0, 9.0)));
     g.scene.add_instance(terrace, bricks, Mat4::IDENTITY);
     let kerb_material = g.material("kerb", Material::textured(MaterialKind::Standard, marble, TextureMapping::WorldTriplanar, 0.8));
     let kerb_height = BRICK_LEVEL + 0.015;
@@ -248,6 +263,7 @@ fn build_scene(detail: Detail) -> (Scene, DemoMotion) {
     ] {
         g.scene.add_instance(kerb, kerb_material, Mat4::from_scale_rotation_translation(size, Quat::IDENTITY, center));
     }
+    outline::end(g.scene, terrace_actor);
 
     // Graph — mushrooms: a vector displacement (overhanging caps on stems) grows them out of a
     // flat bed left of the bricks.
@@ -256,6 +272,7 @@ fn build_scene(detail: Detail) -> (Scene, DemoMotion) {
         "mushrooms",
         Material { graph: Some(mushroom_graph), displacement: Some(Displacement::height(presets::MUSHROOM_MAGNITUDE, 0.0)), ..Material::standard(Vec3::new(0.1, 0.15, 0.05), 0.9, 0.0) },
     );
+    let beds = outline::begin(g.scene, "Mushroom and cloth beds", Mat4::from_translation(Vec3::new(0.0, 0.0, BED_Z)));
     g.scene.add_instance(bed, mushrooms, Mat4::from_translation(Vec3::new(-BED_X, MOSS_LEVEL, BED_Z)));
     // Graph — a rippling cloth: an animated displacement (travelling waves) on a sheet stretched
     // over a frame right of the bricks; a dynamic shadow caster.
@@ -275,6 +292,7 @@ fn build_scene(detail: Detail) -> (Scene, DemoMotion) {
             g.scene.add_instance(kerb, kerb_material, Mat4::from_scale_rotation_translation(size, Quat::IDENTITY, center));
         }
     }
+    outline::end(g.scene, beds);
 
     // Graph — combed tufts on a turning platform (a 1.8 m square of the bed mesh on a drum): a
     // vector displacement built in tangent space (up the normal, bent along the tangent) and
@@ -287,20 +305,26 @@ fn build_scene(detail: Detail) -> (Scene, DemoMotion) {
         Material { graph: Some(tuft_graph), displacement: Some(Displacement::height(0.22, 0.0)), ..Material::standard(Vec3::new(0.2, 0.25, 0.08), 0.85, 0.0) },
     );
     let drum = add_baked_with(g.scene, "gallery/drum", &primitives::cylinder(64, 1, DRUM_RADIUS, DRUM_HEIGHT, true), volume(8));
+    let turntable = outline::begin(g.scene, "Turntable", Mat4::from_translation(TURNTABLE));
     g.scene.add_instance(drum, kerb_material, Mat4::from_translation(TURNTABLE));
     let scale = PLATFORM * 2.0 / 3.0;
     let platform = g.scene.add_instance(bed, tufts, Mat4::from_scale_rotation_translation(Vec3::splat(scale), Quat::IDENTITY, TURNTABLE + Vec3::Y * (DRUM_HEIGHT + 0.005)));
+    outline::end(g.scene, turntable);
     motion.add(g.scene, Motion::Spin { center: TURNTABLE, period: 24.0 }, &[platform], &[]);
 
     // An unlit sign behind the row (KHR_materials_unlit): the stained-glass pattern, unshaded.
     let unlit = g.material("unlit sign", Material { slab: Slab { unlit: true, ..Default::default() }, ..Material::textured(MaterialKind::Standard, glass, TextureMapping::MeshUv, 1.0) });
+    let sign_actor = outline::begin(g.scene, "Unlit sign", Mat4::from_translation(Vec3::new(0.0, 0.0, -3.5)));
     g.scene.add_instance(sign, unlit, Mat4::from_translation(Vec3::new(0.0, 2.6, -3.5)));
     g.scene.add_instance(plinth, plinth_material, Mat4::from_scale_rotation_translation(Vec3::new(0.25, 2.6, 0.08), Quat::IDENTITY, Vec3::new(-1.4, 0.0, -3.52)));
     g.scene.add_instance(plinth, plinth_material, Mat4::from_scale_rotation_translation(Vec3::new(0.25, 2.6, 0.08), Quat::IDENTITY, Vec3::new(1.4, 0.0, -3.52)));
+    outline::end(g.scene, sign_actor);
 
     // A warm spot light on the velvet and the car paint.
     let spot_from = Vec3::new(-7.5, 4.5, 4.0);
-    g.scene.add_light(Light::spot(spot_from, Vec3::new(-6.4, 1.2, 0.0) - spot_from, Vec3::new(1.0, 0.85, 0.65), 18.0, 12.0, 0.5));
+    outline::actor(g.scene, "Spot light", Mat4::from_translation(spot_from), |scene| {
+        scene.add_light(Light::spot(spot_from, Vec3::new(-6.4, 1.2, 0.0) - spot_from, Vec3::new(1.0, 0.85, 0.65), 18.0, 12.0, 0.5))
+    });
     (scene, motion)
 }
 
@@ -313,5 +337,5 @@ fn initial_camera() -> Camera {
 
 pub fn build(detail: Detail) -> SceneSetup {
     let (scene, motion) = build_scene(detail);
-    SceneSetup { scene, camera: initial_camera(), sun: SUN, floor, floor_below: None, animation: None, motion }
+    SceneSetup { scene, camera: initial_camera(), sun: SUN, floor, floor_below: None, animation: None, motion, outline: Default::default() }
 }

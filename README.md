@@ -362,8 +362,8 @@ Each subsystem is described in its own page under [`docs/architecture/`](docs/ar
 
 ### 3. Editor, scene files and PCG — `helios-demo`, `helios-pcg`, `web/editor`
 
-The browser level editor (outliner, details, gizmos, content browser), `.helios.json` scene files, PCG volumes and the
-material graph editor: [`docs/architecture/editor.md`](docs/architecture/editor.md).
+The browser level editor (actors with components and a hierarchy, outliner, details, gizmos, content browser),
+`.helios.json` scene files, PCG volumes and the material graph editor: [`docs/architecture/editor.md`](docs/architecture/editor.md).
 
 ### WebGPU constraints that shaped the design
 
