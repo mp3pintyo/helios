@@ -9,7 +9,7 @@ $profileDir = if ($Debug) { "debug" } else { "release" }
 $cargoArgs = @("build", "-p", "helios-demo", "--lib", "--target", "wasm32-unknown-unknown")
 if (-not $Debug) { $cargoArgs += "--release" }
 
-cargo @cargoArgs
+cargo --config "build.rustc-wrapper=''" @cargoArgs
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 wasm-bindgen --target web --no-typescript --out-dir web/pkg "target/wasm32-unknown-unknown/$profileDir/helios_demo.wasm"

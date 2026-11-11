@@ -38,6 +38,7 @@ use crate::photo::{PhotoMode, PhotoProgress, PhotoSample};
 use crate::picking::{PickResult, Picker};
 use crate::pipelines::{self, in_group, Group};
 use crate::lumen_lite::{GiMethod, LiteFallback, LiteInputs, LumenLite};
+use crate::world_cache::WorldCacheMode;
 use crate::motion::MotionTracker;
 use crate::megalights::{MegaLights, MegaLightsInputs};
 use crate::megalights_volume::{MegaLightsVolume, MegaLightsVolumeInputs};
@@ -124,10 +125,13 @@ pub enum DebugView {
     /// budget / held for its level's turn / cached), why pages were invalidated, and the
     /// physical page pool with its pressure (`vsm_overview.rs`).
     ShadowOverview = 26,
+    /// Lumen world cache: the radiance its cells give each pixel's surface (purple-tinted voxel
+    /// lighting where no cell holds it). Runs the world cache.
+    WorldCache = 27,
 }
 
 impl DebugView {
-    pub const ALL: [DebugView; 27] = [
+    pub const ALL: [DebugView; 28] = [
         Self::Lit,
         Self::Clusters,
         Self::Triangles,
@@ -155,6 +159,7 @@ impl DebugView {
         Self::MaterialFeatures,
         Self::Tessellation,
         Self::ShadowOverview,
+        Self::WorldCache,
     ];
 
     /// The view with index `index` (its `--view` number), if any.
@@ -191,6 +196,7 @@ impl DebugView {
             Self::MaterialFeatures => "Material features (Substrate slabs)",
             Self::Tessellation => "Tessellation (depth, micro-triangles)",
             Self::ShadowOverview => "Shadow overview (levels | page work | invalidation | pool)",
+            Self::WorldCache => "Lumen world cache (purple: no cell)",
         }
     }
 
@@ -361,6 +367,12 @@ pub struct RenderSettings {
     /// their nearest layer. Off: weighted blended OIT for particles and depth peeling for every
     /// translucent surface (round 7). Needs 19 sampled textures per shader stage (the shading layout's 18 + the grid).
     pub avboit: bool,
+    /// Lumen world cache (UE 5.9, `world_cache.rs`): sparse world-space cells filled by paths
+    /// traced from the screen through the distance fields, read where Lumen's rays hit a
+    /// surface — behind the mesh cards in place of the voxel lighting, or in place of the cards
+    /// too (the default: within 12–15 % of a path-traced reference indoors, where the cards and
+    /// voxels were 3–6 times too bright, for ~0.1 ms). Off: cards and voxel lighting (round 7).
+    pub world_cache: WorldCacheMode,
 }
 
 impl Default for RenderSettings {
@@ -422,6 +434,7 @@ impl Default for RenderSettings {
             mega_lights_hzb_traces: true,
             mega_lights_volume: true,
             avboit: true,
+            world_cache: WorldCacheMode::Replace,
         }
     }
 }
@@ -702,6 +715,11 @@ impl Renderer {
     /// The final gather this frame: the probe view runs Lumen Lite whatever the method.
     fn uses_lumen_lite(&self) -> bool {
         self.settings.global_illumination && (self.settings.gi_method == GiMethod::LumenLite || self.settings.debug_view == DebugView::LumenLiteProbes)
+    }
+
+    /// Lumen world cache statistics (natively with `HELIOS_WORLD_CACHE_STATS`).
+    pub fn world_cache_stats(&self) -> crate::WorldCacheStats {
+        self.lumen.world_cache_stats()
     }
 
     /// GPU statistics from a recent frame.
@@ -1002,6 +1020,12 @@ impl Renderer {
         let size = (self.targets.width, self.targets.height);
         let capacity = self.targets.capacity;
         self.svt.sync(&self.device, &self.queue, scene, self.settings.texture_streaming, frame, size);
+        // The world cache's debug view runs it (behind the cards) if it is off.
+        let world_cache = match (self.settings.world_cache, self.settings.debug_view) {
+            (WorldCacheMode::Off, DebugView::WorldCache) => WorldCacheMode::Fallback,
+            (mode, _) => mode,
+        };
+        self.lumen.set_world_cache(if self.settings.global_illumination { world_cache } else { WorldCacheMode::Off });
         self.lumen.update(&self.device, &self.queue, scene, &self.motion.changes, camera.position, frame, &self.targets, self.settings.tessellation);
         // Created as soon as it is asked for, so the browser compiles it before GI comes on.
         let r = &self.requested;
@@ -1239,6 +1263,10 @@ impl Renderer {
         if self.settings.debug_view == DebugView::SurfaceCards {
             self.lumen.record_debug(&mut rec, &self.frame_uniform, &self.targets, &self.samplers);
         }
+        if self.settings.debug_view == DebugView::WorldCache && self.settings.global_illumination {
+            let surfaces = CardInputs { vsm: &self.vsm, glass, textures: &self.textures, materials: &self.scene.materials, extended: &self.extended, queue: &self.queue };
+            self.lumen.record_world_cache_debug(&mut rec, &self.frame_uniform, &self.targets, &self.sky, &self.samplers, &self.lights, &self.exposure.buffer, &surfaces);
+        }
         if let Some(lite) = lumen_lite.filter(|_| self.settings.debug_view == DebugView::LumenLiteProbes) {
             lite.record_debug(&mut rec, &lite_inputs, &self.targets.gi_history[current]);
         }
@@ -1281,6 +1309,7 @@ impl Renderer {
         let read_feedback = self.scene.record_feedback(&mut rec.encoder, frame);
         let read_texture_feedback = self.svt.record_feedback(&mut rec.encoder, frame);
         let read_tessellation = self.culling.tessellation(&self.scene).is_some_and(|t| t.record_readback(&mut rec.encoder));
+        self.lumen.record_stats(&mut rec.encoder);
 
         let (commands, map_profiler) = rec.finish();
         self.queue.submit([commands]);

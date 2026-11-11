@@ -266,6 +266,7 @@ impl LumenLite {
                     (72, bind::texture_uint()),
                     (73, tex(false)),
                     (74, bind::texture_3d_uint()),
+                    (150, bind::texture_uint()),
                 ],
             ),
             update_probes: stage("update_field", &[&[(2, u()), (20, rw()), (22, ro()), (23, rw()), (24, rw())], &sampled_atlases[1..]].concat()),
@@ -339,6 +340,7 @@ impl LumenLite {
                 (72, TextureView(lumen.card_capture)),
                 (73, TextureView(lumen.card_lighting)),
                 (74, TextureView(lumen.instance_ids)),
+                (150, TextureView(lumen.world_cache)),
             ],
         );
         let [irradiance, moments] = atlases();

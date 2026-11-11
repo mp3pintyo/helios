@@ -75,6 +75,11 @@ mod native {
         /// Order-independent transparency (`--wboit`: weighted blended OIT for particles and
         /// depth peeling for translucent surfaces, round 7's path, instead of AVBOIT).
         pub avboit: bool,
+        /// Lumen world cache (`--world-cache off|on|replace`; `on`: behind the mesh cards,
+        /// `replace`: in place of them).
+        pub world_cache: Option<helios_render::WorldCacheMode>,
+        /// Fixed exposure in EV (`--exposure EV`: auto exposure off), for comparing images.
+        pub exposure: Option<f32>,
         /// Stream image textures at native resolution (`--no-svt`: 512² texture arrays only).
         pub svt: bool,
         pub animate_sun: bool,
@@ -174,7 +179,7 @@ mod native {
 
     impl Options {
         pub fn parse(args: &[String]) -> Self {
-            let mut o = Options { screenshot: None, size: (1600, 900), frames: 90, view: None, detail: Detail::High, scene: SceneKind::Valley, camera: None, eye: None, at: None, occlusion: true, sw_raster: true, rvt: true, glass_shadows: true, svt: true, animate_sun: false, lod: None, fov: None, pool_mb: None, texture_pool_mb: None, texture_compression: true, switch_to: None, dump_dir: None, dump_count: 16, keys: Vec::new(), keys_at: None, hold: Vec::new(), gltf: None, ground: true, bake_hvm: None, stream_from: None, io_latency_ms: 0, sun: None, move_light: false, full_invalidation: false, moving_lights: Default::default(), moving_light_pages: None, movers: None, static_motion: false, screen_percentage: None, gpu_budget_ms: None, local_exposure: Some(Default::default()), scene_file: None, select: Vec::new(), no_skinning: false, gi: None, megalights: false, tessellation: true, displacement_speed_bound: true, dice_rate: None, speed: None, fog_scattering: None, tsr_depth_history: true, dof: None, photo: None, shadow_refresh_budget: None, shadow_max_staleness: None, shadow_distant: None, megalights_options: (None, true, true, true), avboit: true };
+            let mut o = Options { screenshot: None, size: (1600, 900), frames: 90, view: None, detail: Detail::High, scene: SceneKind::Valley, camera: None, eye: None, at: None, occlusion: true, sw_raster: true, rvt: true, glass_shadows: true, svt: true, animate_sun: false, lod: None, fov: None, pool_mb: None, texture_pool_mb: None, texture_compression: true, switch_to: None, dump_dir: None, dump_count: 16, keys: Vec::new(), keys_at: None, hold: Vec::new(), gltf: None, ground: true, bake_hvm: None, stream_from: None, io_latency_ms: 0, sun: None, move_light: false, full_invalidation: false, moving_lights: Default::default(), moving_light_pages: None, movers: None, static_motion: false, screen_percentage: None, gpu_budget_ms: None, local_exposure: Some(Default::default()), scene_file: None, select: Vec::new(), no_skinning: false, gi: None, megalights: false, tessellation: true, displacement_speed_bound: true, dice_rate: None, speed: None, fog_scattering: None, tsr_depth_history: true, dof: None, photo: None, shadow_refresh_budget: None, shadow_max_staleness: None, shadow_distant: None, megalights_options: (None, true, true, true), avboit: true, world_cache: None, exposure: None };
             let mut scene_given = false;
             let mut it = args.iter().skip(1);
             while let Some(arg) = it.next() {
@@ -208,6 +213,14 @@ mod native {
                     "--no-rvt" => o.rvt = false,
                     "--no-glass-shadows" => o.glass_shadows = false,
                     "--wboit" => o.avboit = false,
+                    "--exposure" => o.exposure = value().parse().ok(),
+                    "--world-cache" => {
+                        let v = value();
+                        o.world_cache = helios_render::WorldCacheMode::parse(&v);
+                        if o.world_cache.is_none() {
+                            log::warn!("--world-cache {v}: expected off, on or replace");
+                        }
+                    }
                     "--no-svt" => o.svt = false,
                     "--no-texture-compression" => o.texture_compression = false,
                     "--animate-sun" => o.animate_sun = true,
@@ -366,6 +379,13 @@ mod native {
             app.renderer.settings.virtual_texturing = self.rvt;
             app.renderer.settings.glass_shadows = self.glass_shadows;
             app.renderer.settings.avboit = self.avboit;
+            if let Some(mode) = self.world_cache {
+                app.renderer.settings.world_cache = mode;
+            }
+            if let Some(ev) = self.exposure {
+                app.renderer.settings.auto_exposure = false;
+                app.renderer.settings.exposure_compensation = ev;
+            }
             app.renderer.settings.texture_streaming = self.svt;
             if let Some(lod) = self.lod {
                 app.renderer.settings.lod_threshold = lod;

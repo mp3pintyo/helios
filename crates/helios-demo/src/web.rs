@@ -460,6 +460,11 @@ async fn run() -> Result<(), String> {
     if matches!(option_string("oit", "oit").as_deref(), Some("wboit")) {
         app.renderer.settings.avboit = false;
     }
+    // `?world-cache=on|replace|off`: Lumen's world cache behind / in place of the mesh cards
+    // (key 5 cycles).
+    if let Some(mode) = option_string("worldCache", "world-cache").as_deref().and_then(helios_render::WorldCacheMode::parse) {
+        app.renderer.settings.world_cache = mode;
+    }
     set_status("");
 
     let hud = document.get_element_by_id("hud").and_then(|e| e.dyn_into::<HtmlElement>().ok());

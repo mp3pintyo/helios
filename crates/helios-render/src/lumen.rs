@@ -24,6 +24,9 @@
 //! * **Displaced surfaces** (`lumen_displaced.rs`) — instances whose material displaces their
 //!   mesh (Nanite tessellation) are represented by a distance field and cards baked from the
 //!   displaced surface, so all of the above follow the displacement.
+//! * **World cache** (`world_cache.rs`) — optional (UE 5.9's Lumen World Cache): sparse
+//!   world-space cells filled by paths traced from the screen; ray hits read them behind the
+//!   cards in place of the voxel lighting, or in place of the cards too.
 
 use std::collections::HashMap;
 
@@ -43,6 +46,7 @@ use crate::shader::create_module;
 use crate::targets::FrameTargets;
 use crate::textures::TextureLibrary;
 use crate::util::{bind, bind_group, bind_group_layout, compute_pipeline, storage_buffer, storage_buffer_init, uniform_buffer, workgroups};
+use crate::world_cache::{WorldCache, WorldCacheInputs, WorldCacheMode};
 use crate::pipelines::{in_group, Group, Lazy};
 
 pub const SDF_LEVELS: usize = 4;
@@ -80,7 +84,8 @@ struct LumenUniform {
     sky_intensity: f32,
     probe_update_fraction: u32,
     voxel_update_phase: u32,
-    _pad: u32,
+    /// [`WorldCacheMode::gpu`].
+    world_cache: u32,
     near_field: NearFieldUniform,
     cards: CardUniform,
 }
@@ -194,6 +199,8 @@ pub struct Lumen {
     reflect_temporal: Stage,
     light_cards: Stage,
     debug_cards: Stage,
+    /// UE 5.9's world cache (`world_cache.rs`), allocated when first enabled.
+    world_cache: WorldCache,
 }
 
 fn texture_3d(device: &wgpu::Device, label: &str, size: (u32, u32, u32), format: F) -> wgpu::Texture {
@@ -232,6 +239,8 @@ impl Lumen {
         let hdr = || bind::storage_texture(F::Rgba16Float);
         // The gather passes' mesh-card bindings: data, pages, capture, lighting, instance ids.
         let card_bindings = [(70, ro()), (71, ro()), (72, bind::texture_uint()), (73, tex(false)), (74, bind::texture_3d_uint())];
+        // ... and the world cache's cells (lumen_world_cache_common.wgsl), read at every hit.
+        let card_bindings = [&card_bindings[..], &[(150, bind::texture_uint())]].concat();
         let with_cards = |bindings: &[(u32, BindingType)]| [bindings, &card_bindings].concat();
 
         let level_list = (0..SDF_LEVELS)
@@ -428,7 +437,18 @@ impl Lumen {
                     (27, hdr()),
                 ],
             ),
+            world_cache: WorldCache::new(device),
         }
+    }
+
+    /// Where ray hits read the world cache (off: cards and voxel lighting only).
+    pub fn set_world_cache(&mut self, mode: WorldCacheMode) {
+        self.world_cache.mode = mode;
+    }
+
+    /// Statistics of the world cache (natively with `HELIOS_WORLD_CACHE_STATS`).
+    pub fn world_cache_stats(&self) -> crate::world_cache::WorldCacheStats {
+        self.world_cache.latest
     }
 
     /// Current reflection result (half resolution, rgb radiance, a = validity).
@@ -457,6 +477,7 @@ impl Lumen {
         let displaced = self.displaced.sync(scene, tessellation);
         if versions != self.versions || changes.structural || displaced {
             self.versions = versions;
+            self.world_cache.invalidate();
             self.displaced.assign(scene);
             // Uploading borrows Lumen mutably and the variants immutably.
             let variants = std::mem::replace(&mut self.displaced, DisplacedSurfaces::new());
@@ -563,7 +584,7 @@ impl Lumen {
             sky_intensity: 1.0,
             probe_update_fraction: PROBE_UPDATE_FRACTION,
             voxel_update_phase: frame % 4,
-            _pad: 0,
+            world_cache: if self.has_sdf { self.world_cache.mode.gpu() } else { 0 },
             near_field: self.near_field.update(device, queue, camera_position),
             cards: self.cards.update(device, queue, camera_position, frame),
         };
@@ -574,6 +595,7 @@ impl Lumen {
         if self.gather.as_ref().is_none_or(|g| g.size != size) {
             self.gather = Some(GatherTargets::new(device, size));
         }
+        self.world_cache.prepare(device, camera_position, (targets.width, targets.height));
     }
 
     /// The clipmap levels as the incremental updates see them.
@@ -684,6 +706,12 @@ impl Lumen {
 
     pub fn after_submit(&mut self) {
         self.displaced.after_submit();
+        self.world_cache.after_submit();
+    }
+
+    /// Copies the world cache's statistics for read-back (end of the frame).
+    pub fn record_stats(&mut self, encoder: &mut wgpu::CommandEncoder) {
+        self.world_cache.record_stats(encoder);
     }
 
     /// Composes the clipmap levels of the global distance field scheduled by `update`. Recorded
@@ -778,7 +806,8 @@ impl Lumen {
             };
             self.cards.record_capture(rec, surfaces.queue, &inputs);
         }
-        if self.has_sdf && self.cards.update_count() > 0 {
+        // The world cache replacing the cards: their lighting is not updated (UE 5.9).
+        if self.has_sdf && self.cards.update_count() > 0 && self.world_cache.mode != WorldCacheMode::Replace {
             let group = self.light_cards.group(
                 device,
                 &[
@@ -850,6 +879,7 @@ impl Lumen {
                     (72, TextureView(&self.cards.capture)),
                     (73, TextureView(&self.cards.lighting)),
                     (74, TextureView(&self.instance_ids)),
+                    (150, TextureView(self.world_cache.cells())),
                 ],
             );
             let mut pass = rec.compute_pass("lumen surface + radiance cache");
@@ -864,6 +894,40 @@ impl Lumen {
             }
         }
         let lighting = &self.voxel_lighting[write];
+
+        // ---- World cache: paths from the screen into its cells ------------------------------------
+        if self.has_sdf {
+            let inputs = WorldCacheInputs {
+                frame,
+                lumen: &self.uniform,
+                global_sdf: &self.global_sdf,
+                voxel_lighting: lighting,
+                linear: &samplers.linear,
+                shadow_sampler: &samplers.shadow,
+                radiance_probes: &self.radiance_probes,
+                transmittance: &sky.transmittance,
+                sky_view: &sky.sky_view,
+                lights: &lights.lights,
+                exposure,
+                vsm: surfaces.vsm,
+                glass: surfaces.glass,
+                near_field: (&self.near_field.data, &self.near_field.atlas),
+                targets,
+                card_data: &self.cards.data,
+                card_pages: &self.cards.pages,
+                card_capture: &self.cards.capture,
+                card_lighting: &self.cards.lighting,
+                card_albedo: &self.cards.albedo,
+                instance_ids: &self.instance_ids,
+            };
+            self.world_cache.record(rec, &inputs);
+            if self.world_cache.reference_active() && screen_probes {
+                self.world_cache.record_reference(rec, &inputs);
+            }
+        }
+        // The reference path tracer (comparisons) writes the GI in place of the screen probes.
+        let screen_probes = screen_probes && !(self.has_sdf && self.world_cache.reference_active());
+        let cells = self.world_cache.cells();
 
         // ---- Screen probes ----------------------------------------------------------------------
         let grid = (targets.width.div_ceil(PROBE_TILE), targets.height.div_ceil(PROBE_TILE));
@@ -907,6 +971,7 @@ impl Lumen {
                 (72, TextureView(&self.cards.capture)),
                 (73, TextureView(&self.cards.lighting)),
                 (74, TextureView(&self.instance_ids)),
+                (150, TextureView(cells)),
                 (out.0, TextureView(out.1)),
             ];
             if out.0 == 12 {
@@ -1040,7 +1105,48 @@ impl Lumen {
             card_capture: &self.cards.capture,
             card_lighting: &self.cards.lighting,
             instance_ids: &self.instance_ids,
+            world_cache: self.world_cache.cells(),
         }
+    }
+
+    /// Draws the world cache's radiance at every pixel ([`crate::DebugView::WorldCache`]).
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_world_cache_debug(
+        &self,
+        rec: &mut Recorder,
+        frame: &wgpu::Buffer,
+        targets: &FrameTargets,
+        sky: &crate::passes::sky::Sky,
+        samplers: &crate::passes::Samplers,
+        lights: &crate::lights::LightCulling,
+        exposure: &wgpu::Buffer,
+        surfaces: &CardInputs,
+    ) {
+        let lighting = &self.voxel_lighting[((self.frame & 1) ^ 1) as usize];
+        let inputs = WorldCacheInputs {
+            frame,
+            lumen: &self.uniform,
+            global_sdf: &self.global_sdf,
+            voxel_lighting: lighting,
+            linear: &samplers.linear,
+            shadow_sampler: &samplers.shadow,
+            radiance_probes: &self.radiance_probes,
+            transmittance: &sky.transmittance,
+            sky_view: &sky.sky_view,
+            lights: &lights.lights,
+            exposure,
+            vsm: surfaces.vsm,
+            glass: surfaces.glass,
+            near_field: (&self.near_field.data, &self.near_field.atlas),
+            targets,
+            card_data: &self.cards.data,
+            card_pages: &self.cards.pages,
+            card_capture: &self.cards.capture,
+            card_lighting: &self.cards.lighting,
+            card_albedo: &self.cards.albedo,
+            instance_ids: &self.instance_ids,
+        };
+        self.world_cache.record_debug(rec, &inputs);
     }
 }
 
@@ -1057,6 +1163,8 @@ pub(crate) struct TraceResources<'a> {
     pub card_capture: &'a wgpu::TextureView,
     pub card_lighting: &'a wgpu::TextureView,
     pub instance_ids: &'a wgpu::TextureView,
+    /// The world cache's cells (binding 150).
+    pub world_cache: &'a wgpu::TextureView,
 }
 
 /// Coverage of alpha-masked (mesh, material) pairs: the fraction of the surface that passes the

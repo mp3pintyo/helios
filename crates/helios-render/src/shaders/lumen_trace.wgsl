@@ -3,7 +3,10 @@
 // global distance field beyond, the surface caches at the hit, the sky where nothing is hit.
 //
 // Includers declare, besides the bindings of lumen_common.wgsl, lumen_mesh_sdf.wgsl and
-// lumen_cards.wgsl: sky_view_lut: texture_2d<f32>.
+// lumen_cards.wgsl: sky_view_lut: texture_2d<f32>. The world cache's cells are bound by
+// lumen_world_cache_common.wgsl (binding 150).
+
+#include "lumen_world_cache_common.wgsl"
 
 struct Radiance {
     color: vec3<f32>,
@@ -32,7 +35,13 @@ fn trace_world_radiance(origin: vec3<f32>, dir: vec3<f32>, t_min: f32) -> Radian
             let near = trace_mesh_sdfs(origin, dir, 0.0, lumen.mesh_sdf_trace.x);
             if near.hit {
                 let p = origin + dir * near.t;
-                r.color = card_surface_radiance(near_field_radiance(p, near.normal), near.instance, p, near.normal, 0.02);
+                // The world cache over the voxel estimate; the cards over both unless it replaces them.
+                let fallback = world_cache_over(near_field_radiance(p, near.normal), p, near.normal);
+                if lumen.world_cache == WC_REPLACE {
+                    r.color = fallback;
+                } else {
+                    r.color = card_surface_radiance(fallback, near.instance, p, near.normal, 0.02);
+                }
                 r.t = near.t;
                 return r;
             }
@@ -43,11 +52,19 @@ fn trace_world_radiance(origin: vec3<f32>, dir: vec3<f32>, t_min: f32) -> Radian
             // Sample the surface cache on the near side of the hit: lighting voxels are larger
             // than thin walls, so this keeps the far (e.g. sunlit exterior) side from leaking in.
             let lighting_voxel = lumen.sdf_levels[hit.level].w * SDF_RES / LIGHT_RES;
-            let voxels = voxel_radiance(hit.position - dir * lighting_voxel * 0.6, hit.level);
+            var voxels = voxel_radiance(hit.position - dir * lighting_voxel * 0.6, hit.level);
+            let normal = sdf_normal(hit.position, hit.level);
+            let n = select(normal, -normal, dot(normal, dir) > 0.0);
+            if lumen.world_cache != WC_OFF {
+                // The world cache's cell of the surface (the hit moved onto the field's zero level).
+                voxels = world_cache_over(voxels, hit.position - normal * sdf_distance(hit.position, hit.level), n);
+            }
             // The surface's cards, if any.
-            var n = sdf_normal(hit.position, hit.level);
-            n = select(n, -n, dot(n, dir) > 0.0);
-            r.color = card_field_radiance(voxels, hit.position, n, hit.level, lumen.sdf_levels[hit.level].w * 0.5);
+            if lumen.world_cache == WC_REPLACE {
+                r.color = voxels;
+            } else {
+                r.color = card_field_radiance(voxels, hit.position, n, hit.level, lumen.sdf_levels[hit.level].w * 0.5);
+            }
             r.t = hit.t;
             return r;
         }
