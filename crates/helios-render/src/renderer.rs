@@ -1065,14 +1065,6 @@ impl Renderer {
         let r = &self.requested;
         let megalights_wanted = r.mega_lights || matches!(r.debug_view, DebugView::MegaLightsSamples | DebugView::MegaLightsDenoising);
         self.megalights.sync_substrate(&self.device, self.extended.lighting.then_some(&self.extended.megalights_layout).filter(|_| megalights_wanted));
-        // The browser waits for every core pipeline the frame needs (the scene's material
-        // permutations, say) instead of compiling one inside the frame, which would hold the
-        // queue behind a synchronous compile (Firefox) or compile one pipeline at a time in the
-        // GPU process (Chromium: a scene switch waited 25 s for its 34 new pipelines). So a frame
-        // whose sync queued pipelines — a core one, or one of a feature this frame renders with
-        // (the new scene's tessellation dicing, say) — stops here: the page keeps its last image
-        // while they compile in the background, and the next frame renders with the features
-        // whose pipelines are in. Natively nothing is queued and this never stops.
         // Lumen Lite is created as soon as it is asked for (or the frame chose it as its
         // fallback), so the browser compiles it before it is used.
         let r = &self.requested;
@@ -1084,6 +1076,14 @@ impl Renderer {
         if self.frame_index == 0 && self.sync_only {
             return;
         }
+        // The browser waits for every core pipeline the frame needs (the scene's material
+        // permutations, say) instead of compiling one inside the frame, which would hold the
+        // queue behind a synchronous compile (Firefox) or compile one pipeline at a time in the
+        // GPU process (Chromium: a scene switch waited 25 s for its 34 new pipelines). So a frame
+        // whose sync queued pipelines — a core one, or one of a feature this frame renders with
+        // (the new scene's tessellation dicing, say) — stops here: the page keeps its last image
+        // while they compile in the background, and the next frame renders with the features
+        // whose pipelines are in. Natively nothing is queued and this never stops.
         if pipelines::deferring() && (!pipelines::ready(Group::Core) || Group::ALL.iter().zip(ready_before).any(|(&g, before)| before && !pipelines::ready(g))) {
             self.held = true;
             return;

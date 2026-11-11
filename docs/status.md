@@ -326,12 +326,20 @@ Honest differences that remain:
     over up to four by a deterministic least-loaded assignment (the page only runs the builder without bakes,
     ≈ 0.3 s), and a stand-in of the scene queues its content pipelines while they bake; scene switches bake there
     too. Still simpler than UE, which cooks offline: every visit bakes the scene again (a bake takes as long as its
-    largest mesh: the valley's terrain, 2.5 s on a page thread), imported glTF models bake on the page, Firefox's
-    compile set is unchanged (≈ 43 s of background compiling for the valley, led by the translucency shading,
-    tessellation dicing and the resolve's tessellation permutation), and the device needs 20 sampled textures per
+    largest mesh: the valley's terrain, 2.5 s on a page thread), imported glTF models bake on the page, and the
+    device needs 20 sampled textures per
     shader stage (WebGPU guarantees 16; desktop browsers offer 48–64) — there is no reduced variant for smaller
     adapters. `shader-f16` is requested and wired up (`half.wgsl`), but no pass uses it: TSR and MegaLights'
     denoiser gained nothing on the RTX 3090, where UE 5.8.1 runs TSR in 16-bit by default.
+    Round 8 (`webperf`, `docs/round8/webperf.md`): a frame whose scene sync queues pipelines (a new scene, an
+    editor change) is held — the canvas keeps its last image — while they compile in the background, instead of
+    compiling them inside the frame (a switch to the gallery held the canvas 18–26 s in Chrome, now ≈ 3–4 s); the
+    valley's Firefox set shrank from 214 to 200 pipelines (45 → 38.5 s of compiling: the resolve's tessellation
+    permutation used from the start, the dicing two levels per pipeline, classic translucency only for refracting
+    surfaces, the underwater view on demand). Still simpler: the new scene's pipelines compile after its bake,
+    not during it (its stand-in cannot be synced while the old scene renders: one GPU scene), so a switch still
+    shows a frozen frame for the compile (Firefox 12–16 s for the gallery's ten resolve pipelines, one at a time), and
+    AVBOIT's front / back variants (≈ 10 s of the valley's Firefox compile) are separate pipelines.
 16. **Coloured light through glass** (round 7, `glass-shadows`): the sun's map of the glass panes keeps one pane
     per texel (light through two panes in a row takes the nearer one's colour) and spans every visible pane (glass
     spread over a large world gets coarse texels); Lumen's voxel surface cache and the volumes' lighting cache still

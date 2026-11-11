@@ -796,6 +796,8 @@ fn frame(st: &mut State, now: f64) {
         log::info!("frames held {:.2} s for the pipelines a new scene or an edit needs", (now - st.held_since) / 1000.0);
         st.held_since = 0.0;
     }
+    // A presented frame waits for nothing (a hold's status line ends here).
+    set_busy("");
     if st.presented == 0 {
         set_time(1, now);
         let start = TIMES.with(Cell::get)[0];

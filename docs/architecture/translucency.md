@@ -71,7 +71,9 @@ Part of the `helios-render` GPU pipeline; the pipeline diagram and the index of 
   transmittance target). Cost (1600×900, RTX 3090, minima of 3 interleaved runs, all translucency + OIT passes): the
   lake's crossing panels 1.25 → 0.92 ms (no peeling), the cathedral's aisle screens 0.82 → 0.68 ms, views with only
   particles and volumes +0.05–0.10 ms (the grid 0.02–0.07 ms, the composite's second draw, the march's grid taps);
-  the grid takes 36 MiB at 1600×900. Details and limits: `docs/round8/translucency.md`.
+  the grid takes 36 MiB at 1600×900. Details and limits: `docs/round8/translucency.md`. In the browser only the
+  refracting surfaces' classic shading models (and peel variants) are queued while AVBOIT is on (the others compile
+  when it is switched off: `webperf`, 1–2 s each in Firefox).
 * **Coloured light through glass** (`glass_shadow.rs`, `glass_shadow.wgsl`; UE5's translucent shadows). Panes that
   let the sun through (not shadow casters) would light the interior white; instead the visible `Glass` instances are
   drawn from the sun into a map of their own — an orthographic view along the sunlight fitted to their boxes, 256²
@@ -107,7 +109,8 @@ Part of the `helios-render` GPU pipeline; the pipeline diagram and the index of 
   caustics form irregular cells rather than a lattice of parallelograms (straight crests did); the bends only vary
   across each wave's travel direction, so they travel with it and nothing shimmers. Caustics they scale only the bed's direct-sun share `(E_sun·c + E_amb)/(E_sun + E_amb)` (no albedo needed), with E_sun
   through the bed's virtual shadow map and cloud shadows — so no caustics in shadow. **Underwater**: with the camera
-  in a body, a full-screen draw fogs the opaque scene by absorption and single scattering along the view (to the
+  in a body (in the browser its pipeline compiles once the camera comes within 10 m of a body, round 8 `webperf`;
+  a frame under water before that skips the fog), a full-screen draw fogs the opaque scene by absorption and single scattering along the view (to the
   surface where the ray leaves the water) and adds caustics on the bed. The in-scattered light is the sun (through the
   surface's Fresnel transmission and its shadows) and the sky / GI irradiance (Lumen's radiance cache) entering the
   surface above the middle of the ray, fading with depth: since the depth changes linearly along the ray, the single
