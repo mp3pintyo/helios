@@ -1,8 +1,10 @@
 // GPU-driven hierarchical culling, LOD selection and streaming feedback.
 //
-//   cull_instances : instance frustum test -> batches of up to 64 pages
+//   cull_instances : instance frustum test -> batches of up to 64 pages, or for instances with
+//                    few pages their pages one by one (page candidates)
 //   cull_pages     : one thread per page: residency, frustum and LOD pruning -> page work items,
-//                    or for small pages their clusters one by one (cluster candidates)
+//                    or for small pages their clusters one by one (cluster candidates); a
+//                    workgroup per batch, then one per 64 page candidates
 //   cull_clusters  : one thread per cluster: LOD cut with residency, frustum, two-pass HZB
 //                    occlusion, streaming feedback and hardware/software raster binning; a
 //                    workgroup per page work item, then one per 64 cluster candidates
@@ -18,7 +20,8 @@
 //       clusters and update the persistent visibility bits
 //
 // The work buffer holds batches in [0, batch_capacity), page items after them, then cluster
-// candidates (two per vec4, up to 2 * work_capacity).
+// candidates (two per vec4, up to 2 * work_capacity), then page candidates (two per vec4, up to
+// 2 * batch_capacity).
 // The atomics buffer holds page feedback in [0, page_count) and visibility bits after it.
 // Visible clusters: hardware-raster entries grow from the front, software-raster entries
 // from the back, so both share one slot space for the visibility buffer. In the main view,
@@ -41,6 +44,37 @@
 
 override CULL_MODE: u32 = 0u;
 
+// Whether this specialisation culls deforming instances (wind, displacement, skin). Frames in
+// which nothing deforms (GpuScene::deforms: no wind blowing on an instance with a wind response,
+// no displaced or skinned instance) take the lean one: bounds are never padded and the wind,
+// displacement and skin lookups compile away. Only the wind's bound (wind_strength,
+// wind_padded) is used here, never the form of wind_offset.
+override DEFORMING: bool = true;
+
+// The wind strength of `instance` for culling (wind_strength).
+fn cull_strength(instance: Instance) -> f32 {
+    if !DEFORMING {
+        return 0.0;
+    }
+    return wind_strength(instance);
+}
+
+// `sphere` grown to hold `instance`'s geometry wherever its deformation moves it.
+fn deformed_bounds(instance: Instance, strength: f32, sphere: vec4<f32>) -> vec4<f32> {
+    if !DEFORMING {
+        return sphere;
+    }
+    return posed_bounds(instance, wind_padded(instance, strength, displacement_padded(instance, sphere)));
+}
+
+// dynamic_caster, for this specialisation.
+fn cull_dynamic_caster(instance: Instance, strength: f32) -> bool {
+    if !DEFORMING {
+        return (instance.flags & (INSTANCE_MOVABLE | INSTANCE_ANIMATED)) != 0u;
+    }
+    return dynamic_caster(instance, strength);
+}
+
 const VIEW_MAIN: u32 = 0u;
 const VIEW_SHADOW: u32 = 1u;
 const PAGES_PER_BATCH: u32 = 64u;
@@ -59,7 +93,8 @@ struct CullState {
     masked_early: u32,
     voxel_count: atomic<u32>,
     candidate_count: atomic<u32>,
-    _pad: array<u32, 3>,
+    page_candidate_count: atomic<u32>,
+    _pad: array<u32, 2>,
 }
 
 @group(0) @binding(0) var<uniform> view: CullView;
@@ -203,6 +238,22 @@ fn vsm_overlaps(sphere: vec4<f32>, dynamic: bool) -> bool {
     return false;
 }
 
+// Whether this view is a sun clipmap level with no dirty page at all (both of its rectangles
+// in vsm_overlaps empty).
+fn level_is_clean() -> bool {
+    if view.kind != VIEW_SHADOW || view.orthographic == 0u {
+        return false;
+    }
+    let base = u32(view.vsm.x) * 8u;
+    var clean = true;
+    for (var rect = 0u; rect < 8u; rect += 4u) {
+        let lo = vec2<i32>(bitcast<i32>(atomicLoad(&atomics[base + rect])), bitcast<i32>(atomicLoad(&atomics[base + rect + 1u])));
+        let hi = vec2<i32>(bitcast<i32>(atomicLoad(&atomics[base + rect + 2u])), bitcast<i32>(atomicLoad(&atomics[base + rect + 3u])));
+        clean = clean && any(hi < lo);
+    }
+    return clean;
+}
+
 fn is_resident(page: u32) -> bool {
     return page != INVALID_PAGE && page_table[page] != INVALID_ID;
 }
@@ -210,7 +261,9 @@ fn is_resident(page: u32) -> bool {
 @compute @workgroup_size(64)
 fn cull_instances(@builtin(global_invocation_id) gid: vec3<u32>) {
     let index = gid.x;
-    if index >= view.instance_count {
+    // A sun clipmap level without dirty pages culls everything: every thread leaves before
+    // loading its instance (most levels, most frames).
+    if index >= view.instance_count || level_is_clean() {
         return;
     }
     let instance = instances[index];
@@ -229,22 +282,68 @@ fn cull_instances(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (instance.flags & INSTANCE_EXPANDED) != 0u {
         return;
     }
-    let strength = wind_strength(instance);
-    let bounds = posed_bounds(instance, wind_padded(instance, strength, displacement_padded(instance, instance.bounds)));
-    if !sphere_in_frustum(bounds) || !vsm_overlaps(bounds, dynamic_caster(instance, strength)) {
+    let strength = cull_strength(instance);
+    let bounds = deformed_bounds(instance, strength, instance.bounds);
+    if !sphere_in_frustum(bounds) || !vsm_overlaps(bounds, cull_dynamic_caster(instance, strength)) {
         return;
     }
-    let batches = (instance.page_count + PAGES_PER_BATCH - 1u) / PAGES_PER_BATCH;
-    let first = atomicAdd(&state.batch_count, batches);
+    // Instances with few pages list them as page candidates (not an assembly's culling record,
+    // whose lanes are its parts' pages, and not in the local lights' view, whose page tests loop
+    // over its lights: there lanes of one instance share its loads, which paid more than packing).
+    let part_list = (instance.flags & INSTANCE_PART_LIST) != 0u;
+    let local_lights = view.kind == VIEW_SHADOW && view.orthographic == 0u;
+    let count = instance.page_count;
+    if !part_list && !local_lights && count <= SMALL_INSTANCE_PAGES {
+        let c0 = atomicAdd(&state.page_candidate_count, count);
+        let capacity = page_candidate_capacity();
+        if c0 + count <= capacity {
+            for (var p = 0u; p < count; p++) {
+                write_page_candidate(c0 + p, index, p);
+            }
+            return;
+        }
+        // Out of page candidates: void what was reserved below the capacity and take batches.
+        for (var c = c0; c < min(c0 + count, capacity); c++) {
+            write_page_candidate(c, INVALID_ID, 0u);
+        }
+    }
+    let batches = (count + PAGES_PER_BATCH - 1u) / PAGES_PER_BATCH;
+    let slot0 = atomicAdd(&state.batch_count, batches);
     for (var b = 0u; b < batches; b++) {
-        let slot = first + b;
+        let slot = slot0 + b;
         if slot >= view.batch_capacity {
             atomicAdd(&state.overflow, 1u);
             return;
         }
         let start = b * PAGES_PER_BATCH;
-        work[slot] = vec4<u32>(index, start, min(PAGES_PER_BATCH, instance.page_count - start), 0u);
+        work[slot] = vec4<u32>(index, start, min(PAGES_PER_BATCH, count - start), 0u);
     }
+}
+
+// Instances with at most this many pages list them as page candidates, 64 to a page workgroup from
+// any instances, instead of taking a 64-lane batch of their own: grass (6 pages), ferns, logs,
+// conifer needles and small props would leave most lanes idle.
+const SMALL_INSTANCE_PAGES: u32 = 16u;
+
+// Page candidates, two (instance, mesh page) pairs per vec4 after the cluster candidates; up to
+// two per batch slot. INVALID_ID marks a reserved slot that is not used.
+fn page_candidate_capacity() -> u32 {
+    return view.batch_capacity * 2u;
+}
+
+fn page_candidate_word(c: u32) -> u32 {
+    return view.batch_capacity + (view.work_capacity * 2u) + (c >> 1u);
+}
+
+fn write_page_candidate(c: u32, instance_id: u32, page: u32) {
+    let lane = (c & 1u) * 2u;
+    work[page_candidate_word(c)][lane] = instance_id;
+    work[page_candidate_word(c)][lane + 1u] = page;
+}
+
+fn read_page_candidate(c: u32) -> vec2<u32> {
+    let pair = work[page_candidate_word(c)];
+    return select(pair.xy, pair.zw, (c & 1u) != 0u);
 }
 
 var<workgroup> wg_count: atomic<u32>;
@@ -297,10 +396,12 @@ fn cull_pages(
     var page_id = 0u;
     var first_cluster = 0u;
     var cluster_count = 0u;
+    var lane_page = 0u;
+    var valid = false;
     if batch_index < batch_count {
         let batch = work[batch_index];
-        var lane_page = batch.y + lid;
-        var valid = lid < batch.z;
+        lane_page = batch.y + lid;
+        valid = lid < batch.z;
         instance_id = batch.x;
         if valid && (instances[instance_id].flags & INSTANCE_PART_LIST) != 0u {
             // An expanded assembly's record (assembly.wgsl): lane -> (part, page of the part).
@@ -310,22 +411,31 @@ fn cull_pages(
             instance_id = list.page_offset + part;
             valid = lane_page < instances[instance_id].page_count;
         }
-        if valid {
-            let instance = instances[instance_id];
-            page_id = instance.page_offset + lane_page;
-            let page = pages[page_id];
-            let scale = instance.max_scale;
-            let strength = wind_strength(instance);
-            let bounds = posed_bounds(instance, wind_padded(instance, strength, displacement_padded(instance, transform_sphere(instance.world, page.bounds, scale))));
-            if page_table[page_id] != INVALID_ID && sphere_in_frustum(bounds) && vsm_overlaps(bounds, dynamic_caster(instance, strength)) {
-                // If even the coarsest parent in the page is fine enough, every cluster in it
-                // would be rejected by the LOD test: skip the page entirely.
-                let parent = transform_sphere(instance.world, page.parent_lod_bounds, scale);
-                emit = projected_error(world_error(page.max_parent_error, scale), parent) > view.lod_threshold;
-            }
-            first_cluster = page.cluster_offset;
-            cluster_count = page.cluster_count;
+    } else {
+        // The workgroups after the batches take 64 page candidates each.
+        let c = (batch_index - batch_count) * 64u + lid;
+        if c < min(atomicLoad(&state.page_candidate_count), page_candidate_capacity()) {
+            let pair = read_page_candidate(c);
+            instance_id = pair.x;
+            lane_page = pair.y;
+            valid = pair.x != INVALID_ID;
         }
+    }
+    if valid {
+        let instance = instances[instance_id];
+        page_id = instance.page_offset + lane_page;
+        let page = pages[page_id];
+        let scale = instance.max_scale;
+        let strength = cull_strength(instance);
+        let bounds = deformed_bounds(instance, strength, transform_sphere(instance.world, page.bounds, scale));
+        if page_table[page_id] != INVALID_ID && sphere_in_frustum(bounds) && vsm_overlaps(bounds, cull_dynamic_caster(instance, strength)) {
+            // If even the coarsest parent in the page is fine enough, every cluster in it
+            // would be rejected by the LOD test: skip the page entirely.
+            let parent = transform_sphere(instance.world, page.parent_lod_bounds, scale);
+            emit = projected_error(world_error(page.max_parent_error, scale), parent) > view.lod_threshold;
+        }
+        first_cluster = page.cluster_offset;
+        cluster_count = page.cluster_count;
     }
 
     // Small pages: one global reservation of candidates per workgroup.
@@ -446,10 +556,10 @@ fn test_cluster(instance_id: u32, cluster_id: u32) -> ClusterResult {
     let own = projected_error(world_error(cluster.lod_error, scale), transform_sphere(instance.world, cluster.lod_bounds, scale));
     let parent = projected_error(world_error(cluster.parent_error, scale), transform_sphere(instance.world, cluster.parent_lod_bounds, scale));
     let bounds = transform_sphere(instance.world, cluster.bounds, scale);
-    let strength = wind_strength(instance);
-    let padded = posed_bounds(instance, wind_padded(instance, strength, displacement_padded(instance, bounds)));
+    let strength = cull_strength(instance);
+    let padded = deformed_bounds(instance, strength, bounds);
     let own_ok = own <= view.lod_threshold;
-    let candidate = parent > view.lod_threshold && sphere_in_frustum(padded) && vsm_overlaps(padded, dynamic_caster(instance, strength));
+    let candidate = parent > view.lod_threshold && sphere_in_frustum(padded) && vsm_overlaps(padded, cull_dynamic_caster(instance, strength));
     // Streaming feedback (main view): this cluster is on the cut but wants finer children.
     if candidate && !own_ok && cluster.child_page != INVALID_PAGE && CULL_MODE != 2u && view.kind == VIEW_MAIN {
         atomicMax(&atomics[cluster.child_page], view.frame_index);
@@ -473,7 +583,7 @@ fn test_cluster(instance_id: u32, cluster_id: u32) -> ClusterResult {
     }
 
     // Voxels and tessellated clusters are only rasterised in compute (voxel_raster.wgsl, tess.wgsl).
-    let compute_only = cluster_is_voxel(cluster) || is_tessellated(instance.flags, cluster);
+    let compute_only = cluster_is_voxel(cluster) || (DEFORMING && is_tessellated(instance.flags, cluster));
     if result.draw && (view.sw_raster_threshold > 0.0 || compute_only) {
         result.software = compute_only || prefers_software_raster(cluster, bounds);
     }
