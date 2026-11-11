@@ -43,11 +43,16 @@ fn glass_light_transmission(index: u32, light_position: vec3<f32>, p: vec3<f32>)
     // pane), their transmittances averaged.
     let d = p - light_position;
     let distance = length(d) - glass_lights.params.y;
+    // The distances first: most points a light with a map reaches lie in front of every pane
+    // (on the light's side), and they need no colours.
+    let a = textureGather(3, glass_light_maps, glass_light_sampler, d, layer);
+    let behind = (a > vec4<f32>(0.0)) & (vec4<f32>(distance) > a);
+    if !any(behind) {
+        return vec3<f32>(1.0);
+    }
     let r = textureGather(0, glass_light_maps, glass_light_sampler, d, layer);
     let g = textureGather(1, glass_light_maps, glass_light_sampler, d, layer);
     let b = textureGather(2, glass_light_maps, glass_light_sampler, d, layer);
-    let a = textureGather(3, glass_light_maps, glass_light_sampler, d, layer);
-    let behind = (a > vec4<f32>(0.0)) & (vec4<f32>(distance) > a);
     let one = vec4<f32>(1.0);
     let t = vec3<f32>(dot(select(one, r, behind), one), dot(select(one, g, behind), one), dot(select(one, b, behind), one));
     return t * 0.25;

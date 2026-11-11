@@ -29,7 +29,8 @@
 @group(0) @binding(13) var<uniform> vsm: Vsm;
 
 const SRAO_DIRECTIONS: u32 = 4u;
-const SRAO_STEPS: u32 = 4u;
+// 3 steps (4 at full resolution before): each pixel blends up to four texels' estimates.
+const SRAO_STEPS: u32 = 3u;
 // World radius (m) and its screen cap (pixels at 900 rows).
 const SRAO_RADIUS: f32 = 0.4;
 const SRAO_MAX_PIXELS: f32 = 64.0;
