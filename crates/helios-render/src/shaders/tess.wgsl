@@ -4,7 +4,7 @@
 //   emit   : one workgroup per software cluster, one thread per triangle of a tessellated
 //            cluster: its level-0 patch is culled and routed (diced or split, tess_queue.wgsl)
 //   split  : the split passes (tess_queue.wgsl)
-//   dice   : every grid level F = 2^level in one dispatch, the diced patches' micro-triangles are displaced and
+//   dice   : grid levels F = 2^level two per dispatch, the diced patches' micro-triangles are displaced and
 //            rasterised, PASS 0 the depth, PASS 1 the payload (sw_raster.wgsl). Patches with F <= 2
 //            are diced by one thread each; F = 4 and 8 by 16 and 64 threads (4 patches or one per
 //            workgroup): the grid's vertices are displaced and projected into shared memory, then
@@ -28,6 +28,8 @@
 
 override PASS: u32 = 0u;
 override LATE: bool = false;
+// The dicing path: false for grid levels 0 and 1 (a thread per patch), true for 2 and 3 (shared memory).
+override GRID: bool = false;
 
 @group(0) @binding(0) var<uniform> view: CullView;
 @group(0) @binding(1) var<storage, read> visible_clusters: array<vec4<u32>>;
@@ -253,18 +255,20 @@ var<workgroup> wg_screen: array<vec4<f32>, 64>;
 var<workgroup> wg_lambda: array<vec2<f32>, 64>;
 var<workgroup> wg_level: vec2<u32>;
 
-// Every grid level in one dispatch (tess_queue.wgsl's tess_dice_level): one pipeline per pass instead of one
-// per pass and level (the browser compiles each), and no barrier between the levels' dispatches.
+// Two grid levels per dispatch (tess_queue.wgsl's tess_dice_level), one pipeline per path and pass instead of
+// one per level and pass (the browser compiles each). The paths stay apart: merged, the thread path's
+// registers (a whole grid per thread) cost the shared-memory path its occupancy (+0.6 ms on a graph-
+// displaced view).
 @compute @workgroup_size(64)
 fn dice(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) groups: vec3<u32>, @builtin(local_invocation_index) lid: u32) {
     if lid == 0u {
-        wg_level = tess_dice_level(wid.x + (wid.y * groups.x));
+        wg_level = tess_dice_level(wid.x + (wid.y * groups.x), select(0u, 2u, GRID));
     }
     let located = workgroupUniformLoad(&wg_level);
     let level = located.x;
     let group = located.y;
     let count = min(atomicLoad(&state[STATE_DICE + level]), DICE_CAPACITY);
-    if level <= 1u {
+    if !GRID {
         let index = (group * 64u) + lid;
         if index < count {
             dice_patch(level, index);

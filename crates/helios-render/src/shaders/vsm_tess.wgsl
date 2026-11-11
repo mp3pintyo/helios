@@ -23,6 +23,8 @@
 
 // Slope-scaled depth bias, as the other page rasterisers apply it (vsm.rs).
 override SLOPE_BIAS: f32 = 1.5;
+// The dicing path: false for grid levels 0 and 1 (a thread per patch), true for 2 and 3 (shared memory).
+override GRID: bool = false;
 
 @group(0) @binding(0) var<uniform> vsm: Vsm;
 @group(0) @binding(1) var<storage, read> draws: array<vec4<u32>>;
@@ -258,18 +260,17 @@ var<workgroup> wg_displaced: array<vec3<f32>, 64>;
 var<workgroup> wg_page: array<vec4<f32>, 64>;
 var<workgroup> wg_level: vec2<u32>;
 
-// Every grid level in one dispatch (tess_queue.wgsl's tess_dice_level): one pipeline per pass instead of one
-// per pass and level (the browser compiles each), and no barrier between the levels' dispatches.
+// Two grid levels per dispatch (tess_queue.wgsl's tess_dice_level), as tess.wgsl.
 @compute @workgroup_size(64)
 fn dice(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) groups: vec3<u32>, @builtin(local_invocation_index) lid: u32) {
     if lid == 0u {
-        wg_level = tess_dice_level(wid.x + (wid.y * groups.x));
+        wg_level = tess_dice_level(wid.x + (wid.y * groups.x), select(0u, 2u, GRID));
     }
     let located = workgroupUniformLoad(&wg_level);
     let level = located.x;
     let group = located.y;
     let count = min(atomicLoad(&state[STATE_DICE + level]), DICE_CAPACITY);
-    if level <= 1u {
+    if !GRID {
         let index = (group * 64u) + lid;
         if index < count {
             dice_patch(level, index);
