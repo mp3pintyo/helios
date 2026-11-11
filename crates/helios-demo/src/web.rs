@@ -75,6 +75,8 @@ pub(crate) struct State {
     /// process serves between compiles: one pipeline at a time made the full set ~15 % slower
     /// than compiling it in one go; the canvas still updates about once a second.
     batch: u32,
+    /// The pipelines of the background batch compiling now (`?compile-log=1` logs them).
+    batch_labels: Vec<String>,
 }
 
 /// A wait for the browser's GPU process to work through the pipelines created so far.
@@ -93,6 +95,11 @@ static GPU_DRAINED: AtomicU32 = AtomicU32::new(0);
 static GPU_WAIT: AtomicU32 = AtomicU32::new(0);
 /// Core pipelines the serial compiler's GPU process has compiled (the first image's progress).
 static CORE_COMPILED: AtomicU32 = AtomicU32::new(0);
+/// Serial compiler: `?compile-batch=N` fixes the background batch size (0: adaptive), and
+/// `?compile-log=1` logs every batch's pipelines and compile time (with a batch of 1, each
+/// pipeline's own; for finding the expensive ones).
+static FIXED_BATCH: AtomicU32 = AtomicU32::new(0);
+static COMPILE_LOG: AtomicU32 = AtomicU32::new(0);
 
 thread_local! {
     /// The running engine, for the exported page API.
@@ -152,9 +159,33 @@ fn compiling_text(now: f64) -> String {
 /// Works the pipeline queue; with the serial compiler a completion callback queued behind each
 /// core pipeline counts its compile (`onSubmittedWorkDone` resolves after the compiles before it).
 fn pump(queue: &wgpu::Queue) {
-    pipelines::pump_and(|| queue.on_submitted_work_done(|| {
+    let made = pipelines::pump_and(|| queue.on_submitted_work_done(|| {
         CORE_COMPILED.fetch_add(1, Ordering::Relaxed);
+        if COMPILE_LOG.load(Ordering::Relaxed) != 0 {
+            CORE_TIMES.lock().unwrap().push(now());
+        }
     }));
+    if made > 0 && COMPILE_LOG.load(Ordering::Relaxed) != 0 && pipelines::compiler() == Compiler::Serial {
+        CORE_LABELS.with(|l| l.borrow_mut().extend(browser::take_created_labels()));
+    }
+}
+
+/// `?compile-log=1`, serial compiler: when each core pipeline's compile finished (the
+/// completion callbacks queued behind them resolve in order) and their labels.
+static CORE_TIMES: std::sync::Mutex<Vec<f64>> = std::sync::Mutex::new(Vec::new());
+thread_local! {
+    static CORE_LABELS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Logs each core pipeline's compile time (the gap to the previous one's completion).
+fn log_core_compiles() {
+    let times = CORE_TIMES.lock().unwrap().clone();
+    let labels = CORE_LABELS.with(|l| l.borrow().clone());
+    let mut previous = TIMES.with(Cell::get)[0];
+    for (label, at) in labels.iter().zip(&times) {
+        log::info!("core compiled in {:.3} s: {label}", (at - previous).max(0.0) / 1000.0);
+        previous = *at;
+    }
 }
 
 fn now() -> f64 {
@@ -361,6 +392,14 @@ async fn run() -> Result<(), String> {
     // `?bake-workers=0` (page config `bakeWorkers: "0"`): Lumen's displaced variants bake on
     // the render thread instead of Web Workers.
     crate::web_bake::install(option_string("bakeWorkers", "bake-workers").as_deref() != Some("0"));
+    // `?f16=0`: f32 everywhere, as on a device without `shader-f16`.
+    if query_param("f16").as_deref() == Some("0") {
+        helios_render::allow_half_precision(false);
+    }
+    // `?max-sampled-textures=16`: a device as small as WebGPU's default limits allow (for testing).
+    if let Some(count) = query_param("max-sampled-textures").and_then(|v| v.parse().ok()) {
+        GpuContext::limit_sampled_textures(count);
+    }
     let instance = GpuContext::create_instance();
     let surface = instance
         .create_surface(wgpu::SurfaceTarget::Canvas(canvas.clone()))
@@ -370,6 +409,8 @@ async fn run() -> Result<(), String> {
         .map_err(|e| format!("{e}. Use a browser with WebGPU enabled (Chrome/Edge 113+, Safari 26+, Firefox 141+)."))?;
     // `?shaders=serial|parallel`: how the background compile works (by default by browser).
     browser::install(&ctx.device, parallel_compiles());
+    FIXED_BATCH.store(query_param("compile-batch").and_then(|v| v.parse().ok()).unwrap_or(0), Ordering::Relaxed);
+    COMPILE_LOG.store((query_param("compile-log").as_deref() == Some("1")) as u32, Ordering::Relaxed);
 
     let (width, height) = canvas_size(&canvas);
     canvas.set_width(width);
@@ -405,6 +446,7 @@ async fn run() -> Result<(), String> {
     // Let the browser send the compiles to its GPU process before the main thread bakes.
     next_tick().await;
 
+    let target = frame_target(&ctx.device, &config);
     // `?scene-file=URL`: a saved editor scene; its base scene is built instead of `?scene`.
     let scene_file = match query_param("scene-file") {
         Some(url) => {
@@ -447,7 +489,16 @@ async fn run() -> Result<(), String> {
             };
             set_status(&format!("Building the {} (virtual geometry, distance fields, textures)…", kind.name()));
             next_tick().await;
-            DemoApp::build(renderer, kind, detail, model)
+            // The meshes bake in the bake workers (the page stays live; the GPU process keeps
+            // compiling): see scene_bake.rs.
+            // Meanwhile a stand-in of the scene (no meshes) queues the pipelines its materials
+            // need, which compile during the bake too.
+            let queue = ctx.queue.clone();
+            let mut renderer = renderer;
+            let view = target.create_view(&Default::default());
+            let prefetch = |stand_in: &crate::scenes::SceneSetup| renderer.prefetch_scene(&stand_in.scene, &stand_in.camera, &view);
+            let setup = crate::scene_bake::build(kind, detail, model.as_ref(), prefetch, || pump(&queue)).await;
+            DemoApp::from_setup(renderer, setup, kind, detail, model)
         }
     };
     configure_resolution(&mut app);
@@ -472,7 +523,6 @@ async fn run() -> Result<(), String> {
         help.set_text_content(Some(HELP));
     }
 
-    let target = frame_target(&ctx.device, &config);
     let state = Rc::new(RefCell::new(State {
         app,
         input: Input::default(),
@@ -492,7 +542,8 @@ async fn run() -> Result<(), String> {
         compiling_frames: 0,
         presented: 0,
         compile_next: false,
-        batch: 1,
+        batch: FIXED_BATCH.load(Ordering::Relaxed).max(1),
+        batch_labels: Vec::new(),
     }));
     STATE.with(|s| *s.borrow_mut() = Some(state.clone()));
     // Keep the context (instance/adapter/queue) alive for the page lifetime.
@@ -540,9 +591,12 @@ fn install_input(state: &Rc<RefCell<State>>, canvas: &HtmlCanvasElement) -> Resu
             return;
         }
         if code == "KeyN" && embedded {
-            // The page cannot be reloaded with another query: rebuild in place.
+            // The page cannot be reloaded with another query: rebuild in place (baked in the
+            // workers; the current scene runs meanwhile).
             let next = st.app.kind.next(false);
-            st.app.load_scene(next);
+            wasm_bindgen_futures::spawn_local(async move {
+                helios_load_scene(next.name().to_string()).await;
+            });
             return;
         }
         if code == "KeyN" {
@@ -650,7 +704,18 @@ fn frame(st: &mut State, now: f64) {
             log::info!("a frame waited for compiles: {}", browser::take_created_labels().join(", "));
         }
         if wait.background {
-            st.batch = if seconds < 0.3 { (st.batch * 2).min(32) } else if seconds > 1.0 { (st.batch / 2).max(1) } else { st.batch };
+            if COMPILE_LOG.load(Ordering::Relaxed) != 0 {
+                log::info!("compiled in {seconds:.3} s: {}", std::mem::take(&mut st.batch_labels).join(", "));
+            }
+            st.batch = if FIXED_BATCH.load(Ordering::Relaxed) > 0 {
+                st.batch
+            } else if seconds < 0.3 {
+                (st.batch * 2).min(32)
+            } else if seconds > 1.0 {
+                (st.batch / 2).max(1)
+            } else {
+                st.batch
+            };
         }
         st.compiling = None;
         set_busy("");
@@ -661,7 +726,7 @@ fn frame(st: &mut State, now: f64) {
     // compile was done: the canvas's presentation waits in the same GPU process queue). The
     // frames after wait for them instead of presenting behind them.
     if std::mem::take(&mut st.compile_next) && (0..st.batch).map(|_| pipelines::make_next()).fold(false, |any, made| any | made) {
-        browser::take_created_labels();
+        st.batch_labels = browser::take_created_labels();
         st.compiling = Some(wait_for_gpu(&st.queue, true));
         return;
     }
@@ -726,6 +791,9 @@ fn frame(st: &mut State, now: f64) {
         set_time(1, now);
         let start = TIMES.with(Cell::get)[0];
         log::info!("first image at {:.1} s, {:.1} s after the shaders started compiling; waiting for: {}", now / 1000.0, (now - start) / 1000.0, waiting_features());
+        if COMPILE_LOG.load(Ordering::Relaxed) != 0 {
+            log_core_compiles();
+        }
         let made_in_frames = browser::take_created_labels();
         if !made_in_frames.is_empty() {
             log::info!("made by the first frames: {}", made_in_frames.join(", "));
@@ -759,13 +827,17 @@ fn waiting_features() -> String {
 
 // ---- Page API ---------------------------------------------------------------------------------
 
-/// Rebuilds the engine with another scene (`valley`, `cathedral` or `forest`); blocks for the
-/// few seconds the bake takes, so show a notice and yield a frame before calling. Returns
-/// whether the scene name was known and the engine running.
+/// Rebuilds the engine with another scene (`valley`, `cathedral`, `forest` or `gallery`). The
+/// meshes bake in the bake workers while the current scene keeps running (without workers the
+/// bake blocks the page for a few seconds, so show a notice and yield a frame before calling).
+/// Resolves once the new scene is in, to whether the scene name was known and the engine
+/// running.
 #[wasm_bindgen(js_name = heliosLoadScene)]
-pub fn helios_load_scene(name: &str) -> bool {
-    let Some(kind) = SceneKind::parse(name).filter(|k| *k != SceneKind::Model) else { return false };
-    with_state(|st| st.app.load_scene(kind)).is_some()
+pub async fn helios_load_scene(name: String) -> bool {
+    let Some(kind) = SceneKind::parse(&name).filter(|k| *k != SceneKind::Model) else { return false };
+    let Some(detail) = with_state(|st| st.app.detail) else { return false };
+    let setup = crate::scene_bake::build(kind, detail, None, |_| {}, || {}).await;
+    with_state(|st| st.app.set_scene(kind, setup)).is_some()
 }
 
 /// Presses a hotkey once, by its `KeyboardEvent.code` (e.g. `KeyG` toggles GI), as if typed.
@@ -861,6 +933,23 @@ pub fn helios_shaders() -> String {
         since(first),
         since(full)
     )
+}
+
+/// Per-pass GPU times (timestamp queries) as JSON, `{"frames": 120, "frame": 8.1, "passes":
+/// {"tsr": 0.11, …}}`: each pass's minimum since the last reset (`reset`: start a new window).
+/// Empty without timestamp queries or before the engine runs.
+#[wasm_bindgen(js_name = heliosGpuPasses)]
+pub fn helios_gpu_passes(reset: bool) -> String {
+    with_state(|st| {
+        let (minima, frame, frames) = st.app.renderer.gpu_minima();
+        let passes: Vec<String> = minima.iter().map(|(name, ms)| format!("\"{name}\":{ms:.4}")).collect();
+        let json = format!("{{\"frames\":{frames},\"frame\":{:.4},\"passes\":{{{}}}}}", frame.unwrap_or(0.0), passes.join(","));
+        if reset {
+            st.app.renderer.reset_gpu_minima();
+        }
+        json
+    })
+    .unwrap_or_default()
 }
 
 /// The current scene's name; empty until the engine runs.

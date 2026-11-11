@@ -1,4 +1,9 @@
 //! Embedded WGSL sources with a minimal `#include "file.wgsl"` preprocessor.
+//!
+//! Shaders that include `half.wgsl` get its f16 variant (`half_f16.wgsl`) on devices with f16
+//! shaders ([`half_precision`]): one variant per device, chosen when the module is made.
+
+use std::sync::atomic::{AtomicBool, Ordering};
 
 const SOURCES: &[(&str, &str)] = &[
     ("alpha_mask.wgsl", include_str!("shaders/alpha_mask.wgsl")),
@@ -34,6 +39,8 @@ const SOURCES: &[(&str, &str)] = &[
     ("gi.wgsl", include_str!("shaders/gi.wgsl")),
     ("glass_light.wgsl", include_str!("shaders/glass_light.wgsl")),
     ("glass_shadow.wgsl", include_str!("shaders/glass_shadow.wgsl")),
+    ("half.wgsl", include_str!("shaders/half.wgsl")),
+    ("half_f16.wgsl", include_str!("shaders/half_f16.wgsl")),
     ("hzb.wgsl", include_str!("shaders/hzb.wgsl")),
     ("hzb_trace.wgsl", include_str!("shaders/hzb_trace.wgsl")),
     ("light_cull.wgsl", include_str!("shaders/light_cull.wgsl")),
@@ -172,8 +179,37 @@ pub fn compose_variant(name: &str, replacements: &[(&str, &str)]) -> String {
     out
 }
 
+/// Whether devices may use f16 shaders (`--no-shader-f16`, `?f16=0` turn it off).
+static HALF_ALLOWED: AtomicBool = AtomicBool::new(true);
+
+/// Lets devices created from now on use f16 shaders where the adapter offers them (the default),
+/// or not (every `hf` is f32, as on a device without them).
+pub fn allow_half_precision(allowed: bool) {
+    HALF_ALLOWED.store(allowed, Ordering::Relaxed);
+}
+
+pub(crate) fn half_precision_allowed() -> bool {
+    HALF_ALLOWED.load(Ordering::Relaxed)
+}
+
+/// Whether `device`'s shaders compute `hf` values (half.wgsl) in f16.
+pub fn half_precision(device: &wgpu::Device) -> bool {
+    device.features().contains(wgpu::Features::SHADER_F16)
+}
+
+/// [`compose`] with half.wgsl's f16 variant (`enable` directives moved to the top).
+pub fn compose_half(name: &str) -> String {
+    let source = compose_variant(name, &[("half.wgsl", source("half_f16.wgsl"))]);
+    let (enables, rest): (Vec<&str>, Vec<&str>) = source.lines().partition(|l| l.trim_start().starts_with("enable "));
+    let mut out = enables.join("\n");
+    out.push('\n');
+    out.push_str(&rest.join("\n"));
+    out
+}
+
 pub fn create_module(device: &wgpu::Device, name: &str) -> wgpu::ShaderModule {
-    create_module_from(device, name, compose(name))
+    let source = if half_precision(device) && source(name).contains("#include \"half.wgsl\"") { compose_half(name) } else { compose(name) };
+    create_module_from(device, name, source)
 }
 
 pub fn create_module_from(device: &wgpu::Device, label: &str, wgsl: String) -> wgpu::ShaderModule {
@@ -241,6 +277,22 @@ mod tests {
         } else {
             Err(format!("{label}: {}", problems.join("; ")))
         }
+    }
+
+    /// The f16 variants of the shaders that compute in half precision (none in this round:
+    /// TSR and MegaLights' denoiser gained nothing, docs/round8/platform.md), and half.wgsl in
+    /// both variants.
+    #[test]
+    fn half_precision_variants_validate() {
+        let half: Vec<&str> = SOURCES.iter().filter(|(_, s)| s.contains("#include \"half.wgsl\"")).map(|(n, _)| *n).collect();
+        let mut failures: Vec<String> = half.iter().filter_map(|name| validate(name, &compose_half(name)).err()).collect();
+        let kernel = "@compute @workgroup_size(1) fn main() { let c = hf3(0.25) * hf(2.0); let x = f32(c.x) + HF_MAX; }";
+        for (variant, file) in [("f32", "half.wgsl"), ("f16", "half_f16.wgsl")] {
+            failures.extend(validate(variant, &format!("{}
+{kernel}", source(file))).err());
+        }
+        assert!(failures.is_empty(), "{}", failures.join("
+"));
     }
 
     /// The Substrate variants of the lighting passes and the extended resolve.

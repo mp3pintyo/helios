@@ -98,6 +98,7 @@ pub fn build(kind: SceneKind, detail: Detail, model: Option<&model::Model>) -> S
 /// their meshes (see [`mesh_store`]).
 pub fn build_with(kind: SceneKind, detail: Detail, model: Option<&model::Model>, store: MeshStore) -> (SceneSetup, MeshStore) {
     let start = Instant::now();
+    let shard = matches!(store, MeshStore::Shard(_));
     let (setup, store) = mesh_store::scoped(store, || match (kind, model) {
         (SceneKind::Valley, _) => valley::build(detail),
         (SceneKind::Cathedral, _) => cathedral::build(detail),
@@ -111,6 +112,10 @@ pub fn build_with(kind: SceneKind, detail: Detail, model: Option<&model::Model>,
     });
     let mut setup = setup;
     name_materials(&mut setup.scene);
+    if shard {
+        // A scene-bake worker's scene holds stand-ins for the other workers' meshes.
+        return (setup, store);
+    }
     log::info!(
         "scene '{}': {} instances, {:.1} M source triangles, {} lights, {:.1} MiB geometry in RAM (built in {:.1} s)",
         kind.name(),
@@ -152,12 +157,13 @@ pub(crate) fn add_baked(scene: &mut Scene, name: &str, mesh: &Mesh) -> MeshHandl
 }
 
 pub(crate) fn add_baked_with(scene: &mut Scene, name: &str, mesh: &Mesh, config: BuildConfig) -> MeshHandle {
-    mesh_store::add(scene, name, || bake_with(name, mesh, config))
+    mesh_store::add(scene, name, mesh.triangle_count() as u64, || bake_with(name, mesh, config))
 }
 
-/// Adds the mesh `build` bakes (or the active store's) as `name`.
-pub(crate) fn add_built(scene: &mut Scene, name: &str, build: impl FnOnce() -> VirtualMesh) -> MeshHandle {
-    mesh_store::add(scene, name, || logged(name, build))
+/// Adds the mesh `build` bakes (or the active store's) as `name`; `cost` estimates the bake
+/// (source triangles).
+pub(crate) fn add_built(scene: &mut Scene, name: &str, cost: u64, build: impl FnOnce() -> VirtualMesh) -> MeshHandle {
+    mesh_store::add(scene, name, cost, || logged(name, build))
 }
 
 fn bake_with(name: &str, mesh: &Mesh, config: BuildConfig) -> VirtualMesh {

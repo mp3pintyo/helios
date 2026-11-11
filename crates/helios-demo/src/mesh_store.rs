@@ -13,6 +13,11 @@
 //! by build order and name; a mesh missing from the library (the builder changed since baking) is
 //! simply baked.
 //!
+//! The same seam spreads the browser's scene bake over Web Workers (`scene_bake.rs`): each
+//! worker builds the scene with a [`Shard`] store, which bakes only the meshes assigned to it
+//! (and adds empty stand-ins for the others), and the page builds it once more with a [`Baked`]
+//! store holding every worker's meshes.
+//!
 //! Imported glTF models (`SceneKind::Model`) are not part of this: their meshes are baked in
 //! parallel when the model loads and added directly, and a library names only a procedural scene
 //! and detail, not a model file. Their source is a file the user already has to load, so streaming
@@ -131,6 +136,95 @@ pub enum MeshStore {
     Record(native::Recorder),
     /// Take pre-baked, streamed meshes from a library.
     Stream(Library),
+    /// Bake only this shard's share of the meshes (a scene-bake worker).
+    Shard(Shard),
+    /// Take meshes baked elsewhere (by the scene-bake workers); bake the ones missing.
+    Baked(Baked),
+}
+
+/// One worker's share of a scene bake. Every worker runs the same builder and sees the same
+/// meshes in the same order, so each can assign them alike without talking to the others: a
+/// mesh goes to the least loaded worker so far (its source triangles are the load; ties to the
+/// lowest index), a [`unit`] of meshes to one worker. Meshes of other workers become empty
+/// stand-ins, which the builder never reads (but within a unit).
+pub struct Shard {
+    index: usize,
+    loads: Vec<u64>,
+    next: u32,
+    /// The worker the open unit's meshes go to (`None` until its first mesh), and its depth.
+    unit: (Option<usize>, u32),
+    /// This shard's meshes: build index, name and the baked mesh.
+    pub baked: Vec<(u32, String, VirtualMesh)>,
+}
+
+impl Shard {
+    /// Worker `index` of `count`.
+    pub fn new(index: u32, count: u32) -> Self {
+        let count = count.max(1) as usize;
+        Self { index: (index as usize).min(count - 1), loads: vec![0; count], next: 0, unit: (None, 0), baked: Vec::new() }
+    }
+
+    /// A store that bakes nothing: the scene with empty stand-ins for all its meshes (its
+    /// materials, textures and instances are real).
+    pub fn stand_in() -> Self {
+        Self { index: usize::MAX, ..Self::new(0, 1) }
+    }
+
+    /// The worker mesh `cost` goes to (and charges it).
+    fn assign(&mut self, cost: u64) -> usize {
+        let least = |loads: &[u64]| (0..loads.len()).min_by_key(|&w| (loads[w], w)).unwrap_or(0);
+        let worker = match self.unit {
+            (Some(worker), _) => worker,
+            (None, 0) => least(&self.loads),
+            (None, depth) => {
+                let worker = least(&self.loads);
+                self.unit = (Some(worker), depth);
+                worker
+            }
+        };
+        // A mesh costs at least something, so the empty ones spread too.
+        self.loads[worker] += cost.max(1);
+        worker
+    }
+}
+
+/// Meshes baked elsewhere, by build index (with the name they were built under).
+pub struct Baked {
+    meshes: Vec<Option<(String, VirtualMesh)>>,
+    next: usize,
+    /// Meshes that had to be baked here (missing, or under another name).
+    pub baked_here: u32,
+}
+
+impl Baked {
+    pub fn new(meshes: impl IntoIterator<Item = (u32, String, VirtualMesh)>) -> Self {
+        let mut slots: Vec<Option<(String, VirtualMesh)>> = Vec::new();
+        for (index, name, mesh) in meshes {
+            let index = index as usize;
+            if slots.len() <= index {
+                slots.resize_with(index + 1, || None);
+            }
+            slots[index] = Some((name, mesh));
+        }
+        Self { meshes: slots, next: 0, baked_here: 0 }
+    }
+}
+
+/// Runs `build` with the meshes it adds kept together: a scene-bake worker bakes all or none of
+/// them (for a mesh whose bake reads meshes added before it, like an assembly's base).
+pub(crate) fn unit<R>(build: impl FnOnce() -> R) -> R {
+    let enter = |delta: i32| {
+        ACTIVE.with(|active| {
+            if let MeshStore::Shard(shard) = &mut *active.borrow_mut() {
+                let depth = shard.unit.1.saturating_add_signed(delta);
+                shard.unit = (if depth == 0 { None } else { shard.unit.0 }, depth);
+            }
+        })
+    };
+    enter(1);
+    let result = build();
+    enter(-1);
+    result
 }
 
 thread_local! {
@@ -144,14 +238,15 @@ pub(crate) fn scoped<R>(store: MeshStore, build: impl FnOnce() -> R) -> (R, Mesh
     (result, ACTIVE.with(|active| active.replace(previous)))
 }
 
-/// Adds the mesh called `name` to `scene`, from the active store; `bake` bakes it.
-pub(crate) fn add(scene: &mut Scene, name: &str, bake: impl FnOnce() -> VirtualMesh) -> MeshHandle {
-    let handle = add_unnamed(scene, name, bake);
+/// Adds the mesh called `name` to `scene`, from the active store; `bake` bakes it. `cost`
+/// estimates the bake (source triangles) for spreading a scene's meshes over workers.
+pub(crate) fn add(scene: &mut Scene, name: &str, cost: u64, bake: impl FnOnce() -> VirtualMesh) -> MeshHandle {
+    let handle = add_unnamed(scene, name, cost, bake);
     crate::scenes::name_mesh(scene, handle, name);
     handle
 }
 
-fn add_unnamed(scene: &mut Scene, name: &str, bake: impl FnOnce() -> VirtualMesh) -> MeshHandle {
+fn add_unnamed(scene: &mut Scene, name: &str, cost: u64, bake: impl FnOnce() -> VirtualMesh) -> MeshHandle {
     ACTIVE.with(|active| match &mut *active.borrow_mut() {
         MeshStore::Bake => scene.add_mesh(bake()),
         #[cfg(not(target_arch = "wasm32"))]
@@ -164,6 +259,32 @@ fn add_unnamed(scene: &mut Scene, name: &str, bake: impl FnOnce() -> VirtualMesh
                 Some(mesh) => scene.add_streamed_mesh(mesh, library.source.clone(), index as u32),
                 None => {
                     log::warn!("mesh #{index} '{name}' is not in the mesh library (scene changed since it was baked?); baking it");
+                    scene.add_mesh(bake())
+                }
+            }
+        }
+        MeshStore::Shard(shard) => {
+            let index = shard.next;
+            shard.next += 1;
+            if shard.assign(cost) != shard.index {
+                return scene.add_mesh(VirtualMesh::default());
+            }
+            let mesh = bake();
+            // Within a unit a later bake may read this mesh from the scene: it gets a copy.
+            let copy = if shard.unit.1 > 0 { mesh.clone() } else { VirtualMesh::default() };
+            shard.baked.push((index, name.to_string(), mesh));
+            scene.add_mesh(copy)
+        }
+        MeshStore::Baked(baked) => {
+            let index = baked.next;
+            baked.next += 1;
+            match baked.meshes.get_mut(index).and_then(Option::take) {
+                Some((baked_name, mesh)) if baked_name == name => scene.add_mesh(mesh),
+                other => {
+                    if other.is_some() {
+                        log::warn!("baked mesh #{index} is not '{name}' (the builders differ?); baking it here");
+                    }
+                    baked.baked_here += 1;
                     scene.add_mesh(bake())
                 }
             }

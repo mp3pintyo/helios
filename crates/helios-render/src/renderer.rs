@@ -501,6 +501,8 @@ pub struct Renderer {
     /// Scene versions whose content pipelines were queued, and whether the scene has displaced
     /// surfaces (browser only, see `prefetch_content`).
     prefetched: Option<(u64, u64, u64)>,
+    /// The frame stops after its scene sync ([`Renderer::prefetch_scene`]).
+    sync_only: bool,
     /// The device samples the 17 textures AVBOIT's translucent surfaces need.
     avboit_supported: bool,
     displaceable: bool,
@@ -598,7 +600,8 @@ impl Renderer {
             settings: RenderSettings::default(),
             requested: RenderSettings::default(),
             prefetched: None,
-            avboit_supported: device.limits().max_sampled_textures_per_shader_stage >= 19, // the translucency layout (18, with the MegaLights volume) + the grid
+            sync_only: false,
+            avboit_supported: device.limits().max_sampled_textures_per_shader_stage >= crate::translucency::AVBOIT_SAMPLED_TEXTURES,
             displaceable: false,
             frame_uniform: uniform_buffer(device, "frame", std::mem::size_of::<FrameUniform>() as u64),
             scene: GpuScene::new(device, pool),
@@ -934,6 +937,21 @@ impl Renderer {
         self.settings = RenderSettings { gi_method: self.settings.gi_method, ..requested };
     }
 
+    /// Browser, before the first image: queues the pipelines `scene` needs — its materials'
+    /// shading models and texture patterns, its translucent models, volumes and particles —
+    /// without rendering it (the frame stops after its scene sync, as the first frames do while
+    /// the core pipelines compile). The page passes a stand-in of a scene whose meshes still
+    /// bake, so that these compile meanwhile. Natively, and after the first image, it does
+    /// nothing.
+    pub fn prefetch_scene(&mut self, scene: &Scene, camera: &Camera, output: &wgpu::TextureView) {
+        if !pipelines::deferring() || self.frame_index > 0 {
+            return;
+        }
+        self.sync_only = true;
+        self.render(scene, camera, output, 0.0);
+        self.sync_only = false;
+    }
+
     /// Queues the pipelines of the scene's content features need (its translucent models,
     /// volumes, particles) before the frame decides which features it renders, so a feature does
     /// not come on with pipelines still to compile. (Content the core set needs is queued during
@@ -1029,7 +1047,7 @@ impl Renderer {
         // scene's material permutations, say) instead of compiling one inside the frame, which
         // would hold the frame (Firefox) or compile on the page's GPU thread (Chromium). Later a
         // newly needed one (an editor change) is compiled in the frame, as natively.
-        if self.frame_index == 0 && !pipelines::ready(Group::Core) {
+        if self.frame_index == 0 && (self.sync_only || !pipelines::ready(Group::Core)) {
             return;
         }
         self.rvt.sync(&self.device, &self.queue, scene, self.settings.virtual_texturing, frame);

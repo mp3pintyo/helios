@@ -1,0 +1,207 @@
+diff --git a/crates/helios-render/src/shaders/megalights_denoise.wgsl b/crates/helios-render/src/shaders/megalights_denoise.wgsl
+index 7a18e10..a17413b 100644
+--- a/crates/helios-render/src/shaders/megalights_denoise.wgsl
++++ b/crates/helios-render/src/shaders/megalights_denoise.wgsl
+@@ -20,6 +20,7 @@
+ #include "common.wgsl"
+ #include "brdf.wgsl"
+ #include "megalights_surface.wgsl"
++#include "half.wgsl"
+ 
+ @group(0) @binding(0) var<uniform> frame: Frame;
+ @group(0) @binding(1) var depth_texture: texture_2d<f32>;
+@@ -234,12 +235,14 @@ fn spatial(@builtin(global_invocation_id) gid: vec3<u32>) {
+     }
+     let l_d = luminance(center_d.rgb);
+     let l_s = luminance(center_s.rgb);
+-    let threshold_d = LUMINANCE_SIGMA * sqrt(variance.x) + 1e-4 + 0.01 * l_d;
+-    let threshold_s = LUMINANCE_SIGMA * sqrt(variance.y) + 1e-4 + 0.01 * l_s;
++    // The luminance weights in half precision (half.wgsl): the inputs are rgba16float.
++    let inv_threshold_d = hf(1.0 / (LUMINANCE_SIGMA * sqrt(variance.x) + 1e-4 + 0.01 * l_d));
++    let inv_threshold_s = hf(1.0 / (LUMINANCE_SIGMA * sqrt(variance.y) + 1e-4 + 0.01 * l_s));
++    let luma = hf3(vec3<f32>(0.2126, 0.7152, 0.0722));
+     let plane = PLANE_TOLERANCE * depth;
+ 
+-    var sum_d = vec3<f32>(0.0);
+-    var sum_s = vec3<f32>(0.0);
++    var sum_d = hf3(0.0);
++    var sum_s = hf3(0.0);
+     var var_d = 0.0;
+     var var_s = 0.0;
+     var w_sum_d = 0.0;
+@@ -260,11 +263,16 @@ fn spatial(@builtin(global_invocation_id) gid: vec3<u32>) {
+                 * pow(saturate(dot(n, textureLoad(gbuffer_normal, tap, 0).xyz)), NORMAL_POWER);
+             let d = textureLoad(in_diffuse, tap, 0);
+             let s = textureLoad(in_specular, tap, 0);
++            let dh = hf3(d.rgb);
++            let sh = hf3(s.rgb);
+             let center_tap = x == 0 && y == 0;
+-            let w_d = select(geometry * exp(-abs(luminance(d.rgb) - l_d) / threshold_d), geometry, center_tap);
+-            let w_s = select(geometry * exp(-abs(luminance(s.rgb) - l_s) / threshold_s), geometry, center_tap);
+-            sum_d += d.rgb * w_d;
+-            sum_s += s.rgb * w_s;
++            let gh = hf(geometry);
++            let w_dh = select(gh * exp(-abs(dot(dh, luma) - hf(l_d)) * inv_threshold_d), gh, center_tap);
++            let w_sh = select(gh * exp(-abs(dot(sh, luma) - hf(l_s)) * inv_threshold_s), gh, center_tap);
++            let w_d = f32(w_dh);
++            let w_s = f32(w_sh);
++            sum_d += dh * w_dh;
++            sum_s += sh * w_sh;
+             // The first iteration's taps hold moments: they take the centre's estimate.
+             var_d += w_d * w_d * select(d.a, variance.x, first);
+             var_s += w_s * w_s * select(s.a, variance.y, first);
+@@ -272,8 +280,8 @@ fn spatial(@builtin(global_invocation_id) gid: vec3<u32>) {
+             w_sum_s += w_s;
+         }
+     }
+-    var out_d = vec4<f32>(sum_d / w_sum_d, var_d / (w_sum_d * w_sum_d));
+-    var out_s = vec4<f32>(sum_s / w_sum_s, var_s / (w_sum_s * w_sum_s));
++    var out_d = vec4<f32>(vec3<f32>(sum_d) / w_sum_d, var_d / (w_sum_d * w_sum_d));
++    var out_s = vec4<f32>(vec3<f32>(sum_s) / w_sum_s, var_s / (w_sum_s * w_sum_s));
+     out_d = select(out_d, center_d, any(out_d != out_d));
+     out_s = select(out_s, center_s, any(out_s != out_s));
+     if pass_params.z != 0u {
+diff --git a/crates/helios-render/src/shaders/tsr.wgsl b/crates/helios-render/src/shaders/tsr.wgsl
+index 134d90a..c160cdc 100644
+--- a/crates/helios-render/src/shaders/tsr.wgsl
++++ b/crates/helios-render/src/shaders/tsr.wgsl
+@@ -31,8 +31,15 @@
+ //     it converges to the feature's true coverage (FSR 2's "locks").
+ //   * where particles or volumes cover the pixel (the reactive mask, FLAG_REACTIVE), keep little
+ //     history with a tight clip and no lock: sparks and flames change without motion vectors.
++//
++// Half precision (half.wgsl: f16 on devices with `shader-f16`): the neighbourhood's colour
++// statistics, the two filters' sums and the history clip work on *exposed* colours (as
++// displayed, ~0–1; clamped to EXPOSED_MAX so the sums of squares stay finite), the moments
++// relative to the centre sample (no cancellation in flat areas). Positions, depths, motion and
++// weights stay f32.
+ 
+ #include "common.wgsl"
++#include "half.wgsl"
+ 
+ struct Tsr {
+     output: vec4<f32>,   // output width, height, 1 / width, 1 / height
+@@ -74,17 +81,25 @@ const MAX_WEIGHT_REACTIVE: f32 = 1.5;
+ // this small weight, which the samples of later frames soon outweigh.
+ override PHOTO: bool = false;
+ const PHOTO_FILL: f32 = 1e-3;
++// Exposed colours are clamped here for the statistics: far beyond white (the tone mapper's
++// shoulder ends near 16), and nine squared differences of 64 stay below f16's maximum.
++const EXPOSED_MAX: f32 = 64.0;
+ 
+-fn rgb_to_ycocg(c: vec3<f32>) -> vec3<f32> {
+-    return vec3<f32>(
+-        0.25 * c.r + 0.5 * c.g + 0.25 * c.b,
+-        0.5 * c.r - 0.5 * c.b,
+-        -0.25 * c.r + 0.5 * c.g - 0.25 * c.b,
++fn rgb_to_ycocg(c: hf3) -> hf3 {
++    return hf3(
++        hf(0.25) * c.r + hf(0.5) * c.g + hf(0.25) * c.b,
++        hf(0.5) * c.r - hf(0.5) * c.b,
++        hf(-0.25) * c.r + hf(0.5) * c.g - hf(0.25) * c.b,
+     );
+ }
+ 
+-fn ycocg_to_rgb(c: vec3<f32>) -> vec3<f32> {
+-    return vec3<f32>(c.x + c.y - c.z, c.x + c.z, c.x - c.y - c.z);
++fn ycocg_to_rgb(c: hf3) -> hf3 {
++    return hf3(c.x + c.y - c.z, c.x + c.z, c.x - c.y - c.z);
++}
++
++// A colour as displayed (`exposure`: last frame's), in half precision.
++fn exposed(color: vec3<f32>, exposure: f32) -> hf3 {
++    return hf3(min(color * exposure, vec3<f32>(EXPOSED_MAX)));
+ }
+ 
+ // Catmull–Rom weights of the four taps around a position with fractional part `f`.
+@@ -226,13 +241,13 @@ fn depth_mismatch(closest: vec2<i32>, depth: f32, previous_pixel: vec2<u32>, his
+ }
+ 
+ // Clips `history` towards the centre of the box [lo, hi] (Playdead / UE).
+-fn clip_to_box(history: vec3<f32>, lo: vec3<f32>, hi: vec3<f32>) -> vec3<f32> {
+-    let center = 0.5 * (hi + lo);
+-    let extent = 0.5 * (hi - lo) + 1e-5;
++fn clip_to_box(history: hf3, lo: hf3, hi: hf3) -> hf3 {
++    let center = hf(0.5) * (hi + lo);
++    let extent = hf(0.5) * (hi - lo) + hf(1e-3);
+     let offset = history - center;
+     let units = abs(offset / extent);
+     let max_unit = max(units.x, max(units.y, units.z));
+-    return select(history, center + offset / max_unit, max_unit > 1.0);
++    return select(history, center + offset / max_unit, max_unit > hf(1.0));
+ }
+ 
+ @compute @workgroup_size(8, 8)
+@@ -257,13 +272,16 @@ fn resolve(@builtin(global_invocation_id) gid: vec3<u32>) {
+         return;
+     }
+ 
+-    // Neighbourhood statistics, the two reconstruction filters and the closest depth.
++    // Neighbourhood statistics (exposed YCoCg, relative to the centre sample), the two
++    // reconstruction filters (exposed) and the closest depth.
+     let nearest = clamp(vec2<i32>(round(position)), vec2<i32>(0), in_size - 1);
+-    var m1 = vec3<f32>(0.0);
+-    var m2 = vec3<f32>(0.0);
+-    var sharp = vec3<f32>(0.0);
++    let pre_exposure = max(exposure[0], 1e-8);
++    let center_c = rgb_to_ycocg(exposed(textureLoad(current_color, nearest, 0).rgb, pre_exposure));
++    var m1 = hf3(0.0);
++    var m2 = hf3(0.0);
++    var sharp = hf3(0.0);
+     var sharp_weight = 0.0;
+-    var wide = vec3<f32>(0.0);
++    var wide = hf3(0.0);
+     var wide_weight = 0.0;
+     var closest_depth = 0.0;
+     var closest = nearest;
+@@ -278,7 +296,8 @@ fn resolve(@builtin(global_invocation_id) gid: vec3<u32>) {
+                 reactive = max(reactive, textureLoad(gbuffer_motion, tap, 0).z);
+             }
+             let color = textureLoad(current_color, tap, 0).rgb;
+-            let c = rgb_to_ycocg(color);
++            let e = exposed(color, pre_exposure);
++            let c = rgb_to_ycocg(e) - center_c;
+             m1 += c;
+             m2 += c * c;
+             let luma = luminance(color) * exposure[0];
+@@ -292,9 +311,9 @@ fn resolve(@builtin(global_invocation_id) gid: vec3<u32>) {
+             let offset_out = offset / ratio;
+             let ws = exp(-KERNEL * dot(offset_out, offset_out));
+             let ww = exp(-WIDE_KERNEL * dot(offset, offset));
+-            sharp += color * ws;
++            sharp += e * hf(ws);
+             sharp_weight += ws;
+-            wide += color * ww;
++            wide += e * hf(ww);
+             wide_weight += ww;
+             let d = textureLoad(depth_texture, tap, 0).r;
+             if d > closest_depth {
+@@ -303,10 +322,12 @@ fn resolve(@builtin(global_invocation_id) gid: vec3<u32>) {
+             }
+         }
+     }
+-    let mean = m1 / 9.0;
+-    let sigma = sqrt(max(m2 / 9.0 - mean * mean, vec3<f32>(0.0)));
+-    let current_sharp = sharp / max(sharp_weight, 1e-6);
+-    let current_wide = wide / max(wide_weight, 1e-6);
++    let mean_offset = m1 / hf(9.0);
++    let sigma = sqrt(max(m2 / hf(9.0) - mean_offset * mean_offset, hf3(0.0)));
++    let mean = center_c + mean_offset;
++    // Back to scene radiance (the history's units).
++    let current_sharp = vec3<f32>(sharp) / (max(sharp_weight, 1e-6) * pre_exposure);
++    let current_wide = vec3<f32>(wide) / (max(wide_weight, 1e-6) * pre_exposure);
+     // This frame's samples near the pixel, in frames at full density (about `ratio²` on average).
+     let frame_weight = sharp_weight / KERNEL_AREA;
+ 
+@@ -345,8 +366,9 @@ fn resolve(@builtin(global_invocation_id) gid: vec3<u32>) {
+         // Sub-pixel detail (leaves, needles, thin tracery) lands in a different set of pixels
+         // with every jitter offset; a tight box treats each of those states as "new" and the
+         // detail flickers instead of being averaged.
+-        let gamma = mix(mix(2.25, 1.0, saturate(speed / 1.5)), 1.0, reactive);
+-        let clipped = ycocg_to_rgb(clip_to_box(rgb_to_ycocg(h.rgb), mean - gamma * sigma, mean + gamma * sigma));
++        let gamma = hf(mix(mix(2.25, 1.0, saturate(speed / 1.5)), 1.0, reactive));
++        let box = clip_to_box(rgb_to_ycocg(exposed(h.rgb, pre_exposure)), mean - gamma * sigma, mean + gamma * sigma);
++        let clipped = vec3<f32>(ycocg_to_rgb(box)) / pre_exposure;
+         // Disocclusion: the history pixel was reprojected with a motion unlike this surface's,
+         // so it showed something else (e.g. the background a foreground object uncovers).
+         let previous_pixel = min(vec2<u32>(previous_uv * tsr.output.xy), out_size - 1u);

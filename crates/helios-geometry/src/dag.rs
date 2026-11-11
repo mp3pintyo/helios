@@ -369,6 +369,7 @@ pub fn build_virtual_mesh(mesh: &Mesh, config: &BuildConfig) -> VirtualMesh {
 
         let mut next: Vec<usize> = Vec::new();
         for group in &groups {
+            crate::progress::tick();
             let members: Vec<usize> = group.iter().map(|&local| current[local]).collect();
             let triangles: Vec<[u32; 3]> = members.iter().flat_map(|&c| work[c].triangles.iter().copied()).collect();
             let result = {

@@ -545,7 +545,10 @@ impl Translucency {
         let layer_ranges = uniform_buffer(device, "translucency layer ranges", LAYER_RANGE_STRIDE * (MAX_LAYERS as u64 + 2));
         queue.write_buffer(&layer_ranges, NEAREST_SLOT as u64 * LAYER_RANGE_STRIDE, bytemuck::bytes_of(&NEAREST));
         queue.write_buffer(&layer_ranges, BEHIND_NEAREST_SLOT as u64 * LAYER_RANGE_STRIDE, bytemuck::bytes_of(&BEHIND_NEAREST));
-        let oit_layout = oit_layout(device);
+        // AVBOIT's layout samples 19 textures: a device with fewer never uses it (weighted
+        // blended OIT instead), and the shading layout stands in.
+        let avboit_supported = device.limits().max_sampled_textures_per_shader_stage >= AVBOIT_SAMPLED_TEXTURES;
+        let oit_layout = if avboit_supported { oit_layout(device) } else { layout.clone() };
         let oit = |shading: Shading, bucket: Bucket| {
             let (device, module, layout) = (device.clone(), module.clone(), oit_layout.clone());
             Lazy::new(move || oit_pipeline(&device, &module, &layout, shading, bucket))
@@ -1186,8 +1189,11 @@ fn layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
     make_layout(device, "translucency", &shading_entries())
 }
 
-/// AVBOIT's shading passes: plus the grid (a 17th texture: devices offering fewer use the
-/// weighted blended path, `RenderSettings::avboit`).
+/// Sampled textures of AVBOIT's shading layout: devices offering fewer use the weighted blended
+/// path (`RenderSettings::avboit`).
+pub(crate) const AVBOIT_SAMPLED_TEXTURES: u32 = 19;
+
+/// AVBOIT's shading passes: plus the grid (the 19th texture).
 fn oit_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
     let mut entries = shading_entries();
     entries.extend(crate::avboit::Avboit::read_entries().into_iter().filter(|(b, _)| *b != 122).map(|(b, t)| (b, ShaderStages::FRAGMENT, t)));

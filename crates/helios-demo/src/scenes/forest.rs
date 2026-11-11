@@ -18,6 +18,7 @@ use helios_render::{
 };
 
 use super::{add_baked_with, add_built, smoothstep, Detail, Rng, SceneSetup};
+use crate::mesh_store;
 
 const SIZE: f32 = 900.0;
 /// Grid cells per side of the terrain mesh at medium and high detail.
@@ -80,11 +81,16 @@ impl Meshes<'_> {
     /// A tree's foliage as an assembly: its sprays are the parts, the base (with the distance
     /// field Lumen sees) is built from their roots.
     fn add_assembly(&mut self, name: &str, plant: &PlantAssembly) -> MeshHandle {
-        let parts: Vec<MeshHandle> = plant.sprays.iter().map(|spray| self.add_foliage(&format!("{name} spray"), spray, false)).collect();
-        let meshes: Vec<VirtualMesh> = parts.iter().map(|&p| self.scene.mesh(p).clone()).collect();
-        let base = add_built(self.scene, name, || {
-            let geometry: Vec<(&VirtualMesh, Mat4)> = plant.placements.iter().map(|&(i, transform)| (&meshes[i], transform)).collect();
-            build_assembly_base(&geometry, &Self::foliage_config(true)).0
+        // The base is built from the sprays' baked meshes: a scene-bake worker bakes them all.
+        let (parts, base) = mesh_store::unit(|| {
+            let parts: Vec<MeshHandle> = plant.sprays.iter().map(|spray| self.add_foliage(&format!("{name} spray"), spray, false)).collect();
+            let meshes: Vec<VirtualMesh> = parts.iter().map(|&p| self.scene.mesh(p).clone()).collect();
+            let cost = plant.sprays.iter().map(|s| s.triangle_count() as u64).sum();
+            let base = add_built(self.scene, name, cost, || {
+                let geometry: Vec<(&VirtualMesh, Mat4)> = plant.placements.iter().map(|&(i, transform)| (&meshes[i], transform)).collect();
+                build_assembly_base(&geometry, &Self::foliage_config(true)).0
+            });
+            (parts, base)
         });
         self.scene.set_assembly(base, plant.placements.iter().map(|&(i, transform)| AssemblyPart { mesh: parts[i], transform }).collect());
         base

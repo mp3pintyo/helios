@@ -322,6 +322,16 @@ Honest differences that remain:
     the core set itself is ~4 s of Firefox compiling (the material resolve 0.6–1.2 s per shading model), the scene's
     content pipelines are found only after the bake, a new scene or a debug view compiles its new pipelines in the
     frame that needs them (the canvas holding its last frame), and the scene bake (3–6 s) runs on the main thread.
+    Round 8 (`browser-bake-worker`, `docs/round8/platform.md`): the scene's meshes bake on Web Workers, spread
+    over up to four by a deterministic least-loaded assignment (the page only runs the builder without bakes,
+    ≈ 0.3 s), and a stand-in of the scene queues its content pipelines while they bake; scene switches bake there
+    too. Still simpler than UE, which cooks offline: every visit bakes the scene again (a bake takes as long as its
+    largest mesh: the valley's terrain, 2.5 s on a page thread), imported glTF models bake on the page, Firefox's
+    compile set is unchanged (≈ 43 s of background compiling for the valley, led by the translucency shading,
+    tessellation dicing and the resolve's tessellation permutation), and the device needs 20 sampled textures per
+    shader stage (WebGPU guarantees 16; desktop browsers offer 48–64) — there is no reduced variant for smaller
+    adapters. `shader-f16` is requested and wired up (`half.wgsl`), but no pass uses it: TSR and MegaLights'
+    denoiser gained nothing on the RTX 3090, where UE 5.8.1 runs TSR in 16-bit by default.
 16. **Coloured light through glass** (round 7, `glass-shadows`): the sun's map of the glass panes keeps one pane
     per texel (light through two panes in a row takes the nearer one's colour) and spans every visible pane (glass
     spread over a large world gets coarse texels); Lumen's voxel surface cache and the volumes' lighting cache still

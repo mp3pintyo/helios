@@ -1,4 +1,5 @@
-// Web Workers for Lumen's displaced-variant bakes (web_bake.rs; helios-render's lumen_offload.rs).
+// Web Workers for the scene bake (scene_bake.rs) and Lumen's displaced-variant bakes (web_bake.rs;
+// helios-render's lumen_offload.rs).
 //
 // This one file is both ends. Imported by the engine's glue on the page (wasm-bindgen copies it to
 // pkg/snippets/), it exports the pool the engine submits work to. Started as a module worker, it
@@ -10,7 +11,9 @@
 // Nothing a worker does may leave a variant missing: a task the page gets no answer for is failed,
 // and the engine then runs it on the render thread itself (lumen_displaced.rs). Hence the
 // handshake and the watchdog below — a worker reports when its instance is ready, it is only
-// handed a task while idle, and one that is not ready or does not answer in time is terminated.
+// handed a task while idle, and one that is not ready in time or falls silent is terminated. A
+// running bake reports progress (bakeBeat, at most once a second), so a long one is not mistaken
+// for a hung one.
 
 const IN_WORKER = typeof WorkerGlobalScope !== "undefined" && self instanceof WorkerGlobalScope;
 
@@ -19,10 +22,13 @@ const GLUE = new URL("../../../helios_demo.js", import.meta.url).href;
 // A worker without tasks for this long is retired.
 const IDLE_MS = 20000;
 // A worker must report its instance ready within this (it takes milliseconds: the module is
-// compiled already), and answer a task within this of being handed it (a bed's bake takes
-// 0.5-4 s on a busy CPU). Past either it is terminated and its task runs on the page.
+// compiled already), and while it runs a task give a sign of life (its heartbeat, or the answer)
+// within this (a bake beats several times a second). Past either it is terminated and its task
+// runs on the page.
 const READY_MS = 8000;
 const TASK_MS = 10000;
+// A worker's heartbeat while it runs a task.
+const BEAT_MS = 1000;
 // When a watchdog timer fires this late, the page's thread was blocked and a worker's answer may
 // be queued behind the timer: it looks again a little later, after the queue has run.
 const LATE_MS = 250;
@@ -109,6 +115,11 @@ class BakePool {
       this.dispatch();
       return;
     }
+    if (data.beat !== undefined) {
+      // Still working: the watchdog starts over.
+      if (data.beat === entry.task) this.arm(entry, TASK_MS, "fell silent");
+      return;
+    }
     if (data.id !== entry.task) return;
     // A task that trapped may have left the instance broken: the worker is replaced.
     if (data.error) return this.fail(entry, `could not run a bake (${data.error})`);
@@ -153,7 +164,7 @@ class BakePool {
       clearTimeout(entry.idle);
       entry.idle = 0;
       entry.task = id;
-      this.arm(entry, TASK_MS, "did not answer in time");
+      this.arm(entry, TASK_MS, "fell silent");
       entry.worker.postMessage({ id, input: buffer }, [buffer]);
     }
     const starting = this.workers.filter((w) => !w.ready).length;
@@ -219,11 +230,24 @@ class BakePool {
   }
 }
 
-// The page's pool: up to `size` workers, started on the first task (a scene without displacement
-// starts none); null where workers cannot exist.
+// The page's pool: up to `size` workers, started on the first task; null where workers cannot
+// exist.
 export function bakePoolCreate(module, size) {
   if (IN_WORKER || typeof Worker === "undefined" || !(module instanceof WebAssembly.Module)) return null;
   return new BakePool(module, size);
+}
+
+// The task this worker runs (0: none) and when it last said so.
+let running = 0;
+let lastBeat = 0;
+
+// Called by the engine's bakes (helios_geometry::progress) while a task runs in this worker.
+export function bakeBeat() {
+  if (!IN_WORKER || !running) return;
+  const now = performance.now();
+  if (now - lastBeat < BEAT_MS) return;
+  lastBeat = now;
+  self.postMessage({ beat: running });
 }
 
 if (IN_WORKER) {
@@ -240,11 +264,15 @@ if (IN_WORKER) {
       return;
     }
     try {
+      running = data.id;
+      lastBeat = performance.now();
       const output = engine.heliosBakeTask(new Uint8Array(data.input));
       if (output.length === 0) throw new Error("the task did not decode");
       self.postMessage({ id: data.id, output: output.buffer }, [output.buffer]);
     } catch (e) {
       self.postMessage({ id: data.id, error: String(e && e.message ? e.message : e) });
+    } finally {
+      running = 0;
     }
   };
   // The handler exists now: the page may send the module.

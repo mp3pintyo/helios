@@ -127,7 +127,8 @@ impl DemoApp {
         Self::from_setup(renderer, setup, kind, detail, None)
     }
 
-    fn from_setup(renderer: Renderer, setup: SceneSetup, kind: SceneKind, detail: Detail, model: Option<Model>) -> Self {
+    /// The app for a scene built beforehand (the browser bakes it in workers).
+    pub(crate) fn from_setup(renderer: Renderer, setup: SceneSetup, kind: SceneKind, detail: Detail, model: Option<Model>) -> Self {
         let editor = Editor::new(&setup.scene, crate::app_editor::base_scene(kind, detail, model.as_ref()));
         Self {
             renderer,
@@ -160,6 +161,11 @@ impl DemoApp {
     /// Replaces the scene (bakes the new one; takes a few seconds).
     pub fn load_scene(&mut self, kind: SceneKind) {
         let setup = scenes::build(kind, self.detail, self.model.as_ref());
+        self.set_scene(kind, setup);
+    }
+
+    /// Replaces the scene with one built beforehand.
+    pub(crate) fn set_scene(&mut self, kind: SceneKind, setup: SceneSetup) {
         self.kind = kind;
         self.scene = setup.scene;
         self.camera = setup.camera;

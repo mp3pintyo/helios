@@ -1056,7 +1056,8 @@ async function loadScene(name, candleLights, lanternOn) {
     engine.heliosSetCandleLights(candles);
     engine.heliosSetLantern(lantern);
   }
-  engine.heliosLoadScene(name);
+  // The scene bakes in the engine's workers; the call resolves once it is in.
+  await engine.heliosLoadScene(name);
   await nextFrames();
   // A new scene may need shaders the last one did not (its materials, say).
   await waitForShaders(false);

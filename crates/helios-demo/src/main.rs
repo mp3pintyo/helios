@@ -294,6 +294,10 @@ mod native {
                     }
                     "--lights" => helios_demo::scenes::candles::set_candle_lights(value().parse().unwrap_or(0)),
                     "--lantern" => helios_demo::scenes::cathedral::set_lantern(true),
+                    // f32 everywhere, as on a device without f16 shaders.
+                    "--no-shader-f16" => helios_render::allow_half_precision(false),
+                    // Test the fallbacks of a device with fewer sampled textures per stage.
+                    "--max-sampled-textures" => GpuContext::limit_sampled_textures(value().parse().unwrap_or(24)),
                     "--campfire-smoke" => helios_demo::scenes::forest::set_campfire_smoke(value().parse().unwrap_or(1.0)),
                     // Highlight contrast, shadow contrast and optionally the blurred luminance blend.
                     "--local-exposure" => {

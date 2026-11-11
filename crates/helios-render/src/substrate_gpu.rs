@@ -125,7 +125,8 @@ impl ExtendedMaterials {
             graph_displaced: BTreeSet::new(),
             displacement_key: 0,
             key: None,
-            supported: device.limits().max_storage_textures_per_shader_stage >= 5 && device.limits().max_sampled_textures_per_shader_stage >= 17,
+            // The slab lighting samples one texture more than the lighting pass.
+            supported: device.limits().max_storage_textures_per_shader_stage >= 5 && device.limits().max_sampled_textures_per_shader_stage > crate::context::MIN_SAMPLED_TEXTURES,
             warned: false,
         }
     }
