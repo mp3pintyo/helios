@@ -41,7 +41,7 @@
 //! * **Adaptive voxel-based OIT** (`avboit.rs`; `RenderSettings::avboit`). Surfaces that don't
 //!   read the background — glass without texture, bump or blur ([`Candidate::refracts`] false)
 //!   and blended surfaces — are composited order-independently with the particles and the
-//!   volumes (`fs_oit_front` / `fs_oit_back`, the effects' targets), so sparks between two
+//!   volumes (`fs_oit`, one pipeline for both buckets; the effects' targets), so sparks between two
 //!   panes, smoke behind a panel and intersecting panels order correctly. Refracting surfaces
 //!   (water, stained or frosted glass) keep this pass, but only their *nearest* layer per pixel
 //!   (the effects' nearest refracting depth): refracting glass behind it joins the
@@ -509,8 +509,8 @@ pub struct Translucency {
     oit_draws: Vec<usize>,
     behind_nearest: Vec<usize>,
     oit_layout: wgpu::BindGroupLayout,
-    /// By [glass, blend] and [front, back] bucket.
-    oit_pipelines: [[Lazy<wgpu::RenderPipeline>; 2]; 2],
+    /// By [glass, blend]: both buckets (the pass's layer range tells them apart).
+    oit_pipelines: [Lazy<wgpu::RenderPipeline>; 2],
     grid_layout: wgpu::BindGroupLayout,
     /// The low-resolution grid draws: bounds [order-independent, behind the nearest layer],
     /// transmittance [glass, blend, glass behind the nearest layer].
@@ -558,11 +558,11 @@ impl Translucency {
         // blended OIT instead), and the shading layout stands in.
         let avboit_supported = device.limits().max_sampled_textures_per_shader_stage >= AVBOIT_SAMPLED_TEXTURES;
         let oit_layout = if avboit_supported { oit_layout(device) } else { layout.clone() };
-        let oit = |shading: Shading, bucket: Bucket| {
+        let oit = |shading: Shading| {
             let (device, module, layout) = (device.clone(), module.clone(), oit_layout.clone());
-            Lazy::new(move || oit_pipeline(&device, &module, &layout, shading, bucket))
+            Lazy::new(move || oit_pipeline(&device, &module, &layout, shading))
         };
-        let oit_pipelines = [Shading::Glass, Shading::Blend].map(|s| [oit(s, Bucket::Front), oit(s, Bucket::Back)]);
+        let oit_pipelines = [Shading::Glass, Shading::Blend].map(oit);
         let grid_layout = grid_layout(device);
         let grid = |shading: Shading, entry: &'static str, behind: bool| {
             let (device, module, layout) = (device.clone(), module.clone(), grid_layout.clone());
@@ -648,7 +648,7 @@ impl Translucency {
             }
             if avboit && shading != Shading::Water {
                 let k = (shading == Shading::Blend) as usize;
-                self.oit_pipelines[k].iter().for_each(Lazy::prefetch);
+                self.oit_pipelines[k].prefetch();
                 self.grid_bounds.iter().for_each(Lazy::prefetch);
                 self.grid_transmittance[k].prefetch();
                 if shading == Shading::Glass {
@@ -1040,10 +1040,9 @@ impl Translucency {
         let group = bind_group(rec.device, "translucency (avboit)", &self.oit_layout, &entries);
         let load = wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store };
         let target = |view| Some(wgpu::RenderPassColorAttachment { view, depth_slice: None, resolve_target: None, ops: load });
-        let mut attachments = vec![target(accum), target(transmittance)];
-        if !back {
-            attachments.push(target(&t.gbuffer_motion));
-        }
+        // Both buckets bind the motion target (one pipeline for both); the back bucket's fragments
+        // write it with weight 0.
+        let attachments = vec![target(accum), target(transmittance), target(&t.gbuffer_motion)];
         let size = internal_size(t, color.size);
         let label = if back { "translucency avboit (behind refraction)" } else { "translucency avboit" };
         let mut pass = rec.render_pass(label, &attachments, None);
@@ -1055,7 +1054,7 @@ impl Translucency {
         let lists: &[&Vec<usize>] = if back { &[&self.oit_draws, &self.behind_nearest] } else { &[&self.oit_draws] };
         for &i in lists.iter().flat_map(|l| l.iter()) {
             let c = &self.candidates[i];
-            pass.set_pipeline(&self.oit_pipelines[(c.shading == Shading::Blend) as usize][back as usize]);
+            pass.set_pipeline(&self.oit_pipelines[(c.shading == Shading::Blend) as usize]);
             let r = c.range;
             pass.draw_indexed(r.first_index..r.first_index + r.index_count, r.base_vertex, c.instance..c.instance + 1);
         }
@@ -1364,23 +1363,20 @@ fn pipeline(device: &wgpu::Device, module: &wgpu::ShaderModule, layout: &wgpu::B
     })
 }
 
-/// AVBOIT: `shading`'s surfaces into one bucket's OIT targets (weighted light added,
-/// transmittance multiplied; the front bucket also owns the motion where mostly opaque).
-fn oit_pipeline(device: &wgpu::Device, module: &wgpu::ShaderModule, layout: &wgpu::BindGroupLayout, shading: Shading, bucket: Bucket) -> wgpu::RenderPipeline {
+/// AVBOIT: `shading`'s surfaces into the OIT targets of the bucket the pass's layer range selects
+/// (weighted light added, transmittance multiplied, the motion owned where mostly opaque: the
+/// back bucket writes it with weight 0). One pipeline for both buckets: Firefox compiles each
+/// shading pipeline for 2–3 s.
+fn oit_pipeline(device: &wgpu::Device, module: &wgpu::ShaderModule, layout: &wgpu::BindGroupLayout, shading: Shading) -> wgpu::RenderPipeline {
     let pipeline_layout = crate::util::pipeline_layout(device, "translucency (avboit)", &[layout]);
     let constants = [("SHADING", shading as u32 as f64)];
     let mut targets = crate::oit::avboit_targets(false);
-    let entry = match bucket {
-        Bucket::Front => {
-            let motion_blend = wgpu::BlendState {
-                color: wgpu::BlendComponent { src_factor: wgpu::BlendFactor::SrcAlpha, dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha, operation: wgpu::BlendOperation::Add },
-                alpha: wgpu::BlendComponent::REPLACE,
-            };
-            targets.push(Some(wgpu::ColorTargetState { format: wgpu::TextureFormat::Rgba16Float, blend: Some(motion_blend), write_mask: wgpu::ColorWrites::RED | wgpu::ColorWrites::GREEN }));
-            "fs_oit_front"
-        }
-        Bucket::Back => "fs_oit_back",
+    let motion_blend = wgpu::BlendState {
+        color: wgpu::BlendComponent { src_factor: wgpu::BlendFactor::SrcAlpha, dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha, operation: wgpu::BlendOperation::Add },
+        alpha: wgpu::BlendComponent::REPLACE,
     };
+    targets.push(Some(wgpu::ColorTargetState { format: wgpu::TextureFormat::Rgba16Float, blend: Some(motion_blend), write_mask: wgpu::ColorWrites::RED | wgpu::ColorWrites::GREEN }));
+    let entry = "fs_oit";
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some("translucency (avboit)"),
         layout: Some(&pipeline_layout),
