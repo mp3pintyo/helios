@@ -133,7 +133,9 @@ fn prepare_dice() {
 
 // A displaced grid vertex in its page: texel x, y, depth; w < 0 behind a local light's near plane.
 fn tess_project(draw: vec4<u32>, instance: Instance, strength: f32, object: vec3<f32>) -> vec4<f32> {
-    let world = wind_world_position(instance, strength, object);
+    // Displaced (tessellated) surfaces move with weight 1: plant data is not interpolated over
+    // micro-triangles (vegetation is not displaced).
+    let world = wind_world_position(instance, strength, object, 1.0);
     let p = page_point(draw, world);
     if p.w <= 0.0 {
         return vec4<f32>(0.0, 0.0, 0.0, -1.0);

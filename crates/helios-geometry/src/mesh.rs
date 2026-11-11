@@ -57,12 +57,27 @@ pub struct Mesh {
     /// Joint influences of a skeletal mesh (glTF `JOINTS_0` / `WEIGHTS_0`, quantised): empty, or
     /// one per vertex. Joints index the skin's joint list.
     pub skin: Vec<SkinWeights>,
+    /// Plant data of procedural vegetation (`vegetation.rs`): empty, or one per vertex.
+    /// * `x`, the **wind weight** (attachment): how freely the vertex follows the wind, 0 where
+    ///   the plant is held — its root, the part in the soil — rising to 1 along the plant where it
+    ///   moves freely. It scales the whole wind displacement (`wind.wgsl`), so it only ever
+    ///   reduces it. Generators derive it from the distance along the plant from its root (a
+    ///   frond tip near the ground still moves; a blade's base does not).
+    /// * `y`, the baked **ambient occlusion** (1: open): how much of the sky the plant's own
+    ///   geometry and the ground hide from the vertex (the base of a grass clump, a fern's
+    ///   crown). Like a material's AO it darkens indirect light only.
+    pub plant: Vec<Vec2>,
 }
 
 impl Mesh {
     pub fn new(vertices: Vec<Vertex>, indices: Vec<u32>) -> Self {
         assert!(indices.len().is_multiple_of(3), "index count must be a multiple of 3");
-        Self { vertices, indices, uv1: Vec::new(), colors: Vec::new(), skin: Vec::new() }
+        Self { vertices, indices, uv1: Vec::new(), colors: Vec::new(), skin: Vec::new(), plant: Vec::new() }
+    }
+
+    /// Plant data of vertex `i` (free to move and unoccluded, (1, 1), if the mesh has none).
+    pub fn plant_of(&self, i: usize) -> Vec2 {
+        self.plant.get(i).copied().unwrap_or(Vec2::ONE)
     }
 
     /// A mesh with optional attributes; `uv1` and `colors` are empty or one per vertex.
@@ -185,15 +200,15 @@ impl Mesh {
         canonical_ids(self.vertices.iter().map(|v| v.position))
     }
 
-    /// Merges bit-identical vertices (position, normal, UVs, colour and skin weights) and drops
-    /// degenerate triangles.
+    /// Merges bit-identical vertices (position, normal, UVs, colour, skin weights and plant
+    /// data) and drops degenerate triangles.
     pub fn weld(&mut self) {
-        let mut map: FxHashMap<[u32; 17], u32> = FxHashMap::default();
+        let mut map: FxHashMap<[u32; 19], u32> = FxHashMap::default();
         let mut remap = Vec::with_capacity(self.vertices.len());
         let mut vertices = Vec::new();
-        let (mut uv1, mut colors, mut skin) = (Vec::new(), Vec::new(), Vec::new());
+        let (mut uv1, mut colors, mut skin, mut plant) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
         for (i, v) in self.vertices.iter().enumerate() {
-            let mut key = [0u32; 17];
+            let mut key = [0u32; 19];
             key[..8].copy_from_slice(&bytemuck::cast::<Vertex, [u32; 8]>(*v));
             if let Some(uv) = self.uv1.get(i) {
                 key[8..10].copy_from_slice(&uv.to_array().map(f32::to_bits));
@@ -203,13 +218,17 @@ impl Mesh {
             }
             if let Some(s) = self.skin.get(i) {
                 let j = s.joints.map(u32::from);
-                key[14..].copy_from_slice(&[j[0] | (j[1] << 16), j[2] | (j[3] << 16), u32::from_le_bytes(s.weights)]);
+                key[14..17].copy_from_slice(&[j[0] | (j[1] << 16), j[2] | (j[3] << 16), u32::from_le_bytes(s.weights)]);
+            }
+            if let Some(p) = self.plant.get(i) {
+                key[17..].copy_from_slice(&p.to_array().map(f32::to_bits));
             }
             let id = *map.entry(key).or_insert_with(|| {
                 vertices.push(*v);
                 uv1.extend(self.uv1.get(i));
                 colors.extend(self.colors.get(i));
                 skin.extend(self.skin.get(i));
+                plant.extend(self.plant.get(i));
                 (vertices.len() - 1) as u32
             });
             remap.push(id);
@@ -217,6 +236,7 @@ impl Mesh {
         self.uv1 = uv1;
         self.colors = colors;
         self.skin = skin;
+        self.plant = plant;
         let positions: Vec<[u32; 3]> = vertices.iter().map(|v: &Vertex| v.position.map(f32::to_bits)).collect();
         let mut indices = Vec::with_capacity(self.indices.len());
         for [a, b, c] in self.triangles() {
@@ -241,13 +261,14 @@ impl Mesh {
         self.uv1.clear();
         self.colors.clear();
         self.skin.clear();
+        self.plant.clear();
         self.weld();
         self.compute_normals();
     }
 
     /// Appends `other`, transformed by `transform`. An optional attribute present in either
     /// mesh is kept, with the defaults of [`Mesh::uv1_of`] / [`Mesh::color_of`] /
-    /// [`Mesh::skin_of`] where missing.
+    /// [`Mesh::skin_of`] / [`Mesh::plant_of`] where missing.
     pub fn append(&mut self, other: &Mesh, transform: Mat4) {
         let base = self.vertices.len() as u32;
         if !self.uv1.is_empty() || !other.uv1.is_empty() {
@@ -258,6 +279,9 @@ impl Mesh {
         }
         if !self.skin.is_empty() || !other.skin.is_empty() {
             self.skin = (0..self.vertices.len()).map(|i| self.skin_of(i)).chain((0..other.vertices.len()).map(|i| other.skin_of(i))).collect();
+        }
+        if !self.plant.is_empty() || !other.plant.is_empty() {
+            self.plant = (0..self.vertices.len()).map(|i| self.plant_of(i)).chain((0..other.vertices.len()).map(|i| other.plant_of(i))).collect();
         }
         let normal_matrix = Mat3::from_mat4(transform).inverse().transpose();
         let flip = Mat3::from_mat4(transform).determinant() < 0.0;

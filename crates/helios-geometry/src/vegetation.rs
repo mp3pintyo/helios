@@ -80,6 +80,16 @@ pub struct LeafShape {
 /// Adds a double-sided leaf at `base` growing along `dir`, with `up` as its rough normal.
 /// UV: v along the midrib 0..1, u across 0..1 (matches the `Leaf` texture pattern).
 pub fn add_leaf(b: &mut MeshBuilder, base: Vec3, dir: Vec3, up: Vec3, shape: LeafShape) {
+    leaf(b, base, dir, up, shape, None);
+}
+
+/// [`add_leaf`] with plant data ([`Mesh::plant`]): `plant.0` at the leaf's base, `plant.1` at its
+/// tip, interpolated along the midrib.
+pub fn add_leaf_with_plant(b: &mut MeshBuilder, base: Vec3, dir: Vec3, up: Vec3, shape: LeafShape, plant: (Vec2, Vec2)) {
+    leaf(b, base, dir, up, shape, Some(plant));
+}
+
+fn leaf(b: &mut MeshBuilder, base: Vec3, dir: Vec3, up: Vec3, shape: LeafShape, plant: Option<(Vec2, Vec2)>) {
     let dir = dir.normalize_or(Vec3::Y);
     let side = dir.cross(up).normalize_or(dir.any_orthonormal_vector());
     let normal = side.cross(dir).normalize();
@@ -95,7 +105,13 @@ pub fn add_leaf(b: &mut MeshBuilder, base: Vec3, dir: Vec3, up: Vec3, shape: Lea
     ];
     for flip in [false, true] {
         let n = if flip { -normal } else { normal };
-        let i: Vec<u32> = points.iter().map(|&(p, uv)| b.vertex(p, n, uv)).collect();
+        let i: Vec<u32> = points
+            .iter()
+            .map(|&(p, uv)| match plant {
+                Some((at_base, at_tip)) => b.plant_vertex(p, n, uv, at_base.lerp(at_tip, uv.y)),
+                None => b.vertex(p, n, uv),
+            })
+            .collect();
         let tris = [[0, 1, 4], [1, 2, 4], [2, 3, 4], [3, 0, 4]];
         for t in tris {
             if flip {
@@ -204,6 +220,24 @@ impl Grower<'_> {
     }
 }
 
+/// Smooth step from 0 at `edge0` to 1 at `edge1`.
+fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
+    let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+/// Gives a woody plant rooted at the origin its wind weights ([`Mesh::plant`]): held where it
+/// meets the ground (y = 0, root flares below it), free from `free_height` up. For trunks and
+/// bushes the height above the ground *is* the distance along the plant from its root; the
+/// wood and the leaves of one plant get the same function of height, so a leaf moves with the
+/// twig it sits on. No occlusion is baked (1).
+pub fn root_weights(mesh: &mut Mesh, free_height: f32) {
+    mesh.plant = mesh.vertices.iter().map(|v| Vec2::new(smoothstep(0.0, free_height, v.position[1]), 1.0)).collect();
+}
+
+/// Height over which a tree's trunk stiffens into its free sway (wind weight 0 → 1).
+const TREE_FREE_HEIGHT: f32 = 0.8;
+
 /// A broadleaf tree (oak / beech like) rooted at the origin.
 pub fn broadleaf_tree(params: &TreeParams) -> Plant {
     let g = grow_broadleaf(params);
@@ -211,7 +245,9 @@ pub fn broadleaf_tree(params: &TreeParams) -> Plant {
     for m in &g.wood {
         wood.append(m);
     }
-    Plant { wood: wood.build(), foliage: g.leaves.build() }
+    let mut wood = wood.build();
+    root_weights(&mut wood, TREE_FREE_HEIGHT.min(0.25 * params.height));
+    Plant { wood, foliage: g.leaves.build() }
 }
 
 /// The same tree with its foliage as an assembly: every terminal twig carries a copy of one of
@@ -242,7 +278,9 @@ pub fn broadleaf_assembly(params: &TreeParams) -> PlantAssembly {
             (seed * lengths.len() + variant, Mat4::from_scale_rotation_translation(Vec3::splat(scale), frame, start))
         })
         .collect();
-    PlantAssembly { wood: wood.build(), sprays, placements }
+    let mut wood = wood.build();
+    root_weights(&mut wood, TREE_FREE_HEIGHT.min(0.25 * params.height));
+    PlantAssembly { wood, sprays, placements }
 }
 
 /// Leaves along a twig of `length` on +y (as the trees place them along a twig's outer half),
@@ -324,7 +362,9 @@ pub fn conifer(seed: u32, height: f32, radius: f32, needles_per_branch: u32, det
         let base = Vec3::new(0.0, height * needle_rng.range(0.9, 1.0), 0.0);
         add_leaf(&mut foliage, base, (needle_rng.unit() + Vec3::Y).normalize(), Vec3::Y, needle);
     }
-    Plant { wood: wood.build(), foliage: foliage.build() }
+    let mut wood = wood.build();
+    root_weights(&mut wood, TREE_FREE_HEIGHT);
+    Plant { wood, foliage: foliage.build() }
 }
 
 /// The same conifer with its needles as an assembly: each branch carries a copy of one of six
@@ -370,7 +410,9 @@ pub fn conifer_assembly(seed: u32, height: f32, radius: f32, needles_per_branch:
     }
     sprays.push(leader.build());
     placements.push((sprays.len() - 1, Mat4::IDENTITY));
-    PlantAssembly { wood: wood.build(), sprays, placements }
+    let mut wood = wood.build();
+    root_weights(&mut wood, TREE_FREE_HEIGHT);
+    PlantAssembly { wood, sprays, placements }
 }
 
 /// Point `s` (0..1) along a conifer branch of `span` growing towards `out` from the trunk: out
@@ -397,10 +439,57 @@ fn needle_spray(seed: u32, needles: u32, span: f32, t: f32) -> Mesh {
     b.build()
 }
 
-/// A fern: fronds arching out from the centre, each with paired leaflets.
+/// Depth below the ground (the plant's origin) at which grass blades and fern stalks start:
+/// they grow out of the soil instead of standing on it, so a slope or a terrain a little above
+/// the analytic ground never shows a floating base.
+pub const ROOT_DEPTH: f32 = 0.04;
+
+/// Adds a double-sided strip along `points` (at least two; the last is the tip) with the given
+/// half widths across `side`, facing `normal` (its edges' normals turned outwards by `round`,
+/// shading it like a rounded or folded blade). Every point carries its plant data. UV: v from 0
+/// at the first point to 1 at the tip, u across 0..1.
+fn add_strip(b: &mut MeshBuilder, points: &[(Vec3, f32, Vec2)], side: Vec3, normal: Vec3, round: f32) {
+    let last = points.len() - 1;
+    for flip in [false, true] {
+        let n = if flip { -normal } else { normal };
+        let mut rows: Vec<(u32, u32)> = Vec::new();
+        for (k, &(p, half, plant)) in points.iter().enumerate() {
+            let v = k as f32 / last as f32;
+            if k == last || half <= 0.0 {
+                let tip = b.plant_vertex(p, n, Vec2::new(0.5, v), plant);
+                rows.push((tip, tip));
+            } else {
+                let left = b.plant_vertex(p - side * half, (n - side * round).normalize(), Vec2::new(0.0, v), plant);
+                let right = b.plant_vertex(p + side * half, (n + side * round).normalize(), Vec2::new(1.0, v), plant);
+                rows.push((left, right));
+            }
+        }
+        for k in 0..last {
+            let ((l0, r0), (l1, r1)) = (rows[k], rows[k + 1]);
+            let mut tris = vec![[l0, r0, r1]];
+            if l1 != r1 {
+                tris.push([l0, r1, l1]);
+            }
+            for t in tris {
+                if flip {
+                    b.triangle(t[0], t[2], t[1]);
+                } else {
+                    b.triangle(t[0], t[1], t[2]);
+                }
+            }
+        }
+    }
+}
+
+/// A fern: fronds arching out of a crown, each a tapering stalk (rachis) with paired leaflets.
+/// The stalks start below the ground; a frond's wind weight grows with the distance along it
+/// (the crown is held, a tip resting near the ground still moves), and the crown, under the
+/// fronds, is darker (baked occlusion).
 pub fn fern(seed: u32, fronds: u32, length: f32, leaflets: u32) -> Mesh {
     let mut rng = Rng::new(seed);
     let mut b = MeshBuilder::default();
+    // Wind weight and occlusion at fraction `s` along a frond.
+    let plant = |s: f32| Vec2::new(smoothstep(0.03, 0.35, s), 0.35 + 0.65 * smoothstep(0.0, 0.5, s));
     for f in 0..fronds {
         let a = f as f32 / fronds as f32 * std::f32::consts::TAU + rng.range(-0.3, 0.3);
         let out = Vec3::new(a.cos(), 0.0, a.sin());
@@ -413,28 +502,65 @@ pub fn fern(seed: u32, fronds: u32, length: f32, leaflets: u32) -> Mesh {
             let tangent = (point(s + 0.01) - p).normalize();
             let side = tangent.cross(Vec3::Y).normalize_or(Vec3::X);
             let size = len * 0.22 * (1.0 - s * 0.8);
+            // A leaflet's tip is a leaflet's length further along: its own weight is the stalk's.
+            let along = (plant(s), plant((s + size / len).min(1.0)));
             for sign in [-1.0f32, 1.0] {
                 let dir = (side * sign + tangent * 0.35 - Vec3::Y * 0.15).normalize();
-                add_leaf(&mut b, p, dir, Vec3::Y, LeafShape { length: size, width: size * 0.32, fold: 0.2 });
+                add_leaf_with_plant(&mut b, p, dir, Vec3::Y, LeafShape { length: size, width: size * 0.32, fold: 0.2 }, along);
             }
         }
-        // Rachis as thin blades along the frond.
-        let p0 = point(0.0);
-        add_leaf(&mut b, p0, (point(0.5) - p0).normalize(), Vec3::Y, LeafShape { length: len * 0.5, width: 0.012, fold: 0.0 });
+        // The rachis: a stalk following the frond from below the ground to its tip, tapering.
+        let side = out.cross(Vec3::Y);
+        let mut stalk = vec![(point(0.0) - Vec3::Y * ROOT_DEPTH, 0.008, Vec2::new(0.0, 0.35))];
+        for k in 0..=3 {
+            let s = k as f32 / 3.0;
+            stalk.push((point(s), 0.007 * (1.0 - 0.75 * s), plant(s)));
+        }
+        // Facing up (the strip's winding: side × along).
+        let normal = side.cross(point(0.5) - point(0.4)).normalize_or(Vec3::Y);
+        add_strip(&mut b, &stalk, side, normal, 0.6);
     }
     b.build()
 }
 
-/// A clump of grass blades.
+/// A clump of grass: blades grow out of the soil from a tuft a few centimetres wide and fan out,
+/// widest at the base and tapering to the tip, arching away from the centre. Wind weights hold
+/// a blade where it leaves the ground and free it within its lower third; the baked occlusion
+/// darkens the tuft's base, inner blades most.
 pub fn grass_clump(seed: u32, blades: u32, height: f32) -> Mesh {
     let mut rng = Rng::new(seed);
     let mut b = MeshBuilder::default();
+    let tuft = 0.06 * height / 0.45;
     for _ in 0..blades {
-        let base = Vec3::new(rng.range(-0.15, 0.15), 0.0, rng.range(-0.15, 0.15));
-        let h = height * rng.range(0.6, 1.2);
-        let bend = Vec3::new(rng.range(-0.4, 0.4), 0.0, rng.range(-0.4, 0.4));
-        let dir = (Vec3::Y + bend * 0.5).normalize();
-        add_leaf(&mut b, base, dir, bend.normalize_or(Vec3::X).cross(Vec3::Y), LeafShape { length: h, width: 0.018, fold: 0.1 });
+        let r = tuft * rng.float().sqrt();
+        let a = rng.range(0.0, std::f32::consts::TAU);
+        let out = Vec3::new(a.cos(), 0.0, a.sin());
+        // Outer blades lean further out; each turns a little about its root.
+        let tilt = 0.12 + 0.5 * (r / tuft) + rng.range(0.0, 0.2);
+        let turn = rng.range(-0.5, 0.5);
+        let lean = (out * turn.cos() + out.cross(Vec3::Y) * turn.sin()).normalize();
+        let dir = Vec3::Y * tilt.cos() + lean * tilt.sin();
+        let visible = height * rng.range(0.6, 1.2);
+        let arch = rng.range(0.05, 0.3);
+        let width = rng.range(0.012, 0.02) * 0.5;
+        let root = out * r - Vec3::Y * ROOT_DEPTH;
+        let total = visible + ROOT_DEPTH;
+        let darkness = 0.35 + 0.25 * (r / tuft);
+        // Rows from the root below the ground to the tip: two segments, 6 triangles a blade (the
+        // attributes interpolate between them: at the ground the weight is a fifth of its value
+        // at the middle row).
+        let rows = [0.0, 0.45, 1.0];
+        let points: Vec<(Vec3, f32, Vec2)> = rows
+            .iter()
+            .map(|&s| {
+                let p = root + (dir * s + (lean - Vec3::Y * 0.4) * arch * s * s) * total;
+                let above = ((s * total - ROOT_DEPTH) / visible).max(0.0);
+                let half = width * (1.0 - 0.85 * s.powf(1.5));
+                (p, half, Vec2::new(smoothstep(0.0, 0.35, above), darkness + (1.0 - darkness) * smoothstep(0.0, 0.7, above)))
+            })
+            .collect();
+        let side = lean.cross(Vec3::Y).normalize_or(Vec3::X);
+        add_strip(&mut b, &points, side, side.cross(dir).normalize_or(lean), 0.35);
     }
     b.build()
 }
@@ -452,7 +578,10 @@ pub fn bush(seed: u32, size: f32, leaves: u32) -> Plant {
         sides: 5,
         gravitropism: 0.6,
     };
-    broadleaf_tree(&params)
+    let mut plant = broadleaf_tree(&params);
+    // Low leaves move with the low twigs: the wood's weights.
+    root_weights(&mut plant.foliage, TREE_FREE_HEIGHT.min(0.25 * params.height));
+    plant
 }
 
 #[cfg(test)]
@@ -480,6 +609,38 @@ mod tests {
         let copies: usize = conifer.placements.iter().map(|&(s, _)| conifer.sprays[s].triangle_count()).sum();
         assert_eq!(copies, conifer_plain.foliage.triangle_count());
         assert_eq!(conifer.wood.triangle_count(), conifer_plain.wood.triangle_count());
+    }
+
+    /// Grass and ferns grow out of the soil: their lowest vertices are below the ground and held
+    /// (wind weight 0), what stands above it moves (a fern's drooping frond tips near the ground
+    /// too), and their bases are darker than their tips.
+    #[test]
+    fn plants_are_rooted_in_the_ground() {
+        for mesh in [grass_clump(91, 60, 0.45), fern(81, 9, 0.9, 14)] {
+            assert_eq!(mesh.plant.len(), mesh.vertices.len());
+            let lowest = mesh.vertices.iter().map(|v| v.position[1]).fold(f32::MAX, f32::min);
+            assert!(lowest <= -ROOT_DEPTH + 1e-4, "roots start below the ground: {lowest}");
+            for (v, plant) in mesh.vertices.iter().zip(&mesh.plant) {
+                if v.position[1] < -0.01 && Vec2::new(v.position[0], v.position[2]).length() < 0.1 {
+                    assert!(plant.x < 0.2, "a root at {:?} moves with weight {}", v.position, plant.x);
+                }
+            }
+            let free = mesh.plant.iter().filter(|p| p.x > 0.99).count();
+            assert!(free * 3 > mesh.vertices.len(), "most of the plant moves freely: {free}/{}", mesh.vertices.len());
+            let (base, tip) = (mesh.plant.iter().map(|p| p.y).fold(1.0f32, f32::min), mesh.plant.iter().map(|p| p.y).fold(0.0f32, f32::max));
+            assert!(base < 0.5 && tip > 0.99, "occlusion from {base} at the base to {tip}");
+        }
+        // A fern frond tip resting near the ground still moves.
+        let fern = fern(81, 9, 0.9, 14);
+        let mut low_and_far = fern.vertices.iter().zip(&fern.plant).filter(|(v, _)| v.position[1] < 0.15 && Vec2::new(v.position[0], v.position[2]).length() > 0.5);
+        assert!(low_and_far.clone().count() > 0 && low_and_far.all(|(_, p)| p.x > 0.99));
+        // Trees and bushes are held where they meet the ground.
+        let bush = bush(61, 1.4, 10);
+        for mesh in [&bush.wood, &bush.foliage] {
+            for (v, plant) in mesh.vertices.iter().zip(&mesh.plant) {
+                assert!(v.position[1] > 0.0 || plant.x == 0.0);
+            }
+        }
     }
 
     #[test]

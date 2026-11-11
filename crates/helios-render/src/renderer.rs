@@ -372,6 +372,10 @@ pub struct RenderSettings {
     /// transmittance through smoke, fire and mist darkens the scene, the fog, particles and the
     /// other volumes under them.
     pub volume_shadows: bool,
+    /// Short-range ambient occlusion from the depth buffer (`short_range_ao.wgsl`, UE's Lumen
+    /// short range AO): the occlusion within 0.4 m that the GI probes and distance fields miss —
+    /// the ground under grass and ferns, rocks and logs where they meet it. Indirect light only.
+    pub short_range_ao: bool,
 }
 
 impl Default for RenderSettings {
@@ -436,6 +440,7 @@ impl Default for RenderSettings {
             shadow_distant_prefiltered: true,
             shadow_distant_bias: 1.0,
             volume_shadows: true,
+            short_range_ao: true,
         }
     }
 }
@@ -1367,6 +1372,7 @@ impl Renderer {
             (self.translucency.camera_in_water(), flags::UNDERWATER),
             (s.mega_lights && self.lights.count > 0, flags::MEGALIGHTS),
             (self.effects.active(), flags::REACTIVE),
+            (s.short_range_ao, flags::SHORT_RANGE_AO),
         ] {
             if enabled {
                 frame_flags |= flag;

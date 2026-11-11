@@ -21,7 +21,9 @@ Part of the `helios-render` GPU pipeline; the pipeline diagram and the index of 
   (rotated normal maps stay right). **Vertex colours** multiply the base colour (their alpha the coverage of blended
   materials). The second UV set and vertex colours are optional attributes of the compressed clusters
   (`encoding.rs`): a header bit adds 4 words (bit widths, UV1 and colour minima) and per-vertex offsets with just enough
-  bits (RGBA8 colours, RGB on a square-root curve); meshes without them encode bit-identically to before. The
+  bits (RGBA8 colours, RGB on a square-root curve); meshes without them encode bit-identically to before. Procedural
+  vegetation's *plant data* (wind weight, baked ambient occlusion, 2 × 5 bits; [*Grounded foliage*](foliage.md)) is a
+  third one (extension bit 29); its occlusion multiplies the material's AO. The
   rarer features — second UV set, wrap modes other than repeat, occlusion layers of their own — live in a second
   permutation of the resolve pipelines (`UV_EXTENSIONS`), compiled on first use for scenes whose materials need it;
   other scenes pay for transforms, AO and the optional-attribute check only (Sponza resolve 0.28 → 0.31 ms, best of

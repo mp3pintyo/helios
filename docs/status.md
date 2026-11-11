@@ -149,7 +149,9 @@ Honest differences that remain:
    single-scattering angles (many orders widen it in reality), weights the kernel per pixel only through τ (not per
    source depth), and ignores aerial perspective and underwater fog.
 7. **Wind** is procedural (no pivot-painter data per branch or leaf, no simulation) and does not rotate normals;
-   leaves flutter around their position rather than their stem. Shadow pages cache static casters separately (as
+   leaves flutter around their position rather than their stem. A per-vertex wind weight (round 8) holds plants at
+   their roots, but only the procedural vegetation bakes it (imported foliage moves with weight 1, as do voxel LODs and
+   tessellated surfaces), and it is one scalar per vertex, not a bone hierarchy (UE 5.9's skeletal *dynamic wind*). Shadow pages cache static casters separately (as
    UE's static cache); the wind, `Mobility::Movable` and animated skins make a caster dynamic. Refreshes are decided
    per instance and redraw every dynamic caster in the
    page, so in the forest — where trees, bushes, ferns and grass all sway and only terrain, rocks and logs are
@@ -195,8 +197,13 @@ Honest differences that remain:
    invalidated locally. Instance records are rewritten with one `write_buffer` per contiguous run, not a GPU scatter
    of dirty records (UE's GPU-scene update); adding, hiding or removing instances still rebuilds all instance data.
    The landscape (runtime virtual texture) and water bodies' lake beds don't follow a moved terrain instance.
-10. **Nanite Foliage**: voxels carry per-axis coverage, one normal and their brick's mean texture coordinate — no
-    per-voxel colour, so textures varying within a brick, vertex colours and alpha-masked (card) foliage's mask
+10. **Nanite Foliage**: grounded foliage (round 8) relies on content: the procedural grass, ferns, bushes and trees
+    bake their wind weights and ambient occlusion and the forest places them (and its PCG volumes) on its terrain
+    mesh's height, computed from the scene's own height function; imported plants get no plant data, and there is no
+    Landscape-style height query of the rendered, LOD'd terrain for arbitrary scenes, and
+    the short-range AO is screen space (nothing off screen or behind nearer geometry, no thickness, 4 × 4 noisy taps
+    averaged by TSR; UE's comes with the screen-probe gather and a bent normal). Voxels carry per-axis coverage, one
+    normal and their brick's mean texture coordinate — no per-voxel colour, so textures varying within a brick, vertex colours and alpha-masked (card) foliage's mask
     coverage are averaged away or ignored; coverage along a diagonal is modelled from the three axes (exact for
     axis-aligned and isotropic leaves). Voxels are rasterised as stochastic cubes (no ray-marched depth buckets or
     front-to-back ordering), rely on TSR to average their dithering, move rigidly with the wind at their centre (no

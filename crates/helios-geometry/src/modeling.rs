@@ -16,10 +16,24 @@ use crate::{Mesh, Vertex};
 pub struct MeshBuilder {
     pub vertices: Vec<Vertex>,
     pub indices: Vec<u32>,
+    /// Plant data ([`Mesh::plant`]): empty until a vertex is added with [`MeshBuilder::plant_vertex`].
+    pub plant: Vec<Vec2>,
 }
 
 impl MeshBuilder {
     pub fn vertex(&mut self, p: Vec3, n: Vec3, uv: Vec2) -> u32 {
+        self.vertices.push(Vertex::new(p, n, uv));
+        if !self.plant.is_empty() {
+            self.plant.push(Vec2::ONE);
+        }
+        self.vertices.len() as u32 - 1
+    }
+
+    /// A vertex with plant data (wind weight, ambient occlusion; see [`Mesh::plant`]). Vertices
+    /// added without it get (1, 1).
+    pub fn plant_vertex(&mut self, p: Vec3, n: Vec3, uv: Vec2, plant: Vec2) -> u32 {
+        self.plant.resize(self.vertices.len(), Vec2::ONE);
+        self.plant.push(plant);
         self.vertices.push(Vertex::new(p, n, uv));
         self.vertices.len() as u32 - 1
     }
@@ -42,12 +56,19 @@ impl MeshBuilder {
 
     pub fn append(&mut self, mesh: &Mesh) {
         let base = self.vertices.len() as u32;
+        if !self.plant.is_empty() || !mesh.plant.is_empty() {
+            self.plant.resize(self.vertices.len(), Vec2::ONE);
+            self.plant.extend((0..mesh.vertices.len()).map(|i| mesh.plant_of(i)));
+        }
         self.vertices.extend_from_slice(&mesh.vertices);
         self.indices.extend(mesh.indices.iter().map(|i| i + base));
     }
 
-    pub fn build(self) -> Mesh {
-        let mut mesh = Mesh::new(self.vertices, self.indices);
+    pub fn build(mut self) -> Mesh {
+        if !self.plant.is_empty() {
+            self.plant.resize(self.vertices.len(), Vec2::ONE);
+        }
+        let mut mesh = Mesh { plant: self.plant, ..Mesh::new(self.vertices, self.indices) };
         mesh.weld();
         mesh
     }

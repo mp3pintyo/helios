@@ -24,3 +24,6 @@ MegaLights 16.0 / 9.7 → 14.7 / 8.8 ms (no candle left without a shadow page), 
 8.9 ms, the lantern 11.4 / 7.3 → 11.4 / 7.3 ms. In the browser the first image of a fresh visit takes ~8 s in
 Chromium and in Firefox (was 31–50 s), Firefox's full set ~33 s; the displaced-variant bakes' worst frame 718–920 →
 6–31 ms.
+Round 8 grounded foliage ([`foliage-grounding.md`](round8/foliage-grounding.md); 1600×900, shared GPU, per-pass minima):
+forest default view 8.87 → 9.72 ms (plant data and stalks +0.3–0.4 ms of shadow rasterisation and resolve,
+short-range AO +0.15 ms of lighting).

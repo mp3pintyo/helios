@@ -81,7 +81,8 @@ fn rasterize(
     }
 
     if lid < cluster_vertex_count(cluster) {
-        let world = wind_world_position(instance, wind_strength(instance), skinned_vertex_position(instance, cluster, base, lid));
+        let strength = wind_strength(instance);
+        let world = wind_world_position(instance, strength, skinned_vertex_position(instance, cluster, base, lid), vertex_wind_weight(cluster, base, lid, strength));
         let clip = view.view_proj * vec4<f32>(world, 1.0);
         let ndc = clip.xyz / clip.w;
         // Snap to the sub-pixel grid so shared edges rasterise identically in both clusters.

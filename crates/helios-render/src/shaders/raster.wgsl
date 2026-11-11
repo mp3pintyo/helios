@@ -66,7 +66,8 @@ fn corner(entry: vec4<u32>, cluster: Cluster, vertex_index: u32) -> Corner {
     let base = cluster_base(cluster);
     c.index = cluster_triangle(cluster, base, triangle)[vertex_index % 3u];
     let instance = instances[entry.x];
-    let world = wind_world_position(instance, wind_strength(instance), skinned_vertex_position(instance, cluster, base, c.index));
+    let strength = wind_strength(instance);
+    let world = wind_world_position(instance, strength, skinned_vertex_position(instance, cluster, base, c.index), vertex_wind_weight(cluster, base, c.index, strength));
     c.position = view.view_proj * vec4<f32>(world, 1.0);
     c.visible = true;
     return c;

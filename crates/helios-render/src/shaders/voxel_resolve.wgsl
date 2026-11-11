@@ -41,7 +41,7 @@ fn resolve_voxel(pixel: vec2<u32>, id: u32) {
     // The hit in voxels from the cluster origin, the wind moved back by its offset there; the
     // voxel is the nearest set cell around it (Chebyshev distance to its displaced centre: ½ on
     // its own cube).
-    let rest_estimate = world_position - (wind_world_position(instance, strength, (to_object * (world_position - instance.world[3].xyz)) * inverse_scale) - (instance.world * vec4<f32>((to_object * (world_position - instance.world[3].xyz)) * inverse_scale, 1.0)).xyz);
+    let rest_estimate = world_position - (wind_world_position(instance, strength, (to_object * (world_position - instance.world[3].xyz)) * inverse_scale, 1.0) -(instance.world * vec4<f32>((to_object * (world_position - instance.world[3].xyz)) * inverse_scale, 1.0)).xyz);
     let estimate = (((to_object * (rest_estimate - instance.world[3].xyz)) * inverse_scale) - v.origin) / v.size;
     let brick_cell = voxel_cell(brick, 0u);
     let mask = vec2<u32>(brick.x, brick.y);
@@ -61,7 +61,7 @@ fn resolve_voxel(pixel: vec2<u32>, id: u32) {
                     continue;
                 }
                 let object = v.origin + ((brick_cell + vec3<f32>(local) + 0.5) * v.size);
-                let offset = wind_world_position(instance, strength, object) - (instance.world * vec4<f32>(object, 1.0)).xyz;
+                let offset = wind_world_position(instance, strength, object, 1.0) -(instance.world * vec4<f32>(object, 1.0)).xyz;
                 let d = abs((((to_object * (world_position - offset - instance.world[3].xyz)) * inverse_scale) - object) / v.size);
                 let distance = max(d.x, max(d.y, d.z));
                 if distance < best_distance {
@@ -75,8 +75,9 @@ fn resolve_voxel(pixel: vec2<u32>, id: u32) {
         }
     }
     let attributes = geometry[v.attributes + best];
-    let center_world = wind_world_position(instance, strength, best_center);
-    // The cube moves rigidly with the wind at its centre.
+    let center_world = wind_world_position(instance, strength, best_center, 1.0);
+    // The cube moves rigidly with the wind at its centre, with weight 1: voxels carry no plant
+    // data (they stand in where a blade's held base moves less than a voxel anyway).
     let rest = world_position - (center_world - (instance.world * vec4<f32>(best_center, 1.0)).xyz);
     let object_position = (to_object * (rest - instance.world[3].xyz)) * inverse_scale;
 
@@ -133,7 +134,7 @@ fn resolve_voxel(pixel: vec2<u32>, id: u32) {
         }
     }
 
-    let previous = wind_previous_world_position(instance, strength, best_center) + ((instance.prev_world * vec4<f32>(object_position - best_center, 0.0)).xyz);
+    let previous = wind_previous_world_position(instance, strength, best_center, 1.0) + ((instance.prev_world * vec4<f32>(object_position - best_center, 0.0)).xyz);
     let motion = clip_to_uv(frame.unjittered_view_proj * vec4<f32>(world_position, 1.0)) - clip_to_uv(frame.prev_unjittered_view_proj * vec4<f32>(previous, 1.0));
     textureStore(gbuffer_albedo, pixel, vec4<f32>(sqrt(saturate(surface.albedo)), surface.metallic));
     textureStore(gbuffer_normal, pixel, vec4<f32>(surface.normal, surface.roughness));
