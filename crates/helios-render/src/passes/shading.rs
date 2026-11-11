@@ -107,6 +107,8 @@ pub struct LightingInputs<'a> {
     pub substrate: Option<&'a wgpu::BindGroup>,
     /// Sunlight through glass.
     pub glass: &'a crate::glass_shadow::GlassShadow,
+    /// Local lights through glass.
+    pub glass_lights: &'a crate::glass_light::GlassLights,
 }
 
 impl LightingPass {
@@ -152,6 +154,10 @@ impl LightingPass {
                 (62, bind::texture(false)),
                 (90, bind::uniform()),
                 (91, bind::texture(true)),
+                // Local lights through glass (glass_light.wgsl).
+                (92, crate::glass_light::GlassLights::entries()[0].1),
+                (93, crate::glass_light::GlassLights::entries()[1].1),
+                (94, crate::glass_light::GlassLights::entries()[2].1),
             ],
         );
         Self {
@@ -215,6 +221,9 @@ impl LightingPass {
                 (62, TextureView(inputs.megalights.unwrap_or(inputs.black))),
                 (90, inputs.glass.uniform.as_entire_binding()),
                 (91, TextureView(inputs.glass.view())),
+                (92, inputs.glass_lights.resources()[0].1.clone()),
+                (93, inputs.glass_lights.resources()[1].1.clone()),
+                (94, inputs.glass_lights.resources()[2].1.clone()),
             ],
         );
         // MegaLights traces the shadows of every light itself.

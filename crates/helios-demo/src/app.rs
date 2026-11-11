@@ -240,6 +240,8 @@ impl DemoApp {
             "Slash" => s.translucency_layers = !s.translucency_layers,
             // Sunlight through glass coloured by the panes / white.
             "End" => s.glass_shadows = !s.glass_shadows,
+            // Adaptive voxel-based OIT / weighted blended OIT and depth peeling (A/B).
+            "Home" => s.avboit = !s.avboit,
             "KeyL" => s.wind = !s.wind,
             "Quote" => {
                 let on = !(s.volumes || s.particles);
@@ -422,7 +424,7 @@ impl DemoApp {
             "{} · {:.1} ms ({:.0} fps){gpu} · {resolution} · {} · LOD error {} px{budget}\n\
              visible: {} clusters ({} software, {} alpha-masked), {:.2} M tris (early pass {}) · shadows: {:.2} M tris ({:.2} M software)\n\
              streaming: {}/{} pages, {:.0}/{:.0} MiB resident, {} pending, {} in flight · scene: {} instances, {:.0} M source tris\n\
-             GI {} · shadows {} · TAA {} · fog {} · SW raster {} · wind {} · local exposure {} · MegaLights {} ({} lights) · volumes + particles {} · Substrate {} · glass shadows {}",
+             GI {} · shadows {} · TAA {} · fog {} · SW raster {} · wind {} · local exposure {} · MegaLights {} ({} lights) · volumes + particles {} · Substrate {} · glass shadows {} · OIT {}",
             self.scene_name(),
             self.frame_ms,
             1000.0 / self.frame_ms.max(0.01),
@@ -455,6 +457,7 @@ impl DemoApp {
             on(s.volumes || s.particles),
             on(s.substrate),
             on(s.glass_shadows),
+            if s.avboit { "AVBOIT" } else { "weighted blended" },
         );
         text.push_str(&format!(
             "\nshadow pages: {}/{} in use, {} requested, {} rendered ({} dynamic casters only, {} split; {}/{} draws), {} unallocated · local lights with shadow maps: {} ({} moving, cached)",

@@ -21,6 +21,9 @@
 #include "common.wgsl"
 #include "blackbody.wgsl"
 #include "media_common.wgsl"
+#include "avboit_common.wgsl"
+#include "avboit_read.wgsl"
+#include "avboit_write.wgsl"
 
 const MAX_VOLUMES: u32 = 4u;
 const MAX_STEPS: u32 = 192u;
@@ -68,13 +71,13 @@ struct VolumeMarch {
 @group(0) @binding(87) var cache2: texture_3d<f32>;
 @group(0) @binding(88) var cache3: texture_3d<f32>;
 @group(0) @binding(89) var scene_depth: texture_2d<f32>;
-@group(0) @binding(90) var translucent_depth: texture_2d<f32>;
-@group(0) @binding(91) var front_out: texture_storage_2d<rgba16float, write>;
-@group(0) @binding(92) var back_out: texture_storage_2d<rgba16float, write>;
-@group(0) @binding(93) var front_raw: texture_2d<f32>;
-@group(0) @binding(94) var back_raw: texture_2d<f32>;
-@group(0) @binding(95) var front_history: texture_2d<f32>;
-@group(0) @binding(96) var back_history: texture_2d<f32>;
+@group(0) @binding(140) var translucent_depth: texture_2d<f32>;
+@group(0) @binding(141) var front_out: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(142) var back_out: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(143) var front_raw: texture_2d<f32>;
+@group(0) @binding(144) var back_raw: texture_2d<f32>;
+@group(0) @binding(145) var front_history: texture_2d<f32>;
+@group(0) @binding(146) var back_history: texture_2d<f32>;
 
 // `v`, or `fallback` where it is not a finite number.
 fn finite(v: vec4<f32>, fallback: vec4<f32>) -> vec4<f32> {
@@ -212,6 +215,25 @@ fn march(@builtin(global_invocation_id) gid: vec3<u32>) {
     var rng = pcg_hash(pixel.x ^ pcg_hash(pixel.y ^ pcg_hash(frame.frame_index)));
     let sun = normalize(frame.sun_direction.xyz);
     let cos_sun = dot(dir, sun);
+    // Adaptive voxel-based OIT (avboit.rs): the surfaces and particles in front of a step weigh
+    // its light (the march attenuates by its own medium exactly). One grid column per pixel,
+    // picked at random with the bilinear weights: the temporal resolve averages the choice into
+    // the bilinear filter.
+    let forward = dot(dir, camera_forward());
+    var grid_column = vec2<i32>(0);
+    var grid_bounds = vec2<f32>(0.0);
+    var split_surfaces = vec3<f32>(1.0);
+    if avboit_enabled() {
+        let c = (vec2<f32>(pixel) + 0.5) / f32(avboit.grid.w) - 0.5;
+        rng = pcg_hash(rng);
+        let r = vec2<f32>(f32(rng & 0xffffu), f32(rng >> 16u)) / 65536.0;
+        let pick = vec2<i32>(floor(c)) + select(vec2<i32>(0), vec2<i32>(1), r < fract(c));
+        grid_column = clamp(pick, vec2<i32>(0), vec2<i32>(avboit.grid.xy) - 1);
+        grid_bounds = avboit_bounds(grid_column);
+        if t_split < t_opaque {
+            split_surfaces = max(avboit_surface_at(grid_column, grid_bounds, t_split * forward), vec3<f32>(1e-3));
+        }
+    }
 
     // Visible volumes by entry_t distance.
     var order = array<u32, 4>(0u, 1u, 2u, 3u);
@@ -292,6 +314,15 @@ fn march(@builtin(global_invocation_id) gid: vec3<u32>) {
             } else {
                 radiance *= dt;
             }
+            if avboit_enabled() {
+                // Behind the nearest refracting surface only what lies between it and the step
+                // counts (the front part's composite dims the rest).
+                var weight = avboit_surface_at(grid_column, grid_bounds, t * forward);
+                if t >= t_split {
+                    weight = min(weight / split_surfaces, vec3<f32>(1.0));
+                }
+                radiance *= weight;
+            }
             if t < t_split {
                 accumulate(&front, radiance, step_transmittance, t);
             } else {
@@ -315,6 +346,71 @@ fn march(@builtin(global_invocation_id) gid: vec3<u32>) {
     // A non-finite value would never leave the temporal history.
     textureStore(front_out, pixel, finite(f, vec4<f32>(0.0, 0.0, 0.0, 1.0)));
     textureStore(back_out, pixel, finite(b, vec4<f32>(0.0, 0.0, 0.0, 1.0)));
+}
+
+// ---- AVBOIT grid (avboit.rs) -----------------------------------------------------------------
+// One thread per grid column over the volumes' rectangle, along the column's centre ray.
+
+// Index of the grid column of thread `gid` (offset to the rectangle), or none outside it.
+fn grid_column_of(gid: vec2<u32>) -> vec2<u32> {
+    return gid + march_info.rect.xy / avboit.grid.w;
+}
+
+fn grid_column_valid(column: vec2<u32>) -> bool {
+    return all(column < avboit.grid.xy) && all(column * avboit.grid.w < march_info.rect.zw);
+}
+
+// The column's centre ray: direction and the opaque surface's distance.
+fn grid_ray(column: vec2<u32>) -> vec4<f32> {
+    let size = vec2<u32>(frame.viewport.xy);
+    let pixel = min(column * avboit.grid.w + avboit.grid.w / 2u, size - 1u);
+    let uv = (vec2<f32>(pixel) + 0.5) * frame.viewport.zw;
+    let dir = view_direction(uv, frame.inv_view_proj, frame.camera_position.xyz);
+    return vec4<f32>(dir, ray_distance(textureLoad(scene_depth, pixel, 0).r, dir, 1e9));
+}
+
+// The volumes' optical depth per cell of the columns the surfaces and particles bounded (4
+// samples per box and cell; the cells' third word), and in front of the cells (the column's).
+fn volume_optical_depth(eye: vec3<f32>, dir: vec3<f32>, ta: f32, tb: f32) -> f32 {
+    var optical_depth = 0.0;
+    for (var i = 0u; i < min(march_info.count.x, MAX_VOLUMES); i++) {
+        let v = march_info.volumes[i];
+        let hit = ray_box(eye, dir, v.origin.xyz, v.size.xyz);
+        let t0 = max(hit.x, ta);
+        let t1 = min(hit.y, tb);
+        if t0 >= t1 {
+            continue;
+        }
+        let dt = (t1 - t0) * 0.25;
+        for (var s = 0u; s < 4u; s++) {
+            let uvw = (eye + dir * (t0 + (f32(s) + 0.5) * dt) - v.origin.xyz) / v.size.xyz;
+            optical_depth += sample_state(i, uvw).x * v.origin.w * dt;
+        }
+    }
+    return optical_depth;
+}
+
+@compute @workgroup_size(8, 8)
+fn avboit_volume_inject(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let column = grid_column_of(gid.xy);
+    if !avboit_enabled() || !grid_column_valid(column) {
+        return;
+    }
+    let index = avboit_column_index(column);
+    let b = avboit_column_bounds(index);
+    if b.y <= b.x {
+        return;
+    }
+    let ray = grid_ray(column);
+    let eye = frame.camera_position.xyz;
+    let forward = max(dot(ray.xyz, camera_forward()), 1e-3);
+    let slices = avboit.grid.z;
+    avboit_set_volume_in_front(index, volume_optical_depth(eye, ray.xyz, 0.0, min(b.x / forward, ray.w)));
+    for (var k = 0u; k < slices; k++) {
+        let ta = b.x * pow(b.y / b.x, f32(k) / f32(slices)) / forward;
+        let tb = min(b.x * pow(b.y / b.x, f32(k + 1u) / f32(slices)) / forward, ray.w);
+        atomicStore(&avboit_grid[avboit_cell_word(index, k) + 2u], bitcast<u32>(volume_optical_depth(eye, ray.xyz, ta, tb)));
+    }
 }
 
 // ---- Temporal resolve ------------------------------------------------------------------------

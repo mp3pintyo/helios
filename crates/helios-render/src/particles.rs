@@ -312,9 +312,15 @@ pub(crate) struct ParticleSystem {
     simulate: Lazy<wgpu::ComputePipeline>,
     light: Lazy<wgpu::ComputePipeline>,
     draw: Lazy<wgpu::RenderPipeline>,
+    /// Adaptive voxel-based OIT (`avboit.rs`): the full-resolution draw, and the
+    /// low-resolution bounds and transmittance draws into the grid.
+    draw_avboit: Lazy<wgpu::RenderPipeline>,
+    avboit_bounds: Lazy<wgpu::RenderPipeline>,
+    avboit_inject: Lazy<wgpu::RenderPipeline>,
     simulate_layout: wgpu::BindGroupLayout,
     light_layout: wgpu::BindGroupLayout,
     draw_layout: wgpu::BindGroupLayout,
+    avboit_layout: wgpu::BindGroupLayout,
     uniform: wgpu::Buffer,
     /// Spawns claimed this frame, per emitter (atomic counters, zeroed every frame).
     spawned: wgpu::Buffer,
@@ -355,7 +361,16 @@ impl ParticleSystem {
             ShaderStages::VERTEX_FRAGMENT,
             &[(0, bind::uniform()), (112, bind::storage(true)), (115, bind::storage(true)), (116, bind::texture(false)), (118, bind::texture(false))],
         );
+        let avboit_layout = avboit_draw_layout(device);
+        let draw_pipeline = |make: fn(&wgpu::Device, &wgpu::ShaderModule, &wgpu::BindGroupLayout) -> wgpu::RenderPipeline| {
+            let (device, module, layout) = (device.clone(), module.clone(), avboit_layout.clone());
+            Lazy::new(move || make(&device, &module, &layout))
+        };
         Self {
+            draw_avboit: draw_pipeline(crate::oit::particle_avboit_pipeline),
+            avboit_bounds: draw_pipeline(|d, m, l| low_resolution_pipeline(d, m, l, "fs_particle_bounds")),
+            avboit_inject: draw_pipeline(|d, m, l| low_resolution_pipeline(d, m, l, "fs_particle_inject")),
+            avboit_layout,
             simulate: lazy_compute_pipeline(device, "particle simulation", &module, "simulate", &simulate_layout, &[]),
             light: lazy_compute_pipeline(device, "particle lighting", &module, "light", &light_layout, &[]),
             draw: {
@@ -391,6 +406,15 @@ impl ParticleSystem {
             self.simulate.prefetch();
             self.light.prefetch();
             self.draw.prefetch();
+        }
+    }
+
+    /// Queues the adaptive voxel-based OIT pipelines for the background compile.
+    pub fn prefetch_avboit(&self, scene: &Scene) {
+        if scene.particles.iter().take(MAX_EMITTERS).any(|e| e.capacity > 0) {
+            self.draw_avboit.prefetch();
+            self.avboit_bounds.prefetch();
+            self.avboit_inject.prefetch();
         }
     }
 
@@ -486,6 +510,61 @@ impl ParticleSystem {
         pass.set_bind_group(0, &group, &[]);
         pass.draw(0..6, 0..self.slots);
     }
+
+    /// Draws every slot with adaptive voxel-based OIT: `pass` into the grid at low resolution
+    /// (bounds or transmittance), or the full-resolution weighted draw into the bound OIT targets.
+    pub fn draw_avboit(&self, device: &wgpu::Device, pass: &mut wgpu::RenderPass, inputs: &LightingInputs, translucent_depth: &wgpu::TextureView, avboit: &crate::avboit::Avboit, stage: crate::oit::AvboitStage) {
+        let (Some(particles), Some(visuals)) = (&self.particles, &self.visuals) else { return };
+        if !self.active {
+            return;
+        }
+        let mut entries = vec![
+            (0, inputs.frame.as_entire_binding()),
+            (112, particles.as_entire_binding()),
+            (115, visuals.as_entire_binding()),
+            (116, TextureView(&inputs.targets.depth)),
+            (118, TextureView(translucent_depth)),
+        ];
+        entries.extend(avboit.read_resources());
+        entries.extend(avboit.write_resources().into_iter().filter(|(b, _)| *b != 120));
+        let group = bind_group(device, "particle draw (avboit)", &self.avboit_layout, &entries);
+        let pipeline = match stage {
+            crate::oit::AvboitStage::Bounds => &self.avboit_bounds,
+            crate::oit::AvboitStage::Transmittance => &self.avboit_inject,
+            crate::oit::AvboitStage::Shade => &self.draw_avboit,
+        };
+        pass.set_pipeline(pipeline);
+        pass.set_bind_group(0, &group, &[]);
+        pass.draw(0..6, 0..self.slots);
+    }
+}
+
+/// The particle draws' layout with the AVBOIT grid: the vertex stage reads the particles, the
+/// fragment stage the depths and the grid (and writes it at low resolution).
+fn avboit_draw_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    let both = ShaderStages::VERTEX_FRAGMENT;
+    let fragment = ShaderStages::FRAGMENT;
+    let mut entries = vec![(0, both, bind::uniform()), (112, both, bind::storage(true)), (115, both, bind::storage(true)), (116, fragment, bind::texture(false)), (118, fragment, bind::texture(false))];
+    entries.extend(crate::avboit::Avboit::read_entries().map(|(b, t)| (b, fragment, t)));
+    entries.extend(crate::avboit::Avboit::write_entries().into_iter().filter(|(b, _)| *b != 120).map(|(b, t)| (b, fragment, t)));
+    let entries: Vec<wgpu::BindGroupLayoutEntry> = entries.into_iter().map(|(binding, visibility, ty)| wgpu::BindGroupLayoutEntry { binding, visibility, ty, count: None }).collect();
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("particle draw (avboit)"), entries: &entries })
+}
+
+/// A low-resolution draw of the sprites into the AVBOIT grid (`entry`: bounds or transmittance).
+fn low_resolution_pipeline(device: &wgpu::Device, module: &wgpu::ShaderModule, layout: &wgpu::BindGroupLayout, entry: &str) -> wgpu::RenderPipeline {
+    let pipeline_layout = crate::util::pipeline_layout(device, "particle avboit grid", &[layout]);
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("particle avboit grid"),
+        layout: Some(&pipeline_layout),
+        vertex: wgpu::VertexState { module, entry_point: Some("vs_particle"), compilation_options: Default::default(), buffers: &[] },
+        primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::TriangleList, cull_mode: None, ..Default::default() },
+        depth_stencil: None,
+        multisample: Default::default(),
+        fragment: Some(wgpu::FragmentState { module, entry_point: Some(entry), compilation_options: Default::default(), targets: &[crate::avboit::low_resolution_target()] }),
+        multiview_mask: None,
+        cache: None,
+    })
 }
 
 #[cfg(test)]

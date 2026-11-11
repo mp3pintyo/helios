@@ -306,6 +306,12 @@ pub struct RenderSettings {
     /// anisotropy, unlit). Off: every material renders as its plain metallic-roughness base;
     /// material graphs still run (`substrate.rs`).
     pub substrate: bool,
+    /// Order-independent transparency by adaptive voxel-based OIT (`avboit.rs`; UE 5.9's
+    /// `r.OIT.Method=1`): particles, volumes and the translucent surfaces that don't refract are
+    /// weighted by the measured transmittance in front of them; refracting surfaces composite
+    /// their nearest layer. Off: weighted blended OIT for particles and depth peeling for every
+    /// translucent surface (round 7). Needs 17 sampled textures per shader stage.
+    pub avboit: bool,
 }
 
 impl Default for RenderSettings {
@@ -356,6 +362,7 @@ impl Default for RenderSettings {
             dynamic_resolution: None,
             per_instance_invalidation: true,
             substrate: true,
+            avboit: true,
         }
     }
 }
@@ -395,6 +402,8 @@ pub struct Renderer {
     /// Scene versions whose content pipelines were queued, and whether the scene has displaced
     /// surfaces (browser only, see `prefetch_content`).
     prefetched: Option<(u64, u64, u64)>,
+    /// The device samples the 17 textures AVBOIT's translucent surfaces need.
+    avboit_supported: bool,
     displaceable: bool,
     frame_uniform: wgpu::Buffer,
     scene: GpuScene,
@@ -482,6 +491,7 @@ impl Renderer {
             settings: RenderSettings::default(),
             requested: RenderSettings::default(),
             prefetched: None,
+            avboit_supported: device.limits().max_sampled_textures_per_shader_stage >= 17,
             displaceable: false,
             frame_uniform: uniform_buffer(device, "frame", std::mem::size_of::<FrameUniform>() as u64),
             scene: GpuScene::new(device, pool),
@@ -782,8 +792,9 @@ impl Renderer {
             return;
         }
         self.prefetched = Some(versions);
-        self.translucency.prefetch(scene);
-        self.effects.prefetch(scene);
+        let avboit = self.settings.avboit && self.avboit_supported;
+        self.translucency.prefetch(scene, avboit);
+        self.effects.prefetch(scene, avboit);
         self.displaceable = crate::gpu_scene::displaceable(scene);
     }
 
@@ -924,6 +935,17 @@ impl Renderer {
         if let Some(tessellation) = &mut self.culling.tessellation {
             tessellation.poll();
         }
+        self.time += delta_time;
+
+        let current = (self.frame_index & 1) as usize;
+        let unjittered_view_proj = self.write_uniforms(scene, camera, delta_time);
+        // Translucent surfaces are drawn over lit radiance only, not over debug views.
+        let translucency = self.settings.translucency && self.settings.debug_view == DebugView::Lit;
+        let layers = self.settings.translucency_layers;
+        let changes = &self.motion.changes;
+        let glass_shadows = self.settings.glass_shadows && self.settings.shadows;
+        let avboit = self.settings.avboit && self.avboit_supported;
+        self.translucency.update(&self.device, &self.queue, scene, changes, camera.position, &unjittered_view_proj, capacity, translucency, layers, glass_shadows, avboit);
         // Volumes and particles are drawn over lit radiance and in their own debug view.
         let effects = matches!(self.settings.debug_view, DebugView::Lit | DebugView::VolumesParticles);
         self.effects.update(
@@ -938,18 +960,10 @@ impl Renderer {
                 delta_time,
                 internal: size,
                 capacity,
+                avboit,
+                translucent_surfaces: self.translucency.order_independent_surfaces(),
             },
         );
-        self.time += delta_time;
-
-        let current = (self.frame_index & 1) as usize;
-        let unjittered_view_proj = self.write_uniforms(scene, camera, delta_time);
-        // Translucent surfaces are drawn over lit radiance only, not over debug views.
-        let translucency = self.settings.translucency && self.settings.debug_view == DebugView::Lit;
-        let layers = self.settings.translucency_layers;
-        let changes = &self.motion.changes;
-        let glass_shadows = self.settings.glass_shadows && self.settings.shadows;
-        self.translucency.update(&self.device, &self.queue, scene, changes, camera.position, &unjittered_view_proj, capacity, translucency, layers, glass_shadows);
 
         let lumen_lite = self.lumen_lite.as_ref().filter(|_| self.uses_lumen_lite());
         let device = self.device.clone();
@@ -1052,6 +1066,7 @@ impl Renderer {
             lumen: &self.lumen,
             samplers: &self.samplers,
             substrate: megalights_slabs.as_ref(),
+            glass_lights: self.translucency.glass_lights(),
         };
         if megalights {
             self.megalights.record(&mut rec, &megalights_inputs, current);
@@ -1074,6 +1089,7 @@ impl Renderer {
             black: &self.black,
             substrate: lighting_slabs.as_ref(),
             glass,
+            glass_lights: self.translucency.glass_lights(),
         };
         self.lighting.record(&mut rec, &lighting);
         if self.extended.subsurface && lit {
@@ -1091,8 +1107,8 @@ impl Renderer {
         if self.settings.debug_view == DebugView::Invalidation {
             self.invalidation_debug.record(&mut rec, &self.frame_uniform, &self.targets, &self.vsm, &self.lumen, &self.samplers);
         }
-        self.effects.record_before_translucency(&mut rec, &lighting, &self.scene, &self.translucency);
-        self.translucency.record(&mut rec, &lighting, &self.scene, &self.textures);
+        self.effects.record_before_translucency(&mut rec, &lighting, &self.scene, &self.translucency, &self.textures);
+        self.translucency.record(&mut rec, &lighting, &self.scene, &self.textures, self.effects.nearest_refracting());
         self.effects.record_after_translucency(&mut rec, &lighting);
 
         // Post-processing, at output resolution from here on.

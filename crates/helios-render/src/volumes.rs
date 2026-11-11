@@ -33,6 +33,7 @@ use crate::passes::shading::LightingInputs;
 use crate::profiler::Recorder;
 use crate::scene::{LightHandle, Scene};
 use crate::shader::create_module;
+use crate::avboit::Avboit;
 use crate::util::{bind, bind_group, bind_group_layout, lazy_compute_pipeline, storage_buffer, uniform_buffer, workgroups};
 use crate::pipelines::Lazy;
 
@@ -407,6 +408,8 @@ pub(crate) struct HeterogeneousVolumes {
     flicker: Lazy<wgpu::ComputePipeline>,
     light_cache: Lazy<wgpu::ComputePipeline>,
     march: Lazy<wgpu::ComputePipeline>,
+    /// The volumes' optical depth in the AVBOIT grid.
+    avboit_inject: Lazy<wgpu::ComputePipeline>,
     resolve: Lazy<wgpu::ComputePipeline>,
     curl_layout: wgpu::BindGroupLayout,
     forces_layout: wgpu::BindGroupLayout,
@@ -467,10 +470,13 @@ impl HeterogeneousVolumes {
         march_entries.extend([
             (80, bind::uniform()),
             (89, bind::texture(false)),
-            (90, bind::texture(false)),
-            (91, bind::storage_texture(FORMAT)),
-            (92, bind::storage_texture(FORMAT)),
+            (140, bind::texture(false)),
+            (141, bind::storage_texture(FORMAT)),
+            (142, bind::storage_texture(FORMAT)),
         ]);
+        // The AVBOIT grid: the march reads it, the volumes' bounds and injection write it.
+        march_entries.extend(crate::avboit::Avboit::read_entries());
+        march_entries.extend(crate::avboit::Avboit::write_entries().into_iter().filter(|(b, _)| *b != 120));
         let march_layout = layout("volume march", &march_entries);
         let resolve_layout = layout(
             "volume resolve",
@@ -479,12 +485,12 @@ impl HeterogeneousVolumes {
                 (11, bind::sampler()),
                 (80, bind::uniform()),
                 (89, bind::texture(false)),
-                (91, bind::storage_texture(FORMAT)),
-                (92, bind::storage_texture(FORMAT)),
-                (93, bind::texture(true)),
-                (94, bind::texture(true)),
-                (95, bind::texture(true)),
-                (96, bind::texture(true)),
+                (141, bind::storage_texture(FORMAT)),
+                (142, bind::storage_texture(FORMAT)),
+                (143, bind::texture(true)),
+                (144, bind::texture(true)),
+                (145, bind::texture(true)),
+                (146, bind::texture(true)),
             ],
         );
         // Compiled when a scene first has volumes (in the browser in the background: `update`).
@@ -504,6 +510,7 @@ impl HeterogeneousVolumes {
             flicker: pipeline("volume fire lights", &sim, "flicker_lights", &flicker_layout),
             light_cache: pipeline("volume lighting cache", &render, "light_cache", &cache_layout),
             march: pipeline("volume march", &render, "march", &march_layout),
+            avboit_inject: pipeline("volume avboit transmittance", &render, "avboit_volume_inject", &march_layout),
             resolve: pipeline("volume resolve", &render, "resolve", &resolve_layout),
             curl_layout,
             forces_layout,
@@ -567,6 +574,13 @@ impl HeterogeneousVolumes {
                 pipeline.prefetch();
             }
             self.pressure.iter().for_each(Lazy::prefetch);
+        }
+    }
+
+    /// Queues the AVBOIT grid passes for the background compile if the scene has volumes.
+    pub fn prefetch_avboit(&self, scene: &Scene) {
+        if !scene.volumes.is_empty() {
+            self.avboit_inject.prefetch();
         }
     }
 
@@ -795,24 +809,10 @@ impl HeterogeneousVolumes {
 
     /// Marches the visible volumes into this frame's front and back parts and resolves them
     /// temporally. `translucent_depth` is the nearest translucent surface's depth (0: none).
-    pub fn record(&self, rec: &mut Recorder, inputs: &LightingInputs, translucent_depth: &wgpu::TextureView) {
+    pub fn record(&self, rec: &mut Recorder, inputs: &LightingInputs, translucent_depth: &wgpu::TextureView, avboit: &Avboit) {
         let Some(targets) = self.targets.as_ref().filter(|_| self.visible()) else { return };
         let device = rec.device;
-        let mut entries = crate::media::fog_resources(inputs);
-        let slot = |k: usize| self.visible.get(k).map(|&i| &self.emitters[i]);
-        for k in 0..MAX_VISIBLE {
-            let (state, cache) = slot(k).map_or((&self.empty, &self.empty), |g| (&g.state[0], &g.cache));
-            entries.push((81 + k as u32, TextureView(state)));
-            entries.push((85 + k as u32, TextureView(cache)));
-        }
-        entries.extend([
-            (80, self.march_uniform.as_entire_binding()),
-            (89, TextureView(&inputs.targets.depth)),
-            (90, TextureView(translucent_depth)),
-            (91, TextureView(&targets.raw[0])),
-            (92, TextureView(&targets.raw[1])),
-        ]);
-        let march = bind_group(device, "volume march", &self.march_layout, &entries);
+        let march = self.march_group(device, inputs, translucent_depth, avboit, targets);
         let (current, previous) = (&targets.history[self.frame & 1], &targets.history[1 - (self.frame & 1)]);
         let resolve = bind_group(
             device,
@@ -823,12 +823,12 @@ impl HeterogeneousVolumes {
                 (11, Sampler(&inputs.samplers.linear)),
                 (80, self.march_uniform.as_entire_binding()),
                 (89, TextureView(&inputs.targets.depth)),
-                (91, TextureView(&current[0])),
-                (92, TextureView(&current[1])),
-                (93, TextureView(&targets.raw[0])),
-                (94, TextureView(&targets.raw[1])),
-                (95, TextureView(&previous[0])),
-                (96, TextureView(&previous[1])),
+                (141, TextureView(&current[0])),
+                (142, TextureView(&current[1])),
+                (143, TextureView(&targets.raw[0])),
+                (144, TextureView(&targets.raw[1])),
+                (145, TextureView(&previous[0])),
+                (146, TextureView(&previous[1])),
             ],
         );
         let (w, h) = (self.rect[2] - self.rect[0], self.rect[3] - self.rect[1]);
@@ -839,6 +839,41 @@ impl HeterogeneousVolumes {
         pass.set_pipeline(&self.resolve);
         pass.set_bind_group(0, &resolve, &[]);
         pass.dispatch_workgroups(workgroups(w, 8), workgroups(h, 8), 1);
+    }
+
+    /// The visible volumes' optical depth in the AVBOIT grid's columns over their rectangle
+    /// (after the surfaces and particles bounded the columns: volumes don't).
+    pub fn record_avboit(&self, rec: &mut Recorder, inputs: &LightingInputs, translucent_depth: &wgpu::TextureView, avboit: &Avboit) {
+        let Some(targets) = self.targets.as_ref().filter(|_| self.visible() && avboit.enabled()) else { return };
+        let march = self.march_group(rec.device, inputs, translucent_depth, avboit, targets);
+        let (label, pipeline) = ("volume avboit transmittance", &self.avboit_inject);
+        let tile = avboit.tile();
+        let (x0, y0) = (self.rect[0] / tile, self.rect[1] / tile);
+        let (x1, y1) = (self.rect[2].div_ceil(tile), self.rect[3].div_ceil(tile));
+        let mut pass = rec.compute_pass(label);
+        pass.set_pipeline(pipeline);
+        pass.set_bind_group(0, &march, &[]);
+        pass.dispatch_workgroups(workgroups(x1 - x0, 8), workgroups(y1 - y0, 8), 1);
+    }
+
+    fn march_group(&self, device: &wgpu::Device, inputs: &LightingInputs, translucent_depth: &wgpu::TextureView, avboit: &Avboit, targets: &ScreenTargets) -> wgpu::BindGroup {
+        let mut entries = crate::media::fog_resources(inputs);
+        let slot = |k: usize| self.visible.get(k).map(|&i| &self.emitters[i]);
+        for k in 0..MAX_VISIBLE {
+            let (state, cache) = slot(k).map_or((&self.empty, &self.empty), |g| (&g.state[0], &g.cache));
+            entries.push((81 + k as u32, TextureView(state)));
+            entries.push((85 + k as u32, TextureView(cache)));
+        }
+        entries.extend([
+            (80, self.march_uniform.as_entire_binding()),
+            (89, TextureView(&inputs.targets.depth)),
+            (140, TextureView(translucent_depth)),
+            (141, TextureView(&targets.raw[0])),
+            (142, TextureView(&targets.raw[1])),
+        ]);
+        entries.extend(avboit.read_resources());
+        entries.extend(avboit.write_resources().into_iter().filter(|(b, _)| *b != 120));
+        bind_group(device, "volume march", &self.march_layout, &entries)
     }
 }
 
