@@ -278,6 +278,8 @@ impl DemoApp {
             },
             // Short-range ambient occlusion (grounded foliage, rock and log contact) on / off.
             "Digit9" => s.short_range_ao = !s.short_range_ao,
+            // Dynamic wind (plant bones) on / off (off: the procedural wind).
+            "Numpad1" => s.wind_bones = !s.wind_bones,
             "KeyL" => s.wind = !s.wind,
             "Quote" => {
                 let on = !(s.volumes || s.particles);

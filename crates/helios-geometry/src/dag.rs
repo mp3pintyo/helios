@@ -48,6 +48,7 @@ use glam::{Vec2, Vec3, Vec4};
 
 use crate::encoding::{decode_triangle, encode_cluster, ClusterEncoding, Quantization, QuantizedVertex, VertexAttributes};
 use crate::hash::{FxHashMap, FxHashSet};
+use crate::plant_bones::PlantBones;
 use crate::sdf::{MeshSdf, SdfMode};
 use crate::simplify::{simplify, SimplifyMesh, SimplifyOptions};
 use crate::voxel::{
@@ -219,6 +220,9 @@ pub struct VirtualMesh {
     pub aabb: Aabb,
     pub stats: VirtualMeshStats,
     pub sdf: Option<MeshSdf>,
+    /// The bones of a procedural plant ([`Mesh::bones`]) and the bounds of their motion: the
+    /// clusters' skin attribute indexes them (`.hvm` version 6).
+    pub bones: Option<PlantBones>,
 }
 
 /// Which LOD cuts a cluster takes part in.
@@ -315,10 +319,17 @@ pub fn build_virtual_mesh(mesh: &Mesh, config: &BuildConfig) -> VirtualMesh {
     let mut locked_forever = vec![false; positions.len()];
 
     // Voxel meshes: the full-detail geometry every voxel cluster is built from. Skinned meshes
-    // never get voxels: voxels carry no skin weights, so they could not follow the pose.
-    let voxel_lods = config.voxels.filter(|_| mesh.skin.is_empty());
+    // never get voxels: voxels carry no skin weights, so they could not follow the pose. Plants
+    // do: each brick of voxels follows one bone (`voxel_bone`: the branch its leaves hang from).
+    let plant_bones = !mesh.bones.is_empty();
+    let voxel_lods = config.voxels.filter(|_| mesh.skin.is_empty() || plant_bones);
+    let voxel_bones: Vec<u16> = if plant_bones && voxel_lods.is_some() {
+        (0..positions.len()).map(|i| crate::plant_bones::voxel_bone(&mesh.bones, mesh.skin_of(i).dominant_joint().min(mesh.bones.len() as u16 - 1))).collect()
+    } else {
+        Vec::new()
+    };
     let source_attributes = voxel_lods.map(|_| (positions.clone(), normals.clone(), uvs.clone()));
-    let voxel_source = source_attributes.as_ref().map(|(positions, normals, uvs)| VoxelSource { positions, normals, uvs });
+    let voxel_source = source_attributes.as_ref().map(|(positions, normals, uvs)| VoxelSource { positions, normals, uvs, bones: &voxel_bones });
 
     let mut work: Vec<WorkCluster> = {
         let pieces = voxel_lods.map(|_| Pieces::new(&all_triangles, &canonical));
@@ -495,6 +506,9 @@ pub fn build_virtual_mesh(mesh: &Mesh, config: &BuildConfig) -> VirtualMesh {
     let vertices = Vertices { positions: &positions, normals: &normals, uvs: &uvs, uv1: &uv1, colors: &colors, skin: &skin, plant: &plant };
     let mut vm = pack(&vertices, &work, &voxel_groups, config);
     vm.sdf = bake_sdf(&vm, config.sdf);
+    if plant_bones {
+        vm.bones = Some(PlantBones::of_mesh(mesh, mesh.bones.clone()));
+    }
     vm
 }
 
@@ -913,21 +927,31 @@ impl VirtualMesh {
         self.stats.voxels_per_level.iter().any(|&v| v > 0)
     }
 
-    /// Version 5: clusters may carry plant data (extension bit 29, [`crate::encoding`]); version
-    /// 4 files are the same format without it and load as they are. Version 4 added voxel
+    /// Version 6: a seventh section count, the plant bones ([`VirtualMesh::bones`]) after the
+    /// statistics, and voxel clusters may carry a bone per brick ([`crate::voxel`]). Version 5:
+    /// clusters may carry plant data (extension bit 29, [`crate::encoding`]); versions 5 and 4
+    /// (the same format without it) load as they are. Version 4 added voxel
     /// clusters ([`crate::voxel`]) and per-level voxel counts; version 3 files (triangles only, no
     /// voxel statistics) and version 2 files (float vertices) must be baked again.
-    const MAGIC: [u8; 4] = *b"HVM5";
-    /// Bytes at the start of a `.hvm` that determine its header length ([`VirtualMesh::header_len`]).
-    pub const PREFIX_BYTES: usize = 28;
+    const MAGIC: [u8; 4] = *b"HVM6";
+    /// Bytes at the start of a `.hvm` that determine its header length ([`VirtualMesh::header_len`])
+    /// (a version 4 or 5 prefix is 28 bytes, then header data: reading 32 is harmless).
+    pub const PREFIX_BYTES: usize = 32;
     const SDF_HEADER_WORDS: usize = 14;
 
     /// Header length for the section counts stored in the prefix
-    /// (`clusters, pages, dependencies, levels, payload words, sdf words`).
-    fn header_len_for(counts: &[usize; 6]) -> usize {
-        let [clusters, pages, dependencies, levels, _, sdf_words] = *counts;
+    /// (`clusters, pages, dependencies, levels, payload words, sdf words`, from version 6 `bones`).
+    fn header_len_for(counts: &[usize], version: u8) -> usize {
+        let (clusters, pages, dependencies, levels, sdf_words) = (counts[0], counts[1], counts[2], counts[3], counts[5]);
         let sdf = if sdf_words > 0 { (Self::SDF_HEADER_WORDS + sdf_words) * 4 } else { 0 };
-        Self::PREFIX_BYTES
+        let (prefix, bones) = if version >= 6 {
+            let bones = counts[6];
+            (32, if bones > 0 { (crate::plant_bones::BOUND_WORDS + bones * crate::plant_bones::BONE_WORDS) * 4 } else { 0 })
+        } else {
+            (28, 0)
+        };
+        prefix
+            + bones
             + 10 * 4
             + sdf
             + clusters * size_of::<GpuCluster>()
@@ -940,23 +964,29 @@ impl VirtualMesh {
     /// Byte length of the serialised header (everything but the page payloads), i.e. the file
     /// offset at which the payload section starts.
     pub fn header_bytes(&self) -> usize {
-        Self::header_len_for(&[
-            self.clusters.len(),
-            self.pages.len(),
-            self.dependencies.len(),
-            self.stats.clusters_per_level.len(),
-            self.payload_bytes() / 4,
-            self.sdf.as_ref().map_or(0, |s| s.words.len()),
-        ])
+        Self::header_len_for(
+            &[
+                self.clusters.len(),
+                self.pages.len(),
+                self.dependencies.len(),
+                self.stats.clusters_per_level.len(),
+                self.payload_bytes() / 4,
+                self.sdf.as_ref().map_or(0, |s| s.words.len()),
+                self.bones.as_ref().map_or(0, |b| b.bones.len()),
+            ],
+            6,
+        )
     }
 
-    fn check_magic(magic: &[u8]) -> Result<(), String> {
+    /// The format version of a `.hvm` from its magic.
+    fn check_magic(magic: &[u8]) -> Result<u8, String> {
         match magic {
-            m if m == Self::MAGIC => Ok(()),
-            b"HVM4" => Ok(()),
+            m if m == Self::MAGIC => Ok(6),
+            b"HVM5" => Ok(5),
+            b"HVM4" => Ok(4),
             b"HVM3" => Err("virtual mesh version 3 (no voxel LODs) is no longer supported: bake it again".into()),
             b"HVM2" => Err("virtual mesh version 2 (uncompressed vertices) is no longer supported: bake it again".into()),
-            _ => Err("not a helios virtual mesh (HVM5)".into()),
+            _ => Err("not a helios virtual mesh (HVM6)".into()),
         }
     }
 
@@ -966,9 +996,10 @@ impl VirtualMesh {
         if prefix.len() < Self::PREFIX_BYTES {
             return Err("truncated virtual mesh header".into());
         }
-        Self::check_magic(&prefix[..4])?;
+        let version = Self::check_magic(&prefix[..4])?;
         let count = |i: usize| u32::from_le_bytes(prefix[4 + i * 4..8 + i * 4].try_into().unwrap()) as usize;
-        Ok(Self::header_len_for(&std::array::from_fn(count)))
+        let counts: Vec<usize> = (0..if version >= 6 { 7 } else { 6 }).map(count).collect();
+        Ok(Self::header_len_for(&counts, version))
     }
 
     /// Byte range of `page`'s payload inside the serialised `.hvm`. Payloads are stored in page
@@ -1017,6 +1048,7 @@ impl VirtualMesh {
             self.stats.clusters_per_level.len(),
             self.page_data.len(),
             sdf_words,
+            self.bones.as_ref().map_or(0, |b| b.bones.len()),
         ] {
             out.extend_from_slice(&(len as u32).to_le_bytes());
         }
@@ -1051,6 +1083,9 @@ impl VirtualMesh {
         out.extend_from_slice(bytemuck::cast_slice(&self.stats.clusters_per_level));
         out.extend_from_slice(bytemuck::cast_slice(&self.stats.triangles_per_level));
         out.extend_from_slice(bytemuck::cast_slice(&self.stats.voxels_per_level));
+        if let Some(bones) = self.bones.as_ref().filter(|b| !b.bones.is_empty()) {
+            out.extend_from_slice(bytemuck::cast_slice(&bones.to_words()));
+        }
         out.extend_from_slice(bytemuck::cast_slice(&self.page_data));
         out
     }
@@ -1088,8 +1123,8 @@ impl VirtualMesh {
         }
 
         let mut r = Reader(bytes);
-        Self::check_magic(r.take(4)?)?;
-        let counts: Vec<usize> = (0..6).map(|_| r.u32()).collect::<Result<_, _>>()?;
+        let version = Self::check_magic(r.take(4)?)?;
+        let counts: Vec<usize> = (0..if version >= 6 { 7 } else { 6 }).map(|_| r.u32()).collect::<Result<_, _>>()?;
         let header: Vec<f32> = r.vec(10)?;
         let sdf = if counts[5] > 0 {
             let h: Vec<u32> = r.vec(14)?;
@@ -1120,9 +1155,15 @@ impl VirtualMesh {
                 triangles_per_level: r.vec(counts[3])?,
                 voxels_per_level: r.vec(counts[3])?,
             },
+            bones: None,
             page_data: Vec::new(),
             payload_first_page: counts[1] as u32,
         };
+        let bone_count = counts.get(6).copied().unwrap_or(0);
+        if bone_count > 0 {
+            let words: Vec<u32> = r.vec(crate::plant_bones::BOUND_WORDS + bone_count * crate::plant_bones::BONE_WORDS)?;
+            mesh.bones = Some(PlantBones::from_words(&words, bone_count)?);
+        }
         if with_payload {
             mesh.page_data = r.vec(counts[4])?;
             mesh.payload_first_page = 0;

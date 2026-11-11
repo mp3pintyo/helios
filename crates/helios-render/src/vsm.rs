@@ -54,6 +54,7 @@ use crate::targets::FrameTargets;
 use crate::tessellation::{tessellation_entry, tessellation_resource, ShadowInputs};
 use crate::util::{bind, bind_group, bind_group_layout, compute_pipeline, pipeline_layout, storage_buffer, uniform_buffer, workgroups};
 use crate::vsm_local::{self, LocalCull, LocalFrame, LocalShadows};
+use crate::plant_wind::{plant_entry, plant_resource};
 use crate::skin::{skin_entry, skin_resource};
 use crate::vsm_motion::{self, MoveFootprints, ShadowMove};
 use crate::vsm_moments::{MomentInputs, VsmMoments};
@@ -379,6 +380,7 @@ impl VirtualShadowMap {
         draw_entries.extend(alpha_mask_entries());
         draw_entries.push(wind_entry());
         draw_entries.push(skin_entry());
+        draw_entries.push(plant_entry());
         draw_entries.push((60, bind::uniform()));
         let draw_layout = bind_group_layout(device, "vsm draw", ShaderStages::VERTEX_FRAGMENT, &draw_entries);
         let mut sw_entries = draw_entries[..6].to_vec();
@@ -386,6 +388,7 @@ impl VirtualShadowMap {
         sw_entries.extend(alpha_mask_entries());
         sw_entries.push(wind_entry());
         sw_entries.push(skin_entry());
+        sw_entries.push(plant_entry());
         sw_entries.push((60, bind::uniform()));
         let sw_layout = bind_group_layout(device, "vsm raster sw", c, &sw_entries);
         // Page quads are placed in the vertex stage; only the fragment stage may write storage.
@@ -847,7 +850,7 @@ impl VirtualShadowMap {
                 ]
                 .into_iter()
                 .chain(alpha_mask_resources(scene))
-                .chain([wind_resource(scene), skin_resource(scene)])
+                .chain([wind_resource(scene), skin_resource(scene), plant_resource(scene)])
                 .collect::<Vec<_>>(),
             )
         };
@@ -937,7 +940,7 @@ impl VirtualShadowMap {
             ]
             .into_iter()
             .chain(alpha_mask_resources(scene))
-            .chain([wind_resource(scene), skin_resource(scene)])
+            .chain([wind_resource(scene), skin_resource(scene), plant_resource(scene)])
             .collect::<Vec<_>>(),
         );
         {

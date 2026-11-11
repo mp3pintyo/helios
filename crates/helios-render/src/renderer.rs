@@ -376,6 +376,10 @@ pub struct RenderSettings {
     /// short range AO): the occlusion within 0.4 m that the GI probes and distance fields miss —
     /// the ground under grass and ferns, rocks and logs where they meet it. Indirect light only.
     pub short_range_ao: bool,
+    /// Dynamic wind (`plant_wind.rs`, UE 5.9's Dynamic Wind): plants with bones bend them —
+    /// blades and branches curve, leaves turn about their stems, normals follow. Off: the same
+    /// plants move by the procedural wind (`wind.wgsl`).
+    pub wind_bones: bool,
 }
 
 impl Default for RenderSettings {
@@ -441,6 +445,7 @@ impl Default for RenderSettings {
             shadow_distant_bias: 1.0,
             volume_shadows: true,
             short_range_ao: true,
+            wind_bones: true,
         }
     }
 }
@@ -965,6 +970,7 @@ impl Renderer {
         self.motion.update(scene);
         let changes = &self.motion.changes;
         self.scene.tessellation_enabled = self.settings.tessellation;
+        self.scene.wind_bones_enabled = self.settings.wind_bones;
         let sync = self.scene.sync(&self.device, &self.queue, scene, changes, self.motion.previous(), frame);
         if sync.geometry_changed {
             self.history_valid = false;

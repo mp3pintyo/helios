@@ -48,6 +48,7 @@ use crate::targets::FrameTargets;
 use crate::textures::TextureLibrary;
 use crate::util::{bind, bind_group, bind_group_layout, compute_pipeline, compute_pipeline_with, workgroups};
 use crate::water::BINDING_WATER;
+use crate::plant_wind::{plant_entry, plant_resource};
 use crate::skin::{skin_entry, skin_resource};
 use crate::tessellation::{tessellation_entry, tessellation_resource};
 use crate::wind::{wind_entry, wind_resource};
@@ -137,6 +138,7 @@ impl MaterialPass {
                 (80, bind::texture(true)),
                 wind_entry(),
                 skin_entry(),
+                plant_entry(),
                 (BINDING_WATER, bind::uniform()),
                 (BINDING_DEPTH, bind::texture(false)),
                 tessellation_entry(),
@@ -262,6 +264,7 @@ impl MaterialPass {
                 (80, TextureView(&svt.material)),
                 wind_resource(scene),
                 skin_resource(scene),
+                plant_resource(scene),
                 (BINDING_WATER, water.as_entire_binding()),
                 (BINDING_DEPTH, TextureView(&targets.depth)),
                 tessellation_resource(scene),

@@ -26,7 +26,12 @@ pub struct GpuInstance {
     pub max_scale: f32,
     pub flags: u32,
     /// The material's [`crate::WindResponse`] (bend, sway, flutter, frequency); zero = static.
+    /// For a plant with bones: the procedural layers whose bounds hold its bones' motion
+    /// (`plant_wind.rs`).
     pub wind: Vec4,
+    /// Plants with bones (`plant_wind.rs`): header texel + 1 (the material's response; 0: no
+    /// bones, the procedural wind), first texel of the bone table, simulation slot + 1, unused.
+    pub plant: [u32; 4],
 }
 
 #[repr(C)]
@@ -203,7 +208,7 @@ pub mod flags {
 }
 
 const _: () = {
-    assert!(std::mem::size_of::<GpuInstance>() == 240);
+    assert!(std::mem::size_of::<GpuInstance>() == 256);
     assert!(std::mem::size_of::<GpuMaterial>() == 192);
     assert!(std::mem::size_of::<CullViewUniform>() == 336);
     assert!(std::mem::size_of::<FrameUniform>() == 496);

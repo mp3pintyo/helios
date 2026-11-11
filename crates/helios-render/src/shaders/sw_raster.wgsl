@@ -21,6 +21,7 @@
 #include "alpha_mask.wgsl"
 #include "wind.wgsl"
 #include "skinning.wgsl"
+#include "plant_wind.wgsl"
 
 override PASS: u32 = 0u;
 override LATE: bool = false;
@@ -40,6 +41,7 @@ override MASKED: bool = false;
 @group(0) @binding(42) var alpha_mask_sampler: sampler;
 @group(0) @binding(65) var<uniform> wind: Wind;
 @group(0) @binding(66) var skin_palette: texture_2d<f32>;
+@group(0) @binding(150) var plant_bones: texture_2d<f32>;
 
 const SUBPIXEL: f32 = 256.0;
 const MAX_TRIANGLE_PIXELS: u32 = 4096u;
@@ -82,7 +84,7 @@ fn rasterize(
 
     if lid < cluster_vertex_count(cluster) {
         let strength = wind_strength(instance);
-        let world = wind_world_position(instance, strength, skinned_vertex_position(instance, cluster, base, lid), vertex_wind_weight(cluster, base, lid, strength));
+        let world = plant_world_position(instance, strength, cluster, base, lid, skinned_vertex_position(instance, cluster, base, lid));
         let clip = view.view_proj * vec4<f32>(world, 1.0);
         let ndc = clip.xyz / clip.w;
         // Snap to the sub-pixel grid so shared edges rasterise identically in both clusters.

@@ -9,6 +9,7 @@ use crate::alpha_mask::{AlphaMasks, MaterialMask};
 use crate::assembly::Assemblies;
 use crate::gpu_types::{instance_flags, material_flags, GpuInstance, GpuMaterial, GpuUvTransform};
 use crate::motion::SceneChanges;
+use crate::plant_wind::PlantTables;
 use crate::scene::{Instance, Material, Mobility, Scene, TextureHandle, TextureSource, UvTransform};
 use crate::skin::{instance_skin_flags, SkinPalettes};
 use crate::streaming::{StreamingStats, Streamer};
@@ -66,6 +67,11 @@ pub struct GpuScene {
     pub skins: SkinPalettes,
     /// Assembly tables and the per-frame expansion into part instances.
     pub assemblies: Assemblies,
+    /// Bone tables of plants (`plant_wind.rs`).
+    pub plants: PlantTables,
+    /// Plants bend their bones in the wind (`RenderSettings::wind_bones`; the instances carry it).
+    pub wind_bones_enabled: bool,
+    wind_bones_uploaded: bool,
     pub instance_count: u32,
     pub page_count: u32,
     pub meshes: Vec<MeshRange>,
@@ -125,6 +131,9 @@ impl GpuScene {
             masks: AlphaMasks::new(device),
             skins: SkinPalettes::new(device),
             assemblies: Assemblies::new(device),
+            plants: PlantTables::new(device),
+            wind_bones_enabled: true,
+            wind_bones_uploaded: true,
             instance_count: 0,
             page_count: 0,
             meshes: Vec::new(),
@@ -236,7 +245,9 @@ impl GpuScene {
         // Palettes first: shadow moves of skinned instances cover their largest reach.
         self.skins.sync(device, queue, scene);
         // Switching tessellation changes the instances' displaced flags.
-        let instances_changed = self.versions.2 != scene.instance_version || self.tessellation_enabled != self.tessellation_uploaded;
+        let instances_changed = self.versions.2 != scene.instance_version
+            || self.tessellation_enabled != self.tessellation_uploaded
+            || self.wind_bones_enabled != self.wind_bones_uploaded;
         self.shadow_moves.clear();
         let mut bounds_grew = false;
         if materials_changed || instances_changed || changes.structural {
@@ -344,7 +355,8 @@ impl GpuScene {
 
         self.page_count = pages.len() as u32;
         self.voxels = scene.meshes.iter().any(|m| m.has_voxels());
-        self.assemblies.upload_geometry(device, queue, scene, &self.meshes);
+        let bone_tables = self.plants.upload_geometry(scene);
+        self.assemblies.upload_geometry(device, queue, scene, &self.meshes, &bone_tables);
         self.clusters = storage_buffer_init(device, queue, "clusters", bytemuck::cast_slice(&clusters));
         self.pages = storage_buffer_init(device, queue, "pages", bytemuck::cast_slice(&pages));
         self.page_table = storage_buffer(device, "page table", pages.len() as u64 * 4, wgpu::BufferUsages::empty());
@@ -379,7 +391,7 @@ impl GpuScene {
     }
 
     /// The GPU record of `instance` (moved from `prev_world` since the previous frame).
-    fn record(&self, scene: &Scene, instance: &Instance, prev_world: Mat4, visibility_offset: u32) -> GpuInstance {
+    fn record(&mut self, scene: &Scene, instance: &Instance, prev_world: Mat4, visibility_offset: u32) -> GpuInstance {
         let mesh = self.meshes[instance.mesh.0 as usize];
         let world = instance.transform;
         let linear = Mat3::from_mat4(world);
@@ -400,6 +412,11 @@ impl GpuScene {
                 flags |= instance_flags::ANIMATED;
             }
         }
+        let response = instance_wind(scene, instance);
+        let (plant, wind) = match self.plants.instance(scene, instance, response, self.wind_bones_enabled) {
+            Some((plant, wind)) => (plant, wind),
+            None => ([0; 4], response),
+        };
         GpuInstance {
             world,
             prev_world,
@@ -413,7 +430,8 @@ impl GpuScene {
             visibility_offset,
             max_scale,
             flags,
-            wind: instance_wind(scene, instance),
+            wind,
+            plant,
         }
     }
 
@@ -423,18 +441,16 @@ impl GpuScene {
         let mut visibility_bits = self.page_count * 32;
         let mut wind_shadows = false;
         let mut windy = false;
-        let instances: Vec<GpuInstance> = scene
-            .instances
-            .iter()
-            .zip(prev_world)
-            .map(|(instance, &prev_world)| {
-                let gpu = self.record(scene, instance, prev_world, visibility_bits);
-                wind_shadows |= instance.cast_shadow && gpu.wind != Vec4::ZERO;
-                windy |= gpu.wind != Vec4::ZERO;
-                visibility_bits += gpu.cluster_count;
-                gpu
-            })
-            .collect();
+        self.plants.reset_headers();
+        let mut instances: Vec<GpuInstance> = Vec::with_capacity(count);
+        for (instance, &prev_world) in scene.instances.iter().zip(prev_world) {
+            let gpu = self.record(scene, instance, prev_world, visibility_bits);
+            wind_shadows |= instance.cast_shadow && gpu.wind != Vec4::ZERO;
+            windy |= gpu.wind != Vec4::ZERO;
+            visibility_bits += gpu.cluster_count;
+            instances.push(gpu);
+        }
+        self.plants.upload(device, queue);
 
         let (mut lo, mut hi) = (glam::Vec3::splat(f32::MAX), glam::Vec3::splat(f32::MIN));
         for i in &instances {
@@ -467,6 +483,7 @@ impl GpuScene {
         let animated_caster = instance_flags::ANIMATED | instance_flags::CAST_SHADOW;
         self.animated_shadows = instances.iter().any(|i| i.flags & animated_caster == animated_caster);
         self.tessellation_uploaded = self.tessellation_enabled;
+        self.wind_bones_uploaded = self.wind_bones_enabled;
         self.records = instances;
     }
 }

@@ -1,7 +1,7 @@
 // Cluster vertices of a (cluster, page) shadow draw, shared by the hardware (vsm_draw.wgsl) and
 // software (vsm_raster.wgsl) page rasterisers so both see bit-identical positions — wind and
 // skinning included, as in the main view. Requires vsm_common.wgsl, vsm_local_common.wgsl,
-// geometry.wgsl, wind.wgsl, skinning.wgsl and an `instances: array<Instance>` binding.
+// geometry.wgsl, wind.wgsl, skinning.wgsl, plant_wind.wgsl and an `instances: array<Instance>` binding.
 //
 // draw = (instance, cluster, physical page | level << 16, page tag).
 
@@ -19,7 +19,7 @@ fn page_vertex(draw: vec4<u32>, cluster: Cluster, base: u32, local: u32) -> vec4
         object = skinned_position(instance, cluster, base, local, object);
     }
     let strength = wind_strength(instance);
-    let world = wind_world_position(instance, strength, object, vertex_wind_weight(cluster, base, local, strength));
+    let world = plant_world_position(instance, strength, cluster, base, local, object);
     let level = draw.z >> 16u;
     let page = vec2<f32>(decode_tag(draw.w));
     if level >= LOCAL_LEVEL {

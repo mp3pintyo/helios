@@ -44,7 +44,13 @@
 //! [8 + 4 bricks ..) one word per occupied voxel, brick by brick in bit order:
 //!               octahedral normal x | y << 8 | coverage x << 16 | y << 21 | z << 26
 //!               (5 bits each, square-root code: α = (c / 31)²)
+//! plants only (word 4 bit 31, `.hvm` version 6): then the plant bone of every brick, 16 bits
+//!               each, two to a word (brick 2k in the low half)
 //! ```
+//!
+//! A plant's bricks follow the bone most of their geometry belongs to — the branch its leaves
+//! hang from ([`crate::plant_bones::voxel_bone`]) — so distant voxels move with the branches as
+//! the triangles they stand in for do.
 //!
 //! A cluster holds at most [`MAX_CLUSTER_BRICKS`] bricks within 64 bricks along each axis.
 
@@ -148,7 +154,12 @@ pub(crate) struct VoxelSource<'a> {
     pub positions: &'a [Vec3],
     pub normals: &'a [Vec3],
     pub uvs: &'a [Vec2],
+    /// Per vertex, the plant bone its voxels follow (empty: not a plant).
+    pub bones: &'a [u16],
 }
+
+/// Header word 4 flag of a voxel cluster whose bricks carry plant bones.
+pub const VOXEL_BONES_FLAG: u32 = 1 << 31;
 
 /// A voxel grid: cell `c` spans `origin + c·size .. origin + (c + 1)·size`.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -178,9 +189,19 @@ pub(crate) struct Cell {
     area: f32,
     uv: Vec2,
     uv_square: f32,
+    /// Plant bones of the geometry and their areas (the four largest).
+    bones: [(u16, f32); 4],
 }
 
 impl Cell {
+    fn add_bone(&mut self, bone: u16, area: f32) {
+        if let Some(slot) = self.bones.iter_mut().find(|b| b.0 == bone && b.1 > 0.0) {
+            slot.1 += area;
+        } else if let Some(slot) = self.bones.iter_mut().min_by(|a, b| a.1.total_cmp(&b.1)).filter(|b| b.1 < area) {
+            *slot = (bone, area);
+        }
+    }
+
     fn add(&mut self, area: f32, n: Vec3, uv: Vec2) {
         let c = &mut self.covariance;
         c[0] += n.x * n.x * area;
@@ -265,9 +286,14 @@ pub(crate) fn voxelize(source: &VoxelSource, triangles: &[SourceTriangle], grid:
             face
         };
         let (positive, negative) = (n.max(Vec3::ZERO), (-n).max(Vec3::ZERO));
+        let bone = source.bones.get(t.vertices[0] as usize).copied();
         sample_triangle(p, grid.size * SAMPLE_SPACING, |point, area| {
             let key = cell_key(grid.cell(point));
-            cells.entry(key).or_default().add(area, n, uv);
+            let cell = cells.entry(key).or_default();
+            cell.add(area, n, uv);
+            if let Some(bone) = bone {
+                cell.add_bone(bone, area);
+            }
             let side = sides.entry((key, t.piece)).or_default();
             side.0 += positive * area;
             side.1 += negative * area;
@@ -459,6 +485,8 @@ fn encode_cluster(
         voxels: Vec<IVec3>,
         uv: Vec2,
         spread: f32,
+        /// The plant bone with the most area in the brick.
+        bone: Option<u16>,
     }
     let records: Vec<Brick> = chunk
         .iter()
@@ -467,15 +495,20 @@ fn encode_cluster(
             voxels.sort_unstable_by_key(|&(bit, _)| bit);
             let mask = voxels.iter().fold(0u64, |m, &(bit, _)| m | (1 << bit));
             let (mut area, mut uv, mut uv_square) = (0.0, Vec2::ZERO, 0.0);
+            let mut bones: FxHashMap<u16, f32> = FxHashMap::default();
             for &(_, c) in &voxels {
                 let cell = &cells[&cell_key(c)];
                 area += cell.area;
                 uv += cell.uv;
                 uv_square += cell.uv_square;
+                for &(bone, a) in cell.bones.iter().filter(|b| b.1 > 0.0) {
+                    *bones.entry(bone).or_default() += a;
+                }
             }
             let mean = uv / area.max(1e-30);
             let variance = (uv_square / area.max(1e-30) - mean.length_squared()).max(0.0);
-            Brick { mask, position: b - lo, voxels: voxels.into_iter().map(|(_, c)| c).collect(), uv: mean, spread: 2.0 * variance.sqrt() }
+            let bone = bones.into_iter().max_by(|a, b| a.1.total_cmp(&b.1).then(b.0.cmp(&a.0))).map(|b| b.0);
+            Brick { mask, position: b - lo, voxels: voxels.into_iter().map(|(_, c)| c).collect(), uv: mean, spread: 2.0 * variance.sqrt(), bone }
         })
         .collect();
 
@@ -487,7 +520,9 @@ fn encode_cluster(
 
     let mut words = Vec::with_capacity(VOXEL_HEADER_WORDS as usize + records.len() * BRICK_WORDS as usize + voxel_count);
     words.extend([origin.x.to_bits(), origin.y.to_bits(), origin.z.to_bits(), size.to_bits()]);
-    words.extend([records.len() as u32 | (voxel_count as u32) << 8, uv_min.x.to_bits(), uv_min.y.to_bits(), uv_range.to_bits()]);
+    let has_bones = records.iter().any(|b| b.bone.is_some());
+    let flags = if has_bones { VOXEL_BONES_FLAG } else { 0 };
+    words.extend([records.len() as u32 | (voxel_count as u32) << 8 | flags, uv_min.x.to_bits(), uv_min.y.to_bits(), uv_range.to_bits()]);
     let mut first = 0u32;
     for b in &records {
         let p = b.position.as_uvec3();
@@ -516,6 +551,12 @@ fn encode_cluster(
             words.push(encode_octahedral(normal, NORMAL_BITS) | (x << 16) | (y << 21) | (z << 26));
         }
     }
+    if has_bones {
+        for pair in records.chunks(2) {
+            let bone = |b: &Brick| b.bone.unwrap_or(0) as u32;
+            words.push(bone(&pair[0]) | pair.get(1).map_or(0, bone) << 16);
+        }
+    }
     let sphere = Sphere::from_points(&points);
     VoxelCluster {
         words,
@@ -541,7 +582,18 @@ pub struct Voxel {
 
 /// (bricks, voxels) of the voxel cluster starting at `words`.
 pub fn voxel_counts(words: &[u32]) -> (u32, u32) {
-    (words[4] & 0xff, words[4] >> 8)
+    (words[4] & 0xff, (words[4] >> 8) & 0x7fff)
+}
+
+/// The plant bone of brick `brick` of the voxel cluster starting at `words` (`None` if its
+/// bricks carry none).
+pub fn voxel_brick_bone(words: &[u32], brick: u32) -> Option<u16> {
+    if words[4] & VOXEL_BONES_FLAG == 0 {
+        return None;
+    }
+    let (bricks, voxels) = voxel_counts(words);
+    let word = words[(VOXEL_HEADER_WORDS + bricks * BRICK_WORDS + voxels + brick / 2) as usize];
+    Some((word >> (16 * (brick & 1))) as u16)
 }
 
 /// Decodes the voxel cluster starting at `words` (exactly as the renderer does).
@@ -620,7 +672,7 @@ mod tests {
         // The flat leaf (normal ±y) seen from above covers its own area once: 0.25 m² of a
         // 2 m voxel's face.
         let grid = Grid { origin: Vec3::splat(-1.0), size: 2.0 };
-        let cells = voxelize(&VoxelSource { positions: &positions, normals: &normals, uvs: &uvs }, &triangles, grid);
+        let cells = voxelize(&VoxelSource { positions: &positions, normals: &normals, uvs: &uvs, bones: &[] }, &triangles, grid);
         assert_eq!(cells.len(), 1);
         let coverage = cells.values().next().unwrap().coverage();
         assert!((coverage.y - 0.25 / 4.0).abs() < 1e-4, "{coverage}");
@@ -634,13 +686,13 @@ mod tests {
         let mut b = crate::modeling::MeshBuilder::default();
         b.quad(Vec3::new(0.0, 0.5, 0.0), Vec3::new(0.0, 0.5, 1.0), Vec3::new(1.0, 0.5, 1.0), Vec3::new(1.0, 0.5, 0.0));
         let (positions, normals, uvs, triangles) = source_of(&b.build());
-        let source = VoxelSource { positions: &positions, normals: &normals, uvs: &uvs };
+        let source = VoxelSource { positions: &positions, normals: &normals, uvs: &uvs, bones: &[] };
         let cells = voxelize(&source, &triangles, Grid { origin: Vec3::ZERO, size: 1.0 });
         assert!(cells.values().next().unwrap().coverage().y > 0.99);
 
         let mesh = primitives::leaf_cloud(400, 7).transformed(glam::Mat4::from_scale(Vec3::splat(0.5)));
         let (positions, normals, uvs, triangles) = source_of(&mesh);
-        let source = VoxelSource { positions: &positions, normals: &normals, uvs: &uvs };
+        let source = VoxelSource { positions: &positions, normals: &normals, uvs: &uvs, bones: &[] };
         let cells = voxelize(&source, &triangles, Grid { origin: Vec3::splat(-1.0), size: 2.0 });
         let coverage = cells.values().next().unwrap().coverage();
         let projected: f32 = mesh.triangles().map(|t| {
@@ -657,7 +709,7 @@ mod tests {
     fn coverage_follows_leaf_density_and_round_trips() {
         let mesh = primitives::leaf_cloud(4000, 3);
         let (positions, normals, uvs, triangles) = source_of(&mesh);
-        let source = VoxelSource { positions: &positions, normals: &normals, uvs: &uvs };
+        let source = VoxelSource { positions: &positions, normals: &normals, uvs: &uvs, bones: &[] };
         let (grid, group) = fit_grid(&source, &triangles, 400, 0.0).unwrap();
         assert!(group.len() <= 400 && group.len() > 100, "{} voxels", group.len());
         let clusters = build_voxel_clusters(&source, &triangles, grid, &group);
@@ -683,7 +735,7 @@ mod tests {
     fn fitted_grids_respect_the_budget() {
         let mesh = primitives::leaf_cloud(2000, 5);
         let (positions, normals, uvs, triangles) = source_of(&mesh);
-        let source = VoxelSource { positions: &positions, normals: &normals, uvs: &uvs };
+        let source = VoxelSource { positions: &positions, normals: &normals, uvs: &uvs, bones: &[] };
         let mut previous = 0.0;
         for budget in [4000usize, 1000, 250, 60] {
             let (grid, cells) = fit_grid(&source, &triangles, budget, 0.0).unwrap();

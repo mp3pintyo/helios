@@ -25,6 +25,7 @@
 #include "svt.wgsl"
 #include "wind.wgsl"
 #include "skinning.wgsl"
+#include "plant_wind.wgsl"
 #include "water.wgsl"
 #include "shore.wgsl"
 #include "voxel.wgsl"
@@ -81,6 +82,7 @@ const TILE_LISTS: u32 = 120u;
 @group(0) @binding(80) var svt_material: texture_2d<f32>;
 @group(0) @binding(65) var<uniform> wind: Wind;
 @group(0) @binding(66) var skin_palette: texture_2d<f32>;
+@group(0) @binding(150) var plant_bones: texture_2d<f32>;
 @group(0) @binding(90) var<uniform> water: Water;
 
 fn tile_capacity() -> u32 {
@@ -320,6 +322,15 @@ fn resolve(
     // Skinned instances: the corners' previous positions (motion vectors).
     var previous_worlds: array<vec3<f32>, 3>;
     let skinned = SKINNING && instance_skin(instance) != 0u;
+    // A plant with bones (plant_wind.wgsl): corners and normals posed by their bones, motion
+    // vectors from the corners' previous poses.
+    let planted = plant_animated(instance, wind_force);
+    var air_now: PlantAir;
+    var air_before: PlantAir;
+    if planted {
+        air_now = plant_air(instance, wind_force, wind_origin(instance), wind.time.x);
+        air_before = plant_air(instance, wind_force, wind_previous_origin(instance), wind.time.y);
+    }
     let extended = cluster_is_extended(cluster, base);
     for (var i = 0u; i < 3u; i++) {
         let local = corners[i];
@@ -338,7 +349,16 @@ fn resolve(
             normals[i] = v.normal;
             previous_worlds[i] = wind_previous_world_position(instance, wind_force, v.previous, plants[i].x);
         }
-        world_positions[i] = wind_world_position(instance, wind_force, posed, plants[i].x);
+        if planted {
+            let bone = plant_vertex_bone(cluster, base, local);
+            let now = plant_pose(instance.plant.y, air_now, bone, posed, normals[i]);
+            world_positions[i] = (instance.world * vec4<f32>(now.position, 1.0)).xyz;
+            normals[i] = now.normal;
+            let before = plant_pose(instance.plant.y, air_before, bone, posed, vec3<f32>(0.0));
+            previous_worlds[i] = (instance.prev_world * vec4<f32>(before.position, 1.0)).xyz;
+        } else {
+            world_positions[i] = wind_world_position(instance, wind_force, posed, plants[i].x);
+        }
         uvs[i] = vertex_uv(cluster, base, local);
         // Optional attributes (imported meshes only).
         uv1s[i] = uvs[i];
@@ -380,7 +400,7 @@ fn resolve(
     // the corner arrays need not live through it.)
     let plant = interpolate2(plants, b.lambda);
     var previous_world = wind_previous_world_position(instance, wind_force, input.object_position, plant.x);
-    if skinned {
+    if skinned || planted {
         previous_world = interpolate3(previous_worlds, b.lambda);
     }
     if displaced {

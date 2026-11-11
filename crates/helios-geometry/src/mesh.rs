@@ -4,6 +4,7 @@ use bytemuck::{Pod, Zeroable};
 use glam::{Mat3, Mat4, Vec2, Vec3, Vec4};
 
 use crate::hash::FxHashMap;
+use crate::plant_bones::PlantBone;
 use crate::{Aabb, SkinWeights, Sphere};
 
 /// Source vertex: two `vec4<f32>` — `(position, u)` and `(normal, v)`.
@@ -67,12 +68,16 @@ pub struct Mesh {
     ///   geometry and the ground hide from the vertex (the base of a grass clump, a fern's
     ///   crown). Like a material's AO it darkens indirect light only.
     pub plant: Vec<Vec2>,
+    /// Bones of a procedural plant's skeleton (`plant_bones.rs`): empty, or the table the skin
+    /// ([`Mesh::skin`], one rigid bone per vertex) indexes. The renderer's dynamic wind bends
+    /// them; the skin is then not a skeletal mesh's.
+    pub bones: Vec<PlantBone>,
 }
 
 impl Mesh {
     pub fn new(vertices: Vec<Vertex>, indices: Vec<u32>) -> Self {
         assert!(indices.len().is_multiple_of(3), "index count must be a multiple of 3");
-        Self { vertices, indices, uv1: Vec::new(), colors: Vec::new(), skin: Vec::new(), plant: Vec::new() }
+        Self { vertices, indices, uv1: Vec::new(), colors: Vec::new(), skin: Vec::new(), plant: Vec::new(), bones: Vec::new() }
     }
 
     /// Plant data of vertex `i` (free to move and unoccluded, (1, 1), if the mesh has none).
@@ -278,7 +283,15 @@ impl Mesh {
             self.colors = (0..self.vertices.len()).map(|i| self.color_of(i)).chain((0..other.vertices.len()).map(|i| other.color_of(i))).collect();
         }
         if !self.skin.is_empty() || !other.skin.is_empty() {
-            self.skin = (0..self.vertices.len()).map(|i| self.skin_of(i)).chain((0..other.vertices.len()).map(|i| other.skin_of(i))).collect();
+            // Plant bones are appended after this mesh's: the other's vertices index them there.
+            let shift = self.bones.len() as u16;
+            let shifted = |s: SkinWeights| if other.bones.is_empty() { s } else { SkinWeights { joints: s.joints.map(|j| j + shift), ..s } };
+            self.skin = (0..self.vertices.len()).map(|i| self.skin_of(i)).chain((0..other.vertices.len()).map(|i| shifted(other.skin_of(i)))).collect();
+        }
+        if !other.bones.is_empty() {
+            let shift = self.bones.len() as u16;
+            let scale = crate::assembly::max_scale(&transform);
+            self.bones.extend(other.bones.iter().map(|b| PlantBone { parent: b.parent.map(|p| p + shift), ..b.transformed(&transform, scale) }));
         }
         if !self.plant.is_empty() || !other.plant.is_empty() {
             self.plant = (0..self.vertices.len()).map(|i| self.plant_of(i)).chain((0..other.vertices.len()).map(|i| other.plant_of(i))).collect();

@@ -7,7 +7,7 @@
 use glam::{Mat4, Vec2, Vec3};
 
 use crate::noise::fbm;
-use crate::{Mesh, Vertex};
+use crate::{Mesh, SkinWeights, Vertex};
 
 // ---- Small builder --------------------------------------------------------------------------------
 
@@ -18,6 +18,10 @@ pub struct MeshBuilder {
     pub indices: Vec<u32>,
     /// Plant data ([`Mesh::plant`]): empty until a vertex is added with [`MeshBuilder::plant_vertex`].
     pub plant: Vec<Vec2>,
+    /// Skin ([`Mesh::skin`]): empty until a plant bone is set with [`MeshBuilder::set_bone`].
+    pub skin: Vec<SkinWeights>,
+    /// The bone new vertices are bound to.
+    pub bone: Option<u16>,
 }
 
 impl MeshBuilder {
@@ -26,7 +30,22 @@ impl MeshBuilder {
         if !self.plant.is_empty() {
             self.plant.push(Vec2::ONE);
         }
+        self.bind_new(1);
         self.vertices.len() as u32 - 1
+    }
+
+    /// Binds the vertices added from now on rigidly to plant bone `bone` (see
+    /// [`crate::plant_bones`]).
+    pub fn set_bone(&mut self, bone: u16) {
+        self.bone = Some(bone);
+    }
+
+    /// Skin of the last `count` vertices added: the current bone.
+    fn bind_new(&mut self, count: usize) {
+        if let Some(bone) = self.bone {
+            self.skin.resize(self.vertices.len() - count, SkinWeights::rigid(0));
+            self.skin.resize(self.vertices.len(), SkinWeights::rigid(bone));
+        }
     }
 
     /// A vertex with plant data (wind weight, ambient occlusion; see [`Mesh::plant`]). Vertices
@@ -35,6 +54,7 @@ impl MeshBuilder {
         self.plant.resize(self.vertices.len(), Vec2::ONE);
         self.plant.push(plant);
         self.vertices.push(Vertex::new(p, n, uv));
+        self.bind_new(1);
         self.vertices.len() as u32 - 1
     }
 
@@ -62,13 +82,17 @@ impl MeshBuilder {
         }
         self.vertices.extend_from_slice(&mesh.vertices);
         self.indices.extend(mesh.indices.iter().map(|i| i + base));
+        self.bind_new(mesh.vertices.len());
     }
 
     pub fn build(mut self) -> Mesh {
         if !self.plant.is_empty() {
             self.plant.resize(self.vertices.len(), Vec2::ONE);
         }
-        let mut mesh = Mesh { plant: self.plant, ..Mesh::new(self.vertices, self.indices) };
+        if !self.skin.is_empty() {
+            self.skin.resize(self.vertices.len(), SkinWeights::rigid(0));
+        }
+        let mut mesh = Mesh { plant: self.plant, skin: self.skin, ..Mesh::new(self.vertices, self.indices) };
         mesh.weld();
         mesh
     }
