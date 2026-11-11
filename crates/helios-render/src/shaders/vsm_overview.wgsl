@@ -181,7 +181,11 @@ fn reasons_panel(r: Receiver) -> vec3<f32> {
     }
     let reason = info[INFO_PAGE_REASON + p.physical];
     let age = f32(((vsm.frame & 0xffffffu) - (reason >> 8u)) & 0xffffffu);
-    if (reason & 0xffu) != 0u && age < INVALIDATION_FADE {
+    let full = vsm_entries[p.entry].w == vsm.frame && page_kind(info[INFO_PAGE_STATE + p.physical]) == PAGE_FULL;
+    if full && ((reason & 0xffu) == 0u || age > 0.0) {
+        // Rendered in full without a footprint this frame: new, or its level's light moved.
+        color = vec3<f32>(0.9) * (0.4 + (0.6 * r.shade));
+    } else if (reason & 0xffu) != 0u && age < INVALIDATION_FADE {
         var hue = vec3<f32>(1.0, 0.9, 0.15);
         if (reason & HIT_STATIC) != 0u {
             hue = vec3<f32>(1.0, 0.12, 0.08);
@@ -191,9 +195,6 @@ fn reasons_panel(r: Receiver) -> vec3<f32> {
             hue = vec3<f32>(1.0, 0.25, 0.9);
         }
         color = mix(color, hue * (0.4 + (0.6 * r.shade)), 1.0 - (age / INVALIDATION_FADE));
-    } else if vsm_entries[p.entry].w == vsm.frame && page_kind(info[INFO_PAGE_STATE + p.physical]) == PAGE_FULL {
-        // Rendered in full without a footprint: new, or its level's light moved (the sun).
-        color = vec3<f32>(0.9) * (0.4 + (0.6 * r.shade));
     }
     if grid_line(p.texel) {
         color *= 0.5;
@@ -232,7 +233,9 @@ fn pool_panel(q: vec2<f32>, size: vec2<f32>) -> vec3<f32> {
     if all(g >= vec2<f32>(0.0)) && all(g < vec2<f32>(1.0)) {
         let cell = vec2<u32>(g * 32.0);
         let f = fract(g * 32.0);
-        if any(f < vec2<f32>(0.08)) {
+        // Cell borders where cells are large enough to show them (not at low internal
+        // resolutions, where they would alias).
+        if grid >= 320.0 && any(f < vec2<f32>(0.08)) {
             return vec3<f32>(0.06);
         }
         let p = cell.y * 32u + cell.x;

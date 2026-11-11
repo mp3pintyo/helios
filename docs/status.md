@@ -106,7 +106,9 @@ Honest differences that remain:
    cache 1.5 → 2.4 ms, cards 0.07 → 0.35 ms, in both modes). Light culling stays brute force per froxel (0.01 →
    0.30 ms at 1000 lights; up to 255 lights per froxel, 1024 per scene). The denoiser lags behind moving lights by up to
    24 frames where the variance clip does not catch the change, and its spatial filter softens lighting detail on
-   fresh (disoccluded) pixels.
+   fresh (disoccluded) pixels. The shadow overview (debug view 26, round 8) shows the shared pool's pages per light and its pressure as
+   colours and bars, without the numbers and per-light labels of UE's overview (the HUD and the headless report carry
+   the counts), and its per-pixel panels cover the sun's clipmap only (local lights: debug view 15).
 5. **Translucency** is ordered per pixel up to 4 layers deep (depth peeling; deeper layers fall back to per-instance
    order). The layer count comes from projected bounding boxes, so boxes that overlap on screen cost up to three extra
    depth-only draws, scene-colour copies and shading passes even where the surfaces themselves don't. Refraction reads
@@ -135,7 +137,15 @@ Honest differences that remain:
    static — the wind still costs most of what it did (see [*Wind*](architecture/motion.md)); a page gets its static layer by being rendered in
    full once more at its first dynamic refresh, and only 256 pages a frame have scratch space for software-rasterised
    dynamic casters (beyond that they take the hardware path). The wind doesn't move distance fields, the surface cache
-   or translucent materials (rigid moves do).
+   or translucent materials (rigid moves do). Round 8 (`vsm-deferred-invalidation`) caps the refreshes at a budget per
+   frame (96 pages), by how many texels a page's shadow may be off and how long it has waited: the forest's wind costs
+   about a third less, but where the budget binds a swaying shadow lags its caster by up to 4 frames (UE throttles only
+   Nanite LOD changes this way and keeps WPO-animated pages current); the priority ignores how many pixels sample a
+   page. Distant clipmap levels (`vsm-prefiltered-distant`, from level 7) follow a moving sun every 4 frames in turns,
+   not every frame: their shadows lag the sun by up to 4 frames or 0.5° (a seam where they meet the level before them,
+   below a texel at the demo's sun speeds), and are not *prefiltered* as UE 5.8's experimental Prefiltered Distant
+   pages are (no lower-resolution moment / filtered representation, no temporal reprojection): distant casters render
+   at full resolution, only less often.
 8. **Skeletal meshes**: linear blend skinning with up to 4 influences per vertex (glTF's first joint set; UE allows
    8–12) and 8-bit weights; no dual-quaternion skinning, morph targets (imported files with them render their base
    shape, with a warning), cloth or physics. Culling bounds are per instance (posed joint spheres) and per cluster only
