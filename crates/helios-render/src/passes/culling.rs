@@ -69,10 +69,11 @@ pub struct CullCapacity {
 }
 
 impl CullCapacity {
-    /// Size of the work buffer: page batches, page work items, then up to two cluster
-    /// candidates per page item slot (small pages, cull.wgsl), two per 16 bytes.
+    /// Size of the work buffer: page batches, page work items, up to two cluster candidates per
+    /// page item slot (small pages, cull.wgsl), then up to two page candidates per batch slot
+    /// (instances with few pages to test), two per 16 bytes.
     fn work_bytes(&self) -> u64 {
-        (self.batches + 2 * self.pages) as u64 * 16
+        (2 * self.batches + 2 * self.pages) as u64 * 16
     }
 }
 
@@ -128,7 +129,10 @@ pub struct Culling {
     /// alpha-masked and voxel rasterisers below ([`Lazy::new`], queued by [`Culling::prefetch`]):
     /// scenes without that content never pay their compiles. The late (occlusion) passes belong
     /// to [`Group::OcclusionCulling`]: the browser's first frames cull in a single pass.
-    passes: [Lazy<CullPasses>; 2],
+    /// The third is the lean specialisation for frames in which nothing deforms (`DEFORMING`:
+    /// no wind blowing on instances with a wind response, no displaced or skinned instances):
+    /// it never pads bounds and carries no wind, displacement or skin code ([`GpuScene::deforms`]).
+    passes: [Lazy<CullPasses>; 3],
     prepare_pages: Lazy<wgpu::ComputePipeline>,
     prepare_clusters: Lazy<wgpu::ComputePipeline>,
     prepare_early_draw: Lazy<wgpu::ComputePipeline>,
@@ -150,7 +154,7 @@ pub struct Culling {
     pub(crate) tessellation: Option<Tessellation>,
 }
 
-/// The pipelines of cull.wgsl's passes, specialised for one `SKINNING` value.
+/// The pipelines of cull.wgsl's passes, specialised for one `SKINNING` and `DEFORMING` value.
 struct CullPasses {
     instances: Lazy<wgpu::ComputePipeline>,
     pages: Lazy<wgpu::ComputePipeline>,
@@ -158,15 +162,16 @@ struct CullPasses {
 }
 
 impl CullPasses {
-    fn new(device: &wgpu::Device, module: &wgpu::ShaderModule, layout: &wgpu::BindGroupLayout, skinning: bool) -> Self {
+    fn new(device: &wgpu::Device, module: &wgpu::ShaderModule, layout: &wgpu::BindGroupLayout, skinning: bool, deforming: bool) -> Self {
         let skinning = ("SKINNING", if skinning { 1.0 } else { 0.0 });
+        let deforming = ("DEFORMING", if deforming { 1.0 } else { 0.0 });
         let cluster_pipeline = |mode: CullMode| {
-            compute_pipeline(device, "cull clusters", module, "cull_clusters", layout, &[("CULL_MODE", mode as u32 as f64), skinning])
+            compute_pipeline(device, "cull clusters", module, "cull_clusters", layout, &[("CULL_MODE", mode as u32 as f64), skinning, deforming])
         };
         let occlusion = |mode| in_group(Group::OcclusionCulling, || cluster_pipeline(mode));
         Self {
-            instances: compute_pipeline(device, "cull instances", module, "cull_instances", layout, &[skinning]),
-            pages: compute_pipeline(device, "cull pages", module, "cull_pages", layout, &[skinning]),
+            instances: compute_pipeline(device, "cull instances", module, "cull_instances", layout, &[skinning, deforming]),
+            pages: compute_pipeline(device, "cull pages", module, "cull_pages", layout, &[skinning, deforming]),
             clusters: [cluster_pipeline(CullMode::Single), occlusion(CullMode::Early), occlusion(CullMode::Late)],
         }
     }
@@ -214,10 +219,10 @@ impl Culling {
             ],
         );
 
-        let cull_passes = |skinning: bool| {
+        let cull_passes = |skinning: bool, deforming: bool| {
             let (device, module, layout) = (device.clone(), cull_module.clone(), cull_layout.clone());
-            let make = move || CullPasses::new(&device, &module, &layout, skinning);
-            if skinning { Lazy::new(make) } else { Lazy::background(make) }
+            let make = move || CullPasses::new(&device, &module, &layout, skinning, deforming);
+            if skinning || !deforming { Lazy::new(make) } else { Lazy::background(make) }
         };
         let args_pipeline = |entry: &str| compute_pipeline(device, entry, &args_module, entry, &args_layout, &[]);
         let sw_pipeline = |pass: u32, late: bool, masked: bool, background: bool| {
@@ -259,7 +264,7 @@ impl Culling {
         .create_view(&Default::default());
 
         Self {
-            passes: [cull_passes(false), cull_passes(true)],
+            passes: [cull_passes(false, true), cull_passes(true, true), cull_passes(false, false)],
             prepare_pages: args_pipeline("prepare_page_dispatch"),
             prepare_clusters: args_pipeline("prepare_cluster_dispatch"),
             prepare_early_draw: args_pipeline("prepare_early_draw"),
@@ -298,6 +303,19 @@ impl Culling {
         self.cull_impl(rec, view, scene, mode, None, atomics);
     }
 
+    /// The culling specialisation for this frame: the lean one when nothing deforms (in the
+    /// browser once compiled in the background; until then the general one, which is exact too).
+    fn passes_for(&self, scene: &GpuScene) -> &CullPasses {
+        if !scene.deforms() {
+            let lean = &self.passes[2];
+            if lean.is_made() || !crate::pipelines::deferring() {
+                return lean;
+            }
+            lean.prefetch();
+        }
+        &self.passes[scene.skins.skinned_instances as usize]
+    }
+
     fn cull_impl(
         &self,
         rec: &mut Recorder,
@@ -308,7 +326,7 @@ impl Culling {
         atomics: &wgpu::Buffer,
     ) {
         let device = rec.device;
-        let passes = &self.passes[scene.skins.skinned_instances as usize];
+        let passes = self.passes_for(scene);
         let cull_group = bind_group(
             device,
             "cull",
@@ -339,7 +357,17 @@ impl Culling {
         if mode != CullMode::Late {
             rec.encoder.clear_buffer(&view.state, 0, None);
         }
-        let mut pass = rec.compute_pass(if mode == CullMode::Late { "cull (late)" } else { "cull" });
+        // Profiling aid (HELIOS_CULL_STAGES=1): every stage of every view its own timed pass,
+        // labelled by stage and view kind, instead of one `cull` / `cull (late)` pass per view.
+        let stages = cull_stages_profiled();
+        let kind = if std::ptr::eq(atomics, &scene.atomics) { "main" } else { "shadow" };
+        let stage_label = |stage: &str| format!("cull {stage} [{kind}]");
+        let mut pass = rec.compute_pass(&match (stages, mode) {
+            (true, CullMode::Late) => stage_label("clusters (late)"),
+            (true, _) => stage_label("instances"),
+            (false, CullMode::Late) => "cull (late)".to_owned(),
+            (false, _) => "cull".to_owned(),
+        });
         if mode != CullMode::Late {
             pass.set_bind_group(0, &cull_group, &[]);
             pass.set_pipeline(&passes.instances);
@@ -350,6 +378,10 @@ impl Culling {
             pass.set_bind_group(0, &args_group, &[]);
             pass.dispatch_workgroups(1, 1, 1);
 
+            if stages {
+                drop(pass);
+                pass = rec.compute_pass(&stage_label("pages"));
+            }
             pass.set_pipeline(&passes.pages);
             pass.set_bind_group(0, &cull_group, &[]);
             pass.dispatch_workgroups_indirect(&view.args, ARGS_PAGES);
@@ -357,6 +389,10 @@ impl Culling {
             pass.set_pipeline(&self.prepare_clusters);
             pass.set_bind_group(0, &args_group, &[]);
             pass.dispatch_workgroups(1, 1, 1);
+            if stages {
+                drop(pass);
+                pass = rec.compute_pass(&stage_label("clusters"));
+            }
         }
 
         pass.set_pipeline(&passes.clusters[mode as usize]);
@@ -413,6 +449,9 @@ impl Culling {
     pub fn prefetch(&self, scene: &GpuScene) {
         if scene.skins.skinned_instances {
             self.passes[1].prefetch();
+        }
+        if !scene.deforms() {
+            self.passes[2].prefetch();
         }
         if scene.masks.any() {
             self.sw_raster_masked.iter().for_each(Lazy::prefetch);
@@ -522,6 +561,12 @@ impl Culling {
         pass.set_bind_group(0, &merge_group, &[]);
         pass.dispatch_workgroups(util::workgroups(targets.width, 8), util::workgroups(targets.height, 8), 1);
     }
+}
+
+/// Whether `HELIOS_CULL_STAGES` asks for every culling stage as its own timed pass.
+fn cull_stages_profiled() -> bool {
+    static STAGES: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *STAGES.get_or_init(|| std::env::var("HELIOS_CULL_STAGES").is_ok_and(|v| v != "0"))
 }
 
 fn raster_pipeline(

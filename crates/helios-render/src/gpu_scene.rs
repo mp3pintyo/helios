@@ -78,6 +78,9 @@ pub struct GpuScene {
     shadow_moves: Vec<ShadowMove>,
     /// Some shadow-casting instance has a wind response.
     wind_shadows: bool,
+    /// Some instance has a wind response; the wind blows (strength > 0, set by write_wind).
+    windy: bool,
+    wind_blowing: std::sync::atomic::AtomicBool,
     /// Some mesh has voxel LODs (the voxel rasterisers run).
     voxels: bool,
     /// Some instance is displaced (the tessellator runs), and the setting its flags were made with.
@@ -130,6 +133,8 @@ impl GpuScene {
             records: Vec::new(),
             shadow_moves: Vec::new(),
             wind_shadows: false,
+            windy: false,
+            wind_blowing: std::sync::atomic::AtomicBool::new(false),
             voxels: false,
             displaced: false,
             displaceable: false,
@@ -152,6 +157,12 @@ impl GpuScene {
     /// invalidates).
     pub fn wind_moves_shadows(&self) -> bool {
         self.wind_shadows
+    }
+
+    /// Whether some instance deforms this frame: the wind moves it, its material displaces it or it is
+    /// skinned. Culling takes its lean specialisation otherwise (DEFORMING in cull.wgsl).
+    pub fn deforms(&self) -> bool {
+        (self.windy && self.wind_blowing.load(std::sync::atomic::Ordering::Relaxed)) || self.displaced || self.skins.skinned_instances
     }
 
     /// Whether some mesh has voxel LODs.
@@ -187,6 +198,7 @@ impl GpuScene {
 
     pub fn write_wind(&self, queue: &wgpu::Queue, wind: &WindUniform) {
         queue.write_buffer(&self.wind, 0, bytemuck::bytes_of(wind));
+        self.wind_blowing.store(wind.direction.w > 0.0, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Shadow casters moved by the last [`GpuScene::sync`], with their old and new bounds.
@@ -410,6 +422,7 @@ impl GpuScene {
         // Visibility bits start after the page feedback words.
         let mut visibility_bits = self.page_count * 32;
         let mut wind_shadows = false;
+        let mut windy = false;
         let instances: Vec<GpuInstance> = scene
             .instances
             .iter()
@@ -417,6 +430,7 @@ impl GpuScene {
             .map(|(instance, &prev_world)| {
                 let gpu = self.record(scene, instance, prev_world, visibility_bits);
                 wind_shadows |= instance.cast_shadow && gpu.wind != Vec4::ZERO;
+                windy |= gpu.wind != Vec4::ZERO;
                 visibility_bits += gpu.cluster_count;
                 gpu
             })
@@ -447,6 +461,7 @@ impl GpuScene {
 
         self.instance_count = count as u32;
         self.wind_shadows = wind_shadows;
+        self.windy = windy;
         self.displaced = instances.iter().any(|i| i.flags & instance_flags::DISPLACED != 0);
         self.displaceable = displaceable(scene);
         let animated_caster = instance_flags::ANIMATED | instance_flags::CAST_SHADOW;

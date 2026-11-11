@@ -27,7 +27,9 @@ fn write_dispatch(offset: u32, groups: u32) {
 
 @compute @workgroup_size(1)
 fn prepare_page_dispatch() {
-    write_dispatch(0u, min(state[0], view.batch_capacity));
+    // A workgroup per batch, then one per 64 page candidates (cull.wgsl).
+    let candidates = min(state[13], view.batch_capacity * 2u);
+    write_dispatch(0u, min(state[0], view.batch_capacity) + (candidates + 63u) / 64u);
 }
 
 @compute @workgroup_size(1)

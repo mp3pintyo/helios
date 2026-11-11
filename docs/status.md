@@ -302,3 +302,11 @@ Honest differences that remain:
     camera whose range reaches a pane get a glass map (one pane per texel as for the sun, 256² per cube face, a 2×2
     box filter, no blur with the distance behind the pane); the rest, and the fog, particles, volumes and Lumen for
     every local light, see glass as clear; spot lights render all six faces (`docs/round8/translucency.md`).
+17. **Nanite culling** (round 8, `nanite-culling-split`): no persistent-thread BVH traversal — every view runs a
+    fixed chain of six dispatches (instances → pages → clusters with their argument passes), the twelve sun clipmap
+    levels one after another, so fixed per-view costs dominate shadow culling (a clean level still costs its
+    dispatches and barriers). UE 5.9's simple/complex split is per frame (a lean specialisation when nothing
+    deforms), not per instance: windy frames cull every instance with the deformation bounds code. There is no
+    multi-level DAG step: a per-mesh level table skipping finer levels at once cost as much as it saved and was
+    removed; coarse pages above the LOD cut still send every cluster to the cluster test
+    (`docs/round8/nanite-culling.md`).
