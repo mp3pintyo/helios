@@ -127,8 +127,12 @@ const SOURCES: &[(&str, &str)] = &[
     ("vsm_page.wgsl", include_str!("shaders/vsm_page.wgsl")),
     ("vsm_raster.wgsl", include_str!("shaders/vsm_raster.wgsl")),
     ("vsm_sample.wgsl", include_str!("shaders/vsm_sample.wgsl")),
+    ("vsm_moments.wgsl", include_str!("shaders/vsm_moments.wgsl")),
+    ("vsm_prefiltered.wgsl", include_str!("shaders/vsm_prefiltered.wgsl")),
     ("vsm_static.wgsl", include_str!("shaders/vsm_static.wgsl")),
     ("vsm_tess.wgsl", include_str!("shaders/vsm_tess.wgsl")),
+    ("volume_shadow.wgsl", include_str!("shaders/volume_shadow.wgsl")),
+    ("volume_shadow_sample.wgsl", include_str!("shaders/volume_shadow_sample.wgsl")),
     ("water.wgsl", include_str!("shaders/water.wgsl")),
     ("wind.wgsl", include_str!("shaders/wind.wgsl")),
 ];

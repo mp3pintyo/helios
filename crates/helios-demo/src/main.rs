@@ -170,11 +170,17 @@ mod native {
         /// First distant shadow level and the frames between their refreshes
         /// (`--shadow-distant 7,4`; `--shadow-distant 0`: every level every frame).
         pub shadow_distant: Option<(u32, u32)>,
+        /// Prefiltered distant shadows (`--no-shadow-prefiltered`: off) and how many levels
+        /// coarser the distant levels render (`--shadow-distant-bias 1`).
+        pub shadow_prefiltered: bool,
+        pub shadow_distant_bias: Option<f32>,
+        /// Heterogeneous volumes cast shadows (`--no-volume-shadows`: off).
+        pub volume_shadows: bool,
     }
 
     impl Options {
         pub fn parse(args: &[String]) -> Self {
-            let mut o = Options { screenshot: None, size: (1600, 900), frames: 90, view: None, detail: Detail::High, scene: SceneKind::Valley, camera: None, eye: None, at: None, occlusion: true, sw_raster: true, rvt: true, glass_shadows: true, svt: true, animate_sun: false, lod: None, fov: None, pool_mb: None, texture_pool_mb: None, texture_compression: true, switch_to: None, dump_dir: None, dump_count: 16, keys: Vec::new(), keys_at: None, hold: Vec::new(), gltf: None, ground: true, bake_hvm: None, stream_from: None, io_latency_ms: 0, sun: None, move_light: false, full_invalidation: false, moving_lights: Default::default(), moving_light_pages: None, movers: None, static_motion: false, screen_percentage: None, gpu_budget_ms: None, local_exposure: Some(Default::default()), scene_file: None, select: Vec::new(), no_skinning: false, gi: None, megalights: false, tessellation: true, displacement_speed_bound: true, dice_rate: None, speed: None, fog_scattering: None, tsr_depth_history: true, dof: None, photo: None, shadow_refresh_budget: None, shadow_max_staleness: None, shadow_distant: None, megalights_options: (None, true, true, true), avboit: true };
+            let mut o = Options { screenshot: None, size: (1600, 900), frames: 90, view: None, detail: Detail::High, scene: SceneKind::Valley, camera: None, eye: None, at: None, occlusion: true, sw_raster: true, rvt: true, glass_shadows: true, svt: true, animate_sun: false, lod: None, fov: None, pool_mb: None, texture_pool_mb: None, texture_compression: true, switch_to: None, dump_dir: None, dump_count: 16, keys: Vec::new(), keys_at: None, hold: Vec::new(), gltf: None, ground: true, bake_hvm: None, stream_from: None, io_latency_ms: 0, sun: None, move_light: false, full_invalidation: false, moving_lights: Default::default(), moving_light_pages: None, movers: None, static_motion: false, screen_percentage: None, gpu_budget_ms: None, local_exposure: Some(Default::default()), scene_file: None, select: Vec::new(), no_skinning: false, gi: None, megalights: false, tessellation: true, displacement_speed_bound: true, dice_rate: None, speed: None, fog_scattering: None, tsr_depth_history: true, dof: None, photo: None, shadow_refresh_budget: None, shadow_max_staleness: None, shadow_distant: None, megalights_options: (None, true, true, true), avboit: true, shadow_prefiltered: true, shadow_distant_bias: None, volume_shadows: true };
             let mut scene_given = false;
             let mut it = args.iter().skip(1);
             while let Some(arg) = it.next() {
@@ -263,6 +269,9 @@ mod native {
                     "--photo" => o.photo = value().parse().ok(),
                     "--shadow-refresh-budget" => o.shadow_refresh_budget = value().parse().ok(),
                     "--shadow-max-staleness" => o.shadow_max_staleness = value().parse().ok(),
+                    "--no-shadow-prefiltered" => o.shadow_prefiltered = false,
+                    "--shadow-distant-bias" => o.shadow_distant_bias = value().parse().ok(),
+                    "--no-volume-shadows" => o.volume_shadows = false,
                     "--shadow-distant" => {
                         let v: Vec<u32> = value().split(',').filter_map(|x| x.parse().ok()).collect();
                         o.shadow_distant = v.first().map(|&level| (level, v.get(1).copied().unwrap_or(4)));
@@ -273,6 +282,7 @@ mod native {
                     "--no-shader-f16" => helios_render::allow_half_precision(false),
                     // Test the fallbacks of a device with fewer sampled textures per stage.
                     "--max-sampled-textures" => GpuContext::limit_sampled_textures(value().parse().unwrap_or(24)),
+                    "--campfire-smoke" => helios_demo::scenes::forest::set_campfire_smoke(value().parse().unwrap_or(1.0)),
                     // Highlight contrast, shadow contrast and optionally the blurred luminance blend.
                     "--local-exposure" => {
                         let v: Vec<f32> = value().split(',').filter_map(|x| x.parse().ok()).collect();
@@ -423,6 +433,11 @@ mod native {
             }
             if let Some(frames) = self.shadow_max_staleness {
                 app.renderer.settings.shadow_max_staleness = frames;
+            }
+            app.renderer.settings.shadow_distant_prefiltered = self.shadow_prefiltered;
+            app.renderer.settings.volume_shadows = self.volume_shadows;
+            if let Some(bias) = self.shadow_distant_bias {
+                app.renderer.settings.shadow_distant_bias = bias;
             }
             if let Some((level, interval)) = self.shadow_distant {
                 app.renderer.settings.shadow_distant_level = level;

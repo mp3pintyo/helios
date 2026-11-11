@@ -51,6 +51,7 @@
 // MegaLights' in-scattered local light (megalights_volume.wgsl, same froxels; 1x1x1 while off).
 @group(0) @binding(140) var megalights_light: texture_3d<f32>;
 #include "glass_shadow.wgsl"
+#include "volume_shadow_sample.wgsl"
 
 fn henyey_greenstein(cos_theta: f32, g: f32) -> f32 {
     let g2 = g * g;
@@ -83,14 +84,16 @@ fn fog_density(world: vec3<f32>) -> f32 {
 
 // Sun visibility from the virtual shadow map (one filtered tap; froxels are large).
 fn sun_visibility(world: vec3<f32>) -> f32 {
+    // Shafts of shade under smoke and mist (heterogeneous volumes).
+    let volumes = volume_sun_transmittance(world, 0xffffffffu);
     if vsm.enabled == 0u || !has_flag(frame.flags, FLAG_SHADOWS) {
-        return 1.0;
+        return volumes;
     }
     let l = vsm_lookup(world, min(vsm_level(world) + FOG_SHADOW_LEVEL_BIAS, vsm.level_count - 1u));
     if !l.found {
-        return 1.0;
+        return volumes;
     }
-    return textureSampleCompareLevel(vsm_atlas, shadow_sampler, l.uv, l.depth);
+    return textureSampleCompareLevel(vsm_atlas, shadow_sampler, l.uv, l.depth) * volumes;
 }
 
 fn cloud_shadow(world: vec3<f32>) -> f32 {
@@ -165,6 +168,7 @@ fn inject(@builtin(global_invocation_id) gid: vec3<u32>) {
                 if slot != INVALID_ID && any(ls.radiance > vec3<f32>(0.0)) {
                     visibility = local_vsm_visibility(slot, world, vec3<f32>(0.0), FOG_SHADOW_LEVEL_BIAS);
                 }
+                visibility *= volume_light_transmittance(light_grid[base + 1u + i], light.position_range.xyz, world);
                 radiance += ls.radiance * visibility * henyey_greenstein(dot(ls.l, view_dir), g * 0.5);
             }
         }

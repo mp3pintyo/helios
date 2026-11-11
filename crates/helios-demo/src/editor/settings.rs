@@ -54,6 +54,10 @@ pub fn all() -> Vec<Setting> {
         number("shadow_refresh_budget", "Shadow page refreshes per frame (0 = all)", "Lighting", (0.0, 512.0, 8.0), |s| json!(s.shadow_refresh_budget), |s, v| {
             s.shadow_refresh_budget = f(v).max(0.0) as u32
         }),
+        flag("shadow_distant_prefiltered", "Prefiltered distant shadows", "Lighting", |s| json!(s.shadow_distant_prefiltered), |s, v| {
+            s.shadow_distant_prefiltered = b(v)
+        }),
+        flag("volume_shadows", "Volume shadows (smoke, fire, mist)", "Lighting", |s| json!(s.volume_shadows), |s, v| s.volume_shadows = b(v)),
         number("shadow_distant_level", "Distant shadow levels from (0 = none)", "Lighting", (0.0, 15.0, 1.0), |s| json!(s.shadow_distant_level), |s, v| {
             s.shadow_distant_level = f(v).max(0.0) as u32
         }),

@@ -9,6 +9,9 @@ $profileDir = if ($Debug) { "debug" } else { "release" }
 $cargoArgs = @("build", "-p", "helios-demo", "--lib", "--target", "wasm32-unknown-unknown")
 if (-not $Debug) { $cargoArgs += "--release" }
 
+# No compiler cache wrapper (e.g. sccache) for the wasm build: web-sys's rustc command line exceeds Windows' limit
+# once a wrapper expands cargo's @argfile, and the spawn fails.
+# (PowerShell can't set an empty environment variable, so the override goes through --config.)
 cargo --config "build.rustc-wrapper=''" @cargoArgs
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 

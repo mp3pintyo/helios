@@ -35,6 +35,9 @@ pub(crate) fn lighting_entries() -> Vec<(u32, BindingType)> {
         // Sunlight through glass (glass_shadow.wgsl).
         (90, bind::uniform()),
         (91, bind::texture(true)),
+        // Shadows of heterogeneous volumes (volume_shadow_sample.wgsl).
+        (151, bind::uniform()),
+        (152, bind::texture_3d(true)),
     ]
 }
 
@@ -65,6 +68,8 @@ pub(crate) fn lighting_resources<'a>(inputs: &'a LightingInputs) -> Vec<(u32, Bi
         (60, inputs.vsm.local.uniform.as_entire_binding()),
         (90, inputs.glass.uniform.as_entire_binding()),
         (91, TextureView(inputs.glass.view())),
+        (151, inputs.volume_shadows.uniform.as_entire_binding()),
+        (152, TextureView(inputs.volume_shadows.atlas())),
     ]
 }
 

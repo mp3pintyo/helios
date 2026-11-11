@@ -115,6 +115,9 @@ struct Vsm {
     // Per level its light view: the sun's, except for distant levels, which follow a moving sun
     // at their own rate (vsm.rs). Addresses and depths of a level are in its own light space.
     level_light: array<mat4x4<f32>, 16>,
+    // Prefiltered distant levels (vsm_moments.rs): x: resolution bias of the distant levels (in
+    // levels: 1 = half resolution), y: 1 while on, z: moment bias, w: light bleeding reduction.
+    prefilter: vec4<f32>,
 }
 
 // A world point in `level`'s light space (x, -y in world units: page coordinates times the
@@ -137,9 +140,15 @@ struct VsmAddress {
 }
 
 // Clipmap level whose texels match the screen footprint at `world`.
+// Distant levels (from vsm.refresh.z) are prefiltered at a lower resolution while
+// vsm.prefilter.y is set: receivers that would sample one take a level vsm.prefilter.x coarser.
 fn vsm_level(world: vec3<f32>) -> u32 {
     let footprint = distance(world, vsm.eye.xyz) * vsm.pixel_angle;
-    let level = ceil(log2(max(footprint / vsm.first_texel, 1e-6)) + vsm.lod_bias);
+    let raw = log2(max(footprint / vsm.first_texel, 1e-6)) + vsm.lod_bias;
+    var level = ceil(raw);
+    if vsm.prefilter.y != 0.0 && level >= f32(vsm.refresh.z) {
+        level = max(ceil(raw + vsm.prefilter.x), level);
+    }
     return u32(clamp(level, 0.0, f32(vsm.level_count - 1u)));
 }
 

@@ -113,6 +113,8 @@ pub struct LightingInputs<'a> {
     pub megalights_volume_light: [&'a wgpu::TextureView; 2],
     /// Local lights through glass.
     pub glass_lights: &'a crate::glass_light::GlassLights,
+    /// Shadows of heterogeneous volumes (last frame's, see volume_shadow.rs).
+    pub volume_shadows: &'a crate::volume_shadow::VolumeShadows,
 }
 
 impl LightingPass {
@@ -162,6 +164,11 @@ impl LightingPass {
                 (92, crate::glass_light::GlassLights::entries()[0].1),
                 (93, crate::glass_light::GlassLights::entries()[1].1),
                 (94, crate::glass_light::GlassLights::entries()[2].1),
+                // Prefiltered distant shadows: the moment atlas (vsm_prefiltered.wgsl).
+                (150, bind::texture(true)),
+                // Shadows of heterogeneous volumes (volume_shadow_sample.wgsl).
+                (151, bind::uniform()),
+                (152, bind::texture_3d(true)),
             ],
         );
         Self {
@@ -228,6 +235,9 @@ impl LightingPass {
                 (92, inputs.glass_lights.resources()[0].1.clone()),
                 (93, inputs.glass_lights.resources()[1].1.clone()),
                 (94, inputs.glass_lights.resources()[2].1.clone()),
+                (150, TextureView(inputs.vsm.moments.view().unwrap_or(inputs.black))),
+                (151, inputs.volume_shadows.uniform.as_entire_binding()),
+                (152, TextureView(inputs.volume_shadows.atlas())),
             ],
         );
         // MegaLights traces the shadows of every light itself.
