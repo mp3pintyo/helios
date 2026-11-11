@@ -62,11 +62,12 @@ struct PlantAir {
     flutter: f32,         // 2π · 2.6 Hz · t
     response: vec3<f32>,  // the material's bend, sway, flutter times the strength
     // Leaf flutter's level of detail: 1 near, fading to 0 where a leaf tip's flutter (2.5 × the
-    // response, helios_geometry::vegetation) would cover under two pixels; at 0 leaves ride rigidly
+    // response, helios_geometry::vegetation) would cover under a pixel; at 0 leaves ride rigidly
     // on their branch and their level is skipped. A function of the instance and the camera
     // only, so every pass and view agrees.
     leaves: f32,
-    // The same for branches (sway bones), whose motion is ~5 % of the instance radius × sway.
+    // The same for branches (sway bones): about a radian per unit sway (helios_geometry::
+    // vegetation) on a branch about 0.4 × the plant's radius long.
     branches: f32,
     // Promoted instances (plant_sim.wgsl): simulation slot + 1 (0: parametric only), and which
     // texel of a bone's pair to read (0: this frame's deviation, 1: the previous frame's).
@@ -89,11 +90,11 @@ fn plant_air(instance: Instance, strength: f32, origin: vec3<f32>, time: f32) ->
     a.flutter = WIND_TAU * WIND_FLUTTER_HZ * time;
     a.response = response.xyz * strength;
     // wind.params.x: distance per metre of motion at which it covers WIND_MIN_PIXELS (4); the
-    // leaves and branches stop where theirs would cover 2 pixels.
+    // leaves and branches stop where theirs would cover a pixel.
     let d = distance(origin, wind.camera.xyz);
-    let leaf_limit = 2.5 * a.response.z * 2.0 * wind.params.x;
+    let leaf_limit = 2.5 * a.response.z * 4.0 * wind.params.x;
     a.leaves = saturate(4.0 * (leaf_limit - d) / max(leaf_limit, 1e-3));
-    let branch_limit = 0.05 * instance.bounds.w * a.response.y * 2.0 * wind.params.x;
+    let branch_limit = 0.4 * instance.bounds.w * a.response.y * 4.0 * wind.params.x;
     a.branches = saturate(4.0 * (branch_limit - d) / max(branch_limit, 1e-3));
     a.sim = instance.plant.z;
     a.sim_texel = 0u;
