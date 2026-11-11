@@ -134,8 +134,14 @@ collector; the forest's first-visit figure varies with when the collector runs (
 
 **Images** (native, 1600×900, base vs new, frame 90): valley 57.7 dB, cathedral 60.9 dB, gallery 63.8 dB, forest
 39.1 dB — the forest's run-to-run noise (base vs base 39.2 dB; its particles and wind aren't deterministic).
-**Frame time:** nothing changes per pass (the post-processing pass writes the same target); `Idle::tick` and an empty
-`destroy_retired` per frame.
+**Frame time** (native, valley, 1600×900, 300 frames, interleaved base / new, GPU frame minimum): base 5.69, 5.69,
+5.67 ms; new 5.72, 5.71, 5.70, 5.71 ms — +0.02–0.03 ms, at the run-to-run noise (no pass changes; per frame the CPU
+adds `Idle::tick`s and an empty `destroy_retired`).
+
+**Firefox with the new build** (headed 155, the valley, `?compile-batch=1`): the page holds 1282 MiB, steady; at
+t = 59 s, 820 frames in, the device is lost as before ("Not enough memory left", lost "Out of memory") and the page
+now says so (`gpumem/firefox-device-lost.jpg`). A chain valley → gallery → forest → cathedral → valley ran with the
+page at 1276 / 1067 / 1313 / 1416 / 1449 MiB until the device was lost back in the valley.
 
 ## Alternatives considered
 
