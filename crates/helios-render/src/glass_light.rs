@@ -106,6 +106,8 @@ pub(crate) struct GlassLights {
     placeholder: wgpu::TextureView,
     sampler: wgpu::Sampler,
     maps: Option<Maps>,
+    /// Frames without a light through glass (the maps are released after a while).
+    idle: crate::gpu_memory::Idle,
     /// Per layer: the light it is for and the panes (indices into the caller's list) to draw.
     assigned: Vec<Option<(LayerKey, Vec<usize>)>>,
     /// Per layer: what it holds.
@@ -172,6 +174,7 @@ impl GlassLights {
                 ..Default::default()
             }),
             maps: None,
+            idle: Default::default(),
             assigned: vec![None; MAX_GLASS_LIGHTS],
             drawn: vec![None; MAX_GLASS_LIGHTS],
             written: None,
@@ -235,10 +238,19 @@ impl GlassLights {
             queue.write_buffer(&self.uniform, 0, bytemuck::bytes_of(&uniform));
             self.written = Some(uniform);
         }
+        if self.idle.tick(uniform.params[0] != 0.0) {
+            // No light has reached a pane for a while (e.g. the scene has no glass any more).
+            if let Some(maps) = self.maps.take() {
+                crate::gpu_memory::retire_view(&maps.array);
+                crate::gpu_memory::retire_view(&maps.depth);
+                self.drawn.iter_mut().for_each(|d| *d = None);
+            }
+        }
         if uniform.params[0] == 0.0 {
             return;
         }
         if self.maps.is_none() {
+            self.drawn.iter_mut().for_each(|d| *d = None);
             self.maps = Some(Maps::new(device));
         }
         for (layer, entry) in self.assigned.iter().enumerate() {

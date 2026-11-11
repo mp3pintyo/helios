@@ -81,20 +81,8 @@ impl RuntimeVirtualTexture {
 
         let span = PAGE_TEXELS + 2 * BORDER;
         let atlas_size = TILES_PER_ROW * span;
-        let atlas = |label: &str, srgb: bool| {
-            device.create_texture(&wgpu::TextureDescriptor {
-                label: Some(label),
-                size: wgpu::Extent3d { width: atlas_size, height: atlas_size, depth_or_array_layers: 1 },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: F::Rgba8Unorm,
-                usage: U::TEXTURE_BINDING | U::STORAGE_BINDING,
-                view_formats: if srgb { &[F::Rgba8UnormSrgb] } else { &[] },
-            })
-        };
-        let albedo = atlas("rvt albedo", true);
-        let detail = atlas("rvt detail", false);
+        // The atlases are allocated once a scene has a landscape (`sync`).
+        let atlases = Atlases::new(device, 1);
 
         let module = create_module(device, "rvt_render.wgsl");
         let layout = bind_group_layout(
@@ -145,14 +133,10 @@ impl RuntimeVirtualTexture {
         Self {
             cache,
             params: uniform_buffer(device, "rvt params", std::mem::size_of::<RvtParams>() as u64),
-            albedo: albedo.create_view(&wgpu::TextureViewDescriptor {
-                format: Some(F::Rgba8UnormSrgb),
-                usage: Some(U::TEXTURE_BINDING),
-                ..Default::default()
-            }),
-            detail: detail.create_view(&Default::default()),
-            albedo_storage: albedo.create_view(&Default::default()),
-            detail_storage: detail.create_view(&Default::default()),
+            albedo: atlases.albedo,
+            detail: atlases.detail,
+            albedo_storage: atlases.albedo_storage,
+            detail_storage: atlases.detail_storage,
             heightfield: heightfield_texture(device, queue, &[0.0], [1, 1]),
             layout,
             render,
@@ -201,6 +185,18 @@ impl RuntimeVirtualTexture {
                 break;
             }
             self.cache.clear(queue);
+            // Atlases only for a scene with a landscape (82 MiB); a scene without gives them back.
+            let size = if self.state.enabled != 0 { self.state.atlas_size as u32 } else { 1 };
+            if self.albedo.texture().width() != size {
+                for view in [&self.albedo, &self.detail] {
+                    crate::gpu_memory::retire_view(view);
+                }
+                let atlases = Atlases::new(device, size);
+                self.albedo = atlases.albedo;
+                self.detail = atlases.detail;
+                self.albedo_storage = atlases.albedo_storage;
+                self.detail_storage = atlases.detail_storage;
+            }
         }
         let mut state = self.state;
         state.enabled &= enabled as u32;
@@ -239,6 +235,40 @@ impl RuntimeVirtualTexture {
         pass.set_pipeline(&self.render);
         pass.set_bind_group(0, &group, &[]);
         pass.dispatch_workgroups_indirect(&self.cache.lists, DIRTY_ARGS_OFFSET);
+    }
+}
+
+/// The albedo and detail atlases (sampled and storage views).
+struct Atlases {
+    albedo: wgpu::TextureView,
+    detail: wgpu::TextureView,
+    albedo_storage: wgpu::TextureView,
+    detail_storage: wgpu::TextureView,
+}
+
+impl Atlases {
+    /// Atlases of `size`² texels (1: the stand-ins of a scene without a landscape).
+    fn new(device: &wgpu::Device, size: u32) -> Self {
+        let atlas = |label: &str, srgb: bool| {
+            device.create_texture(&wgpu::TextureDescriptor {
+                label: Some(label),
+                size: wgpu::Extent3d { width: size, height: size, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: F::Rgba8Unorm,
+                usage: U::TEXTURE_BINDING | U::STORAGE_BINDING,
+                view_formats: if srgb { &[F::Rgba8UnormSrgb] } else { &[] },
+            })
+        };
+        let albedo = atlas("rvt albedo", true);
+        let detail = atlas("rvt detail", false);
+        Self {
+            albedo: albedo.create_view(&wgpu::TextureViewDescriptor { format: Some(F::Rgba8UnormSrgb), usage: Some(U::TEXTURE_BINDING), ..Default::default() }),
+            detail: detail.create_view(&Default::default()),
+            albedo_storage: albedo.create_view(&Default::default()),
+            detail_storage: detail.create_view(&Default::default()),
+        }
     }
 }
 

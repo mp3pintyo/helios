@@ -100,6 +100,12 @@ impl Targets {
             translucent_depth_array: depth.create_view(&wgpu::TextureViewDescriptor { dimension: Some(wgpu::TextureViewDimension::D2Array), ..Default::default() }),
         }
     }
+
+    fn retire(&self) {
+        for view in self.accum.iter().chain(&self.reveal).chain([&self.translucent_depth]) {
+            crate::gpu_memory::retire_view(view);
+        }
+    }
 }
 
 pub(crate) struct Oit {
@@ -113,6 +119,8 @@ pub(crate) struct Oit {
     avboit_front: Lazy<wgpu::RenderPipeline>,
     uniform: wgpu::Buffer,
     targets: Option<Targets>,
+    /// Frames without anything to composite (the targets and the grid are released after a while).
+    idle: crate::gpu_memory::Idle,
     /// The transmittance grid (allocated while AVBOIT is used).
     pub avboit: crate::avboit::Avboit,
     /// AVBOIT composites this frame.
@@ -179,6 +187,7 @@ impl Oit {
             layout,
             uniform: uniform_buffer(device, "oit composite", std::mem::size_of::<CompositeUniform>() as u64),
             targets: None,
+            idle: Default::default(),
             avboit: crate::avboit::Avboit::new(device),
             use_avboit: false,
         }
@@ -197,11 +206,25 @@ impl Oit {
     /// `avboit`: composite with adaptive voxel-based OIT this frame (the grid over `internal`).
     pub fn update(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, capacity: (u32, u32), internal: (u32, u32), volume_rect: [u32; 4], avboit: bool) {
         if self.targets.as_ref().is_none_or(|t| t.size != capacity) {
+            if let Some(old) = &self.targets {
+                old.retire();
+            }
             self.targets = Some(Targets::new(device, capacity));
         }
         queue.write_buffer(&self.uniform, 0, bytemuck::bytes_of(&CompositeUniform { volume_rect }));
         self.use_avboit = avboit;
         self.avboit.update(device, queue, avboit, internal, capacity);
+    }
+
+    /// Counts the frames without effects (`used`: something is composited this frame); after a
+    /// while without, gives the targets and the AVBOIT grid back.
+    pub fn idle(&mut self, used: bool) {
+        if self.idle.tick(used) {
+            if let Some(old) = self.targets.take() {
+                old.retire();
+            }
+            self.avboit.release();
+        }
     }
 
     /// Turns the AVBOIT grid off (nothing is composited this frame).

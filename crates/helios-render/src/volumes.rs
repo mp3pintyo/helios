@@ -397,6 +397,12 @@ impl ScreenTargets {
             history: [[make("volume front 0"), make("volume back 0")], [make("volume front 1"), make("volume back 1")]],
         }
     }
+
+    fn retire(&self) {
+        for view in self.raw.iter().chain(self.history.iter().flatten()) {
+            crate::gpu_memory::retire_view(view);
+        }
+    }
 }
 
 pub(crate) struct HeterogeneousVolumes {
@@ -440,6 +446,8 @@ pub(crate) struct HeterogeneousVolumes {
     rect: Rect,
     previous_rect: Rect,
     targets: Option<ScreenTargets>,
+    /// Frames without a visible volume (the targets are released after a while).
+    targets_idle: crate::gpu_memory::Idle,
     /// A 1³ volume bound for the unused march slots.
     empty: wgpu::TextureView,
     time: f32,
@@ -548,6 +556,7 @@ impl HeterogeneousVolumes {
             rect: [0; 4],
             previous_rect: [0; 4],
             targets: None,
+            targets_idle: Default::default(),
             empty: volume_texture(device, "volume empty", UVec3::ONE),
             time: 0.0,
             frame: 0,
@@ -616,6 +625,7 @@ impl HeterogeneousVolumes {
         let emitters = if enabled { &scene.volumes[..scene.volumes.len().min(MAX_EMITTERS)] } else { &[] };
         if emitters.is_empty() {
             self.shadows.update(device, queue, &[], &[]);
+            self.release_idle();
             return;
         }
         let dt = delta_time.clamp(1.0 / 240.0, 1.0 / 30.0);
@@ -715,7 +725,20 @@ impl HeterogeneousVolumes {
         queue.write_buffer(&self.flicker_uniform, 0, bytemuck::bytes_of(&flicker));
 
         if self.visible() && self.targets.as_ref().is_none_or(|t| t.size != capacity) {
+            if let Some(old) = &self.targets {
+                old.retire();
+            }
             self.targets = Some(ScreenTargets::new(device, capacity));
+        }
+        self.release_idle();
+    }
+
+    /// Gives the screen targets back once no volume has been marched for a while.
+    fn release_idle(&mut self) {
+        if self.targets_idle.tick(self.visible()) {
+            if let Some(old) = self.targets.take() {
+                old.retire();
+            }
         }
     }
 

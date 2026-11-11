@@ -370,6 +370,7 @@ impl NearField {
             wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(size[0]), rows_per_image: Some(size[1]) },
             atlas.size(),
         );
+        crate::gpu_memory::retire_view(&self.atlas);
         self.atlas = atlas.create_view(&Default::default());
         log::info!(
             "lumen near field: {} mesh SDF instances, atlas {}x{}x{}",
@@ -435,6 +436,7 @@ impl NearField {
             let needed = self.scene_words.len() + grid.len();
             if needed > self.capacity {
                 self.capacity = needed + needed / 4;
+                crate::gpu_memory::retire_buffer(&self.data);
                 self.data = storage_buffer(device, "mesh sdf data", self.capacity as u64 * 4, wgpu::BufferUsages::empty());
                 queue.write_buffer(&self.data, 0, bytemuck::cast_slice(&self.scene_words));
             }

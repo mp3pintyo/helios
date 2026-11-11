@@ -84,6 +84,7 @@ impl Effects {
         } else if self.oit.uses_avboit() {
             self.oit.disable_avboit(device, queue);
         }
+        self.oit.idle(self.active);
     }
 
     /// Volumes, particles or (AVBOIT) order-independent surfaces cover part of this frame (TSR
