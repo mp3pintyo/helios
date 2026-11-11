@@ -4,7 +4,11 @@ Part of the `helios-render` GPU pipeline; the pipeline diagram and the index of 
 [README](../../README.md). Costs are GPU times at 1600×900 on an RTX 3090 unless stated otherwise
 ([measurement method and per-round frame times](../performance.md)).
 * **Local lights** (`lights.rs`). Point and spot lights are culled into 16×9×24 froxels of up to 255 lights each
-  (63 before MegaLights). Lights are also injected into the surface cache, so they bounce.
+  (63 before MegaLights). Lights are also injected into the surface cache, so they bounce. Culling is hierarchical
+  (round 8, [`lights.md`](../round8/lights.md)): one workgroup per coarse cell of 4 × 3 tiles × 4 slices streams the
+  lights through shared memory 64 at a time, tests each against the cell once and only the survivors against the
+  cell's 48 froxels, in index order (the same lists as brute force): 0.25 → 0.07 ms at 1000 lights, 0.08 → 0.03 at
+  300.
 * **Local light virtual shadow maps** (`vsm_local.rs`, `vsm_local_common.wgsl`, `vsm_local_sample.wgsl`). As in UE5,
   up to 32 shadow-casting point and spot lights per frame — the most influential on screen (range sphere coverage ×
   brightness, with hysteresis so slots and their pages stick), static lights first: a light that moved within the
@@ -155,3 +159,24 @@ Part of the `helios-render` GPU pipeline; the pipeline diagram and the index of 
   close-up 0.0017 → 0.0009 %, 1000-light aisle 0.0005 → 0.0007 % (classic → MegaLights). Browser (headless Chromium,
   1280×720, 300 lights): 1.2 ms. Memory (only while on): 56 bytes per internal pixel (two rgba16f raw, two sets of
   rgba16f diffuse + specular + r32uint history) plus 36 bytes per 2×2 block of samples.
+
+  **Round 8** ([`lights.md`](../round8/lights.md)). *Shared rays outside penumbrae* (UE 5.8): the guide masks also
+  record per tile which lights had a ray blocked; a light picked twice in a block whose rays in the tile all agreed
+  last frame (all reached it or all were blocked) traces one ray for both picks (the header stores which sample's
+  ray each uses), and `generate` compacts the remaining rays per workgroup into a list that sizes the trace's
+  indirect dispatch: 17 % fewer rays at 33 lights (trace 0.10 ms faster), 6–7 % at 300–1000
+  (`mega_lights_shared_rays`, `--ml-no-shared-rays`). *HZB screen traces*: the contact-shadow trace walks a
+  closest-depth HZB of the final depth buffer (`hzb_trace.wgsl`, reusable; `ClosestHzb` in `passes/hzb.rs`, 0.027 ms
+  to build) instead of eight linear steps, so it sees every pixel the ray crosses (+0.03–0.05 ms;
+  `mega_lights_hzb_traces`, `--ml-linear-traces`). *Importance cull* (`mega_lights_importance_cull`, 0.01): each
+  light's reach in the grid ends where its radiance at last frame's exposure falls below the threshold (UE's
+  attenuation falloff; distant specular of culled lights is lost) — in the cathedral, whose candle ranges already
+  end where they are visible, it culls nothing at the default. *Volumes*: volumetric fog and translucent surfaces
+  take their local light from a froxel volume MegaLights samples and shadows (`megalights_volume.rs`, on the fog's
+  16 px × 64-slice grid): per froxel and frame one light drawn by its unshadowed radiance at a jittered point, one
+  shadow ray (`megalights_rays.wgsl`: the same shadow-map march or distance-field cones, pages four mips coarser),
+  blended 10 % into the reprojected history; the fog adds its in-scattering (phase towards the camera) instead of
+  its loop, translucent surfaces shade its SH bands 0–1 as a directional part through the BRDF plus an ambient rest
+  (`mega_lights_volume`, `--ml-no-volume`, **3**). 0.24–0.31 ms, of which the fog (−0.04 to −0.16) and
+  translucency loops (−0.01 to −0.07; aisle glass at 1000 lights 1.06 → 0.78) win back much; 17.5 MB at 1600×900.
+  MegaLights frame at 300 / 1000 lights 7.78 → 7.66 / 8.69 → 8.52 ms.

@@ -107,6 +107,10 @@ pub struct LightingInputs<'a> {
     pub substrate: Option<&'a wgpu::BindGroup>,
     /// Sunlight through glass.
     pub glass: &'a crate::glass_shadow::GlassShadow,
+    /// MegaLights' volume (translucent surfaces' local light while it is on) and its incident
+    /// light textures (sh0, sh1) of this frame.
+    pub megalights_volume: &'a crate::megalights_volume::MegaLightsVolume,
+    pub megalights_volume_light: [&'a wgpu::TextureView; 2],
 }
 
 impl LightingPass {

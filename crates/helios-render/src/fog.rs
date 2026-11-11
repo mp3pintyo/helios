@@ -67,6 +67,9 @@ pub struct FogInputs<'a> {
     pub samplers: &'a crate::passes::Samplers,
     /// Sunlight through glass (coloured shafts).
     pub glass: &'a crate::glass_shadow::GlassShadow,
+    /// MegaLights' in-scattered local light (`megalights_volume.rs`), which replaces the light
+    /// loop; a 1×1×1 volume while that is off.
+    pub megalights_light: &'a wgpu::TextureView,
 }
 
 pub struct VolumetricFog {
@@ -113,6 +116,7 @@ impl VolumetricFog {
                 (60, bind::uniform()),
                 (90, bind::uniform()),
                 (91, bind::texture(true)),
+                (140, bind::texture_3d(true)),
             ],
         );
         let integrate_layout = bind_group_layout(
@@ -209,6 +213,7 @@ impl VolumetricFog {
                 (60, inputs.vsm.local.uniform.as_entire_binding()),
                 (90, inputs.glass.uniform.as_entire_binding()),
                 (91, TextureView(inputs.glass.view())),
+                (140, TextureView(inputs.megalights_light)),
             ],
         );
         let integrate = bind_group(

@@ -65,6 +65,7 @@ mod lumen_offload;
 mod material_graphs;
 mod media;
 mod megalights;
+mod megalights_volume;
 mod motion;
 mod near_field;
 mod oit;

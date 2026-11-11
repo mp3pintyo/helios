@@ -94,17 +94,21 @@ Honest differences that remain:
    (WebGPU has none): beyond the 1 m
    screen trace, rays use the light's virtual shadow map (only the ≤ 32 static lights with one; SMRT-style, 8 steps) or
    Lumen's distance fields, which are coarser than triangles (mesh SDFs of at most 48 voxels per axis, 0.25 m global
-   voxels beyond 2 m from both ends). The screen trace marches the depth buffer linearly (8 steps, no HZB traversal:
-   the HZB holds the farthest depth, made for culling). Samples come from one representative pixel per 2×2 block (all
-   four pixels shade with its pdf; edges between surfaces converge over the rotating representative), always four per
-   block (no adaptive sample count, no "skip rays outside penumbrae" of UE 5.8, no per-light-type budget); guiding uses
-   a 256-bit hash per tile (lights 256 indices apart share a bit). The sun stays on its classic path (virtual shadow
-   map), and so do volumetric fog (the clustered lights, shadowed only by the shadow-mapped ones), translucent
-   surfaces (forward clustered loop) and particles: with hundreds of lights they still see the unshadowed ones.
+   voxels beyond 2 m from both ends). The screen trace walks a closest-depth HZB but only over 1 m (32 iterations at most;
+   Lumen's screen traces still march linearly). Samples come from one representative pixel per 2×2 block (all four
+   pixels shade with its pdf; edges between surfaces converge over the rotating representative), always four per
+   block: rays to a light picked twice are shared outside penumbrae (UE 5.8), but there is no adaptive *sample* count
+   and no per-light-type budget, and the compacted ray list costs ~0.05 ms, so the saving is small with many lights
+   (6–7 % fewer rays at 300–1000); guiding uses a 256-bit hash per tile (lights 256 indices apart share a bit). The
+   importance cull is a per-light radius at last frame's exposure (it cuts nothing where ranges are already tight).
+   Volumetric fog and translucent surfaces get MegaLights' lighting from a froxel volume (16-pixel columns, one
+   sample per froxel and frame, ~10 frames of history without clipping, so it lags moving lights; one dominant
+   direction per froxel for translucency, no per-pixel front-layer pass as UE has, the clustered loop beyond the
+   volume's depth range); particles keep their own path. The sun stays on its classic path (virtual shadow map).
    Lumen's surface cache still lights every card texel and voxel with every light in range (one global-field shadow
    cone each), which becomes the dominant light-count-dependent cost (cathedral 33 → 1000 lights: surface + radiance
-   cache 1.5 → 2.4 ms, cards 0.07 → 0.35 ms, in both modes). Light culling stays brute force per froxel (0.01 →
-   0.30 ms at 1000 lights; up to 255 lights per froxel, 1024 per scene). The denoiser lags behind moving lights by up to
+   cache 1.5 → 2.4 ms, cards 0.07 → 0.35 ms, in both modes). Light culling is a two-level grid (coarse cells of 4 × 3 tiles × 4 slices,
+   0.07 ms at 1000 lights), not UE's z-binning or a light BVH; still up to 255 lights per froxel, 1024 per scene. The denoiser lags behind moving lights by up to
    24 frames where the variance clip does not catch the change, and its spatial filter softens lighting detail on
    fresh (disoccluded) pixels. The shadow overview (debug view 26, round 8) shows the shared pool's pages per light and its pressure as
    colours and bars, without the numbers and per-light labels of UE's overview (the HUD and the headless report carry

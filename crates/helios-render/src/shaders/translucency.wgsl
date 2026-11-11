@@ -48,6 +48,7 @@
 #include "stars.wgsl"
 #include "water.wgsl"
 #include "glass_shadow.wgsl"
+#include "megalights_volume_common.wgsl"
 
 override SHADING: u32 = 0u;
 const SHADING_WATER: u32 = 0u;
@@ -110,6 +111,10 @@ const NO_FLOOR: f32 = -1.0e30;
 @group(0) @binding(30) var material_sampler: sampler;
 @group(0) @binding(31) var gbuffer_normal: texture_2d<f32>;
 @group(0) @binding(60) var<uniform> local_vsm: LocalVsm;
+// MegaLights' shadowed local light in froxels (megalights_volume.wgsl; range.w = 0 while off).
+@group(0) @binding(130) var<uniform> ml_volume: MlVolume;
+@group(0) @binding(131) var ml_volume_sh0: texture_3d<f32>;
+@group(0) @binding(132) var ml_volume_sh1: texture_3d<f32>;
 // The peeled layers' depths, nearest first, and the range of them this shading pass composites.
 @group(0) @binding(105) var layers: texture_2d_array<f32>;
 @group(0) @binding(106) var<uniform> layer_range: LayerRange;
@@ -328,6 +333,13 @@ fn direct_light(input: DirectInput) -> vec3<f32> {
     }
     if frame.light_count == 0u {
         return color;
+    }
+    if ml_volume.range.w > 0.0 && input.linear_depth < ml_volume.range.y {
+        // MegaLights: every light shadowed, from the froxel volume - a directional part through
+        // the BRDF, the rest as diffuse light from all around (a quarter of it on average).
+        let v = ml_volume_light(input.uv, input.linear_depth, lut_sampler);
+        color += brdf(input, v.direction, a) * v.radiance * v.directional;
+        return color + input.diffuse * (0.25 / PI) * v.radiance * (1.0 - v.directional);
     }
     // Local lights: those with a virtual shadow map use it (with fewer taps than lighting.wgsl;
     // translucent surfaces request no pages and fall back to coarser resident mips); of the

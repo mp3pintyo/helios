@@ -40,6 +40,7 @@ use crate::pipelines::{self, in_group, Group};
 use crate::lumen_lite::{GiMethod, LiteFallback, LiteInputs, LumenLite};
 use crate::motion::MotionTracker;
 use crate::megalights::{MegaLights, MegaLightsInputs};
+use crate::megalights_volume::{MegaLightsVolume, MegaLightsVolumeInputs};
 use crate::resolution::{self, DynamicResolution, ResolutionController};
 use crate::rvt::RuntimeVirtualTexture;
 use crate::scene::InstanceHandle;
@@ -337,6 +338,23 @@ pub struct RenderSettings {
     /// is spread out (UE 5.9's far shadows at their own update rate).
     pub shadow_distant_level: u32,
     pub shadow_distant_interval: u32,
+    /// MegaLights' importance cull (UE 5.8's light attenuation falloff): each light's reach in
+    /// the light grid ends where its incident radiance, at last frame's exposure, falls below
+    /// this (display white ≈ 1; `light_cull.wgsl`), so sampling spends its candidates on lights
+    /// that matter. Distant specular highlights of the culled lights are lost. 0: off. Only
+    /// while MegaLights is on.
+    pub mega_lights_importance_cull: f32,
+    /// MegaLights traces one ray per light and block where last frame's rays to that light all
+    /// agreed (fully lit or fully shadowed: outside penumbrae, UE 5.8), shared by the block's
+    /// samples of it; rays are compacted so the saved ones cost nothing. Off: one ray per sample.
+    pub mega_lights_shared_rays: bool,
+    /// MegaLights' screen traces walk a closest-depth HZB (`hzb_trace.wgsl`) instead of eight
+    /// linear steps.
+    pub mega_lights_hzb_traces: bool,
+    /// Volumetric fog and translucent surfaces take their local light from a froxel volume
+    /// that MegaLights samples and shadows (`megalights_volume.wgsl`) instead of the unshadowed
+    /// clustered loop. Only while MegaLights is on.
+    pub mega_lights_volume: bool,
 }
 
 impl Default for RenderSettings {
@@ -393,6 +411,10 @@ impl Default for RenderSettings {
             shadow_max_staleness: 4,
             shadow_distant_level: DEFAULT_SHADOW_DISTANT_LEVEL,
             shadow_distant_interval: 4,
+            mega_lights_importance_cull: DEFAULT_IMPORTANCE_CULL,
+            mega_lights_shared_rays: true,
+            mega_lights_hzb_traces: true,
+            mega_lights_volume: true,
         }
     }
 }
@@ -403,6 +425,8 @@ pub const DEFAULT_SHADOW_REFRESH_BUDGET: u32 = 96;
 /// level selection gives receivers beyond ~50 m at 1600 x 900 (60 degree field of view).
 pub const DEFAULT_SHADOW_DISTANT_LEVEL: u32 = 7;
 
+/// Default of [`RenderSettings::mega_lights_importance_cull`].
+pub const DEFAULT_IMPORTANCE_CULL: f32 = 0.01;
 /// Default of [`RenderSettings::moving_light_pages`].
 pub const DEFAULT_MOVING_LIGHT_PAGES: f32 = 32.0;
 /// Capacities of the per-view GPU work lists.
@@ -466,6 +490,8 @@ pub struct Renderer {
     gi: GiPass,
     lighting: LightingPass,
     megalights: MegaLights,
+    /// MegaLights for volumetric fog and translucent surfaces.
+    megalights_volume: MegaLightsVolume,
     translucency: Translucency,
     effects: Effects,
     tsr: TsrPass,
@@ -569,6 +595,7 @@ impl Renderer {
             gi: in_group(Group::GlobalIllumination, || GiPass::new(device)),
             lighting: LightingPass::new(device),
             megalights: MegaLights::new(device, queue),
+            megalights_volume: MegaLightsVolume::new(device),
             translucency: in_group(Group::Translucency, || Translucency::new(device, queue)),
             effects: in_group(Group::Effects, || Effects::new(device)),
             tsr: TsrPass::new(device),
@@ -1006,6 +1033,11 @@ impl Renderer {
         let megalights_debug = matches!(self.settings.debug_view, DebugView::MegaLightsSamples | DebugView::MegaLightsDenoising);
         let megalights = (self.settings.mega_lights || megalights_debug) && self.lights.count > 0;
         self.megalights.update(&self.device, capacity, megalights);
+        let volume = self.settings.mega_lights && self.settings.mega_lights_volume && self.lights.count > 0;
+        let fog_range = self.fog.enabled().then_some((0.5, scene.fog.distance.max(1.0)));
+        self.megalights_volume.update(&self.device, &self.queue, capacity, volume, fog_range);
+        let importance = if self.settings.mega_lights { self.settings.mega_lights_importance_cull } else { 0.0 };
+        self.lights.set_importance_threshold(&self.queue, importance);
         if self.stats.poll(self.scene.instance_count) {
             self.update_lod_budget();
             let st = self.stats.latest;
@@ -1047,7 +1079,7 @@ impl Renderer {
         let mut rec = Recorder::new(&device, &mut self.profiler, "frame");
         self.sky.record(&mut rec, &self.frame_uniform, &self.samplers.linear, scene.ground_albedo);
         self.effects.record_lights(&mut rec, &self.lights);
-        self.lights.record(&mut rec, &self.frame_uniform);
+        self.lights.record(&mut rec, &self.frame_uniform, &self.exposure.buffer);
 
         // Virtual geometry: assemblies the main view needs as parts get part instances (for
         // every view), then two-pass occlusion culling into the visibility buffer.
@@ -1120,6 +1152,15 @@ impl Renderer {
             let inputs = CloudInputs { frame: &self.frame_uniform, sky: &self.sky, lut_sampler: &self.samplers.linear, depth: &self.targets.depth };
             self.clouds.record(&mut rec, &inputs, current);
         }
+        let volume_inputs = MegaLightsVolumeInputs {
+            frame: &self.frame_uniform,
+            fog: &self.fog,
+            lights: &self.lights,
+            vsm: &self.vsm,
+            lumen: &self.lumen,
+            samplers: &self.samplers,
+        };
+        self.megalights_volume.record(&mut rec, &volume_inputs, current);
         if self.fog.enabled() {
             let inputs = FogInputs {
                 frame: &self.frame_uniform,
@@ -1130,6 +1171,7 @@ impl Renderer {
                 lumen: &self.lumen,
                 samplers: &self.samplers,
                 glass,
+                megalights_light: self.megalights_volume.fog_light(current),
             };
             self.fog.record(&mut rec, &inputs, current);
         }
@@ -1142,6 +1184,9 @@ impl Renderer {
             vsm: &self.vsm,
             lumen: &self.lumen,
             samplers: &self.samplers,
+            hzb: &self.hzb,
+            shared_rays: self.settings.mega_lights_shared_rays,
+            hzb_traces: self.settings.mega_lights_hzb_traces,
             substrate: megalights_slabs.as_ref(),
         };
         if megalights {
@@ -1165,6 +1210,8 @@ impl Renderer {
             black: &self.black,
             substrate: lighting_slabs.as_ref(),
             glass,
+            megalights_volume: &self.megalights_volume,
+            megalights_volume_light: self.megalights_volume.incident(current),
         };
         self.lighting.record(&mut rec, &lighting);
         if self.extended.subsurface && lit {

@@ -9,7 +9,8 @@ Part of the `helios-render` GPU pipeline; the pipeline diagram and the index of 
   multiple-scattering octaves and a dual-lobe phase, ambient from the sky's SH. Half resolution, checkerboarded, with
   temporal reprojection by cloud distance; a 16 km cloud shadow map darkens the ground under moving clouds.
 * **Volumetric fog** (`fog.rs`). Height fog with drifting noise in a 16 px × 64-slice froxel volume: each froxel
-  scatters the sun (virtual shadow map visibility, cloud shadows), the clustered local lights and Lumen's radiance
+  scatters the sun (virtual shadow map visibility, cloud shadows), the clustered local lights (with MegaLights: the
+  in-scattering of MegaLights' froxel volume, every light shadowed, [lights](lights.md)) and Lumen's radiance
   cache (so interiors don't glow with sky light); jittered, temporally reprojected and integrated front to back.
 * **Fog screen space scattering** (`fog_scattering.rs`, `fog_scattering.wgsl`; UE 5.8's experimental Fog Screen Space
   Scattering). The froxel fog only *removes* the light coming from visible surfaces (`colour × transmittance +

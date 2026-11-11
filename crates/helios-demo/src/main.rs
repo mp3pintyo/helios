@@ -139,6 +139,10 @@ mod native {
         pub gi: Option<String>,
         /// MegaLights instead of the clustered light loop.
         pub megalights: bool,
+        /// MegaLights options (`--ml-importance-cull F`, `--ml-no-shared-rays`,
+        /// `--ml-linear-traces`, `--ml-no-volume`): (importance threshold, shared rays, HZB
+        /// screen traces, fog and translucency volume).
+        pub megalights_options: (Option<f32>, bool, bool, bool),
         /// Nanite tessellation of displaced materials (`--no-tessellation`: undisplaced).
         pub tessellation: bool,
         /// `--no-displacement-speed-bound`: shadow pages under animated displacement refresh
@@ -167,7 +171,7 @@ mod native {
 
     impl Options {
         pub fn parse(args: &[String]) -> Self {
-            let mut o = Options { screenshot: None, size: (1600, 900), frames: 90, view: None, detail: Detail::High, scene: SceneKind::Valley, camera: None, eye: None, at: None, occlusion: true, sw_raster: true, rvt: true, glass_shadows: true, svt: true, animate_sun: false, lod: None, fov: None, pool_mb: None, texture_pool_mb: None, texture_compression: true, switch_to: None, dump_dir: None, dump_count: 16, keys: Vec::new(), keys_at: None, hold: Vec::new(), gltf: None, ground: true, bake_hvm: None, stream_from: None, io_latency_ms: 0, sun: None, move_light: false, full_invalidation: false, moving_lights: Default::default(), moving_light_pages: None, movers: None, static_motion: false, screen_percentage: None, gpu_budget_ms: None, local_exposure: Some(Default::default()), scene_file: None, select: Vec::new(), no_skinning: false, gi: None, megalights: false, tessellation: true, displacement_speed_bound: true, dice_rate: None, speed: None, fog_scattering: None, tsr_depth_history: true, dof: None, photo: None, shadow_refresh_budget: None, shadow_max_staleness: None, shadow_distant: None };
+            let mut o = Options { screenshot: None, size: (1600, 900), frames: 90, view: None, detail: Detail::High, scene: SceneKind::Valley, camera: None, eye: None, at: None, occlusion: true, sw_raster: true, rvt: true, glass_shadows: true, svt: true, animate_sun: false, lod: None, fov: None, pool_mb: None, texture_pool_mb: None, texture_compression: true, switch_to: None, dump_dir: None, dump_count: 16, keys: Vec::new(), keys_at: None, hold: Vec::new(), gltf: None, ground: true, bake_hvm: None, stream_from: None, io_latency_ms: 0, sun: None, move_light: false, full_invalidation: false, moving_lights: Default::default(), moving_light_pages: None, movers: None, static_motion: false, screen_percentage: None, gpu_budget_ms: None, local_exposure: Some(Default::default()), scene_file: None, select: Vec::new(), no_skinning: false, gi: None, megalights: false, tessellation: true, displacement_speed_bound: true, dice_rate: None, speed: None, fog_scattering: None, tsr_depth_history: true, dof: None, photo: None, shadow_refresh_budget: None, shadow_max_staleness: None, shadow_distant: None, megalights_options: (None, true, true, true) };
             let mut scene_given = false;
             let mut it = args.iter().skip(1);
             while let Some(arg) = it.next() {
@@ -239,6 +243,10 @@ mod native {
                     "--select" => o.select = value().split(',').filter_map(|x| x.parse().ok()).collect(),
                     "--gi" => o.gi = Some(value()),
                     "--megalights" => o.megalights = true,
+                    "--ml-importance-cull" => o.megalights_options.0 = value().parse().ok(),
+                    "--ml-no-shared-rays" => o.megalights_options.1 = false,
+                    "--ml-linear-traces" => o.megalights_options.2 = false,
+                    "--ml-no-volume" => o.megalights_options.3 = false,
                     "--no-tessellation" => o.tessellation = false,
                     "--no-displacement-speed-bound" => o.displacement_speed_bound = false,
                     "--dice-rate" => o.dice_rate = value().parse().ok(),
@@ -379,6 +387,13 @@ mod native {
                 app.motion.set_mobility(&mut app.scene, helios_render::Mobility::Static);
             }
             app.renderer.settings.mega_lights |= self.megalights;
+            let (importance, shared_rays, hzb_traces, volume) = self.megalights_options;
+            if let Some(threshold) = importance {
+                app.renderer.settings.mega_lights_importance_cull = threshold;
+            }
+            app.renderer.settings.mega_lights_shared_rays = shared_rays;
+            app.renderer.settings.mega_lights_hzb_traces = hzb_traces;
+            app.renderer.settings.mega_lights_volume = volume;
             app.renderer.settings.tessellation = self.tessellation;
             app.renderer.settings.displacement_speed_bound = self.displacement_speed_bound;
             if let Some(speed) = self.speed {

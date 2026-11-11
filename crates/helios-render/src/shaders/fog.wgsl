@@ -48,6 +48,8 @@
 @group(0) @binding(20) var scattering: texture_3d<f32>;
 @group(0) @binding(21) var integrated_out: texture_storage_3d<rgba16float, write>;
 @group(0) @binding(60) var<uniform> local_vsm: LocalVsm;
+// MegaLights' in-scattered local light (megalights_volume.wgsl, same froxels; 1x1x1 while off).
+@group(0) @binding(140) var megalights_light: texture_3d<f32>;
 #include "glass_shadow.wgsl"
 
 fn henyey_greenstein(cos_theta: f32, g: f32) -> f32 {
@@ -139,7 +141,10 @@ fn inject(@builtin(global_invocation_id) gid: vec3<u32>) {
         // Local lights (the clustered grid lists the lights reaching this froxel), shadowed by
         // one tap of their virtual shadow map where they have one: shafts between pillars and
         // under pews. Pages were requested FOG_SHADOW_LEVEL_BIAS mips coarser (vsm.wgsl).
-        if frame.light_count > 0u {
+        if textureDimensions(megalights_light).z > 1u {
+            // MegaLights sampled and shadowed every light of the froxel.
+            radiance += textureLoad(megalights_light, gid, 0).rgb;
+        } else if frame.light_count > 0u {
             // A froxel stands for its whole cell, but the inverse-square falloff is evaluated at one
             // point: a flame a few centimetres from it would light the entire 16-pixel block. The
             // mean of 1/r² over a ball of radius R around the light is 3/R², so soften the falloff

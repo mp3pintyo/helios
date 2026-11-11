@@ -43,3 +43,37 @@ fn downsample(@builtin(global_invocation_id) gid: vec3<u32>) {
     );
     textureStore(destination, gid.xy, vec4<f32>(d));
 }
+
+// Closest-depth pyramid (reverse-Z: the *maximum*), for screen traces (hzb_trace.wgsl): a ray
+// in front of a texel's closest depth passes everything under it. Built from the final depth
+// buffer (after the late pass), where the farthest-depth pyramid above is built from the
+// early pass for occlusion culling.
+@compute @workgroup_size(8, 8)
+fn from_depth_closest(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let size = hzb_level.size;
+    if any(gid.xy >= size) {
+        return;
+    }
+    let limit = hzb_level.source_limit;
+    let base = gid.xy * 2u;
+    let d = max(
+        max(textureLoad(depth, min(base, limit), 0).r, textureLoad(depth, min(base + vec2<u32>(1u, 0u), limit), 0).r),
+        max(textureLoad(depth, min(base + vec2<u32>(0u, 1u), limit), 0).r, textureLoad(depth, min(base + vec2<u32>(1u, 1u), limit), 0).r),
+    );
+    textureStore(destination, gid.xy, vec4<f32>(d));
+}
+
+@compute @workgroup_size(8, 8)
+fn downsample_closest(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let size = hzb_level.size;
+    if any(gid.xy >= size) {
+        return;
+    }
+    let limit = hzb_level.source_limit;
+    let base = gid.xy * 2u;
+    let d = max(
+        max(textureLoad(source, min(base, limit), 0).r, textureLoad(source, min(base + vec2<u32>(1u, 0u), limit), 0).r),
+        max(textureLoad(source, min(base + vec2<u32>(0u, 1u), limit), 0).r, textureLoad(source, min(base + vec2<u32>(1u, 1u), limit), 0).r),
+    );
+    textureStore(destination, gid.xy, vec4<f32>(d));
+}

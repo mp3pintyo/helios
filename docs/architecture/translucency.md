@@ -23,7 +23,8 @@ Part of the `helios-render` GPU pipeline; the pipeline diagram and the index of 
   cathedral 0.40 → 0.39 ms), one peeled layer (cathedral apse) 0.42 → 0.49 ms, three (lake test corner) 1.86 → 2.02 ms
   and (aisle glass screens) 0.45 → 0.89 ms; the layer depths take 4 bytes per pixel and layer at the internal
   resolution's capacity (17 MB for three at 1600×900), allocated once a view needs them.
-  Shading: GGX sun with VSM + cloud shadows, clustered local lights, Lumen radiance
+  Shading: GGX sun with VSM + cloud shadows, clustered local lights (with MegaLights: MegaLights' froxel volume,
+  every light shadowed, [lights](lights.md)), Lumen radiance
   cache for ambient light, reflections from a screen-space trace against the opaque depth and colour, then Lumen's
   global distance field + surface cache, then sky with the on-screen clouds; aerial perspective and volumetric fog are
   applied at the surface depth exactly (`A·surface + B·(1 − T) + T·background`, the background already carries the
