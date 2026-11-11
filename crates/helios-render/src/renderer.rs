@@ -1102,7 +1102,11 @@ impl Renderer {
         let tessellation = self.scene.has_displacement() || (pipelines::deferring() && tessellation_wanted);
         let debug_views = self.settings.debug_view != DebugView::Lit;
         let (uv_extensions, skinning, kinds) = (self.scene.uv_extensions, self.scene.skins.skinned_instances, self.scene.resolve_kinds);
-        self.material.sync(&self.device, uv_extensions, skinning, tessellation, tessellation_wanted, debug_views, kinds, &self.extended, substrate);
+        // Only the shading models of plants with bones carry the plant code (none with the
+        // bones off: `plant_pose.any()`).
+        let plant_kinds = if self.scene.plant_pose.any() { self.scene.plant_kinds() } else { 0 };
+        self.material.sync(&self.device, uv_extensions, skinning, tessellation, tessellation_wanted, debug_views, kinds, plant_kinds, &self.extended, substrate);
+        self.vsm.prefetch(self.scene.plant_pose.any(), skinning, self.scene.masks.any());
         let slab_lighting = self.extended.lighting.then_some(&self.extended.lighting_layout);
         self.lighting.sync_substrate(&self.device, slab_lighting);
         // MegaLights' slab variant only once MegaLights is asked for (a scene switch to the
@@ -1241,7 +1245,12 @@ impl Renderer {
         // every view), then two-pass occlusion culling into the visibility buffer.
         self.scene.assemblies.record(&mut rec, &self.main_view, &self.scene.instances);
         // Promoted plants' springs (the dynamic wind's simulated tier) before anything draws them.
-        self.scene.plant_sim.record(&mut rec, &self.scene.instances, &self.scene.wind, &self.scene.plants.view);
+        self.scene.plant_sim.record(&mut rec, &self.scene.instances, &self.scene.wind, &self.scene.plants.view, &self.scene.plant_pose.view);
+        // Plant skeletons posed once per instance (the dynamic wind's pose pass) while the wind blows.
+        if self.scene.wind_blowing() {
+            let s = &self.scene;
+            s.plant_pose.record(&mut rec, &s.instances, &s.wind, &s.plants.view, s.plant_sim.state(), s.assemblies.part_counter());
+        }
         let (culling, view, gpu_scene, targets) = (&self.culling, &self.main_view, &self.scene, &self.targets);
         if self.settings.occlusion_culling {
             culling.cull(&mut rec, view, gpu_scene, CullMode::Early, Some(&targets.hzb));

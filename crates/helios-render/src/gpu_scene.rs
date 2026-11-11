@@ -9,6 +9,7 @@ use crate::alpha_mask::{AlphaMasks, MaterialMask};
 use crate::assembly::Assemblies;
 use crate::gpu_types::{instance_flags, material_flags, GpuInstance, GpuMaterial, GpuUvTransform};
 use crate::motion::SceneChanges;
+use crate::plant_pose::PlantPose;
 use crate::plant_sim::{Candidate, PlantSim, SIM_BONES, SIM_DEVIATION};
 use crate::plant_wind::PlantTables;
 use crate::scene::{Instance, Material, Mobility, Scene, TextureHandle, TextureSource, UvTransform};
@@ -50,6 +51,10 @@ pub struct GpuScene {
     /// The plain resolve slots (shading models) the materials use, a bit each: the resolve
     /// creates pipelines for these only.
     pub resolve_kinds: u32,
+    /// Per material its plain resolve slot (shading model).
+    material_kinds: Vec<u32>,
+    /// The materials of instances with plant bones.
+    plant_materials: Vec<u32>,
     /// Counts uploads of `materials` (extended materials patch their resolve slots after each).
     pub material_uploads: u64,
     /// [`WindUniform`], written every frame ([`GpuScene::write_wind`]).
@@ -72,6 +77,9 @@ pub struct GpuScene {
     pub plants: PlantTables,
     /// The dynamic wind's simulated tier: promoted plants near the camera (`plant_sim.rs`).
     pub plant_sim: PlantSim,
+    /// The dynamic wind's pose pass: plant skeletons posed once per instance and frame
+    /// (`plant_pose.rs`).
+    pub plant_pose: PlantPose,
     /// Plants bend their bones in the wind (`RenderSettings::wind_bones`; the instances carry it).
     pub wind_bones_enabled: bool,
     wind_bones_uploaded: bool,
@@ -120,6 +128,8 @@ impl GpuScene {
             materials: crate::util::uniform_buffer(device, "materials", (MAX_MATERIALS * std::mem::size_of::<GpuMaterial>()) as u64),
             uv_extensions: false,
             resolve_kinds: 0,
+            material_kinds: Vec::new(),
+            plant_materials: Vec::new(),
             material_uploads: 0,
             wind: crate::util::uniform_buffer(device, "wind", std::mem::size_of::<WindUniform>() as u64),
             // Lumen's displaced variants copy its material table (lumen_displaced.rs).
@@ -136,6 +146,7 @@ impl GpuScene {
             assemblies: Assemblies::new(device),
             plants: PlantTables::new(device),
             plant_sim: PlantSim::new(device),
+            plant_pose: PlantPose::new(device),
             wind_bones_enabled: true,
             wind_bones_uploaded: true,
             instance_count: 0,
@@ -176,6 +187,17 @@ impl GpuScene {
     /// skinned. Culling takes its lean specialisation otherwise (DEFORMING in cull.wgsl).
     pub fn deforms(&self) -> bool {
         (self.windy && self.wind_blowing.load(std::sync::atomic::Ordering::Relaxed)) || self.displaced || self.skins.skinned_instances
+    }
+
+    /// The plain resolve slots (shading models) of the materials of plants with bones, a bit each:
+    /// only their resolve pipelines carry the plant code (`PLANTS` in plant_wind.wgsl).
+    pub fn plant_kinds(&self) -> u32 {
+        self.plant_materials.iter().filter_map(|&m| self.material_kinds.get(m as usize)).fold(0, |kinds, &k| kinds | (1 << k.min(31)))
+    }
+
+    /// Whether the wind blows this frame (`write_wind`).
+    pub fn wind_blowing(&self) -> bool {
+        self.wind_blowing.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Whether some mesh has voxel LODs.
@@ -394,6 +416,7 @@ impl GpuScene {
         materials.truncate(MAX_MATERIALS);
         self.uv_extensions = materials.iter().any(needs_uv_extensions);
         self.resolve_kinds = materials.iter().fold(0, |kinds, m| kinds | (1 << m.resolve.min(31)));
+        self.material_kinds = materials.iter().map(|m| m.resolve).collect();
         materials.resize(MAX_MATERIALS, bytemuck::Zeroable::zeroed());
         queue.write_buffer(&self.materials, 0, bytemuck::cast_slice(&materials));
         self.material_uploads += 1;
@@ -500,6 +523,12 @@ impl GpuScene {
         }
         self.bounds = if instances.is_empty() { (glam::Vec3::ZERO, glam::Vec3::ONE) } else { (lo, hi) };
         let visibility_bits = self.assemblies.upload_instances(device, queue, scene, visibility_bits);
+        // The pose pass visits the plants with bones and the assembly part slots.
+        let plants: Vec<u32> = instances.iter().enumerate().filter(|(_, gpu)| gpu.plant[0] != 0).map(|(i, _)| i as u32).collect();
+        self.plant_materials = plants.iter().map(|&i| instances[i as usize].material).collect();
+        self.plant_materials.sort_unstable();
+        self.plant_materials.dedup();
+        self.plant_pose.set_instances(device, queue, &plants, count as u32 + self.assemblies.record_count(), self.assemblies.part_capacity());
         let bytes: &[u8] = bytemuck::cast_slice(&instances);
         // Assemblies' culling records and part instances are written after the scene's by the GPU.
         let extra = self.assemblies.record_count() + self.assemblies.part_capacity();

@@ -1,11 +1,13 @@
 //! Dynamic plant wind (UE 5.9's Dynamic Wind for Nanite foliage, its parametric `Mode 0`): the
-//! bones of procedural plants ([`helios_geometry::plant_bones`]) bent by the wind, evaluated per
-//! vertex in closed form by every pass that positions geometry (`shaders/plant_wind.wgsl`).
+//! bones of procedural plants ([`helios_geometry::plant_bones`]) bent by the wind, posed once
+//! per instance and frame by the pose pass ([`crate::plant_pose`]) and per vertex by every pass
+//! that positions geometry (`shaders/plant_wind.wgsl`).
 //!
 //! The bone tables live in one `Rgba32Float` texture (binding [`BINDING_PLANT_BONES`], read with
-//! `textureLoad`, so no shader stage gains a storage buffer): per mesh with bones its table (three
-//! texels a bone), per assembly part its own table (the part's leaves, then the chain of plant
-//! bones it hangs from, in the part's space), and per (mesh, material) pair a header texel with
+//! `textureLoad`, so no shader stage gains a storage buffer): per mesh with bones its table (a
+//! header texel, four texels a bone, the ranked bones' list: [`table_texels`]), per assembly part
+//! its own table (the part's leaves, then the chain of plant bones it hangs from, in the part's
+//! space), and per (mesh, material) pair a header texel with
 //! the material's [`crate::WindResponse`]. An instance finds them through
 //! [`crate::gpu_types::GpuInstance::plant`]; its `wind` then holds the procedural layers whose
 //! culling and shadow-invalidation bounds hold the bones' motion
@@ -34,14 +36,89 @@ pub fn plant_resource(scene: &crate::gpu_scene::GpuScene) -> (u32, wgpu::Binding
     (BINDING_PLANT_BONES, wgpu::BindingResource::TextureView(&scene.plants.view))
 }
 
-/// The three texels of a bone (`plant_bone` in plant_wind.wgsl): pivot and parent (−1: none);
-/// axis and length; attachment, class + phase, amplitude, frequency.
-pub fn bone_texels(b: &PlantBone) -> [Vec4; 3] {
+/// Texels per bone (`PLANT_BONE_TEXELS` in plant_motion.wgsl).
+pub const BONE_TEXELS: usize = 4;
+
+/// How a bone hangs in its plant for the pose pass and the per-vertex pose
+/// (`plant_motion.wgsl`, `plant_pose.wgsl`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BoneLink {
+    /// Its pose entry (ranked: it hangs from another bone and is not a leaf at the end of its
+    /// chain), if any.
+    pub rank: Option<u32>,
+    /// A leaf (flutter) at the end of its chain: its vertices evaluate its arc themselves and
+    /// ride on the parent, its *carrier*, at its attachment (else the bone is its own carrier).
+    pub leaf: bool,
+    /// The carrier's pose entry.
+    pub carrier_rank: Option<u32>,
+    /// The root its chain hangs from and where on it (the attachment of the bone just below the
+    /// root, the leaf itself where its parent is the root; −1 for a root): a leaf on a root and
+    /// instances whose ranked bones are all at rest ride on it there.
+    pub root: u16,
+    pub root_attach: f32,
+}
+
+/// The links of a table's bones, the ranked bones in rank order and the classes among them (bit
+/// per [`helios_geometry::BoneClass`] index).
+pub fn bone_links(bones: &[PlantBone]) -> (Vec<BoneLink>, Vec<u16>, u32) {
+    let mut children = vec![0u32; bones.len()];
+    for b in bones {
+        if let Some(p) = b.parent {
+            children[p as usize] += 1;
+        }
+    }
+    let leaf = |i: usize| bones[i].class == helios_geometry::BoneClass::Flutter && bones[i].parent.is_some() && children[i] == 0;
+    let mut ranked = Vec::new();
+    let mut classes = 0u32;
+    let mut rank = vec![None; bones.len()];
+    for (i, b) in bones.iter().enumerate() {
+        if b.parent.is_some() && !leaf(i) {
+            rank[i] = Some(ranked.len() as u32);
+            ranked.push(i as u16);
+            classes |= 1 << b.class.index();
+        }
+    }
+    let links = (0..bones.len())
+        .map(|i| {
+            let carrier = if leaf(i) { bones[i].parent.unwrap() as usize } else { i };
+            // Up the chain to the bone that hangs from the root (a leaf's own attachment where
+            // its parent is the root).
+            let (mut x, mut root, mut root_attach) = (i, i as u16, -1.0);
+            let mut guard = 0;
+            while let Some(p) = bones[x].parent {
+                root = p;
+                root_attach = bones[x].attach;
+                x = p as usize;
+                guard += 1;
+                assert!(guard <= bones.len(), "plant bone cycle");
+            }
+            BoneLink { rank: rank[i], leaf: leaf(i), carrier_rank: rank[carrier], root, root_attach }
+        })
+        .collect();
+    (links, ranked, classes)
+}
+
+/// The four texels of a bone (`plant_motion.wgsl`): pivot and length; axis and class + phase;
+/// amplitude, frequency, attachment and parent (−1: none); its carrier's pose entry (−1: none),
+/// root, attachment on the root, leaf flag. Everything a vertex needs of its bone is in them, so
+/// it fetches them at once.
+pub fn bone_texels(b: &PlantBone, link: &BoneLink) -> [Vec4; BONE_TEXELS] {
     [
-        b.pivot.extend(b.parent.map_or(-1.0, f32::from)),
-        b.axis.extend(b.length.max(1e-6)),
-        Vec4::new(b.attach, b.class.index() as f32 + b.phase.clamp(0.0, 0.999), b.amplitude, b.frequency),
+        b.pivot.extend(b.length.max(1e-6)),
+        b.axis.extend(b.class.index() as f32 + b.phase.clamp(0.0, 0.999)),
+        Vec4::new(b.amplitude, b.frequency, b.attach, b.parent.map_or(-1.0, f32::from)),
+        Vec4::new(link.carrier_rank.map_or(-1.0, |r| r as f32), f32::from(link.root), link.root_attach, if link.leaf { 1.0 } else { 0.0 }),
     ]
+}
+
+/// A table's texels: its header (bones, ranked bones, their classes), the bones, then the ranked
+/// bones' indices four a texel. Instances point at the first bone (the header's texel + 1).
+pub fn table_texels(bones: &[PlantBone]) -> Vec<Vec4> {
+    let (links, ranked, classes) = bone_links(bones);
+    let mut texels = vec![Vec4::new(bones.len() as f32, ranked.len() as f32, classes as f32, 0.0)];
+    texels.extend(bones.iter().zip(&links).flat_map(|(b, l)| bone_texels(b, l)));
+    texels.extend(ranked.chunks(4).map(|c| Vec4::from_array(std::array::from_fn(|k| c.get(k).map_or(0.0, |&b| f32::from(b))))));
+    texels
 }
 
 pub struct PlantTables {
@@ -87,8 +164,8 @@ impl PlantTables {
             .iter()
             .map(|mesh| {
                 let bones = mesh.bones.as_ref().filter(|b| !b.bones.is_empty())?;
-                let first = self.texels.len() as u32;
-                self.texels.extend(bones.bones.iter().flat_map(bone_texels));
+                let first = self.texels.len() as u32 + 1;
+                self.texels.extend(table_texels(&bones.bones));
                 Some(first)
             })
             .collect();
@@ -104,8 +181,8 @@ impl PlantTables {
                         if table.is_empty() {
                             return 0;
                         }
-                        let first = self.texels.len() as u32;
-                        self.texels.extend(table.iter().flat_map(bone_texels));
+                        let first = self.texels.len() as u32 + 1;
+                        self.texels.extend(table_texels(&table));
                         first
                     })
                     .collect()

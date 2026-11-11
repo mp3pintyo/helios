@@ -50,6 +50,7 @@ mod clouds;
 mod fog;
 mod fog_scattering;
 mod photo;
+mod plant_pose;
 mod plant_sim;
 mod plant_wind;
 mod context;

@@ -13,7 +13,7 @@ use crate::targets::{FrameTargets, DEPTH_FORMAT, VISIBILITY_FORMAT};
 use crate::textures::TextureLibrary;
 use crate::pipelines::{in_group, Group};
 use crate::util::{self, bind, bind_group, bind_group_layout, compute_pipeline, lazy_compute_pipeline, storage_buffer, uniform_buffer, Lazy};
-use crate::plant_sim::{sim_entry, sim_resource};
+use crate::plant_pose::{motion_entry, motion_resource};
 use crate::plant_wind::{plant_entry, plant_resource};
 use crate::skin::{skin_entry, skin_resource};
 use crate::tessellation::{tessellation_entry, tessellation_resource, Tessellation};
@@ -148,6 +148,12 @@ pub struct Culling {
     sw_raster: [Lazy<wgpu::ComputePipeline>; 4],
     /// The same for alpha-masked clusters (each specialisation skips the other's clusters).
     sw_raster_masked: [Lazy<wgpu::ComputePipeline>; 4],
+    /// The rasterisers above for scenes with plant bones (`PLANTS` in plant_wind.wgsl: the
+    /// others compile without the plant code), made when a scene first needs them: hardware
+    /// [early, late, masked early, masked late], software opaque and alpha-masked as above.
+    raster_plants: [Lazy<wgpu::RenderPipeline>; 4],
+    sw_raster_plants: [Lazy<wgpu::ComputePipeline>; 4],
+    sw_raster_masked_plants: [Lazy<wgpu::ComputePipeline>; 4],
     /// The same for voxel clusters (voxel_raster.wgsl).
     voxel_raster: [Lazy<wgpu::ComputePipeline>; 4],
     merge: Lazy<wgpu::ComputePipeline>,
@@ -204,7 +210,7 @@ impl Culling {
         raster_entries.push(wind_entry());
         raster_entries.push(skin_entry());
         raster_entries.push(plant_entry());
-        raster_entries.push(sim_entry());
+        raster_entries.push(motion_entry());
         let raster_layout = bind_group_layout(device, "raster", ShaderStages::VERTEX_FRAGMENT, &raster_entries);
         let mut sw_entries = raster_entries.clone();
         sw_entries.push((7, bind::storage(false)));
@@ -229,7 +235,7 @@ impl Culling {
             if skinning || !deforming { Lazy::new(make) } else { Lazy::background(make) }
         };
         let args_pipeline = |entry: &str| compute_pipeline(device, entry, &args_module, entry, &args_layout, &[]);
-        let sw_pipeline = |pass: u32, late: bool, masked: bool, background: bool| {
+        let sw_pipeline_with = |pass: u32, late: bool, masked: bool, background: bool, plants: bool| {
             let make = if background { compute_pipeline } else { lazy_compute_pipeline };
             make(
                 device,
@@ -237,19 +243,23 @@ impl Culling {
                 &sw_module,
                 "rasterize",
                 &sw_layout,
-                &[("PASS", pass as f64), ("LATE", if late { 1.0 } else { 0.0 }), ("MASKED", if masked { 1.0 } else { 0.0 })],
+                &[("PASS", pass as f64), ("LATE", if late { 1.0 } else { 0.0 }), ("MASKED", if masked { 1.0 } else { 0.0 }), ("PLANTS", if plants { 1.0 } else { 0.0 })],
             )
         };
+        let sw_pipeline = |pass: u32, late: bool, masked: bool, background: bool| sw_pipeline_with(pass, late, masked, background, false);
+        let sw_plants = |pass: u32, late: bool, masked: bool| sw_pipeline_with(pass, late, masked, false, true);
         let voxel_module = create_module(device, "voxel_raster.wgsl");
         let voxel_pipeline = |pass: u32, late: bool| {
             let constants = [("PASS", pass as f64), ("LATE", if late { 1.0 } else { 0.0 })];
             lazy_compute_pipeline(device, "voxel raster", &voxel_module, "rasterize", &sw_layout, &constants)
         };
-        let raster = |late: bool, masked: bool| {
+        let raster_with = |late: bool, masked: bool, plants: bool| {
             let (device, module, layout) = (device.clone(), raster_module.clone(), raster_layout.clone());
-            let make = move || raster_pipeline(&device, &module, &layout, late, masked);
-            if masked { Lazy::new(make) } else { Lazy::background(make) }
+            // Made for the scene's content (prefetched by `prefetch`): with or without the plant
+            // code, alpha-masked only where materials need it.
+            Lazy::new(move || raster_pipeline(&device, &module, &layout, late, masked, plants))
         };
+        let raster = |late: bool, masked: bool| raster_with(late, masked, false);
         // The late (second occlusion) pass of every rasteriser.
         let late = |make: &dyn Fn() -> Lazy<wgpu::ComputePipeline>| in_group(Group::OcclusionCulling, make);
 
@@ -277,10 +287,18 @@ impl Culling {
             raster_late: in_group(Group::OcclusionCulling, || raster(true, false)),
             raster_masked_early: raster(false, true),
             raster_masked_late: in_group(Group::OcclusionCulling, || raster(true, true)),
-            // Every scene has opaque clusters: compiled in the background.
-            sw_raster: [sw_pipeline(0, false, false, true), sw_pipeline(1, false, false, true), late(&|| sw_pipeline(0, true, false, true)), late(&|| sw_pipeline(1, true, false, true))],
+            // Every scene has opaque clusters: with or without the plant code (`prefetch`).
+            sw_raster: [sw_pipeline(0, false, false, false), sw_pipeline(1, false, false, false), late(&|| sw_pipeline(0, true, false, false)), late(&|| sw_pipeline(1, true, false, false))],
             sw_raster_masked: [sw_pipeline(0, false, true, false), sw_pipeline(1, false, true, false), late(&|| sw_pipeline(0, true, true, false)), late(&|| sw_pipeline(1, true, true, false))],
             voxel_raster: [voxel_pipeline(0, false), voxel_pipeline(1, false), late(&|| voxel_pipeline(0, true)), late(&|| voxel_pipeline(1, true))],
+            raster_plants: [
+                raster_with(false, false, true),
+                in_group(Group::OcclusionCulling, || raster_with(true, false, true)),
+                raster_with(false, true, true),
+                in_group(Group::OcclusionCulling, || raster_with(true, true, true)),
+            ],
+            sw_raster_plants: [sw_plants(0, false, false), sw_plants(1, false, false), late(&|| sw_plants(0, true, false)), late(&|| sw_plants(1, true, false))],
+            sw_raster_masked_plants: [sw_plants(0, false, true), sw_plants(1, false, true), late(&|| sw_plants(0, true, true)), late(&|| sw_plants(1, true, true))],
             merge: compute_pipeline(device, "visibility merge", &merge_module, "merge", &merge_layout, &[]),
             dummy_hzb,
             tessellation: None,
@@ -422,7 +440,7 @@ impl Culling {
         entries.push(wind_resource(scene));
         entries.push(skin_resource(scene));
         entries.push(plant_resource(scene));
-        entries.push(sim_resource(scene));
+        entries.push(motion_resource(scene));
         entries
     }
 
@@ -459,10 +477,25 @@ impl Culling {
         if !scene.deforms() {
             self.passes[2].prefetch();
         }
+        // One of the two rasteriser sets: with the plant code where plants have bones.
+        let plants = scene.plant_pose.any();
+        if plants {
+            self.raster_plants[..2].iter().for_each(Lazy::prefetch);
+            self.sw_raster_plants.iter().for_each(Lazy::prefetch);
+        } else {
+            self.raster_early.prefetch();
+            self.raster_late.prefetch();
+            self.sw_raster.iter().for_each(Lazy::prefetch);
+        }
         if scene.masks.any() {
-            self.sw_raster_masked.iter().for_each(Lazy::prefetch);
-            self.raster_masked_early.prefetch();
-            self.raster_masked_late.prefetch();
+            if plants {
+                self.raster_plants[2..].iter().for_each(Lazy::prefetch);
+                self.sw_raster_masked_plants.iter().for_each(Lazy::prefetch);
+            } else {
+                self.sw_raster_masked.iter().for_each(Lazy::prefetch);
+                self.raster_masked_early.prefetch();
+                self.raster_masked_late.prefetch();
+            }
         }
         if scene.has_voxels() {
             self.voxel_raster.iter().for_each(Lazy::prefetch);
@@ -512,12 +545,21 @@ impl Culling {
             );
             // The internal resolution's corner of the targets (see `targets.rs`).
             pass.set_viewport(0.0, 0.0, targets.width as f32, targets.height as f32, 0.0, 1.0);
-            pass.set_pipeline(if late { &self.raster_late } else { &self.raster_early });
+            let plants = scene.plant_pose.any();
+            pass.set_pipeline(match (plants, late) {
+                (true, _) => &self.raster_plants[late as usize],
+                (false, true) => &self.raster_late,
+                (false, false) => &self.raster_early,
+            });
             pass.set_bind_group(0, &group, &[]);
             pass.draw_indirect(&view.args, if late { ARGS_LATE_DRAW } else { ARGS_EARLY_DRAW });
             // After the opaque clusters, so their depth rejects hidden masked fragments early.
             if scene.masks.any() {
-                pass.set_pipeline(if late { &self.raster_masked_late } else { &self.raster_masked_early });
+                pass.set_pipeline(match (plants, late) {
+                    (true, _) => &self.raster_plants[2 + late as usize],
+                    (false, true) => &self.raster_masked_late,
+                    (false, false) => &self.raster_masked_early,
+                });
                 pass.draw_indirect(&view.args, if late { ARGS_LATE_MASKED } else { ARGS_EARLY_MASKED });
             }
         }
@@ -547,12 +589,14 @@ impl Culling {
         }
         // The depth pass of all clusters (opaque, alpha-masked, voxels and tessellated), then the
         // payload pass.
+        let (sw_raster, sw_raster_masked) =
+            if scene.plant_pose.any() { (&self.sw_raster_plants, &self.sw_raster_masked_plants) } else { (&self.sw_raster, &self.sw_raster_masked) };
         for stage in [base, base + 1] {
             pass.set_bind_group(0, &sw_group, &[]);
-            pass.set_pipeline(&self.sw_raster[stage]);
+            pass.set_pipeline(&sw_raster[stage]);
             pass.dispatch_workgroups_indirect(&view.args, args);
             if scene.masks.any() {
-                pass.set_pipeline(&self.sw_raster_masked[stage]);
+                pass.set_pipeline(&sw_raster_masked[stage]);
                 pass.dispatch_workgroups_indirect(&view.args, args);
             }
             if scene.has_voxels() {
@@ -581,9 +625,10 @@ fn raster_pipeline(
     layout: &wgpu::BindGroupLayout,
     late: bool,
     masked: bool,
+    plants: bool,
 ) -> wgpu::RenderPipeline {
     let layout = util::pipeline_layout(device, "raster", &[layout]);
-    let constants = [("LATE", if late { 1.0 } else { 0.0 })];
+    let constants = [("LATE", if late { 1.0 } else { 0.0 }), ("PLANTS", if plants { 1.0 } else { 0.0 })];
     let targets = [Some(wgpu::ColorTargetState { format: VISIBILITY_FORMAT, blend: None, write_mask: wgpu::ColorWrites::ALL })];
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some(if masked { "visibility raster (alpha-masked)" } else { "visibility raster" }),
