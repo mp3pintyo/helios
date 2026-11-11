@@ -500,9 +500,12 @@ pub struct Renderer {
     requested: RenderSettings,
     /// Scene versions whose content pipelines were queued, and whether the scene has displaced
     /// surfaces (browser only, see `prefetch_content`).
-    prefetched: Option<(u64, u64, u64)>,
+    prefetched: Option<(u64, u64, u64, bool)>,
     /// The frame stops after its scene sync ([`Renderer::prefetch_scene`]).
     sync_only: bool,
+    /// The last frame stopped after its scene sync because the sync queued pipelines it needs
+    /// (browser): its scene changes are applied again by the next frame.
+    held: bool,
     /// The device samples the 17 textures AVBOIT's translucent surfaces need.
     avboit_supported: bool,
     displaceable: bool,
@@ -601,6 +604,7 @@ impl Renderer {
             requested: RenderSettings::default(),
             prefetched: None,
             sync_only: false,
+            held: false,
             avboit_supported: device.limits().max_sampled_textures_per_shader_stage >= crate::translucency::AVBOIT_SAMPLED_TEXTURES,
             displaceable: false,
             frame_uniform: uniform_buffer(device, "frame", std::mem::size_of::<FrameUniform>() as u64),
@@ -957,12 +961,13 @@ impl Renderer {
     /// not come on with pipelines still to compile. (Content the core set needs is queued during
     /// the frame: see the wait in `render_frame`.)
     fn prefetch_content(&mut self, scene: &Scene) {
-        let versions = (scene.geometry_version, scene.material_version, scene.instance_version);
+        // (AVBOIT switched off needs the classic models of the surfaces it drew.)
+        let avboit = self.settings.avboit && self.avboit_supported;
+        let versions = (scene.geometry_version, scene.material_version, scene.instance_version, avboit);
         if self.prefetched == Some(versions) {
             return;
         }
         self.prefetched = Some(versions);
-        let avboit = self.settings.avboit && self.avboit_supported;
         self.translucency.prefetch(scene, avboit);
         self.effects.prefetch(scene, avboit);
         self.displaceable = crate::gpu_scene::displaceable(scene);
@@ -997,8 +1002,15 @@ impl Renderer {
     fn render_frame(&mut self, scene: &Scene, camera: &Camera, output: &wgpu::TextureView, delta_time: f32) {
         self.update_resolution();
         let frame = self.frame_index + 1;
+        // The groups this frame's settings were chosen with (see the hold after the scene sync).
+        let ready_before = Group::ALL.map(pipelines::ready);
         self.motion.incremental = self.settings.per_instance_invalidation;
         self.motion.update(scene);
+        if std::mem::take(&mut self.held) {
+            // The held frame's sync took this scene's changes: everything that reads them (the
+            // shadow pages, Lumen, translucency) rebuilds now instead.
+            self.motion.changes.structural = true;
+        }
         let changes = &self.motion.changes;
         self.scene.tessellation_enabled = self.settings.tessellation;
         let sync = self.scene.sync(&self.device, &self.queue, scene, changes, self.motion.previous(), frame);
@@ -1036,18 +1048,44 @@ impl Renderer {
             self.scene_changed = true;
         }
         self.displacement_cached = displacement;
-        let tessellation = self.scene.has_displacement();
+        // The resolve's `TESSELLATION` permutation shades displaced pixels and, where no instance
+        // is displaced, renders what the plain one does (its registers cost 0.05–0.1 ms). In the
+        // browser a scene with tessellation asked for uses it from the first image on, while the
+        // tessellator compiles, instead of compiling the plain permutation for those frames and
+        // then the displaced one (5–10 resolve pipelines of 0.6–1.2 s each in Firefox). Natively
+        // the plain one is used whenever nothing is displaced.
+        let tessellation = self.scene.has_displacement() || (pipelines::deferring() && tessellation_wanted);
         let debug_views = self.settings.debug_view != DebugView::Lit;
         let (uv_extensions, skinning, kinds) = (self.scene.uv_extensions, self.scene.skins.skinned_instances, self.scene.resolve_kinds);
         self.material.sync(&self.device, uv_extensions, skinning, tessellation, tessellation_wanted, debug_views, kinds, &self.extended, substrate);
         let slab_lighting = self.extended.lighting.then_some(&self.extended.lighting_layout);
         self.lighting.sync_substrate(&self.device, slab_lighting);
-        self.megalights.sync_substrate(&self.device, self.extended.lighting.then_some(&self.extended.megalights_layout));
-        // Before the first image the browser waits for every core pipeline the frame needs (the
-        // scene's material permutations, say) instead of compiling one inside the frame, which
-        // would hold the frame (Firefox) or compile on the page's GPU thread (Chromium). Later a
-        // newly needed one (an editor change) is compiled in the frame, as natively.
-        if self.frame_index == 0 && (self.sync_only || !pipelines::ready(Group::Core)) {
+        // MegaLights' slab variant only once MegaLights is asked for (a scene switch to the
+        // gallery waited for it in Firefox while the classic loop shades).
+        let r = &self.requested;
+        let megalights_wanted = r.mega_lights || matches!(r.debug_view, DebugView::MegaLightsSamples | DebugView::MegaLightsDenoising);
+        self.megalights.sync_substrate(&self.device, self.extended.lighting.then_some(&self.extended.megalights_layout).filter(|_| megalights_wanted));
+        // The browser waits for every core pipeline the frame needs (the scene's material
+        // permutations, say) instead of compiling one inside the frame, which would hold the
+        // queue behind a synchronous compile (Firefox) or compile one pipeline at a time in the
+        // GPU process (Chromium: a scene switch waited 25 s for its 34 new pipelines). So a frame
+        // whose sync queued pipelines — a core one, or one of a feature this frame renders with
+        // (the new scene's tessellation dicing, say) — stops here: the page keeps its last image
+        // while they compile in the background, and the next frame renders with the features
+        // whose pipelines are in. Natively nothing is queued and this never stops.
+        // Lumen Lite is created as soon as it is asked for (or the frame chose it as its
+        // fallback), so the browser compiles it before it is used.
+        let r = &self.requested;
+        let lite = self.settings.global_illumination && self.settings.gi_method == GiMethod::LumenLite;
+        if lite || (r.global_illumination && (r.gi_method == GiMethod::LumenLite || r.debug_view == DebugView::LumenLiteProbes)) {
+            let device = &self.device;
+            self.lumen_lite.get_or_insert_with(|| in_group(Group::GlobalIllumination, || LumenLite::new(device)));
+        }
+        if self.frame_index == 0 && self.sync_only {
+            return;
+        }
+        if pipelines::deferring() && (!pipelines::ready(Group::Core) || Group::ALL.iter().zip(ready_before).any(|(&g, before)| before && !pipelines::ready(g))) {
+            self.held = true;
             return;
         }
         self.rvt.sync(&self.device, &self.queue, scene, self.settings.virtual_texturing, frame);
@@ -1064,12 +1102,6 @@ impl Renderer {
         };
         self.lumen.set_world_cache(if self.settings.global_illumination { world_cache } else { WorldCacheMode::Off });
         self.lumen.update(&self.device, &self.queue, scene, &self.motion.changes, camera.position, frame, &self.targets, self.settings.tessellation);
-        // Created as soon as it is asked for, so the browser compiles it before GI comes on.
-        let r = &self.requested;
-        if r.global_illumination && (r.gi_method == GiMethod::LumenLite || r.debug_view == DebugView::LumenLiteProbes) {
-            let device = &self.device;
-            self.lumen_lite.get_or_insert_with(|| in_group(Group::GlobalIllumination, || LumenLite::new(device)));
-        }
         if self.uses_lumen_lite() {
             if let Some(lite) = self.lumen_lite.as_mut() {
                 lite.update(&self.queue, scene, camera.position, frame);

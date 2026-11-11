@@ -50,6 +50,7 @@ use crate::profiler::Recorder;
 use crate::scene::{Scene, TextureMapping};
 use crate::shader::{compose, compose_variant, create_module_from};
 use crate::tessellation::{displacement_source, graphs, DisplacementSource, TessView, BINDING_TESSELLATION, UNIFORM_SIZE};
+use crate::pipelines::{in_group, Group, Lazy};
 use crate::util::{bind, bind_group, bind_group_layout, compute_pipeline, storage_buffer, storage_buffer_init, uniform_buffer};
 
 /// An animated displacement is averaged over this many seconds ...
@@ -555,7 +556,7 @@ pub struct DisplaceInputs<'a> {
 pub(crate) struct DisplacedSurfaces {
     layout: Option<wgpu::BindGroupLayout>,
     /// Pipelines by the hash of the displacing-graph set (`graphs::set_hash`; 0: none).
-    pipelines: HashMap<u64, wgpu::ComputePipeline>,
+    pipelines: HashMap<u64, Lazy<wgpu::ComputePipeline>>,
     /// Scene versions and the tessellation setting the requests were made for.
     key: Option<(u64, u64, u64, u64, u64, u64, bool)>,
     /// Per scene instance: the variant it wants.
@@ -793,6 +794,43 @@ impl DisplacedSurfaces {
         if self.job.is_some() || self.refined.is_empty() || self.busy {
             return;
         }
+        let device = rec.device;
+        let set = graphs::displacing_graphs(scene);
+        let key = if set.is_empty() { 0 } else { graphs::set_hash(&set) };
+        let layout = self.layout.get_or_insert_with(|| {
+            let ro = bind::storage(true);
+            bind_group_layout(
+                device,
+                "lumen displace",
+                wgpu::ShaderStages::COMPUTE,
+                &[
+                    (0, bind::uniform()),
+                    (1, ro),
+                    (2, bind::storage(false)),
+                    (3, ro),
+                    (40, bind::uniform()),
+                    (graphs::BINDING_ALBEDO, bind::texture_array(true)),
+                    (43, bind::texture_array(true)),
+                    (44, bind::sampler()),
+                    (BINDING_TESSELLATION, bind::uniform()),
+                    (graphs::BINDING_GRAPH_PARAMETERS, bind::uniform()),
+                ],
+            )
+        });
+        // The dicing passes' permutation of the scene's displacing graphs (none: the base module).
+        let pipeline = self.pipelines.entry(key).or_insert_with(|| {
+            let wgsl = if set.is_empty() {
+                compose("lumen_displace.wgsl")
+            } else {
+                compose_variant("lumen_displace.wgsl", &[("displacement_graphs_off.wgsl", &graphs::scene_dispatch_module(scene, &set))])
+            };
+            in_group(Group::GlobalIllumination, || compute_pipeline(device, "lumen displace", &create_module_from(device, "lumen displace", wgsl), "displace", layout, &[]))
+        });
+        // In the browser it compiles in the background (a new scene's took 0.6 s inside a
+        // frame); the refined variants wait for it.
+        if !pipeline.is_made() {
+            return;
+        }
         let mut pending: Vec<Pending> = Vec::new();
         let mut total = 0;
         let mut waiting = Vec::new();
@@ -827,39 +865,7 @@ impl DisplacedSurfaces {
             }
         };
         log::debug!("lumen: displacing {} variants ({} points)", pending.len(), points.len());
-        let device = rec.device;
-        let layout = self.layout.get_or_insert_with(|| {
-            let ro = bind::storage(true);
-            bind_group_layout(
-                device,
-                "lumen displace",
-                wgpu::ShaderStages::COMPUTE,
-                &[
-                    (0, bind::uniform()),
-                    (1, ro),
-                    (2, bind::storage(false)),
-                    (3, ro),
-                    (40, bind::uniform()),
-                    (graphs::BINDING_ALBEDO, bind::texture_array(true)),
-                    (43, bind::texture_array(true)),
-                    (44, bind::sampler()),
-                    (BINDING_TESSELLATION, bind::uniform()),
-                    (graphs::BINDING_GRAPH_PARAMETERS, bind::uniform()),
-                ],
-            )
-        });
-        // The dicing passes' permutation of the scene's displacing graphs (none: the base module).
-        let set = graphs::displacing_graphs(scene);
-        let key = if set.is_empty() { 0 } else { graphs::set_hash(&set) };
-        let pipeline = self.pipelines.entry(key).or_insert_with(|| {
-            let wgsl = if set.is_empty() {
-                compose("lumen_displace.wgsl")
-            } else {
-                compose_variant("lumen_displace.wgsl", &[("displacement_graphs_off.wgsl", &graphs::scene_dispatch_module(scene, &set))])
-            };
-            (*compute_pipeline(device, "lumen displace", &create_module_from(device, "lumen displace", wgsl), "displace", layout, &[])).clone()
-        });
-
+        let (Some(layout), Some(pipeline)) = (self.layout.as_ref(), self.pipelines.get(&key)) else { return };
         let point_buffer = storage_buffer_init(device, queue, "lumen displace points", bytemuck::cast_slice(points));
         let size = (points.len() * 16) as u64;
         let output = storage_buffer(device, "lumen displaced points", size, wgpu::BufferUsages::COPY_SRC);

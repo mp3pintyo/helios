@@ -77,6 +77,9 @@ pub(crate) struct State {
     batch: u32,
     /// The pipelines of the background batch compiling now (`?compile-log=1` logs them).
     batch_labels: Vec<String>,
+    /// After the first image: since when frames are held for pipelines a frame's scene sync
+    /// queued (a scene switch, an editor change; ms, 0: not held).
+    held_since: f64,
 }
 
 /// A wait for the browser's GPU process to work through the pipelines created so far.
@@ -544,6 +547,7 @@ async fn run() -> Result<(), String> {
         compile_next: false,
         batch: FIXED_BATCH.load(Ordering::Relaxed).max(1),
         batch_labels: Vec::new(),
+        held_since: 0.0,
     }));
     STATE.with(|s| *s.borrow_mut() = Some(state.clone()));
     // Keep the context (instance/adapter/queue) alive for the page lifetime.
@@ -739,7 +743,7 @@ fn frame(st: &mut State, now: f64) {
         if pipelines_created() != pipelines {
             st.compiling = Some(wait_for_gpu(&st.queue, false));
         }
-        set_busy(&compiling_text(now));
+        set_busy(&held_text(st, now));
         return;
     }
 
@@ -759,9 +763,10 @@ fn frame(st: &mut State, now: f64) {
     let view = st.frame_target.create_view(&Default::default());
     st.app.render(&view, dt);
     if st.app.renderer.frame_count() == rendered {
-        // The first frame found core pipelines of the scene's content to compile first (they are
-        // queued now); nothing was rendered.
-        set_busy(&compiling_text(now));
+        // The frame's scene sync found pipelines of the scene's content to compile first (they
+        // are queued now; the first frame, a new scene, an editor change); nothing was rendered,
+        // the canvas keeps its last image.
+        set_busy(&held_text(st, now));
         return;
     }
     if pipelines_created() != pipelines && st.compiling_frames < 8 {
@@ -787,6 +792,10 @@ fn frame(st: &mut State, now: f64) {
     );
     st.queue.submit([encoder.finish()]);
     st.queue.present(texture);
+    if st.held_since > 0.0 {
+        log::info!("frames held {:.2} s for the pipelines a new scene or an edit needs", (now - st.held_since) / 1000.0);
+        st.held_since = 0.0;
+    }
     if st.presented == 0 {
         set_time(1, now);
         let start = TIMES.with(Cell::get)[0];
@@ -818,6 +827,22 @@ fn frame(st: &mut State, now: f64) {
             hud.set_inner_text(&format!("{shaders}{}", st.app.hud()));
         }
     }
+}
+
+/// The status line while frames wait for pipelines: before the first image the core set's
+/// progress, later the time the canvas has held its last image.
+fn held_text(st: &mut State, now: f64) -> String {
+    if st.presented == 0 {
+        return compiling_text(now);
+    }
+    if st.held_since == 0.0 {
+        st.held_since = now;
+        // New content: the background batch starts again from one pipeline (the new scene's
+        // tessellation and resolve permutations compile in 0.5–2 s each in Firefox; a batch
+        // grown to 32 on the last scene's small pipelines held the canvas 18 s).
+        st.batch = FIXED_BATCH.load(Ordering::Relaxed).max(1);
+    }
+    format!("Compiling GPU shaders… {:.0} s", (now - st.held_since) / 1000.0)
 }
 
 /// The features still waiting for their pipelines, e.g. "shadows, global illumination".

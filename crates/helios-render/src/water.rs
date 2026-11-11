@@ -51,6 +51,13 @@ impl WaterBody {
     pub fn contains(&self, p: Vec3) -> bool {
         p.y < self.level && p.x >= self.min.x && p.x <= self.max.x && p.z >= self.min.y && p.z <= self.max.y
     }
+
+    /// Whether `p` is within `margin` of the water below the surface (the camera may dive soon).
+    pub fn near(&self, p: Vec3, margin: f32) -> bool {
+        let m = Vec2::splat(margin);
+        let xz = Vec2::new(p.x, p.z);
+        p.y < self.level + margin && xz.cmpge(self.min - m).all() && xz.cmple(self.max + m).all()
+    }
 }
 
 /// The water bodies of the scene's water instances (at most [`MAX_WATER_BODIES`], the first ones).
@@ -116,6 +123,9 @@ mod tests {
         let body = WaterBody::from_bounds(&sheet, &transform);
         assert_eq!(body, WaterBody { min: Vec2::new(-15.0, -9.0), max: Vec2::new(25.0, 11.0), level: -2.2 });
         assert!(body.contains(Vec3::new(0.0, -3.0, 0.0)));
+        // Within diving distance: above the surface or beside it, not far above or away.
+        assert!(body.near(Vec3::new(0.0, 5.0, 0.0), 10.0) && body.near(Vec3::new(30.0, -3.0, 0.0), 10.0));
+        assert!(!body.near(Vec3::new(0.0, 9.0, 0.0), 10.0) && !body.near(Vec3::new(40.0, -3.0, 0.0), 10.0));
         assert!(!body.contains(Vec3::new(0.0, -2.0, 0.0)), "above the surface");
         assert!(!body.contains(Vec3::new(30.0, -3.0, 0.0)), "beside the surface");
     }

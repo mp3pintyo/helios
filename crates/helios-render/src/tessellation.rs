@@ -222,7 +222,8 @@ const DICE_CAPACITY: u32 = 1 << 18;
 /// u32 words of a view's state buffer (see tess_queue.wgsl): per culling pass, then frame totals.
 const STATE_WORDS: u64 = 16;
 const PASS_WORDS: u64 = 12;
-/// A view's indirect dispatches: the split pass, then the dicing of each grid level (bytes).
+/// A view's indirect dispatches: the split pass, then the dicing of every grid level (bytes; room
+/// for a dispatch per level, as before they were merged).
 const DISPATCH_BYTES: u64 = 20 * 4;
 const DICE_DISPATCH: u64 = 4 * 4;
 /// Split passes: their number follows the deepest split of recent frames within these bounds.
@@ -247,8 +248,8 @@ pub struct TessellationStats {
     pub dice_scale: f32,
 }
 
-/// Per grid level, per raster pass (the shadow view has one).
-type DicePipelines = Vec<Vec<Lazy<wgpu::ComputePipeline>>>;
+/// Per raster pass (the shadow view has one), each dicing every grid level in one dispatch.
+type DicePipelines = Vec<Lazy<wgpu::ComputePipeline>>;
 
 struct ViewPipelines {
     emit: Vec<Lazy<wgpu::ComputePipeline>>,
@@ -292,10 +293,8 @@ impl ViewPipelines {
     /// a permutation's).
     fn raster(pass: &mut ComputePass, dice: &DicePipelines, group: &wgpu::BindGroup, stage: usize, dispatch: &wgpu::Buffer) {
         pass.set_bind_group(0, group, &[]);
-        for (level, pipelines) in dice.iter().enumerate() {
-            pass.set_pipeline(&pipelines[stage]);
-            pass.dispatch_workgroups_indirect(dispatch, DICE_DISPATCH + level as u64 * 16);
-        }
+        pass.set_pipeline(&dice[stage]);
+        pass.dispatch_workgroups_indirect(dispatch, DICE_DISPATCH);
     }
 }
 
@@ -355,24 +354,20 @@ struct GraphInputs {
     parameters: wgpu::Buffer,
 }
 
+// One pipeline per raster pass for every grid level (a `LEVEL` override made 4 × 2 + 4 pipelines,
+// each a 0.5–0.8 s compile in Firefox; the GPU time is the same, docs/round8/webperf.md).
 fn main_dice(device: &wgpu::Device, module: &wgpu::ShaderModule, layout: &wgpu::BindGroupLayout) -> DicePipelines {
-    (0..4)
-        .map(|level| {
-            (0..2)
-                .map(|stage| {
-                    let constants = [CAPACITIES[0], CAPACITIES[1], ("LEVEL", level as f64), ("PASS", stage as f64)];
-                    compute_pipeline(device, "tessellation dice", module, "dice", layout, &constants)
-                })
-                .collect()
+    (0..2)
+        .map(|stage| {
+            let constants = [CAPACITIES[0], CAPACITIES[1], ("PASS", stage as f64)];
+            compute_pipeline(device, "tessellation dice", module, "dice", layout, &constants)
         })
         .collect()
 }
 
 fn shadow_dice(device: &wgpu::Device, module: &wgpu::ShaderModule, layout: &wgpu::BindGroupLayout) -> DicePipelines {
     let bias = ("SLOPE_BIAS", crate::vsm::SLOPE_BIAS as f64);
-    (0..4)
-        .map(|level| vec![compute_pipeline(device, "vsm tessellation dice", module, "dice", layout, &[CAPACITIES[0], CAPACITIES[1], ("LEVEL", level as f64), bias])])
-        .collect()
+    vec![compute_pipeline(device, "vsm tessellation dice", module, "dice", layout, &[CAPACITIES[0], CAPACITIES[1], bias])]
 }
 
 const IDLE: u32 = 0;

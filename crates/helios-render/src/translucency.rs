@@ -57,6 +57,7 @@
 //!   the world above through Snell's window and total internal reflection around it.
 
 use bytemuck::{Pod, Zeroable};
+use crate::pipelines::{in_group, Group};
 use glam::{Mat4, Vec2, Vec3, Vec4};
 use helios_geometry::{lod_cut_resident, Aabb, LodView, VirtualMesh};
 use wgpu::BindingResource::{Sampler, TextureView};
@@ -517,6 +518,10 @@ pub struct Translucency {
     grid_transmittance: [Lazy<wgpu::RenderPipeline>; 3],
 }
 
+/// How close (m, above the surface or beside it) the camera comes to a water body before the
+/// browser compiles the underwater view.
+const UNDERWATER_MARGIN: f32 = 10.0;
+
 impl Translucency {
     pub fn new(device: &wgpu::Device, queue: &wgpu::Queue) -> Self {
         let module = create_module(device, "translucency.wgsl");
@@ -526,7 +531,11 @@ impl Translucency {
             let (device, module, layout) = (device.clone(), module.clone(), layout.clone());
             Lazy::new(move || make(&device, &module, &layout, shading))
         };
-        let pipelines = Shading::ALL.iter().map(|&s| lazy(pipeline, &layout, s)).collect();
+        // The underwater view is queued only once the camera comes near a water body.
+        let pipelines = Shading::ALL
+            .iter()
+            .map(|&s| if s == Shading::Underwater { in_group(Group::OnDemand, || lazy(pipeline, &layout, s)) } else { lazy(pipeline, &layout, s) })
+            .collect();
         let peel_layout = bind_group_layout(
             device,
             "translucency peel",
@@ -628,9 +637,15 @@ impl Translucency {
     /// browser's background compile.
     pub fn prefetch(&self, scene: &Scene, avboit: bool) {
         for instance in scene.instances.iter().filter(|i| i.visible) {
-            let Some(shading) = scene.materials.get(instance.material.0 as usize).and_then(|m| Shading::of(m.kind)) else { continue };
-            self.pipelines[shading as usize].prefetch();
-            self.peel_pipelines[shading as usize].prefetch();
+            let Some(material) = scene.materials.get(instance.material.0 as usize) else { continue };
+            let Some(shading) = Shading::of(material.kind) else { continue };
+            // With AVBOIT the classic pass (and its peeled layers) draws the refracting surfaces
+            // only: the others' classic models (1–1.5 s each in Firefox) compile once AVBOIT is
+            // switched off.
+            if !avboit || refracts(material) {
+                self.pipelines[shading as usize].prefetch();
+                self.peel_pipelines[shading as usize].prefetch();
+            }
             if avboit && shading != Shading::Water {
                 let k = (shading == Shading::Blend) as usize;
                 self.oit_pipelines[k].iter().for_each(Lazy::prefetch);
@@ -639,9 +654,6 @@ impl Translucency {
                 if shading == Shading::Glass {
                     self.grid_transmittance[2].prefetch();
                 }
-            }
-            if shading == Shading::Water {
-                self.pipelines[Shading::Underwater as usize].prefetch();
             }
             if shading == Shading::Glass {
                 self.glass_shadow.prefetch();
@@ -683,6 +695,11 @@ impl Translucency {
         self.glass_lights.update(device, queue, scene.lights(), &panes, eye, versions, glass_shadows && enabled, moved);
         self.draws = if enabled { sort_back_to_front(&self.candidates, eye, &frustum_planes(view_proj)) } else { Vec::new() };
         self.camera_body = if enabled { self.water_bodies.iter().position(|b| b.contains(eye)) } else { None };
+        // The underwater view compiles once the camera comes within diving distance of a water
+        // body (most views never need it).
+        if enabled && self.water_bodies.iter().any(|b| b.near(eye, UNDERWATER_MARGIN)) {
+            self.pipelines[Shading::Underwater as usize].prefetch();
+        }
         let uniform = WaterUniform::new(&scene.water, &self.water_bodies, self.camera_body);
         queue.write_buffer(&self.water, 0, bytemuck::bytes_of(&uniform));
         // AVBOIT: this pass keeps the refracting surfaces, the rest is order independent.
@@ -983,8 +1000,9 @@ impl Translucency {
         pass.set_viewport(0.0, 0.0, size.0 as f32, size.1 as f32, 0.0, 1.0);
         pass.set_bind_group(0, &group, &[]);
         // Under water: the water between the camera and the opaque scene, before any surface.
-        if underwater {
-            pass.set_pipeline(&self.pipelines[Shading::Underwater as usize]);
+        let view = &self.pipelines[Shading::Underwater as usize];
+        if underwater && (view.is_made() || !crate::pipelines::deferring()) {
+            pass.set_pipeline(view);
             pass.draw(0..3, 0..1);
         }
         self.draw_surfaces(&mut pass, &self.pipelines);
