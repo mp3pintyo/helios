@@ -40,3 +40,20 @@ Round 8 wind per instance ([`windperf.md`](round8/windperf.md); 1600×900, share
 runs): forest default view 9.32 → 9.07 ms with the bones (pre-wind build 8.73), 8.93 → 8.54 ms with `--no-wind-bones`
 (the passes placing geometry back at the pre-wind cost); fern and grass close-ups −0.36 / −0.35 ms with the bones
 (shadow page raster −0.40 / −0.26 ms), −0.15 / −0.25 ms without; cathedral 6.66 → 6.39 ms (resolve 0.51 → 0.40 ms).
+
+**Round 8 close** ([`perf8.md`](round8/perf8.md); idle GPU, 2560×1440, 100 % / 67 %, minimum of 3 interleaved runs,
+round 7 → round 8 before the close → **round 8 final**): valley 8.79 / 5.54 → 10.69 / 6.63 → **10.42 / 6.46** ms,
+cathedral 10.87 / 6.68 → 12.05 / 7.38 → **11.48 / 7.27**, forest 16.35 / 10.69 → 16.71 / 11.49 → **16.29 / 11.34**,
+gallery 8.18 / 5.05 → 9.06 / 5.53 → **8.66 / 5.29**, cathedral with 300 lights 15.06 / 8.94 → 16.59 / 9.66 →
+**15.69 / 9.21**, with MegaLights 15.33 / 9.04 → 16.34 / 9.50 → **15.88 / 9.34**, the lantern 11.62 / 7.25 → 12.92 /
+7.97 → **12.27 / 7.76**. Where round 8's time went (100 %): the short-range AO inline in the lighting 0.30–0.61 ms
+(more than its taps: it held the lighting's registers); the Lumen world cache 0.27–0.65 ms, of which the final
+gather and the cards' lighting give back 0.12–0.97 ms; local lights through glass 0.12 ms of lighting (0.27 with 300
+lights) + 0.07–0.11 ms of maps; AVBOIT's two composite draws a bucket +0.10 ms; the material resolve +0.16 (cathedral
+standard model: plant-data decode and register pressure), +0.40 (forest: plant bones in foliage and wood), +0.28 ms
+(valley: the mesh terrain's per-pixel triplanar layers and river shores); the valley's river 0.69 ms of
+translucency + 0.09 of scene colour (its shading 0.61 ms, of which SSR 0.28 for all water, caustics 0.09); the
+forest's plant bones in the rasterisers +0.4 ms and its shadow pages −0.87 ms (moved to the software path); the
+MegaLights froxel volume 0.69 ms (−0.23 ms of fog). Recovered: the short-range AO at half resolution in a pass of its
+own (0.06–0.10 ms; lighting −0.28…−0.71 ms), world-cache paths capped at 24 000 a frame (−0.07…−0.15 ms), AVBOIT
+composites skipping empty pixels (−0.04 ms), glass-light colours read only behind a pane (−0.05 ms in the cathedral).

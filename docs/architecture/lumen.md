@@ -109,7 +109,9 @@ Part of the `helios-render` GPU pipeline; the pipeline diagram and the index of 
   doubling with every doubling of the distance), the dominant axis and sign of the surface normal — the two faces of a
   thin wall never share a cell — and the grid cell (twice as deep along the normal, centred on the grid planes); each
   holds the irradiance its surface receives (running mean of up to 16 frames), its albedo and emission. *Paths*: each
-  frame one random pixel per 8×8 tile starts a path at its G-buffer surface; a cosine ray through the near field and the
+  frame one random pixel per 8×8 tile starts a path at its G-buffer surface (larger tiles above ~1600×900, so that
+  at most 24 000 paths start whatever the resolution: 13×13 at 2560×1440 — the cells need the samples, not the
+  pixels; round-8 close, [`perf8.md`](../round8/perf8.md)); a cosine ray through the near field and the
   global field finds a second vertex and a second ray from there is shaded by the caches (the world cache itself, so
   light keeps bouncing over frames). Each vertex gets the sun (virtual shadow map where resident, distance-field
   shadows otherwise, coloured by glass) and one local light chosen in proportion to its contribution (weighted
@@ -233,12 +235,18 @@ Part of the `helios-render` GPU pipeline; the pipeline diagram and the index of 
 * **Short-range AO** (round 8, `short_range_ao.wgsl`, [`foliage-grounding.md`](../round8/foliage-grounding.md); UE's
   Lumen short range AO). The occlusion within 0.4 m of a pixel is what both GI methods miss: screen probes sit one
   per 16² pixels at half resolution and their filter smears it, the distance fields hold no thin foliage, and a grass
-  tuft or a fern stood on fully lit ground. The lighting pass marches, per pixel, 4 screen directions (rotated per
-  pixel and frame by interleaved gradient noise; TSR averages them) in 4 steps within 0.4 m (at most 64 px at 900
-  rows) through the depth buffer, keeps each direction's horizon — the highest sample's sine of elevation above the
+  tuft or a fern stood on fully lit ground. A compute pass (`short-range ao`, before the lighting) evaluates it at half
+  resolution — one texel per 2×2 pixels at the even pixel of the GI's grid, as UE's
+  `ShortRangeAO.DownsampleFactor` 2 — into `FrameTargets::short_range_ao` (R32Float), and the lighting upsamples it in
+  the GI's own bilateral loop (`sample_half`: the same depth and normal weights, binding 153), so each pixel blends up
+  to four differently rotated estimates. Per texel it marches 4 screen directions (rotated per texel and frame by
+  interleaved gradient noise; TSR averages them) in 3 steps within 0.4 m (at most 64 px at 900 rows) through the depth
+  buffer, keeps each direction's horizon — the highest sample's sine of elevation above the
   tangent plane, `cos(v, n)`, biased by 0.15 and faded towards the radius — and takes their mean as the occluded part
   of the cosine-weighted hemisphere (horizon-based AO, as HBAO / GTAO without their slice integral). It multiplies the
   material AO, so it darkens Lumen's diffuse light (or the sky's) and the specular occlusion, never direct light.
   Samples beyond the radius are skipped: a blade in front of distant ground casts no halo. `RenderSettings::short_range_ao`
-  (on), `--no-short-range-ao`, `9`, editor *Short-range AO*; frame flag 4096. Cost (forest, 1600×900, shared GPU, minima of interleaved runs): lighting +0.15 ms in the default view,
-  +0.19 ms with grass filling the screen.
+  (on), `--no-short-range-ao`, `9`, editor *Short-range AO*; frame flag 4096. Cost at 2560×1440 (idle GPU): the pass
+  0.06–0.10 ms (0.03–0.05 at 67 %), the upsample shares the GI's loads; the first, full-resolution version inside the lighting cost
+  0.30–0.61 ms there (more than its taps: it kept the lighting's registers busy) — round-8 close,
+  [`perf8.md`](../round8/perf8.md).

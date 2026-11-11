@@ -22,7 +22,9 @@
 #include "glass_shadow.wgsl"
 #include "glass_light.wgsl"
 #include "volume_shadow_sample.wgsl"
-#include "short_range_ao.wgsl"
+
+// Short-range ambient occlusion (short_range_ao.wgsl, half resolution; upsampled in sample_half).
+const FLAG_SHORT_RANGE_AO: u32 = 4096u;
 
 @group(0) @binding(0) var<uniform> frame: Frame;
 @group(0) @binding(1) var depth_texture: texture_2d<f32>;
@@ -59,6 +61,8 @@
 @group(0) @binding(61) var<storage, read_write> local_shadow_mask: array<u32>;
 // MegaLights (megalights.rs): the denoised direct light of every local light.
 @group(0) @binding(62) var megalights_lighting: texture_2d<f32>;
+// Short-range AO at half resolution (short_range_ao.wgsl), on the GI's grid.
+@group(0) @binding(153) var short_range_ao_texture: texture_2d<f32>;
 
 // Volumetric fog between the camera and view depth `depth` (see fog.wgsl).
 fn apply_volumetric_fog(color: vec3<f32>, uv: vec2<f32>, depth: f32) -> vec3<f32> {
@@ -229,13 +233,21 @@ fn debug_local_shadow_pages(pixel: vec2<u32>, linear_depth: f32, world: vec3<f32
 // ---- Indirect lighting -------------------------------------------------------------------------
 
 // Bilateral upsample of the half-resolution GI (rgb: mean incident radiance, a: sky visibility).
-fn sample_gi(pixel: vec2<u32>, linear_depth: f32, normal: vec3<f32>) -> vec4<f32> {
+// The half-resolution inputs at a pixel: the GI (`gi`: rgb irradiance, a sky visibility) and
+// the short-range AO (`ao`), each when asked for, upsampled with one set of weights.
+struct HalfSample {
+    gi: vec4<f32>,
+    ao: f32,
+}
+
+fn sample_half(pixel: vec2<u32>, linear_depth: f32, normal: vec3<f32>, with_gi: bool, with_ao: bool) -> HalfSample {
     let gi_size = viewport_extent(frame.viewport, 2u);
     let p = (vec2<f32>(pixel) + 0.5) * 0.5 - 0.5;
     let base = vec2<i32>(floor(p));
     let f = fract(p);
     let near = frame.camera_position.w;
     var sum = vec4<f32>(0.0);
+    var ao_sum = 0.0;
     var weight_sum = 0.0;
     for (var i = 0; i < 4; i++) {
         let offset = vec2<i32>(i & 1, i >> 1);
@@ -247,10 +259,15 @@ fn sample_gi(pixel: vec2<u32>, linear_depth: f32, normal: vec3<f32>) -> vec4<f32
         let depth_weight = exp(-abs(tap_depth - linear_depth) / (0.03 * linear_depth + 0.05));
         let normal_weight = pow(saturate(dot(tap_normal, normal)), 8.0);
         let w = bilinear * depth_weight * normal_weight + 1e-4;
-        sum += textureLoad(gi_texture, tap, 0) * w;
+        if with_gi {
+            sum += textureLoad(gi_texture, tap, 0) * w;
+        }
+        if with_ao {
+            ao_sum += textureLoad(short_range_ao_texture, tap, 0).r * w;
+        }
         weight_sum += w;
     }
-    return sum / weight_sum;
+    return HalfSample(sum / weight_sum, ao_sum / weight_sum);
 }
 
 fn sky_radiance(dir: vec3<f32>) -> vec3<f32> {
@@ -498,8 +515,10 @@ fn shade(@builtin(global_invocation_id) gid: vec3<u32>) {
     var sky_visibility = 1.0;
     var indirect = vec3<f32>(0.0);
     var gi_radiance = vec3<f32>(0.0);
+    let short_range_ao = has_flag(frame.flags, FLAG_SHORT_RANGE_AO);
+    let halfres = sample_half(pixel, linear_depth, n, has_flag(frame.flags, FLAG_GI), short_range_ao);
     if has_flag(frame.flags, FLAG_GI) {
-        let gi = sample_gi(pixel, linear_depth, n);
+        let gi = halfres.gi;
         gi_radiance = gi.rgb * frame.gi_intensity;
         indirect = diffuse_color * gi_radiance;
         sky_visibility = gi.a;
@@ -509,8 +528,8 @@ fn shade(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Material ambient occlusion (baked creases) darkens indirect light only, as in UE, and so
     // does the short-range occlusion of the geometry around the pixel (short_range_ao.wgsl).
     var occlusion = surface_occlusion_of(motion.w);
-    if has_flag(frame.flags, FLAG_SHORT_RANGE_AO) {
-        occlusion *= short_range_ao(pixel, size, world_position, n, noise);
+    if short_range_ao {
+        occlusion *= halfres.ao;
     }
     indirect *= occlusion;
     // Slabs: the coat and the sheen take their share; subsurface pixels scatter theirs.

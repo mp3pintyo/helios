@@ -72,7 +72,8 @@ Part of the `helios-render` GPU pipeline; the pipeline diagram and the index of 
   write their motion vectors; TSR's reactive mask comes from the particles' own transmittance (alpha of the
   transmittance target). Cost (1600×900, RTX 3090, minima of 3 interleaved runs, all translucency + OIT passes): the
   lake's crossing panels 1.25 → 0.92 ms (no peeling), the cathedral's aisle screens 0.82 → 0.68 ms, views with only
-  particles and volumes +0.05–0.10 ms (the grid 0.02–0.07 ms, the composite's second draw, the march's grid taps);
+  particles and volumes +0.05–0.10 ms (the grid 0.02–0.07 ms, the composite's second draw, the march's grid taps;
+  since the round-8 close the modulating and the back composite discard pixels with nothing to composite);
   the grid takes 36 MiB at 1600×900. Details and limits: `docs/round8/translucency.md`. In the browser only the
   refracting surfaces' classic shading models (and peel variants) are queued while AVBOIT is on (the others compile
   when it is switched off: `webperf`, 1–2 s each in Firefox). The order-independent surfaces' front and back
@@ -96,9 +97,11 @@ Part of the `helios-render` GPU pipeline; the pipeline diagram and the index of 
   drawn from the light (`fs_glass_light`), per texel the transmittance of the pane nearest the light and its distance.
   A receiver farther from the light than its texel's pane (5 cm bias) gets the light in the pane's colour: the
   deferred lighting's clustered loop and MegaLights' shading call `glass_light_transmission(light, position, p)` per
-  light (one bilinear tap; a uniform maps light index → layer). A map is redrawn only when its light moves, the
-  panes or the scene change (the swinging chandeliers: every frame, 0.06 ms). Lighting pays 0.06–0.10 ms at night
-  (33 / 300 candles), MegaLights' shading 0.02 ms. Same switch as the sun's (`End`). 24 MiB once
+  light (one bilinear tap; a uniform maps light index → layer; the colours are gathered only where a texel's pane
+  lies between the light and the point — the distance gather alone serves the room on the light's side). A map is
+  redrawn only when its light moves, the panes or the scene change (the swinging chandeliers: every frame, 0.06 ms).
+  Lighting pays 0.06–0.10 ms at night (33 / 300 candles; at 2560×1440 0.08 / 0.27 ms, mostly the per-light layer
+  lookup), MegaLights' shading 0.02 ms. Same switch as the sun's (`End`). 24 MiB once
   a light near glass exists. Lights beyond the eight, the volumetric fog, particles and Lumen's surface cache see
   glass as clear for local lights.
 * **Rivers** are simulated shallow water drawn by the same water shading (flow-mapped waves, simulated foam): see

@@ -233,8 +233,9 @@ Honest differences that remain:
     bake their wind weights and ambient occlusion and the forest places them (and its PCG volumes) on its terrain
     mesh's height, computed from the scene's own height function; imported plants get no plant data, and there is no
     Landscape-style height query of the rendered, LOD'd terrain for arbitrary scenes, and
-    the short-range AO is screen space (nothing off screen or behind nearer geometry, no thickness, 4 × 4 noisy taps
-    averaged by TSR; UE's comes with the screen-probe gather and a bent normal). Voxels carry per-axis coverage, one
+    the short-range AO is screen space (nothing off screen or behind nearer geometry, no thickness, 4 × 3 noisy taps
+    per half-resolution texel, blended by the GI's upsample and averaged by TSR, no history of its own; UE's comes
+    with the screen-probe gather and a bent normal). Voxels carry per-axis coverage, one
     normal and their brick's mean texture coordinate — no per-voxel colour, so textures varying within a brick, vertex colours and alpha-masked (card) foliage's mask
     coverage are averaged away or ignored; coverage along a diagonal is modelled from the three axes (exact for
     axis-aligned and isotropic leaves). Voxels are rasterised as stochastic cubes (no ray-marched depth buckets or
@@ -359,7 +360,7 @@ Honest differences that remain:
     ≈ 0.3 s), and a stand-in of the scene queues its content pipelines while they bake; scene switches bake there
     too. Still simpler than UE, which cooks offline: every visit bakes the scene again (a bake takes as long as its
     largest mesh: the valley's terrain, 2.5 s on a page thread), imported glTF models bake on the page, and the
-    device needs 20 sampled textures per
+    device needs 21 sampled textures per
     shader stage (WebGPU guarantees 16; desktop browsers offer 48–64) — there is no reduced variant for smaller
     adapters. `shader-f16` is requested and wired up (`half.wgsl`), but no pass uses it: TSR and MegaLights'
     denoiser gained nothing on the RTX 3090, where UE 5.8.1 runs TSR in 16-bit by default.

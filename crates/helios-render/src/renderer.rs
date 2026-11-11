@@ -1463,6 +1463,7 @@ impl Renderer {
             megalights_volume_light: self.megalights_volume.incident(current),
             glass_lights: self.translucency.glass_lights(),
             volume_shadows: self.effects.volume_shadows(),
+            short_range_ao: self.settings.short_range_ao,
         };
         self.lighting.record(&mut rec, &lighting);
         if self.extended.subsurface && lit {

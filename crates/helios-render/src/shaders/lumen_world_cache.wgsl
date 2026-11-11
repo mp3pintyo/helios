@@ -469,16 +469,30 @@ fn wc_card_albedo(instance: u32, p: vec3<f32>, n: vec3<f32>, tolerance: f32) -> 
 
 // ---- Paths -----------------------------------------------------------------------------------------
 
+// Paths a frame starts at most: one per tile of 8×8 pixels or larger, so that their number does
+// not grow with the resolution (the cells, not the pixels, need the samples: 1600×900 starts
+// 22.6 k paths in 8×8 tiles, 2560×1440 21.9 k in 13×13). world_cache.rs `path_tile` mirrors it.
+const WC_PATH_BUDGET: u32 = 24000u;
+
+fn wc_path_tile(size: vec2<u32>) -> u32 {
+    var tile = 8u;
+    while ((size.x + tile - 1u) / tile) * ((size.y + tile - 1u) / tile) > WC_PATH_BUDGET {
+        tile += 1u;
+    }
+    return tile;
+}
+
 @compute @workgroup_size(8, 8)
 fn trace_paths(@builtin(global_invocation_id) gid: vec3<u32>) {
     let size = vec2<u32>(frame.viewport.xy);
-    let tiles = (size + 7u) / 8u;
+    let tile = wc_path_tile(size);
+    let tiles = (size + tile - 1u) / tile;
     if any(gid.xy >= tiles) || lumen.world_cache == WC_OFF {
         return;
     }
     var rng = pcg_hash((gid.y * tiles.x + gid.x) ^ pcg_hash(lumen.frame + 0x51ed270bu));
     let pick = pcg_hash(rng);
-    let pixel = min(gid.xy * 8u + vec2<u32>(pick & 7u, (pick >> 3u) & 7u), size - 1u);
+    let pixel = min(gid.xy * tile + vec2<u32>((pick & 0xffffu) % tile, (pick >> 16u) % tile), size - 1u);
     let depth = textureLoad(depth_texture, pixel, 0).r;
     if depth <= 0.0 {
         return;
