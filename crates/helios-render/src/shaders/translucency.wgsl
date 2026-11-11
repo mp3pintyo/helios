@@ -1106,40 +1106,34 @@ fn oit_depth(fragment: Fragment, slope: f32) -> f32 {
 struct OitOutput {
     @location(0) accum: vec4<f32>,
     @location(1) transmittance: vec4<f32>,
-}
-
-struct OitFrontOutput {
-    @location(0) accum: vec4<f32>,
-    @location(1) transmittance: vec4<f32>,
     @location(2) motion: vec4<f32>,
 }
 
-// Full resolution, in front of the nearest refracting surface (layer_range: from it on): the
-// own light weighted by the transmittance in front of the fragment (added), the transmittance
-// (multiplied; alpha 1: not a particle), the motion.
+// Full resolution, one bucket of surfaces, chosen by the pass's `layer_range` (one pipeline for
+// both buckets: the browser compiles one per shading model): the own light weighted by the
+// transmittance in front of the fragment (added), the transmittance (multiplied; alpha 1: not a
+// particle), the motion.
+// * Front bucket (`near` -1: at or in front of the nearest refracting surface, layers[0]):
+//   weighted by everything in front of the fragment; owns the pixel's motion where mostly opaque.
+// * Back bucket (`near` 0: behind it): weighted by what lies between the split and the fragment
+//   only (the front composite dims the rest); motion weight 0 (the blend keeps the target's).
 @fragment
-fn fs_oit_front(in: VertexOutput, @builtin(front_facing) front_facing: bool) -> OitFrontOutput {
+fn fs_oit(in: VertexOutput, @builtin(front_facing) front_facing: bool) -> OitOutput {
     let slope = fwidth(frame.camera_position.w / max(in.position.z, 1e-9));
     let fragment = shade_fragment(in, front_facing);
-    let w = avboit_weight(in.position.xy, oit_depth(fragment, slope), oit_transmittance(fragment), 0.0);
-    var out: OitFrontOutput;
-    out.accum = vec4<f32>(oit_light(fragment).rgb * w, 0.0);
-    out.transmittance = vec4<f32>(oit_transmittance(fragment), 1.0);
-    out.motion = surface_motion(in, fragment.s.alpha);
-    return out;
-}
-
-// Full resolution, behind the nearest refracting surface (layers[0]): weighted by what lies
-// between it and the fragment only.
-@fragment
-fn fs_oit_back(in: VertexOutput, @builtin(front_facing) front_facing: bool) -> OitOutput {
-    let slope = fwidth(frame.camera_position.w / max(in.position.z, 1e-9));
-    let fragment = shade_fragment(in, front_facing);
-    let split = frame.camera_position.w / max(layer_depth(0, vec2<i32>(in.position.xy), 1.0), 1e-9);
+    let back = layer_range.near >= 0;
+    var split = 0.0;
+    if back {
+        split = frame.camera_position.w / max(layer_depth(layer_range.near, vec2<i32>(in.position.xy), 1.0), 1e-9);
+    }
     let w = avboit_weight(in.position.xy, oit_depth(fragment, slope), oit_transmittance(fragment), split);
     var out: OitOutput;
     out.accum = vec4<f32>(oit_light(fragment).rgb * w, 0.0);
     out.transmittance = vec4<f32>(oit_transmittance(fragment), 1.0);
+    out.motion = surface_motion(in, fragment.s.alpha);
+    if back {
+        out.motion.w = 0.0;
+    }
     return out;
 }
 

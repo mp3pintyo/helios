@@ -392,8 +392,7 @@ impl GpuScene {
             log::warn!("{} materials exceed the limit of {MAX_MATERIALS}; instances of the rest render with the wrong material", materials.len());
         }
         materials.truncate(MAX_MATERIALS);
-        self.uv_extensions = materials.iter().any(needs_uv_extensions);
-        self.resolve_kinds = materials.iter().fold(0, |kinds, m| kinds | (1 << m.resolve.min(31)));
+        (self.uv_extensions, self.resolve_kinds) = resolve_needs(&materials);
         materials.resize(MAX_MATERIALS, bytemuck::Zeroable::zeroed());
         queue.write_buffer(&self.materials, 0, bytemuck::cast_slice(&materials));
         self.material_uploads += 1;
@@ -631,6 +630,19 @@ fn gpu_material(scene: &Scene, m: &Material, mask: Option<MaterialMask>) -> GpuM
         resolve: (m.kind as u32).min(crate::passes::material::SKY_SLOT),
         _pad: 0,
     }
+}
+
+/// Whether the materials need the resolve's `UV_EXTENSIONS` permutation, and the shading models
+/// they resolve with (a bit per model; see [`crate::passes::material`]).
+fn resolve_needs(materials: &[GpuMaterial]) -> (bool, u32) {
+    (materials.iter().any(needs_uv_extensions), materials.iter().fold(0, |kinds, m| kinds | (1 << m.resolve.min(31))))
+}
+
+/// [`resolve_needs`] of `scene`'s materials, without uploading them (a scene about to be
+/// switched to: [`crate::Renderer::prefetch_next_scene`]).
+pub(crate) fn scene_resolve_needs(scene: &Scene) -> (bool, u32) {
+    let materials: Vec<GpuMaterial> = scene.materials.iter().take(MAX_MATERIALS).map(|m| gpu_material(scene, m, None)).collect();
+    resolve_needs(&materials)
 }
 
 /// True if the material uses a texture coordinate feature of the resolve's `UV_EXTENSIONS`

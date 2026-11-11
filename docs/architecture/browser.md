@@ -51,6 +51,24 @@ the engine logs `frames held T s`. Before (round 6), such a pipeline was created
 Chromium compiled those one at a time in the GPU process (wgpu's synchronous call), and the switch from the valley
 to the gallery held the canvas 18–26 s for its 34 new pipelines (Firefox 33 s); now 2.7–4.1 s (Firefox 12–16 s).
 
+**Compiling the next scene during its bake** (round 8, `webperf2`). A switch (`heliosLoadScene`) builds a stand-in
+of the new scene (its meshes empty) as the bake starts, and `Renderer::prefetch_next_scene` derives from its
+description alone — without syncing it into the GPU scene, material and texture state the current scene renders
+from — the pipelines it will need: the material resolve's shading models, permutation (UV extensions, skinning,
+tessellation) and extended slab / graph pipelines (`ExtendedMaterials::plan`, the slot assignment without its
+uploads), texture patterns, Substrate's slab lighting and subsurface passes, the tessellator's dicing permutation of
+its displacing graphs, Lumen's card captures of its materials, translucency and the volumes and particles. They are
+queued **ahead** (`pipelines::ahead`): they compile like the rest (Chromium in parallel, Firefox in background
+batches from one pipeline up, the current scene presenting between them) but count for no group's readiness, so
+the current scene neither holds nor loses a feature; `pipelines::claim_ahead` hands them to the new scene when it
+is in, and its first frame waits only for the ones still compiling. A pipeline the current scene asks for meanwhile
+is claimed at once. Valley → gallery held the canvas 2.5–2.8 s in Chromium, now 1.3–1.5 s (Firefox 11–20 s → 9–14
+s); gallery → forest 1.5–2.2 → 0.35 s (Firefox 4.9–8.0 → 1.3–1.4 s); forest → cathedral 1.2–1.8 s → none (Firefox
+0.1–0.2 s). It saves at most the bake's length, and in Firefox the old scene presents one frame per compile batch
+during the bake. Only what the preprocessed meshes reveal is still found by the first frame (the forest's voxel
+LODs); Lumen's card captures are queued for every visible material (the gallery compiles 3 it doesn't use).
+`docs/round8/webperf2.md`.
+
 Pipelines created while recording wait too: Lumen's card capture of a new material (the captures stay pending,
 the cards lit without albedo meanwhile) and Lumen's displaced-variant pipeline. Lumen Lite is created before the
 hold (when asked for, or chosen by the frame as its fallback); MegaLights' slab variant only once MegaLights is
@@ -74,6 +92,9 @@ one interleaved pair (62 → 47 s in a busier one; `docs/round8/webperf.md`):
 * **Translucency with AVBOIT**: only refracting surfaces (water, textured / rough / bumped glass) are drawn by the
   classic pass, so only their classic models (and peel variants) are queued; the others compile once AVBOIT is
   switched off.
+* **AVBOIT's front and back buckets in one pipeline** (`webperf2`): `fs_oit` picks the bucket from the pass's layer
+  range (the split depth only behind the nearest refracting layer) and the back pass binds the motion target too,
+  writing it with weight 0: two shading pipelines instead of four, no new binding.
 * **The underwater view** (`Group::OnDemand`): queued when the camera comes within 10 m of a water body, compiled
   last, gating no feature (a frame under water before it is in skips the underwater fog). The valley's default
   view is that close to its lake, so it still compiles there; views away from water (and scenes whose water the

@@ -365,10 +365,16 @@ Honest differences that remain:
     compiling them inside the frame (a switch to the gallery held the canvas 18–26 s in Chrome, now ≈ 3–4 s); the
     valley's Firefox set shrank from 214 to 200 pipelines (45 → 38.5 s of compiling: the resolve's tessellation
     permutation used from the start, the dicing two levels per pipeline, classic translucency only for refracting
-    surfaces, the underwater view on demand). Still simpler: the new scene's pipelines compile after its bake,
-    not during it (its stand-in cannot be synced while the old scene renders: one GPU scene), so a switch still
-    shows a frozen frame for the compile (Firefox 12–16 s for the gallery's ten resolve pipelines, one at a time), and
-    AVBOIT's front / back variants (≈ 10 s of the valley's Firefox compile) are separate pipelines.
+    surfaces, the underwater view on demand). Round 8 (`webperf2`, `docs/round8/webperf2.md`): AVBOIT's front and
+    back buckets share one pipeline per model (the valley 199 pipelines, its AVBOIT shading 6.7 → 3.5–4.0 s of
+    Firefox compiling), and a switch queues the new scene's pipelines while its meshes are being preprocessed,
+    derived from a stand-in's description without touching the GPU state the old scene renders from
+    (`Renderer::prefetch_next_scene`, queued *ahead*: no hold or feature loss for the old scene). Still simpler:
+    that saves at most the bake's duration (0.6–2.5 s), so a switch still shows a frozen frame for the rest of the
+    compile (the gallery: Chrome 1.3–1.5 s instead of 2.5–2.8 s, Firefox 9–14 s instead of 11–20 s; the forest
+    0.35 s / 1.3–1.4 s, the cathedral none / 0.1–0.2 s), and in Firefox the old scene presents only one frame per
+    compile batch during the bake; UE ships the PSOs precompiled. The pipelines of content only the preprocessed
+    meshes reveal (voxel LODs, which meshes get cards) are still found after the bake.
 16. **Coloured light through glass** (round 7, `glass-shadows`): the sun's map of the glass panes keeps one pane
     per texel (light through two panes in a row takes the nearer one's colour) and spans every visible pane (glass
     spread over a large world gets coarse texels); Lumen's voxel surface cache and the volumes' lighting cache still

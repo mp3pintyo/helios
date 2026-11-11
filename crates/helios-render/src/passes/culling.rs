@@ -450,6 +450,28 @@ impl Culling {
         }
     }
 
+    /// Queues the tessellator and the dicing permutation of a scene about to be switched to that
+    /// will be tessellated (`Renderer::prefetch_next_scene`); the current scene's stays selected.
+    pub fn prefetch_tessellation(&mut self, device: &wgpu::Device, scene: &Scene) {
+        in_group(Group::Tessellation, || {
+            self.tessellation.get_or_insert_with(|| Tessellation::new(device)).prefetch_graphs(device, scene);
+        });
+    }
+
+    /// Queues the skinned and alpha-masked paths of a scene about to be switched to
+    /// (`Renderer::prefetch_next_scene`; whether its meshes get voxel LODs is known only once they
+    /// are preprocessed).
+    pub fn prefetch_next(&self, skinned: bool, masked: bool) {
+        if skinned {
+            self.passes[1].prefetch();
+        }
+        if masked {
+            self.sw_raster_masked.iter().for_each(Lazy::prefetch);
+            self.raster_masked_early.prefetch();
+            self.raster_masked_late.prefetch();
+        }
+    }
+
     /// Queues the pipelines of the content the scene has (skinned instances, alpha-masked and
     /// voxel clusters) for the browser's background compile.
     pub fn prefetch(&self, scene: &GpuScene) {

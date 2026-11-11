@@ -1,0 +1,53 @@
+[
+  {
+    "id": "avboit-variant-merge",
+    "title": "AVBOIT: az első és a hátsó vödör egy pipeline-ban – a völgy Firefox-fordításából ≈ 3 s-mal kevesebb",
+    "area": "Böngésző és platform",
+    "kind": "performance",
+    "status": "done",
+    "phase": "8. kör – 3. hullám",
+    "summary": "Az AVBOIT a sorrendfüggetlen felületeket (nem fénytörő üveg, kevert felületek) két menetben árnyalja: a legközelebbi fénytörő réteg előtti (első) és mögötti (hátsó) vödörben. Eddig a kettő külön belépési pont és külön pipeline volt árnyalási modellenként – négy darab a teljes áttetszőségi árnyalóból, a Firefox egyenkénti fordításában a völgy legnagyobb maradék tétele (1,6–2,7 s darabja). Most árnyalási modellenként egy pipeline szolgálja mindkét vödröt: a völgy 201 helyett 199 pipeline, az AVBOIT árnyalása a Firefoxban 6,7 s helyett 3,5–4,0 s fordítás, a teljes minőség egy párban 50,6 helyett 43,6–44,2 s-nál jön. A kép és a GPU-idő nem változik.",
+    "details": "translucency.wgsl fs_oit (fs_oit_front és fs_oit_back helyett): a két menet már eddig is a rétegtartomány-uniform (106-os kötés) más-más szeletét kötötte – az első menet NEAREST {far: 0, near: −1}, a hátsó BEHIND_NEAREST {far: −1, near: 0} –, így a tartomány maga mondja meg a vödröt: near ≥ 0 esetén a shader a near réteg mélységét veszi vágási mélységnek, és T(d) / T(split)-tel súlyoz (egységes elágazás), különben T(d)-vel. A másik különbség a mozgásvektor-cél volt (a pipeline céljainak egyezniük kell a menet csatolmányaival): a hátsó menet is köti, 0 súllyal írja (SrcAlpha / OneMinusSrcAlpha keverés az RG csatornákon: a cél értéke marad). translucency.rs: oit_pipelines [Lazy; 2] (üveg, keverés), oit_pipeline vödör nélkül, record_order_independent mindkét vödörnél három csatolmánnyal. Új kötés nem kellett (a közös áttetszőségi layout 18, az AVBOIT 19 mintavételezett textúrát köt; a minimum 20) – a feladatban javasolt új uniform helyett a meglévő tartomány hordozza a jelzést. Elvetve: új menetenkénti uniform vagy dinamikus offset (a közös layoutban egy kötés arra, amit a tartomány már elmond), rajzolásonkénti érték (a példányadat a klasszikus menettel közös), a hátsó menet mozgásvektor-cél nélkül egy második render pass layouttal (ismét két pipeline).",
+    "metrics": "Firefox 155 (headed, ?compile-batch=1&compile-log=1, völgy): az AVBOIT árnyaló pipeline-jai 4 db 1,60 + 1,67 + 1,65 + 1,73 = 6,65 s → 2 db 2,37 + 1,63 = 4,0 s és 1,88 + 2,07 = 3,95 s; 201 → 199 pipeline; háttérfordítás 36,7 → 32,0 / 31,8 s; első kép 11,2 → 8,6 / 9,9 s (zaj: az AVBOIT nincs az alapkészletben); teljes minőség 50,6 → 43,6 / 44,2 s (egy base futás, egy másik base futást a Firefox ablakának háttérbe szorítása elrontott). GPU, natív Vulkan, 1600×900, --detail medium, 4 + 4 váltakozó futás, minimumok: völgyi tó, keresztező panelek – első vödör 0,477 → 0,460 ms, hátsó 0,047 → 0,046 ms, képkocka 5,73 → 5,62 ms; katedrális mellékhajó üvegfalai 0,135 → 0,133 / 0,071 → 0,071 ms; Chromium (heliosGpuPasses, sp=100, 2 + 2): tó 0,474 / 0,0041 → 0,474 / 0,0092 ms (a hátsó menet kevés fragmense most egy harmadik célt is ír: +0,005 ms), mellékhajó 0,1495 / 0,0133 → 0,1475 / 0,0123 ms. Képek a base-hez képest: tó 57,2 dB, mellékhajó 63,9 dB, katedrális 58,7 dB (a futások közti zaj szintje), 24/255 fölött csak a katedrális porszemcséinél 0,001 %.",
+    "showcase": "web/index.html?scene=valley&compile-batch=1&compile-log=1 Firefoxban: a konzolban 'translucency (avboit)' négy helyett kétszer szerepel. Nézet: a völgyi tó keresztező panelei (--eye -2.8,3.2,27 --at -1.5,2.6,30.6; a böngészőben heliosLookAt(-2.8,3.2,27,-1.5,2.6,30.6)) – a kép változatlan; a 4-es billentyű kapcsolja az AVBOIT-ot.",
+    "modules": [
+      "crates/helios-render/src/shaders/translucency.wgsl",
+      "crates/helios-render/src/translucency.rs",
+      "docs/architecture/translucency.md",
+      "docs/architecture/browser.md",
+      "docs/round8/webperf2.md"
+    ],
+    "order": 233,
+    "updated": "2026-11-11"
+  },
+  {
+    "id": "switch-prefetch-during-bake",
+    "title": "Jelenetváltás: az új jelenet pipeline-jai már az előfeldolgozás alatt fordulnak – a galéria Chromiumban 2,5–2,8 s helyett 1,3–1,5 s-ig áll",
+    "area": "Böngésző és platform",
+    "kind": "performance",
+    "status": "done",
+    "phase": "8. kör – 3. hullám",
+    "summary": "Jelenetváltáskor a vászon a régi képet tartotta, amíg az új jelenet alapvető pipeline-jai lefordultak – de ezt csak az új jelenet első képkockája kérte, vagyis a hálók előfeldolgozása után. Most a váltás kezdetén, amíg a workerek a hálókat készítik elő, a renderelő a jelenet leírásából (üres hálójú helyettesből) levezeti, mely pipeline-ok kellenek – anyagfeloldás, gráfos és Substrate-réteges változatok, textúraminták, réteg-megvilágítás, felszín alatti szórás, alfamaszkolt raszter, tesszellációs darabolás, Lumen kártyarögzítés, áttetszőség, volumenek és részecskék –, és sorba állítja őket úgy, hogy a régi jelenet közben zavartalanul fut tovább (nem áll meg, egyetlen funkciója sem kapcsol ki). A galéria Chromiumban 2,5–2,8 s helyett 1,3–1,5 s-ig áll, az erdő 1,5–2,2 helyett 0,35 s-ig, a katedrális egyáltalán nem; Firefoxban a galéria 11–20 s helyett 9–14 s, az erdő 4,9–8,0 helyett 1,3–1,4 s, a katedrális 0,1–0,2 s.",
+    "details": "renderer.rs Renderer::prefetch_next_scene: a képkocka saját döntéseit futtatja a helyettes jeleneten, mellékhatás nélkül – gpu_scene::scene_resolve_needs (a feltöltés resolve_needs-e az anyagokon: árnyalási modellek, UV_EXTENSIONS), skinning, a tesszelláció permutációja (displaceable), substrate_gpu.rs ExtendedMaterials::plan (a rebuild slotkiosztása kettéválasztva: tiszta assign + a feltöltések), passes/material.rs MaterialPass::prefetch (a feloldási pipeline-ok a képkocka kiválasztásának módosítása nélkül), textures.rs TextureLibrary::prefetch, passes/culling.rs prefetch_next (skinnelt és alfamaszkolt utak; alpha_mask::scene_has_masks), prefetch_tessellation + tessellation.rs prefetch_graphs (az új jelenet darabolási permutációja a régi mellé, az marad kiválasztva), cards.rs prefetch_captures (a látható példányok anyagainak kártyarögzítése), translucency/effects prefetch. pipelines.rs: ahead(f) – az f-ben sorba állított pipeline-ok (és konstruktoraik beágyazott pipeline-jai) 'előre' jelöltek: lefordulnak, de a ready és a waiting nem számolja őket (a régi jelenet képkockája nem áll meg, funkciója nem kapcsol ki), a soros fordító a háttérkötegekben készíti őket, nem az alapkészlettel; claim_ahead() – a heliosLoadScene a jelenet beállításakor hívja – rendes bejegyzéssé teszi őket; ha a régi jelenet maga kér egy előre jelöltet, azonnal az övé lesz; új queued(). web.rs: a váltás a helyettest a prefetch_next_scene-nek adja, a Firefox kötege egy pipeline-ról indul, a compile_next a queued()-et nézi. Elvetve: a helyettes szinkronja egy második renderelő-állapotba (egy egész jelenet foglalásai és feltöltései eldobásra), a régi jelenet megállítása az előfeldolgozás alatt, külön pipeline-csoport (a csoport dönti el, melyik funkciót tartja vissza, így a jelölés a csoport mellé került).",
+    "metrics": "heliosLoadScene lánc völgy → galéria → erdő → katedrális → völgy, mindegyik az előző teljes minősége után; tartás = a motor 'frames held' ideje; Chromium 1248 (fej nélküli) 2 + 2, Firefox 155 (headed) 2 + 2 váltakozó futás, RTX 3090 megosztva. Chromium tartás: galéria 2,80 / 2,54 → 1,32 / 1,47 s, erdő 2,20 / 1,45 → 0,35 / 0,35 s, katedrális 1,77 / 1,17 → 0 / 0 s, völgy 0 → 0; leghosszabb kihagyás galéria 2,82 / 2,55 → 1,35 / 1,22 s; megjelenés a hívástól galéria 3,47 / 3,14 → 2,94 / 2,55 s, erdő 5,52 / 3,26 → 2,64 / 2,61 s. Ára: a régi jelenet utolsó képkockái az előfeldolgozás alatt – a lap szála most ott építi a helyettes moduljait (a galériánál 0,5 s-os kihagyás, előtte 0,04 s). Firefox tartás: galéria 10,63 / 20,48 → 8,82 / 14,30 s, erdő 4,93 / 8,03 → 1,40 / 1,32 s, katedrális 2,25 / 0,02 → 0,17 / 0,13 s; megjelenés galéria 11,29 / 21,86 → 10,48 / 19,41 s, erdő 7,40 / 13,29 → 5,34 / 5,65 s, katedrális 5,52 / 4,75 → 2,78 / 2,99 s; az előfeldolgozás alatt a régi jelenet fordítási kötegenként egy képet mutat (4 kép 37–82 helyett). A pipeline-szám a heliosLoadScene feloldásakor → az első képkockánál: galéria 232 → 232 (előtte 201 → 231), erdő 246 → 250 (a voxel-raszter: csak az előfeldolgozott hálók mutatják meg), katedrális 264 → 264.",
+    "showcase": "A site jelenetváltója, vagy web/index.html?scene=valley után a konzolból heliosLoadScene('gallery'): a völgy az előfeldolgozás alatt fut tovább, a galéria rövidebb 'Compiling GPU shaders…' után jelenik meg; a konzol 'frames held T s'. Az erdőről a katedrálisra váltva Chromiumban már nincs tartás. Kép: docs/round8/webperf2/3-switch-gallery-chromium.jpg.",
+    "modules": [
+      "crates/helios-render/src/renderer.rs",
+      "crates/helios-render/src/pipelines.rs",
+      "crates/helios-render/src/passes/material.rs",
+      "crates/helios-render/src/passes/culling.rs",
+      "crates/helios-render/src/substrate_gpu.rs",
+      "crates/helios-render/src/gpu_scene.rs",
+      "crates/helios-render/src/textures.rs",
+      "crates/helios-render/src/tessellation.rs",
+      "crates/helios-render/src/cards.rs",
+      "crates/helios-render/src/lumen.rs",
+      "crates/helios-render/src/alpha_mask.rs",
+      "crates/helios-demo/src/web.rs",
+      "docs/architecture/browser.md",
+      "docs/round8/webperf2.md"
+    ],
+    "order": 234,
+    "updated": "2026-11-11"
+  }
+]

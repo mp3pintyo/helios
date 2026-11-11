@@ -56,7 +56,7 @@ lighting / specular / emissive; a material that samples SceneColor adds the back
   A surface steep in depth reaches cells in front of and behind the fragment within the columns the bilinear lookup
   reads (the grid holds it at the column centre's depth); it looks its weight up `1.5 · tile · fwidth(depth)` in front
   of itself so it doesn't dim itself (it did: dark streaks along the columns on the red panel).
-* **Full resolution.** Particles (`fs_particle_avboit`) and order-independent surfaces (`fs_oit_front/back`) add
+* **Full resolution.** Particles (`fs_particle_avboit`) and order-independent surfaces (`fs_oit_front/back`; one `fs_oit` for both buckets since `webperf2`) add
   `own light × weight` to the accumulation target and multiply the (now rgba16f) transmittance target by their own
   transmittance — coloured for glass; alpha carries the particles' own transmittance for TSR's reactive mask, so a
   clear pane doesn't make TSR distrust its history. The volume march multiplies each step's light by the surfaces in
