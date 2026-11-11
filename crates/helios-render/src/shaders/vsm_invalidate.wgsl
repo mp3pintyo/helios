@@ -50,6 +50,10 @@
 // vsm_expand.wgsl whenever the page is rendered), and is refreshed once they may have moved
 // WIND_REFRESH_TEXELS: pages that see grass at their feet, trunks or distant crowns refresh
 // every few frames or never, pages with near, fast foliage every frame.
+// A flagged page records how far its casters may have moved, in its texels: the priority by which
+// vsm.wgsl's refresh queue spends its per-frame budget (pages past the budget keep their cached
+// depth and wait, their priority growing). With a budget, streaming only queues the pages under
+// the instances concerned for a full render instead of freeing them (FOOTPRINT_STREAMED).
 // If the list overflows, every cached page is freed (the old global behaviour).
 
 #include "common.wgsl"
@@ -76,6 +80,10 @@ const ALWAYS: f32 = 3.0e38;
 const FOOTPRINT_DYNAMIC: f32 = 0.0;
 const FOOTPRINT_LAYER: f32 = 1.0;
 const FOOTPRINT_STATIC: f32 = 2.0;
+// Streaming changed the cluster cut of static casters (Nanite's LOD changes): with a refresh
+// budget (vsm.refresh.x) the page keeps its cached depth and is queued for a full render (as UE's
+// deferred invalidation), without one it is freed like FOOTPRINT_STATIC.
+const FOOTPRINT_STREAMED: f32 = 3.0;
 
 struct Footprint {
     // World-space centre (local light pages), w: FOOTPRINT_* kind.
@@ -174,15 +182,20 @@ fn collect(@builtin(global_invocation_id) gid: vec3<u32>) {
     if RESIDENCY && residency_changed(instance) {
         f.change = ALWAYS;
         f.per_frame = ALWAYS;
-        f.world.w = select(FOOTPRINT_STATIC, FOOTPRINT_DYNAMIC, reach > 0.0);
+        f.world.w = select(FOOTPRINT_STREAMED, FOOTPRINT_DYNAMIC, reach > 0.0);
     }
     // Starting to move takes the caster out of the static layers, stopping puts it back: the
-    // pages under everything it covered in either pose change layers.
+    // pages under everything it covered in either pose change layers (a full render, which a
+    // streamed footprint asks for already, drops the layer too).
     let previous = dynamic_reach[gid.x];
     if (previous > 0.0) != (reach > 0.0) {
         f.change = ALWAYS;
         f.per_frame = ALWAYS;
-        f.world.w = max(f.world.w, select(FOOTPRINT_LAYER, FOOTPRINT_STATIC, ABRUPT));
+        if ABRUPT {
+            f.world.w = FOOTPRINT_STATIC;
+        } else if f.world.w == FOOTPRINT_DYNAMIC {
+            f.world.w = FOOTPRINT_LAYER;
+        }
     }
     dynamic_reach[gid.x] = reach;
     f.radius += max(reach, previous);
@@ -211,22 +224,31 @@ fn remember_residency(@builtin(global_invocation_id) gid: vec3<u32>) {
 const HIT_DYNAMIC: u32 = 1u;
 const HIT_LAYER: u32 = 2u;
 const HIT_STATIC: u32 = 4u;
+const HIT_STREAMED: u32 = 8u;
 var<workgroup> page_hit: atomic<u32>;
+// How far the footprints that hit the page may have moved its casters since it was rendered,
+// in 1 / REFRESH_TEXEL_UNITS of its texels: the priority of its refresh (vsm.wgsl).
+var<workgroup> page_moved: atomic<u32>;
 
 fn hit_bits(f: Footprint) -> u32 {
     return 1u << u32(f.world.w);
 }
 
-// Whether footprint `f` may have changed the local light page `id` by WIND_REFRESH_TEXELS of its
-// texels since it was rendered `age` frames ago.
-fn local_page_hit(id: LocalPageId, f: Footprint, age: f32) -> bool {
+// A distance in texels as a refresh priority (vsm_common.wgsl).
+fn refresh_units(texels: f32) -> u32 {
+    return u32(clamp(texels * REFRESH_TEXEL_UNITS, 1.0, 2.0e9));
+}
+
+// How far footprint `f` may have changed the local light page `id` since it was rendered `age`
+// frames ago, in its texels, if that reaches WIND_REFRESH_TEXELS (0 otherwise).
+fn local_page_hit(id: LocalPageId, f: Footprint, age: f32) -> f32 {
     if f.wind != 0u {
-        return false;
+        return 0.0;
     }
     let light = local_vsm.slots[id.slot].position_range;
     let gap = distance(f.world.xyz, light.xyz);
     if gap > f.radius + light.w {
-        return false;
+        return 0.0;
     }
     // A move's page may show its caster up to the refresh distance off (vsm_motion.rs).
     var radius = f.radius;
@@ -234,12 +256,16 @@ fn local_page_hit(id: LocalPageId, f: Footprint, age: f32) -> bool {
         radius += local_texel(id.slot, gap + f.radius, id.mip) * WIND_REFRESH_TEXELS;
     }
     let r = local_sphere_rect(id.slot, id.face, vec4<f32>(f.world.xyz, radius));
-    if !r.valid || min(f.change, f.per_frame * age) < local_texel(id.slot, r.inside, id.mip) * WIND_REFRESH_TEXELS {
-        return false;
+    if !r.valid {
+        return 0.0;
+    }
+    let texels = min(f.change, f.per_frame * age) / local_texel(id.slot, r.inside, id.mip);
+    if texels < WIND_REFRESH_TEXELS {
+        return 0.0;
     }
     let pages = f32(local_mip_pages(id.mip));
     let page = vec2<f32>(id.page);
-    return all(page >= floor(r.lo * pages)) && all(page <= floor(r.hi * pages));
+    return select(0.0, texels, all(page >= floor(r.lo * pages)) && all(page <= floor(r.hi * pages)));
 }
 
 // Dispatched with one workgroup per physical page.
@@ -247,66 +273,97 @@ fn local_page_hit(id: LocalPageId, f: Footprint, age: f32) -> bool {
 fn invalidate_pages(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) lid: u32) {
     if lid == 0u {
         atomicStore(&page_hit, 0u);
+        atomicStore(&page_moved, 0u);
     }
     workgroupBarrier();
     let count = atomicLoad(&footprints.count);
     let entry = owner[wid.x];
     // Overflow: free every page.
     var hits = select(0u, HIT_STATIC, count > CAPACITY);
+    var moved_units = 0u;
     let local_page = entry != INVALID_ID && entry >= local_vsm.entry_base;
     if local_page {
         let id = local_page_id(entry);
         let age = max(f32(vsm.frame - entries[entry].w), 1.0);
-        for (var i = lid; i < min(count, CAPACITY) && hits < HIT_STATIC; i += 64u) {
+        for (var i = lid; i < min(count, CAPACITY) && (hits & HIT_STATIC) == 0u; i += 64u) {
             let f = footprints.items[i];
-            if local_page_hit(id, f, age) {
+            let texels = local_page_hit(id, f, age);
+            if texels > 0.0 {
                 hits |= hit_bits(f);
+                moved_units = max(moved_units, refresh_units(texels));
             }
         }
         // The wind: the page's own casters, by the bounds its last rendering measured.
         let moved = f32(info[INFO_PAGE_MOTION + 2u * wid.x]) * max(wind.time.x - wind.time.y, 0.0) * age;
-        if lid == 0u && min(moved, f32(info[INFO_PAGE_MOTION + 2u * wid.x + 1u])) >= WIND_REFRESH_TEXELS * PAGE_MOTION_UNITS {
+        let wind_moved = min(moved, f32(info[INFO_PAGE_MOTION + 2u * wid.x + 1u]));
+        if lid == 0u && wind_moved >= WIND_REFRESH_TEXELS * PAGE_MOTION_UNITS {
             hits |= HIT_DYNAMIC;
+            moved_units = max(moved_units, refresh_units(wind_moved / PAGE_MOTION_UNITS));
         }
     } else if entry != INVALID_ID && count > 0u {
         let level = entry / (vsm.level_pages * vsm.level_pages);
         let page_world = vsm.level_info[level].x;
-        let threshold = vsm.level_info[level].y * WIND_REFRESH_TEXELS;
+        let texel = vsm.level_info[level].y;
+        let threshold = texel * WIND_REFRESH_TEXELS;
         // entries.w: the frame the page was last rendered in (vsm.wgsl, dirty_info).
         let age = f32(vsm.frame - entries[entry].w);
         let page = vec2<f32>(decode_tag(entries[entry].y));
-        for (var i = lid; i < min(count, CAPACITY) && hits < HIT_STATIC; i += 64u) {
+        // A distant level may follow the sun at its own rate (vsm.rs): footprints are in the
+        // sun's light space, shifted by the difference to the level's.
+        let distant = level >= vsm.refresh.z;
+        for (var i = lid; i < min(count, CAPACITY) && (hits & HIT_STATIC) == 0u; i += 64u) {
             let f = footprints.items[i];
-            if min(f.change, f.per_frame * max(age, 1.0)) >= threshold {
+            let change = min(f.change, f.per_frame * max(age, 1.0));
+            if change >= threshold {
                 // Footprint in page units (a circle, or a move's rectangle padded by the
                 // refresh distance) vs. the page square [page, page + 1).
-                let v = f.center / page_world;
+                var center = f.center;
+                if distant {
+                    let ls = (vsm.light_view * vec4<f32>(f.world.xyz, 1.0)).xyz;
+                    center += vsm_level_xy(f.world.xyz, level) - vec2<f32>(ls.x, -ls.y);
+                }
+                let v = center / page_world;
                 let rect = any(f.rect > vec2<f32>(0.0));
                 let gap = max(abs(v - (page + 0.5)) - ((f.rect / page_world) + 0.5), vec2<f32>(0.0));
                 if length(gap) <= select(f.radius, threshold, rect) / page_world {
                     hits |= hit_bits(f);
+                    moved_units = max(moved_units, refresh_units(change / texel));
                 }
             }
         }
     }
     if hits != 0u {
         atomicOr(&page_hit, hits);
+        atomicMax(&page_moved, moved_units);
     }
     workgroupBarrier();
     let hit = atomicLoad(&page_hit);
     if lid != 0u || entry == INVALID_ID || hit == 0u {
         return;
     }
-    if (hit & HIT_STATIC) != 0u {
+    // Why the page was invalidated last (the shadow overview debug view).
+    info[INFO_PAGE_REASON + wid.x] = (hit & 0xffu) | (vsm.frame << 8u);
+    // Without a refresh budget a streamed footprint frees the page like a static one.
+    if (hit & HIT_STATIC) != 0u || ((hit & HIT_STREAMED) != 0u && vsm.refresh.x == 0u) {
         owner[wid.x] = INVALID_ID;
         entries[entry].x = INVALID_ID;
+        info[INFO_PAGE_REFRESH + wid.x] = 0u;
         return;
     }
     if (hit & HIT_LAYER) != 0u && info[INFO_PAGE_STATIC + wid.x] != INVALID_ID {
         info[INFO_PAGE_STATIC + wid.x] = STALE_STATIC_LAYER;
     }
+    // A pending refresh keeps its largest priority (it grows while the page waits) and whether
+    // it must render in full.
+    let pending = info[INFO_PAGE_REFRESH + wid.x];
+    let moved = max(max(pending & ~REFRESH_FULL, atomicLoad(&page_moved)), 1u);
+    if (hit & HIT_STREAMED) != 0u {
+        // Deferred: the cached depth stays until the refresh queue renders the page in full.
+        info[INFO_PAGE_REFRESH + wid.x] = moved | REFRESH_FULL;
+        return;
+    }
     // A local page under a caster that entered or left the wind measures its casters again.
     if (hit & HIT_DYNAMIC) != 0u || (local_page && (hit & HIT_LAYER) != 0u) {
-        info[INFO_PAGE_REFRESH + wid.x] = 1u;
+        info[INFO_PAGE_REFRESH + wid.x] = moved | (pending & REFRESH_FULL);
     }
 }

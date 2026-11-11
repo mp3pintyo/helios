@@ -76,8 +76,7 @@ fn page_point(draw: vec4<u32>, world: vec3<f32>) -> vec4<f32> {
     if level >= LOCAL_LEVEL {
         return local_page_vertex(world, level - LOCAL_LEVEL, page);
     }
-    let ls = (vsm.light_view * vec4<f32>(world, 1.0)).xyz;
-    let v = vec2<f32>(ls.x, -ls.y) / vsm.level_info[level].y;
+    let v = vsm_level_xy(world, level) / vsm.level_info[level].y;
     return vec4<f32>(v - page * f32(vsm.page_texels), (vsm.level_view_proj[level] * vec4<f32>(world, 1.0)).z, 1.0);
 }
 

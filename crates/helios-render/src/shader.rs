@@ -20,6 +20,7 @@ const SOURCES: &[(&str, &str)] = &[
     ("displacement_height.wgsl", include_str!("shaders/displacement_height.wgsl")),
     ("dynamic_caster.wgsl", include_str!("shaders/dynamic_caster.wgsl")),
     ("dynamic_debug.wgsl", include_str!("shaders/dynamic_debug.wgsl")),
+    ("vsm_overview.wgsl", include_str!("shaders/vsm_overview.wgsl")),
     ("exposure.wgsl", include_str!("shaders/exposure.wgsl")),
     ("fog.wgsl", include_str!("shaders/fog.wgsl")),
     ("fog_common.wgsl", include_str!("shaders/fog_common.wgsl")),

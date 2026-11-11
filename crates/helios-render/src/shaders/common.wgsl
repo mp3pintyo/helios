@@ -34,6 +34,8 @@ const DEBUG_ASSEMBLY_PARTS: u32 = 23u;
 // Substrate slab features and layer count per pixel (substrate.wgsl).
 const DEBUG_MATERIAL_FEATURES: u32 = 24u;
 const DEBUG_TESSELLATION: u32 = 25u;
+// The virtual shadow map overview (vsm_overview.wgsl): drawn by its own pass.
+const DEBUG_SHADOW_OVERVIEW: u32 = 26u;
 
 /// Debug views that show lit (exposed, tonemapped) radiance rather than raw attributes.
 fn is_lit_view(view: u32) -> bool {

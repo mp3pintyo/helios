@@ -25,7 +25,6 @@ fn page_vertex(draw: vec4<u32>, cluster: Cluster, base: u32, local: u32) -> vec4
         return local_page_vertex(world, level - LOCAL_LEVEL, page);
     }
     let a = vsm_address(world, level);
-    let ls = (vsm.light_view * vec4<f32>(world, 1.0)).xyz;
-    let v = vec2<f32>(ls.x, -ls.y) / vsm.level_info[level].y; // absolute texel coordinates
+    let v = vsm_level_xy(world, level) / vsm.level_info[level].y; // absolute texel coordinates
     return vec4<f32>(v - page * f32(vsm.page_texels), a.depth, 1.0);
 }

@@ -145,11 +145,18 @@ mod native {
         pub displacement_speed_bound: bool,
         /// Micro-triangle edge length in pixels (`--dice-rate`).
         pub dice_rate: Option<f32>,
+        /// Shadow pages refreshed per frame at most (`--shadow-refresh-budget`, 0: all at once).
+        pub shadow_refresh_budget: Option<u32>,
+        /// Frames a shadow page may wait for its refresh (`--shadow-max-staleness`).
+        pub shadow_max_staleness: Option<u32>,
+        /// First distant shadow level and the frames between their refreshes
+        /// (`--shadow-distant 7,4`; `--shadow-distant 0`: every level every frame).
+        pub shadow_distant: Option<(u32, u32)>,
     }
 
     impl Options {
         pub fn parse(args: &[String]) -> Self {
-            let mut o = Options { screenshot: None, size: (1600, 900), frames: 90, view: None, detail: Detail::High, scene: SceneKind::Valley, camera: None, eye: None, at: None, occlusion: true, sw_raster: true, rvt: true, glass_shadows: true, svt: true, animate_sun: false, lod: None, fov: None, pool_mb: None, texture_pool_mb: None, texture_compression: true, switch_to: None, dump_dir: None, dump_count: 16, keys: Vec::new(), keys_at: None, hold: Vec::new(), gltf: None, ground: true, bake_hvm: None, stream_from: None, io_latency_ms: 0, sun: None, move_light: false, full_invalidation: false, moving_lights: Default::default(), moving_light_pages: None, movers: None, static_motion: false, screen_percentage: None, gpu_budget_ms: None, local_exposure: Some(Default::default()), scene_file: None, select: Vec::new(), no_skinning: false, gi: None, megalights: false, tessellation: true, displacement_speed_bound: true, dice_rate: None, speed: None };
+            let mut o = Options { screenshot: None, size: (1600, 900), frames: 90, view: None, detail: Detail::High, scene: SceneKind::Valley, camera: None, eye: None, at: None, occlusion: true, sw_raster: true, rvt: true, glass_shadows: true, svt: true, animate_sun: false, lod: None, fov: None, pool_mb: None, texture_pool_mb: None, texture_compression: true, switch_to: None, dump_dir: None, dump_count: 16, keys: Vec::new(), keys_at: None, hold: Vec::new(), gltf: None, ground: true, bake_hvm: None, stream_from: None, io_latency_ms: 0, sun: None, move_light: false, full_invalidation: false, moving_lights: Default::default(), moving_light_pages: None, movers: None, static_motion: false, screen_percentage: None, gpu_budget_ms: None, local_exposure: Some(Default::default()), scene_file: None, select: Vec::new(), no_skinning: false, gi: None, megalights: false, tessellation: true, displacement_speed_bound: true, dice_rate: None, speed: None, shadow_refresh_budget: None, shadow_max_staleness: None, shadow_distant: None };
             let mut scene_given = false;
             let mut it = args.iter().skip(1);
             while let Some(arg) = it.next() {
@@ -224,6 +231,12 @@ mod native {
                     "--no-tessellation" => o.tessellation = false,
                     "--no-displacement-speed-bound" => o.displacement_speed_bound = false,
                     "--dice-rate" => o.dice_rate = value().parse().ok(),
+                    "--shadow-refresh-budget" => o.shadow_refresh_budget = value().parse().ok(),
+                    "--shadow-max-staleness" => o.shadow_max_staleness = value().parse().ok(),
+                    "--shadow-distant" => {
+                        let v: Vec<u32> = value().split(',').filter_map(|x| x.parse().ok()).collect();
+                        o.shadow_distant = v.first().map(|&level| (level, v.get(1).copied().unwrap_or(4)));
+                    }
                     "--lights" => helios_demo::scenes::candles::set_candle_lights(value().parse().unwrap_or(0)),
                     "--lantern" => helios_demo::scenes::cathedral::set_lantern(true),
                     // Highlight contrast, shadow contrast and optionally the blurred luminance blend.
@@ -355,6 +368,16 @@ mod native {
             }
             if let Some(rate) = self.dice_rate {
                 app.renderer.settings.dice_rate = rate;
+            }
+            if let Some(budget) = self.shadow_refresh_budget {
+                app.renderer.settings.shadow_refresh_budget = budget;
+            }
+            if let Some(frames) = self.shadow_max_staleness {
+                app.renderer.settings.shadow_max_staleness = frames;
+            }
+            if let Some((level, interval)) = self.shadow_distant {
+                app.renderer.settings.shadow_distant_level = level;
+                app.renderer.settings.shadow_distant_interval = interval;
             }
             if let Some(budget) = self.gpu_budget_ms {
                 app.gpu_budget_ms = budget;
@@ -573,6 +596,10 @@ mod native {
         pages: f64,
         dynamic_pages: f64,
         draws: f64,
+        /// Shadow refresh queue: deferred by the budget, distant pages held, refreshed past it.
+        deferred: f64,
+        held: f64,
+        forced: f64,
         /// Shadow pages requested, and those without a physical page.
         requested: f64,
         unallocated: f64,
@@ -608,6 +635,9 @@ mod native {
             self.pages += st.shadow_dirty_pages as f64;
             self.dynamic_pages += st.shadow_dynamic_pages as f64;
             self.draws += st.shadow_draws as f64;
+            self.deferred += st.shadow_refresh_deferred as f64;
+            self.held += st.shadow_refresh_held as f64;
+            self.forced += st.shadow_refresh_forced as f64;
             self.requested += st.shadow_pages_requested as f64;
             self.unallocated += st.shadow_page_overflow as f64;
             let moving = app.renderer.moving_light_stats();
@@ -638,7 +668,7 @@ mod native {
             let passes: Vec<String> = self.passes.iter().map(|(label, ms)| format!("{label} {:.3}", ms / n)).collect();
             median
                 + &format!(
-                "frames {from}..{to} mean: GPU {:.2} ms (smoothed max {:.2}) · shadow pages requested {:.0} ({:.1} unallocated), rendered {:.1} ({:.1} dynamic casters only), {:.0} draws · local pages in full {:.1} ({:.1} of moving lights), moving lights' pages {:.1}, {:.2} faces re-anchored · passes: {}",
+                "frames {from}..{to} mean: GPU {:.2} ms (smoothed max {:.2}) · shadow pages requested {:.0} ({:.1} unallocated), rendered {:.1} ({:.1} dynamic casters only), {:.0} draws, refreshes deferred {:.1}, distant held {:.1}, forced {:.1} · local pages in full {:.1} ({:.1} of moving lights), moving lights' pages {:.1}, {:.2} faces re-anchored · passes: {}",
                 self.gpu / n,
                 self.gpu_max,
                 self.requested / n,
@@ -646,6 +676,9 @@ mod native {
                 self.pages / n,
                 self.dynamic_pages / n,
                 self.draws / n,
+                self.deferred / n,
+                self.held / n,
+                self.forced / n,
                 self.local_full / n,
                 self.moving_full / n,
                 self.moving_pages / n,

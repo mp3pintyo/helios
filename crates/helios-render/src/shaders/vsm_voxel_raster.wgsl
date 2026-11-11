@@ -45,8 +45,7 @@ fn page_point(draw: vec4<u32>, world: vec3<f32>) -> vec4<f32> {
     if level >= LOCAL_LEVEL {
         return local_page_vertex(world, level - LOCAL_LEVEL, page);
     }
-    let ls = (vsm.light_view * vec4<f32>(world, 1.0)).xyz;
-    let v = vec2<f32>(ls.x, -ls.y) / vsm.level_info[level].y;
+    let v = vsm_level_xy(world, level) / vsm.level_info[level].y;
     return vec4<f32>(v - page * f32(vsm.page_texels), (vsm.level_view_proj[level] * vec4<f32>(world, 1.0)).z, 1.0);
 }
 
@@ -102,7 +101,8 @@ fn rasterize(
     let local = level >= LOCAL_LEVEL;
     let slot = ((level - min(level, LOCAL_LEVEL)) / LOCAL_MIPS) / LOCAL_FACES;
     // Towards the sun (the light view's z axis), or from the local light per voxel.
-    let sun = vec3<f32>(vsm.light_view[0].z, vsm.light_view[1].z, vsm.light_view[2].z);
+    let sun_view = vsm.level_light[min(level, LOCAL_LEVEL - 1u)];
+    let sun = vec3<f32>(sun_view[0].z, sun_view[1].z, sun_view[2].z);
     let n = f32(vsm.page_texels);
     let page_origin = vec2<i32>(decode_tag(draw.w)) * i32(vsm.page_texels);
     let tile = vec2<i32>(vsm_tile(draw.z & 0xffffu));

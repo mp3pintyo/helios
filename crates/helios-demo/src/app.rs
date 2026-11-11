@@ -240,6 +240,13 @@ impl DemoApp {
             "Slash" => s.translucency_layers = !s.translucency_layers,
             // Sunlight through glass coloured by the panes / white.
             "End" => s.glass_shadows = !s.glass_shadows,
+            // Shadow page refreshes throttled (refresh budget, distant levels at their own rate)
+            // / every invalidated page re-rendered at once.
+            "Home" => {
+                let on = !(s.shadow_refresh_budget > 0 || s.shadow_distant_level > 0);
+                s.shadow_refresh_budget = if on { helios_render::DEFAULT_SHADOW_REFRESH_BUDGET } else { 0 };
+                s.shadow_distant_level = if on { helios_render::DEFAULT_SHADOW_DISTANT_LEVEL } else { 0 };
+            }
             "KeyL" => s.wind = !s.wind,
             "Quote" => {
                 let on = !(s.volumes || s.particles);
@@ -470,6 +477,19 @@ impl DemoApp {
             self.renderer.shadow_mapped_lights(),
             self.renderer.shadow_held_lights(),
         ));
+        if s.shadow_refresh_budget > 0 || s.shadow_distant_level > 0 {
+            text.push_str(&format!(
+                "
+shadow refreshes: budget {} a frame, {} deferred, {} past the budget (waited {} frames) · distant levels from {} every {} frames: {} pages waiting for their turn",
+                s.shadow_refresh_budget,
+                st.shadow_refresh_deferred,
+                st.shadow_refresh_forced,
+                s.shadow_max_staleness,
+                s.shadow_distant_level,
+                s.shadow_distant_interval,
+                st.shadow_refresh_held,
+            ));
+        }
         let pool = self.renderer.local_pool_stats();
         if pool.requested > 0 {
             text.push_str(&format!(
