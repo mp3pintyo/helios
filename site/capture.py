@@ -1,6 +1,9 @@
 """Captures the showcase website's media from the native Helios build.
 
-usage: python site/capture.py [stills|videos|models|all] [--only NAME[,NAME...]] [--size WxH] [--out DIR]
+usage: python site/capture.py [stills|videos|models|docs|all] [--only NAME[,NAME...]] [--size WxH] [--out DIR]
+
+`docs` cuts the round-8 before/after pairs whose "before" side only a pre-fix build could render
+(and the editor's browser screenshots) out of the comparison images in docs/round8/.
 
 Stills land in media/stills/<name>.png (+ .webp), videos in media/videos/<name>.mp4 (+ poster .webp),
 glTF models the page loads into the engine in media/models/. Every still is a fixed camera and
@@ -44,6 +47,23 @@ STONE_PATH = ['--scene', 'valley', '--sun', '200,28', '--eye', '-27,1.2,41', '--
 STONE_GRAZE = ['--scene', 'valley', '--sun', '200,28', '--eye', '-27.5,0.35,41.5', '--at', '-31,0.12,49']
 BRICKS = ['--scene', 'gallery', '--eye', '0.9,0.45,10.9', '--at', '0,0,9.2']
 MUSHROOMS = ['--scene', 'gallery', '--eye', '-5.9,0.3,10.4', '--at', '-6.5,0.08,9.2']
+# Round 8 views (the page's presets use the same cameras).
+WC_AISLE = ['--scene', 'cathedral', '--eye', '22,1.7,11.5', '--at', '45,4,11']
+PUDDLES = ['--scene', 'gallery', '--gi', 'lite', '--eye', '0,0.6,6', '--at', '0,0.5,0']
+ML_NIGHT = ['--scene', 'cathedral', '--lights', '300', '--megalights'] + NIGHT
+GLASS_CANDLES = ['--scene', 'cathedral', '--lights', '1008'] + NIGHT + ['--eye', '0.8,1.6,7.0', '--at', '2.0,0.4,12.0', '--fov', '34']
+LAKE_PANELS = ['--scene', 'valley', '--eye', '-2.8,3.2,27', '--at', '-1.5,2.6,30.6']
+SMOKE = ['--scene', 'forest', '--campfire-smoke', '8', '--sun', '143,40', '--eye', '11,4,2.5', '--at', '7.5,0,-2']
+FOG_NAVE = ['--scene', 'cathedral', '--lantern', '--lights', '300'] + NIGHT
+PHOTO_NAVE = ['--scene', 'cathedral'] + NIGHT + ['--fov', '40', '--dof', '1.2,6']
+GRASS = ['--scene', 'forest', '--eye', '4.6,0.4,-1.6', '--at', '5.7,0.12,-2.7']
+FERNS = ['--scene', 'forest', '--eye', '5.2,0.7,1.2', '--at', '6.2,0.0,0.2']
+CLIFF = ['--scene', 'valley', '--eye', '7,1.8,-25', '--at', '-3.9,-3,-38.9']
+ARCH = ['--scene', 'valley', '--eye', '20.7,1.8,-9.8', '--at', '34,-5.5,-22']
+CAVE = ['--scene', 'valley', '--eye', '-14,2.2,-28', '--at', '-12.5,1.8,-40']
+RIVER = ['--scene', 'valley', '--eye', '-2,3,-6', '--at', '-9,0,-20']
+# Beauty stills in photo mode: 64 frames accumulated (sub-pixel samples; the scene clock stands).
+PHOTO = ['--photo', '64']
 
 # name: arguments. Pairs share a prefix and end in _off / _on.
 STILLS = {
@@ -147,6 +167,57 @@ STILLS = {
     'tess_tufts': (['--scene', 'gallery', '--eye', '1.9,1.1,15.6', '--at', '0,0.1,13.4'], 300),
     'lumen_disp_on': (MUSHROOMS + ['--view', '14'], 400),
     'lantern_night': (['--scene', 'cathedral', '--lantern', '--sun', '200,-25', '--eye', '11.4,1.2,-0.6', '--at', '12.9,0.5,0.5'], 300),
+    # Round 8. Lumen world cache: the south aisle's indirect light, cards + voxels / world cache,
+    # at a fixed exposure (auto exposure would even out the difference); the nave's cells (27).
+    'wc_off': (WC_AISLE + ['--world-cache', 'off', '--view', '7', '--exposure', '0'], 300),
+    'wc_on': (WC_AISLE + ['--view', '7', '--exposure', '0'], 300),
+    'wc_cells': (['--scene', 'cathedral', '--view', '27'], 300),
+    # Lumen Lite 5.8: the gallery's puddles, traced reflections / screen traces + irradiance field.
+    'lite_refl_off': (PUDDLES + ['--lite-traced-reflections'], 300),
+    'lite_refl_on': (PUDDLES, 300),
+    # MegaLights' froxel volume: the fog and glass take shadowed candlelight (300 candles).
+    'ml_volume_off': (ML_NIGHT + ['--ml-no-volume'], 300),
+    'ml_volume_on': (ML_NIGHT, 300),
+    # Candlelight through the north aisle's stained-glass screens: white / coloured by the panes.
+    'glass_candles_off': (GLASS_CANDLES + ['--no-glass-shadows'], 300),
+    'glass_candles_on': (GLASS_CANDLES, 300),
+    # AVBOIT: the lake's crossing panels, weighted blended + depth peeling / adaptive voxel OIT.
+    'avboit_off': (LAKE_PANELS + ['--wboit'], 200),
+    'avboit_on': (LAKE_PANELS, 200),
+    # Shadows: the overview (26) in the windy forest; the smoky campfire's volume shadow.
+    'vsm_overview': ['--scene', 'forest', '--view', '26'],
+    'smoke_shadow_off': (SMOKE + ['--no-volume-shadows'], 420),
+    'smoke_shadow_on': (SMOKE, 420),
+    # Fog screen-space scattering in the candle-lit nave with the lantern; photo mode's bokeh.
+    'fog_glow_off': (FOG_NAVE, 300),
+    'fog_glow_on': (FOG_NAVE + ['--fog-scattering', '4'], 300),
+    'photo_realtime': (PHOTO_NAVE, 300),
+    'photo_accum': (PHOTO_NAVE + ['--photo', '256'], 300),
+    # Grounded foliage: short-range AO off / on at the grass tuft; ferns by the fire (photo).
+    'ao_off': (GRASS + ['--no-short-range-ao'], 200),
+    'ao_on': (GRASS, 200),
+    'ferns_photo': (FERNS + PHOTO, 200),
+    # Mesh terrain, the river and the cliff rock (photo mode).
+    'cliff': (CLIFF + PHOTO, 200),
+    'arch': (ARCH + PHOTO, 200),
+    'cave_river': (CAVE + PHOTO, 200),
+    'river_close': (RIVER + PHOTO, 200),
+}
+
+# Round 8 before/after pairs of fixes reported by the user: the "before" side was rendered by the
+# build before the fix, so both sides are cut from the comparison images in docs/round8/ (the
+# label strip at the top left is cropped away). name: (image, before box, after box) -> name_off/on.
+DOC_PAIRS = {
+    'grounded': ('foliage-grounding/grass-before-after.jpg', (32, 36, 768, 450), (840, 36, 1576, 450)),
+    'campfire_plants': ('foliage-grounding/campfire-night-before-after.jpg', (32, 36, 768, 450), (840, 36, 1576, 450)),
+    'rock': ('rockmat/default-before-after.jpg', (32, 36, 768, 450), (832, 36, 1568, 450)),
+    'cave_fix': ('riverfix/cave-before-after.jpg', (32, 36, 1168, 675), (32, 711, 1168, 1350)),
+}
+# Browser screenshots of the round-8 editor (the Playwright runs of docs/round8/editor-hierarchy.md).
+DOC_STILLS = {
+    'editor_actor_drag': 'editor-hierarchy/browser-drag-campfire.jpg',
+    'editor_outliner': 'editor-hierarchy/browser-outliner-trees.jpg',
+    'editor_component': 'editor-hierarchy/browser-component.jpg',
 }
 
 # name: (arguments, seconds). Recorded at 60 fps, encoded at 30.
@@ -163,6 +234,9 @@ VIDEOS = {
     'campfire_night': (CAMPFIRE, 12),
     # Survey, then a crossfade to the walk 4.5 s in.
     'fox_clips': (['--gltf', FOX, '--keys', 'Minus', '--keys-at', '300'], 10),
+    # Round 8: a Numpad1 gust ring sweeping the clearing's grass and ferns (2 s in); the river.
+    'wind_gust': (['--scene', 'forest', '--eye', '3.0,2.6,2.5', '--at', '7.0,0.0,-2.0', '--keys', 'Numpad1', '--keys-at', '150'], 8),
+    'river_flow': (RIVER, 8),
 }
 
 
@@ -234,6 +308,25 @@ def limit_size(mp4, limit=14 * 2**20):
             os.remove(smaller)
 
 
+def docs(only):
+    """Cuts the round-8 before/after pairs and editor screenshots out of docs/round8/."""
+    out = os.path.join(ROOT, 'stills')
+    os.makedirs(out, exist_ok=True)
+    src = os.path.join(REPO, 'docs', 'round8')
+    for name, (image, before, after) in DOC_PAIRS.items():
+        if only and name not in only:
+            continue
+        im = Image.open(os.path.join(src, image)).convert('RGB')
+        for suffix, box in (('_off', before), ('_on', after)):
+            im.crop(box).save(os.path.join(out, name + suffix + '.webp'), quality=90, method=6)
+        print('pair', name)
+    for name, image in DOC_STILLS.items():
+        if only and name not in only:
+            continue
+        Image.open(os.path.join(src, image)).convert('RGB').save(os.path.join(out, name + '.webp'), quality=85, method=6)
+        print('still', name)
+
+
 def models():
     out = os.path.join(ROOT, 'models')
     os.makedirs(out, exist_ok=True)
@@ -256,3 +349,5 @@ if __name__ == '__main__':
         stills(size, only)
     if what in ('videos', 'all'):
         videos(size, only)
+    if what in ('docs', 'all'):
+        docs(only)

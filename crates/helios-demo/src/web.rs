@@ -1084,6 +1084,13 @@ pub fn helios_set_lantern(on: bool) {
     crate::scenes::cathedral::set_lantern(on);
 }
 
+/// Scales the forest campfire's soot from its next build (`heliosLoadScene`; 1 by default, as
+/// the native `--campfire-smoke`): a smokier fire whose volume shadow shows plainly.
+#[wasm_bindgen(js_name = heliosSetCampfireSmoke)]
+pub fn helios_set_campfire_smoke(scale: f32) {
+    crate::scenes::forest::set_campfire_smoke(scale);
+}
+
 /// Fetches a glTF model (`.glb`, or `.gltf` with its files; relative to the page, as `?gltf=`)
 /// and rebuilds the engine with it as the scene; skinned models play their first clip. Resolves
 /// to whether the engine was running; rejects with the import error.
