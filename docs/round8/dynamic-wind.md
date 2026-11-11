@@ -220,7 +220,9 @@ detail, 1600×900, 300 frames; *main* is the round-8 wave-2 build (75b098f), *of
 * Voxel LODs move rigidly per brick with the branch most of its leaves hang from: no flutter, and a brick straddling
   two branches follows one.
 * Every pass evaluates the bone chain per vertex (UE evaluates bones once per instance and skins): ~0.3–0.5 ms in the
-  forest at 1600×900. The fitted bounds are looser than the procedural ones (a trunk's rotation carries the crown
+  forest at 1600×900. *Follow-up* ([`windperf.md`](windperf.md), item 236): a pose pass now composes the branches once
+  per instance, and the *off* overhead turned out to be the plant code's registers, not the data — gone with a
+  `PLANTS` specialisation. The fitted bounds are looser than the procedural ones (a trunk's rotation carries the crown
   sideways, an h·ρ term the h²/ρ basis covers loosely): ~30 % more (cluster, page) shadow draws.
 * The wind weight of round 8's grounding is not used for plants with bones (their pivots hold the roots); tessellated
   surfaces keep the procedural wind.
