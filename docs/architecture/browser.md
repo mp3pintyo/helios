@@ -118,11 +118,12 @@ After three failures the pool stops and everything bakes on the page. `?bake-wor
 
 ## Device limits
 
-`maxSampledTexturesPerShaderStage`: the deferred lighting pass binds 20 sampled textures (with the VSM moment atlas
-and the volume shadow atlas of round 8), the translucency shading 18, AVBOIT 19, the Substrate slab lighting 21.
-WebGPU guarantees 16; desktop adapters offer 48 (Chromium) or 64 (Firefox) on an RTX 3090, and the device asks for
-up to 24. `GpuContext::MIN_SAMPLED_TEXTURES` (20) is checked before the device is made: below it the start fails with
-a message naming the limit instead of a validation error. Between 20 and the optional variants' counts, AVBOIT
+`maxSampledTexturesPerShaderStage`: the deferred lighting pass binds 21 sampled textures (with the VSM moment atlas,
+the volume shadow atlas and the half-resolution short-range AO of round 8), the translucency shading 18, AVBOIT 19,
+the Substrate slab lighting 22. WebGPU guarantees 16; desktop adapters offer 48 (Chromium) or 64 (Firefox) on an RTX
+3090, and the device asks for up to 24. `GpuContext::MIN_SAMPLED_TEXTURES` (21) is checked before the device is made:
+below it the start fails with a message naming the limit instead of a validation error. Between 21 and the optional
+variants' counts, AVBOIT
 (weighted blended OIT instead) and Substrate's slab lighting are off, and their layouts are not created.
 `--max-sampled-textures N` / `?max-sampled-textures=N` caps the device for testing these paths.
 
