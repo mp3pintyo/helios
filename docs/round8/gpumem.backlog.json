@@ -1,0 +1,39 @@
+[
+  {
+    "id": "gpu-memory-budget",
+    "title": "GPU-memória: alrendszerenkénti elszámolás natívan és a böngészőben, a cserélt és nem használt erőforrások felszabadítása – a Firefox „Not enough memory left” hibája a böngésző szivárgása",
+    "area": "Böngésző és platform",
+    "kind": "fix",
+    "status": "done",
+    "phase": "8. kör – 3. hullám",
+    "summary": "Eddig semmi sem mutatta meg, mennyi GPU-memóriát tart a renderelő és mire. Most a natív --gpu-memory kapcsoló és a böngészős heliosGpuMemory() alrendszerenkénti táblát ad (virtuális árnyéktérképek, Nanite, áttetszőség/OIT, Lumen, textúrák, utófeldolgozás, képkocka-célok, …; címkénként). A völgy 1600×900-on ≈ 1,3 GB, és jelenetváltáskor sem szivárog. A Firefox hibájának oka nem a Helios: a Firefox GPU-folyamata (Windows, D3D12) minden megjelenített képkockánál ≈ két vászonnyi felületet tart meg – egy 30 soros, csak törlő és megjelenítő oldalon is, a telepített Firefox 160-ban is –, és amikor ez kitölti a folyamat memóriakeretét, a wgpu őre elveszíti az eszközt („Not enough memory left”, majd „Out of memory” eszközvesztés). A Helios ezt most üzenettel jelzi a lefagyott vászon helyett. A renderelő közben visszaadja, amit a jelenet nem használ: az üveges fénykockák, a volumenek, az OIT- és AVBOIT-célok, az áttetszőségi jelenetszín 240 használatlan képkocka után felszabadulnak, a táj RVT-atlaszai csak tájjal léteznek, a második utófeldolgozási cél csak mélységélesség + mozgási elmosás együttesénél; a böngészőben a lecserélt erőforrások azonnal megsemmisülnek, nem a szemétgyűjtőre várnak. A galéria 1096 helyett 1001 MiB, a völgyből érkezve 1319 helyett 1017 MiB; a képek változatlanok.",
+    "details": "helios-render/src/gpu_memory.rs (új): Report::from_device a backend allokátorának jelentéséből (Device::generate_allocator_report, D3D12 és Vulkan – minden élő foglalás a címkéjével, a driver kitöltésével), Report::from_counted a böngészős főkönyvből, CATEGORIES – címke-kulcsszavak → 21 alrendszer; table() és json(). helios-demo/src/gpu_memory.js (új): az eszköz létrejötte előtt becsomagolja a GPUDevice.createBuffer / createTexture és a destroy hívásokat, erőforrásonként címke + méret (texelméret × kiterjedés × mipek), amíg megsemmisül vagy a FinalizationRegistry szerint begyűjtődik; ?gpu-memory=1: minden foglalás out-of-memory error scope-ban, a sikertelen naplózva. web.rs: heliosGpuMemory(table) JSON vagy szöveges tábla; set_device_lost_callback → üzenet a vásznon és a főkönyv a naplóban. main.rs: --gpu-memory (tábla a futás végén és minden váltás előtt), --switch-to most lista (egyenletesen elosztott váltások). Megsemmisítés: retire_buffer / retire_view / retire_texture → destroy_retired() a képkocka beküldése után (a wgpu WebGPU-backendje eldobáskor nem hív destroy()-t, így a böngészőben a memória a JS szemétgyűjtőre várt): FrameTargets::retire átméretezéskor, a lap képkocka-célja, Lumen kártya-atlaszai, kártyaadat/-lapok/pár-összegek, a kártyarögzítés átmeneti bemenetei (≈ 11 MiB rögzítésenként), a képernyőpróba- és tükröződés-célok, az SDF-pufferek, a közeli mező atlasza, az eltolt Lumen-változatok pontjai. Lusta foglalás + felszabadítás (gpu_memory::Idle, RELEASE_AFTER_FRAMES = 240): glass_light.rs kockatérképek (24 MiB), volumes.rs menetelési célok (6 × belső felbontás, rgba16f – emitter nélküli jelenetben is), oit.rs OIT-célok + avboit.rs rács, translucency.rs jelenetszín és hámozott rétegek, passes/post_fx.rs célok; rvt.rs Atlases – 1×1 helyettes táj nélkül; post_fx második színcél csak DOF + mozgási elmosás együtt. Diagnózis: Firefox-konzol helyett a lapból lekérdezve (a Firefox a konzolüzeneteket gyakran csak bezáráskor adja át), Windows GPU Process Memory számlálók, DXGI-keret (ctypes), minimális oldal négy változatban. Elvetve: Tracked<Buffer> fogantyútípus (175 pufferező mező, a nézetek életben tartják a textúrákat), Drop-alapú megsemmisítés (megosztott pufferek: CullView::share_work), azonnali felszabadítás jelenetváltáskor (az üresjárat-számláló a funkciókapcsolást és a képernyőről kilépő funkciót is kezeli), a repülésben lévő képkockák korlátozása (a minimális oldal egy képkockával is szivárog).",
+    "metrics": "Natív Vulkan, RTX 3090, 90 képkocka, MiB (alap → új): 1600×900 high – völgy 1312,8 → 1300,3, erdő 1325,0 → 1312,5, katedrális 1340,3 → 1327,8, galéria 1096,0 → 1000,6; 1600×900 medium – 1307,3 → 1294,8, 1286,1 → 1273,6, 1334,2 → 1321,7, 1095,4 → 1000,0; 2560×1440 high – 1859,0 → 1829,0, 1830,2 → 1800,2, 1869,0 → 1839,0, 1502,3 → 1389,4; 2560×1440 medium – 1853,5 → 1823,5, 1791,3 → 1761,3, 1862,9 → 1832,9, 1501,7 → 1388,8. Váltási lánc kétszer (300 képkocka jelenetenként), a váltás előtt: völgy 1312,8 → 1300,3, galéria 1318,9 → 1017,4, erdő 1407,4 → 1372,0, katedrális 1406,8 → 1388,0, második kör völgy 1345,0 → 1308,3, galéria 1351,1 → 1025,4; a második kör mindkettőben azonos az elsővel (nincs szivárgás). Chromium 1248, ugyanez a lánc + átméretezés, élő MiB a lapban (alap injektált főkönyvvel → új): galéria 1242 → 1024 / 1316 → 1031, második völgy 1312 → 1277 / 1278, csúcs az átméretezés után 1964 → 1561; nincs WebGPU-hiba. Firefox 155: a lap főkönyve 1,28–1,40 GB-on állandó, egyetlen foglalás sem hibázik, a GPU-folyamat dedikált használata közben 1,3 → 12,8 GB (≈ 340 MB/s, képkockánként 7–13 MB), az eszköz t = 71–88 s-nál elvész; minimális oldal: 1,7 → 20,9 GB 27 s alatt (≈ 12,5 MB/képkocka 1600×900-on, ≈ 2,7 MB 800×450-en), Firefox 160 saját profillal: 2,2 → 8,6 GB 17 s alatt. Képek (natív, 1600×900, 90. képkocka): völgy 57,7 dB, katedrális 60,9 dB, galéria 63,8 dB, erdő 39,1 dB (alap–alap 39,2 dB: a részecskék és a szél zaja). Képkockaidő: egyik menet sem változik.",
+    "showcase": "Natívan: cargo run -p helios-demo --release -- --scene valley --screenshot out.png --frames 300 --switch-to gallery,cathedral --gpu-memory – a napló minden váltás előtt kiírja az alrendszerenkénti táblát. Böngészőben: web/index.html?scene=valley, majd a konzolban (await import('./pkg/helios_demo.js')).heliosGpuMemory(true); heliosLoadScene('gallery') után 4 s-mal a volumen-, OIT- és RVT-tételek eltűnnek a táblából. Firefoxban (Windows) a teljes sebességű futás egy idő után a „The GPU device was lost …” üzenettel áll meg – ez a böngésző szivárgása (docs/round8/gpumem.md).",
+    "modules": [
+      "crates/helios-render/src/gpu_memory.rs",
+      "crates/helios-render/src/renderer.rs",
+      "crates/helios-render/src/targets.rs",
+      "crates/helios-render/src/volumes.rs",
+      "crates/helios-render/src/oit.rs",
+      "crates/helios-render/src/avboit.rs",
+      "crates/helios-render/src/effects.rs",
+      "crates/helios-render/src/glass_light.rs",
+      "crates/helios-render/src/translucency.rs",
+      "crates/helios-render/src/rvt.rs",
+      "crates/helios-render/src/passes/post_fx.rs",
+      "crates/helios-render/src/cards.rs",
+      "crates/helios-render/src/lumen.rs",
+      "crates/helios-render/src/near_field.rs",
+      "crates/helios-render/src/lumen_displaced.rs",
+      "crates/helios-demo/src/gpu_memory.js",
+      "crates/helios-demo/src/web.rs",
+      "crates/helios-demo/src/main.rs",
+      "docs/architecture/browser.md",
+      "docs/status.md",
+      "docs/round8/gpumem.md"
+    ],
+    "order": 238,
+    "updated": "2026-11-11"
+  }
+]

@@ -358,7 +358,7 @@ Each subsystem is described in its own page under [`docs/architecture/`](docs/ar
 | [Terrain and rivers](docs/architecture/terrain.md) | Mesh terrain (modifier stack, surface nets chunks, landscape seam, cliff rock with geometry-aligned strata, collision, PCG), shallow-water rivers |
 | [Volumes and particles](docs/architecture/volumes-particles.md) | Heterogeneous volumes (fluid simulation), GPU particles, order-independent transparency |
 | [Post-processing](docs/architecture/post.md) | Temporal stability, TSR and dynamic resolution, camera, local exposure, profiling |
-| [Browser platform](docs/architecture/browser.md) | Start-up order, scene bake on Web Workers, frames held for new pipelines, the next scene compiled during its bake, fewer pipelines, device limits, f16 shaders, browser measurement hooks |
+| [Browser platform](docs/architecture/browser.md) | Start-up order, scene bake on Web Workers, frames held for new pipelines, the next scene compiled during its bake, fewer pipelines, device limits, f16 shaders, browser measurement hooks, GPU memory accounting (`--gpu-memory`, `heliosGpuMemory`) |
 
 ### 3. Editor, scene files and PCG — `helios-demo`, `helios-pcg`, `web/editor`
 
