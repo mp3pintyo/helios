@@ -64,11 +64,14 @@ pub struct DemoApp {
     pub editing: bool,
 }
 
+/// Frames a photo (Enter) accumulates.
+pub const PHOTO_SAMPLES: u32 = 128;
+
 /// Screen percentages the `[` / `]` keys step through.
 const SCREEN_PERCENTAGES: [f32; 4] = [50.0, 67.0, 75.0, 100.0];
 
 pub const HELP: &str = "WASD/QE fly · drag to look · wheel speed · Shift fast\n\
-N next scene · 0 demo motion · V debug view · Insert voxel LODs · PageDown tessellation · G GI · ; GI method (Lumen / Lumen Lite) · H shadows · 1 local light shadow maps · [ ] screen percentage (50/67/75/100 %) · \\ dynamic resolution · T TAA · O occlusion · K software raster · I texture streaming · - animation clip / pause · F fog · C clouds · U translucency · End coloured light through glass · / translucency layers · ' volumes + particles · L wind · M motion blur · B depth of field · ` local exposure · = MegaLights · Z/X zoom · , . LOD error · PageUp Substrate materials · ←→↑↓ sun · P animate sun · J day/night cycle · Y camera tour · R reset · Tab editor tools (native)";
+N next scene · 0 demo motion · V debug view · Insert voxel LODs · PageDown tessellation · G GI · ; GI method (Lumen / Lumen Lite) · H shadows · 1 local light shadow maps · [ ] screen percentage (50/67/75/100 %) · \\ dynamic resolution · T TAA · O occlusion · K software raster · I texture streaming · - animation clip / pause · F fog · C clouds · U translucency · End coloured light through glass · Home fog scattering · / translucency layers · ' volumes + particles · L wind · M motion blur · B depth of field · Enter photo (accumulated still) · ` local exposure · = MegaLights · Z/X zoom · , . LOD error · PageUp Substrate materials · ←→↑↓ sun · P animate sun · J day/night cycle · Y camera tour · R reset · Tab editor tools (native)";
 
 impl DemoApp {
     pub fn new(
@@ -240,6 +243,17 @@ impl DemoApp {
             "Slash" => s.translucency_layers = !s.translucency_layers,
             // Sunlight through glass coloured by the panes / white.
             "End" => s.glass_shadows = !s.glass_shadows,
+            // Photo mode: accumulate a still (sub-pixel and, with B, lens samples); again: back
+            // to the real-time image.
+            "Enter" | "NumpadEnter" => {
+                if self.renderer.photo_progress().is_some() {
+                    self.renderer.stop_photo();
+                } else {
+                    self.renderer.start_photo(PHOTO_SAMPLES);
+                }
+            }
+            // Fog screen space scattering (glow of lights through fog) on / off.
+            "Home" => s.fog_scattering = if s.fog_scattering.is_some() { None } else { Some(helios_render::FogScattering::default()) },
             "KeyL" => s.wind = !s.wind,
             "Quote" => {
                 let on = !(s.volumes || s.particles);
@@ -348,8 +362,12 @@ impl DemoApp {
             self.camera.look_at(target);
         }
 
+        // While a photo accumulates the scene stands still (the camera may move: that ends it).
+        let camera_dt = dt;
+        let dt = if self.renderer.photo_progress().is_some_and(|p| !p.done()) { 0.0 } else { dt };
+
         // Sun.
-        let rate = 0.6 * dt;
+        let rate = 0.6 * camera_dt;
         if input.down("ArrowLeft") {
             self.sun_azimuth -= rate;
         }
@@ -422,7 +440,7 @@ impl DemoApp {
             "{} · {:.1} ms ({:.0} fps){gpu} · {resolution} · {} · LOD error {} px{budget}\n\
              visible: {} clusters ({} software, {} alpha-masked), {:.2} M tris (early pass {}) · shadows: {:.2} M tris ({:.2} M software)\n\
              streaming: {}/{} pages, {:.0}/{:.0} MiB resident, {} pending, {} in flight · scene: {} instances, {:.0} M source tris\n\
-             GI {} · shadows {} · TAA {} · fog {} · SW raster {} · wind {} · local exposure {} · MegaLights {} ({} lights) · volumes + particles {} · Substrate {} · glass shadows {}",
+             GI {} · shadows {} · TAA {} · fog {} · SW raster {} · wind {} · local exposure {} · MegaLights {} ({} lights) · volumes + particles {} · Substrate {} · glass shadows {} · fog scattering {}",
             self.scene_name(),
             self.frame_ms,
             1000.0 / self.frame_ms.max(0.01),
@@ -455,6 +473,7 @@ impl DemoApp {
             on(s.volumes || s.particles),
             on(s.substrate),
             on(s.glass_shadows),
+            on(s.fog_scattering.is_some()),
         );
         text.push_str(&format!(
             "\nshadow pages: {}/{} in use, {} requested, {} rendered ({} dynamic casters only, {} split; {}/{} draws), {} unallocated · local lights with shadow maps: {} ({} moving, cached)",
@@ -476,6 +495,11 @@ impl DemoApp {
                 "\nlocal lights' shadow pages: {} of {} requested resident · maps without a resident page: {} · pool resolution bias {:.2} mips",
                 pool.resident, pool.requested, pool.starved, pool.bias
             ));
+        }
+        if let Some(p) = self.renderer.photo_progress() {
+            let state = if p.focusing { "focusing".to_string() } else if p.done() { "done (Enter: back to real time)".to_string() } else { format!("{} / {} frames", p.accumulated, p.samples) };
+            let lens = if s.depth_of_field.is_some() { "lens + sub-pixel samples" } else { "sub-pixel samples" };
+            text.push_str(&format!("\nphoto: {state} ({lens})"));
         }
         let moving = self.renderer.moving_light_stats();
         if moving.anchors.mapped + moving.anchors.fields > 0 {

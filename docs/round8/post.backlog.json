@@ -1,0 +1,71 @@
+[
+  {
+    "id": "fog-screen-space-scattering",
+    "title": "Köd képernyőtéri szórása (UE 5.8 Fog Screen Space Scattering): a fények és a megvilágított felületek átdereng a ködön",
+    "area": "Atmoszféra",
+    "kind": "feature",
+    "status": "done",
+    "phase": "8. kör – 1. hullám",
+    "summary": "A volumetrikus köd eddig csak elnyelte a látható felületekről érkező fényt (szín × áteresztés + beszórt fény): ami a köd a nézeti sugárról csak kicsit szór félre, az elveszett, pedig a pixel mellől mégis a kamerába jut. Ezért a lámpák, gyertyák és ablakok nem derengtek át a párán, a sűrű köd nem lágyította a mögötte lévőt. Mostantól egy utófeldolgozó lépés a TSR után minden pixelre a köd integrált térfogatából kiolvassa az optikai mélységet (τ) és a beszórt fényt, a közvetlenül látott fény előre szórt részét (többszörös szórással, a sugár hátralévő részén csillapítva) a fázisfüggvény előre irányuló lebenyét követő, többszintű elmosással a környezetre teríti, és visszaadja: a fény energiát nem teremt, csak szétteríti azt, amit a köd elnyelt volna. A távoli csillárok és gyertyatartók lágyan derengenek, a hajó kontrasztja a ködben csökken; ahol hosszabb a köd a sugár mentén, ott erősebb. Alapból kikapcsolt (az UE-ben is kísérleti), Home billentyű.",
+    "details": "fog_scattering.rs: FogScatteringPass (prefilter / downsample / upsample / composite compute, Fog csoport), FogScattering { intensity: 1, anisotropy: 0.85 }, forward_fraction (Henyey–Greenstein kúpon belüli hányad), level_weights (szintenként a fázisfüggvény fénye a szint szögsugara és az előzőé között; a látszó szög a szórási szög fele), level_count (1/2-től 1/256-ig, 1600×900-on 8 szint). fog_scattering.wgsl: D = szín − S = L·T, szórt rész D·(e^(F·albedó·τ) − 1) ≤ L·(1 − T); az intenzitás ezt skálázza, de legfeljebb az összes szórt fényig; a piramis alfája a fényforrások τ-ját viszi, egy pixel csak min(1, τ / átlagos forrás-τ) arányban kap (a közeli pillér nem dereng a mögötte lévő párától); az alfa (TSR súly) átmegy (fotó mód). renderer.rs: a TSR után, a mélységélesség előtt, csak Lit nézetben. RenderSettings::fog_scattering (Option, alap None), --fog-scattering N, Home, szerkesztő: 'Fog screen space scattering' (0–4). A fog.wgsl érintetlen (a MegaLights-köd ágenssel nincs ütközés). Elvetett: mix(c, blur(c), s) (változó s mellett nem energiamegőrző), a beszórt S elmosása (a froxelek egyszeres szórását duplán számolná), szórás a froxelek között (16 px-es froxeleken a gyertyaláng dereng elvész).",
+    "metrics": "RTX 3090 (más ágensekkel megosztva), 1600×900, katedrális, 2 váltakozó futás: fog scattering pass 0,110 / 0,115 ms; GPU-képkocka minimum ki 5,72 / 5,65 → be 5,80 / 6,15 ms (a zaj nagyobb a lépésnél); éjszakai erdő 0,111 ms, lámpás katedrális 0,110 ms. Memória 19 MiB. Alap intenzitáson fizikailag kicsi a hatás a jelenetek enyhe párájában (0,01–0,012/m: τ ≈ 0,05 a tábortűzig, 0,3–0,5 a hajó végéig). Böngésző (headless Chromium, WebGPU): a Tint lefordítja, 167/167 pipeline, konzolhiba nincs, a Home kapcsol, 0,17 ms.",
+    "showcase": "Katedrális éjjel a lámpással (--scene cathedral --lantern --lights 300 --sun 200,-30 --fog-scattering 1 vagy 2), a hajó vége felé: a csillárok és a gyertyák derengése, Home-mal ki/be – docs/round8/post/fog-scattering-cathedral.jpg (ki / 1 / 2).",
+    "modules": [
+      "crates/helios-render/src/fog_scattering.rs",
+      "crates/helios-render/src/shaders/fog_scattering.wgsl",
+      "crates/helios-render/src/renderer.rs",
+      "crates/helios-demo/src/app.rs",
+      "crates/helios-demo/src/main.rs",
+      "crates/helios-demo/src/editor/settings.rs"
+    ],
+    "order": 211,
+    "updated": "2026-11-11"
+  },
+  {
+    "id": "accumulation-photo-mode",
+    "title": "Fotó mód: sok képkockából összegzett állókép, alpixeles és lencsemintákkal (UE Accumulation DOF)",
+    "area": "Utófeldolgozás",
+    "kind": "feature",
+    "status": "done",
+    "phase": "8. kör – 1. hullám",
+    "summary": "Az állóképek eddig a valós idejű képből készültek: TSR-történet és utófeldolgozó mélységélesség (48 mintás gyűjtés egy korongon), ami a fókuszon kívüli fényes pontokat elhalványítja. Mostantól álló kamerával N képkocka összegződik egy állóképpé: mindegyik új alpixeles eltolással és (bekapcsolt mélységélességnél) új lencsemintával készül – a kamera a rekesznyílás egy pontjára lép, a vetítés úgy nyíródik, hogy a fókuszsík a helyén maradjon –, így a mélységélesség pontosan olyan, mint egy valódi objektívé, a fényes csúcsfények valódi bokeh-korongok maradnak. Közben a jelenet órája áll, a Lumen, a MegaLights és a köd tovább konvergál, maradék zajuk is kiátlagolódik. A kész kép a képernyőn marad, amíg a kamera meg nem mozdul. Közben kiderült, hogy a valós idejű mélységélesség a szórási kör átmérőjét sugárként használta (kétszeres elmosás) – javítva, most a kettő egyezik.",
+    "details": "photo.rs: PhotoMode (start / stop / progress / begin_frame / accumulate / mean), PhotoSample (lencsekamera, nyírás, jitter), lens_camera, concentric_disc (Shirley–Chiu), aperture_radius (fókusztávolság / f-szám / 2, a valós idejű DOF vékonylencséje); a fókusz a beállításé, vagy autofókusznál a PostFxPass egyszer visszaolvasott fókusztávolsága (request_focus / take_focus / after_submit, MAP_READ puffer). tsr.wgsl PHOTO permutáció (lazy pipeline): a képkocka saját Gauss-rekonstrukciója a mintasúllyal (érvényes egykockás történet marad). photo.wgsl: szín × súly és súly összegzése két rgba32float célban, az átlag megy az expozíción, bloomon és tónusleképezésen át. renderer.rs: Renderer::start_photo / stop_photo / photo_progress; a fotó képkockáin a DOF és a mozgáselmosás ki, delta_time = 0, a lencsenyírás a vetítés része (a nem jitterelt mátrixoké is). app.rs: Enter (128 képkocka, újra: vissza), a jelenet animációi állnak, HUD-sor. main.rs: --photo N (a --frames után, --screenshot-tal), --dof F_STOP[,FOCUS_M]. web.rs: heliosPhoto(n) / heliosPhoto(0), heliosPhotoProgress() JSON. post_fx.wgsl: circle_of_confusion a sugarat adja (eddig az átmérőt). Elvetett: a TSR-történet felhasználása gyűjtőként (fp16-ban sok mintánál torzít), a térbeli felskálázó ág (Catmull–Rom elmosás képkockánként).",
+    "metrics": "RTX 3090, 1600×900: összegző pass 0,048 ms/képkocka; katedrális 128 képkocka autofókusszal 2,24 s (1 képkocka vár a fókuszra), éjjel 256 képkocka 8,3 s; célok 58 MiB (az első fotónál). Böngészőben 48 képkocka 1,0 s, konzolhiba nincs. A valós idejű DOF elmosása a felére csökkent (a fizikai értékre).",
+    "showcase": "Katedrális éjjel, f/1.2, fókusz 6 m, 40° (--scene cathedral --sun 200,-30 --fov 40 --dof 1.2,6 --photo 256): a csillárok lángjai fényes bokeh-korongok – docs/round8/post/photo-full.jpg, photo-vs-realtime-dof.jpg (régi valós idejű DOF / javított / fotó). Élőben: B, majd Enter.",
+    "modules": [
+      "crates/helios-render/src/photo.rs",
+      "crates/helios-render/src/shaders/photo.wgsl",
+      "crates/helios-render/src/shaders/tsr.wgsl",
+      "crates/helios-render/src/passes/tsr.rs",
+      "crates/helios-render/src/passes/post_fx.rs",
+      "crates/helios-render/src/shaders/post_fx.wgsl",
+      "crates/helios-render/src/renderer.rs",
+      "crates/helios-demo/src/app.rs",
+      "crates/helios-demo/src/main.rs",
+      "crates/helios-demo/src/web.rs"
+    ],
+    "order": 212,
+    "updated": "2026-11-11"
+  },
+  {
+    "id": "tsr-depth-history",
+    "title": "TSR mélységtörténet: a takarásból előbukkanó felületek felismerése mélység és síktávolság alapján is",
+    "area": "Utófeldolgozás",
+    "kind": "feature",
+    "status": "done",
+    "phase": "8. kör – 1. hullám",
+    "summary": "A TSR eddig csak a mozgásvektorokból döntötte el, hogy egy előzménypixel ugyanazt a felületet mutatja-e: 1 px alatti mozgáskülönbségnél (lassú oldalmozgás, lengő csillár, ringó ág) csak a szomszédsági színdoboz védett a szellemkép ellen, ami álló képen széles. Mostantól minden előzménypixel megőrzi annak a legközelebbi mintának a mélységét, amellyel íródott; a pont, amit képvisel, az előző kamerával visszaépítve a mostani felület síkján kell legyen (a mélység 2 %-án belül). A teszt a 0,05–0,5 px-es mozgáskülönbségek tartományában hat, ahol a mozgásteszt vak, és ott nem, ahol a felület és az előzmény egyformán mozgott – különben a jitter által kihagyott vékony gally takarásnak látszana, és villogna.",
+    "details": "tsr.wgsl: depth_mismatch (az előzménypixel pontja world_from_depth-szel a TsrUniform::prev_inv_view_proj-ból, normál a mélységszomszédokból – tengelyenként a közelebbi –, síktávolság / (0,02 × mélység), smoothstep 1–2; ég: 60000), view_depth, tap_world, depth_normal; a history_state .w csatornája a nézeti mélység (eddig kihasználatlan, nincs új textúra). A mélységteszt súlya saturate((Δmozgás − 0,05) / 0,45), csak ahol nagyobb a mozgásteszténél. tsr.rs: TsrUniform += prev_inv_view_proj, params; update(prev_view_proj, depth_history). RenderSettings::tsr_depth_history (alap be), --no-tsr-depth-history, szerkesztő: 'TSR depth history (disocclusion)'. Hibakereső render (piros eltérés, zöld mozgássúly): minden sziluetten van eltérés, ezért kell a mozgáskülönbség-kapu. Elvetett: kapu nélküli teszt (minden él minden képkockában elutasítva), puszta mélység-összevetés (lapos szögben a pixel alatti eltolás is nagy mélységkülönbség).",
+    "metrics": "RTX 3090, 1600×900, katedrális, 2 váltakozó futás: tsr 0,104 / 0,103 ms be, 0,104 / 0,112 ms ki – mérhetetlen. Villogás (erdő szélben, álló kamera, 16 képkocka, >24/255): 0,115 → 0,118 % (nincs romlás). Szellemkép egy ugyanabban a pillanatban készült 64 képkockás fotóhoz mérve: lengő csillárok (25°) >16/255 eltérő pixel 1,332 → 1,280 %, átlagos hiba 2,509 → 2,493; szeles erdő 5,849 → 5,831 %; lassú oldalmozgás a hajóban (0,15 m/s) változatlan 0,688. Ezekben a jelenetekben a mozgásteszt és a színdoboz már kevés szellemképet hagyott; a mélységtörténet a vékony mozgó tárgyakon maradt rész egy részét viszi el. Böngésző: a Tint lefordítja.",
+    "showcase": "Katedrális, a lengő csillárok 25°-os nézetben (--fov 25 --camera 5,1.7,0,-1.5707964,0.35), hiba a fotó-referenciához képest ×4 – docs/round8/post/tsr-depth-history-chandelier.jpg; összevetés: --no-tsr-depth-history.",
+    "modules": [
+      "crates/helios-render/src/shaders/tsr.wgsl",
+      "crates/helios-render/src/passes/tsr.rs",
+      "crates/helios-render/src/renderer.rs",
+      "crates/helios-demo/src/main.rs",
+      "crates/helios-demo/src/editor/settings.rs"
+    ],
+    "order": 213,
+    "updated": "2026-11-11"
+  }
+]

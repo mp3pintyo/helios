@@ -24,7 +24,13 @@ Part of the `helios-render` GPU pipeline; the pipeline diagram and the index of 
   pixels* and accumulates them by weight (history alpha counts the samples it holds), so the result converges to the
   scene filtered at output resolution; the history is read with Catmull–Rom, clipped to the neighbourhood's YCoCg
   variance box (wide when still, tight under motion), rejected where the surface's motion differs from the motion
-  the history pixel was written with (disocclusion), blended with exposure-aware luminance weights, and pixels with
+  the history pixel was written with (disocclusion) or where the *depth history* says the history pixel showed
+  another surface (round 8: each history pixel keeps the view depth of the closest sample it was written with; that
+  point, rebuilt with the previous camera, must lie within 2 % of the depth of the current surface's plane, its normal
+  from the depth neighbours — a plane distance, so grazing surfaces don't fail it; the test acts in proportion to a
+  motion difference of 0.05–0.5 px, where the motion test, which needs 1–3 px, is blind, and not at all where surface
+  and history moved alike, since a sub-pixel twig the jitter missed looks exactly like a disocclusion;
+  `RenderSettings::tsr_depth_history`, `--no-tsr-depth-history`, no measurable cost), blended with exposure-aware luminance weights, and pixels with
   less than one frame's worth of samples fill in a wider anti-aliased filter (the responsive path). Below 100 %,
   bright sub-pixel features (candle flames) that only some jitter phases hit are *locked* for one jitter cycle — not
   clipped or luminance-weighted (a lock is carried over only while the pixel is still) — or the clip would erase them. At 100 % it is the former TAA
@@ -43,10 +49,25 @@ Part of the `helios-render` GPU pipeline; the pipeline diagram and the index of 
   particle / volume composite marks *reactive* keep at most 1.5 frames of history (see *Order-independent
   transparency*).
 * **Camera** (`passes/post_fx.rs`). A thin-lens camera (focal length from the field of view and sensor size,
-  f-number, autofocus on the screen centre) drives scatter-as-gather depth of field; motion blur reconstructs along
+  f-number, autofocus on the screen centre) drives scatter-as-gather depth of field (spread over the circle of
+  confusion's radius; until round 8 its diameter, twice the blur, which photo mode's lens samples exposed); motion blur reconstructs along
   per-tile dominant velocities with depth-aware weights (McGuire et al. 2012) and a 180° shutter by default. Exposure
   comes from a 64-bin luminance histogram that ignores the darkest and brightest 10 %, so a sun disk or a candle
   flame cannot pump it.
+* **Photo mode** (`photo.rs`, `photo.wgsl`; UE's Movie Render Graph accumulation and its Accumulation DOF). With the
+  camera still, `Renderer::start_photo(n)` (Enter, `--photo N` with `--screenshot`, `heliosPhoto(n)` /
+  `heliosPhotoProgress()` in the browser) sums `n` frames into one still: every frame gets a new sub-pixel jitter
+  (Halton 2, 3, no cycle) and, with depth of field on, a lens sample — the camera moves to a point of the aperture
+  disc (Halton 5, 7 mapped concentrically; diameter focal length / f-number, the real-time depth of field's lens) and
+  the projection is sheared so the focus plane (the setting's distance, or the autofocus distance read back from the
+  GPU when the photo starts) stays put. TSR's photo permutation reconstructs each frame on its own (its Gaussian over
+  this frame's samples, with their weight), `photo.wgsl` sums colour × weight and weight in two `rgba32float`
+  targets, and the mean goes through exposure, bloom and tone mapping. The post-process depth of field and motion blur
+  are off, the scene's clock stands still (wind, props, sun, exposure), Lumen, MegaLights and the fog keep converging
+  and their noise averages too. Bright out-of-focus highlights keep their energy as real bokeh discs, which the
+  gather-based depth of field dims. The still stays on screen until the camera moves or the photo is stopped.
+  0.05 ms a frame for the sum; 128 frames of the cathedral take 2.2 s natively (58 MiB of targets at 1600×900, made
+  on the first photo).
 * **Local exposure** (`passes/local_exposure.rs`, as UE5's Local Exposure). One global exposure cannot hold Snell's
   window over the dim lake, sunlit windows over dark aisles or a dawn sky over a shaded valley. A bilateral grid of the
   output image's log luminance (cells of 1/45 of the screen height × 32 bins spanning ±10 stops around the metered

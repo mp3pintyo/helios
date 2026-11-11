@@ -64,15 +64,17 @@ fn velocity(pixel: vec2<u32>) -> vec2<f32> {
     return select(v, v * (fx.params.y / length_px), length_px > fx.params.y);
 }
 
-// Signed circle of confusion in pixels (negative in front of the focus plane).
+// Signed radius of the circle of confusion in pixels (negative in front of the focus plane).
 fn circle_of_confusion(depth: f32) -> f32 {
     if fx.params.z <= 0.0 {
         return 0.0;
     }
     let focus = max(focus_state[0], 0.1);
     let f = fx.params.w;
-    // Thin lens: CoC = A f (d - s) / (d (s - f)), with A scaled to pixels on the CPU.
-    let coc = fx.params.z * f * (depth - focus) / (depth * max(focus - f, 1e-3));
+    // Thin lens: the circle's diameter is A f (d - s) / (d (s - f)), with A scaled to pixels on
+    // the CPU; the taps below spread over its radius (photo mode's lens samples, photo.rs, are
+    // the reference: they blur exactly this much).
+    let coc = 0.5 * fx.params.z * f * (depth - focus) / (depth * max(focus - f, 1e-3));
     return clamp(coc, -fx.focus.y, fx.focus.y);
 }
 

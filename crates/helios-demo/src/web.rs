@@ -789,6 +789,32 @@ pub fn helios_set_paused(paused: bool) {
     with_state(|st| st.paused = paused);
 }
 
+/// Takes a photo: `samples` frames accumulated into one still from the current camera, each with
+/// a new sub-pixel jitter and, with depth of field on (`KeyB`), a lens sample focused like the
+/// real-time depth of field (film-quality bokeh instead of the post-process blur). The scene's
+/// clock stands still meanwhile; the finished still stays on the canvas until the camera moves
+/// or `heliosPhoto(0)` returns to the real-time image. Poll [`helios_photo_progress`].
+#[wasm_bindgen(js_name = heliosPhoto)]
+pub fn helios_photo(samples: u32) {
+    with_state(|st| {
+        if samples == 0 {
+            st.app.renderer.stop_photo();
+        } else {
+            st.app.renderer.start_photo(samples);
+        }
+    });
+}
+
+/// The photo's progress as JSON, `{"accumulated": 37, "samples": 128, "focusing": false,
+/// "done": false}`, or an empty string without a photo.
+#[wasm_bindgen(js_name = heliosPhotoProgress)]
+pub fn helios_photo_progress() -> String {
+    with_state(|st| st.app.renderer.photo_progress())
+        .flatten()
+        .map(|p| format!("{{\"accumulated\":{},\"samples\":{},\"focusing\":{},\"done\":{}}}", p.accumulated, p.samples, p.focusing, p.done()))
+        .unwrap_or_default()
+}
+
 /// The HUD text (timings, statistics, feature states); empty until the engine runs.
 #[wasm_bindgen(js_name = heliosHud)]
 pub fn helios_hud() -> String {

@@ -47,6 +47,8 @@ mod camera;
 mod cards;
 mod clouds;
 mod fog;
+mod fog_scattering;
+mod photo;
 mod context;
 mod dynamic_debug;
 mod effects;
@@ -101,6 +103,8 @@ mod wind;
 
 pub use camera::Camera;
 pub use context::{GpuContext, ContextError};
+pub use fog_scattering::FogScattering;
+pub use photo::PhotoProgress;
 pub use passes::local_exposure::LocalExposure;
 pub use passes::post_fx::DepthOfField;
 pub use picking::PickResult;

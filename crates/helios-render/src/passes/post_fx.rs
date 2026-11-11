@@ -1,6 +1,10 @@
 //! Camera effects after TSR, at output resolution: physically based depth of field and motion
 //! blur (see `shaders/post_fx.wgsl`).
 
+use std::cell::Cell;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
+
 use glam::Vec4;
 use wgpu::BindingResource::{Sampler, TextureView};
 use wgpu::{ShaderStages, TextureFormat, TextureUsages};
@@ -60,6 +64,18 @@ pub struct PostFxPass {
     targets: Option<Targets>,
     motion_blur: bool,
     depth_of_field: bool,
+    /// The autofocus distance read back for photo mode (`request_focus`).
+    focus_readback: FocusReadback,
+}
+
+/// Reads the autofocus distance back to the CPU (photo mode focuses its lens samples there).
+struct FocusReadback {
+    buffer: wgpu::Buffer,
+    /// 0 idle, 1 mapping, 2 mapped.
+    status: Arc<AtomicU32>,
+    wanted: Cell<bool>,
+    copied: Cell<bool>,
+    value: Option<f32>,
 }
 
 impl PostFxPass {
@@ -91,10 +107,22 @@ impl PostFxPass {
             motion: pipeline("motion"),
             layout,
             uniform: uniform_buffer(device, "post fx", std::mem::size_of::<PostFxUniform>() as u64),
-            focus_state: storage_buffer(device, "focus", 16, wgpu::BufferUsages::empty()),
+            focus_state: storage_buffer(device, "focus", 16, wgpu::BufferUsages::COPY_SRC),
             targets: None,
             motion_blur: false,
             depth_of_field: false,
+            focus_readback: FocusReadback {
+                buffer: device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("focus readback"),
+                    size: 16,
+                    usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                    mapped_at_creation: false,
+                }),
+                status: Arc::new(AtomicU32::new(0)),
+                wanted: Cell::new(false),
+                copied: Cell::new(false),
+                value: None,
+            },
         }
     }
 
@@ -122,6 +150,35 @@ impl PostFxPass {
             output: Vec4::new(size.0 as f32, height, 1.0 / size.0 as f32, 1.0 / height),
         };
         queue.write_buffer(&self.uniform, 0, bytemuck::bytes_of(&uniform));
+    }
+
+    /// Asks for the autofocus distance of the next frame that runs depth of field.
+    pub fn request_focus(&self) {
+        self.focus_readback.wanted.set(true);
+    }
+
+    /// The autofocus distance asked for with `request_focus`, once it has arrived.
+    pub fn take_focus(&mut self) -> Option<f32> {
+        let r = &mut self.focus_readback;
+        if r.status.load(Ordering::Acquire) == 2 {
+            if let Ok(view) = r.buffer.get_mapped_range(..) {
+                let words: &[f32] = bytemuck::cast_slice(&view);
+                r.value = Some(words[0]);
+            }
+            r.buffer.unmap();
+            r.status.store(0, Ordering::Release);
+        }
+        r.value.take()
+    }
+
+    /// Call after the frame's submission: maps a freshly copied focus distance.
+    pub fn after_submit(&mut self) {
+        let r = &mut self.focus_readback;
+        if r.copied.take() {
+            r.status.store(1, Ordering::Release);
+            let status = r.status.clone();
+            r.buffer.map_async(wgpu::MapMode::Read, .., move |result| status.store(if result.is_ok() { 2 } else { 0 }, Ordering::Release));
+        }
     }
 
     fn create_targets(device: &wgpu::Device, (width, height): (u32, u32)) -> Targets {
@@ -195,6 +252,14 @@ impl PostFxPass {
             pass.set_pipeline(&self.motion);
             pass.dispatch_workgroups(workgroups(w, 8), workgroups(h, 8), 1);
             current = &t.color[next];
+        }
+        drop(pass);
+        // Photo mode's lens focuses where the autofocus is (an idle read-back only).
+        let r = &self.focus_readback;
+        if self.depth_of_field && r.wanted.get() && r.status.load(Ordering::Acquire) == 0 && !r.copied.get() {
+            rec.encoder.copy_buffer_to_buffer(&self.focus_state, 0, &r.buffer, 0, 16);
+            r.wanted.set(false);
+            r.copied.set(true);
         }
         current
     }

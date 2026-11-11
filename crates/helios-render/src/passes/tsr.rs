@@ -2,7 +2,7 @@
 //! from the jittered internal-resolution frame and the reprojected history. The screen
 //! percentage, jitter sequence and dynamic resolution controller are in `resolution.rs`.
 
-use glam::Vec4;
+use glam::{Mat4, Vec4};
 use wgpu::BindingResource::{Sampler, TextureView};
 use wgpu::ShaderStages;
 
@@ -10,7 +10,7 @@ use super::Samplers;
 use crate::profiler::Recorder;
 use crate::shader::create_module;
 use crate::targets::{FrameTargets, HDR_FORMAT, HISTORY_MOTION_FORMAT};
-use crate::util::{bind, bind_group, bind_group_layout, compute_pipeline, uniform_buffer, workgroups};
+use crate::util::{bind, bind_group, bind_group_layout, compute_pipeline, lazy_compute_pipeline, uniform_buffer, workgroups};
 use crate::pipelines::Lazy;
 
 #[repr(C)]
@@ -18,10 +18,17 @@ use crate::pipelines::Lazy;
 struct TsrUniform {
     /// Output width, height, 1 / width, 1 / height.
     output: Vec4,
+    /// The previous frame's unjittered inverse view-projection: where a history pixel's stored
+    /// depth puts its surface (the depth history's plane test).
+    prev_inv_view_proj: Mat4,
+    /// x: depth history on (1) / off (0).
+    params: Vec4,
 }
 
 pub struct TsrPass {
     pipeline: Lazy<wgpu::ComputePipeline>,
+    /// Photo mode's permutation (made when a photo is first taken): this frame alone.
+    photo: Lazy<wgpu::ComputePipeline>,
     layout: wgpu::BindGroupLayout,
     uniform: wgpu::Buffer,
 }
@@ -49,21 +56,29 @@ impl TsrPass {
         );
         Self {
             pipeline: compute_pipeline(device, "tsr", &module, "resolve", &layout, &[]),
+            photo: lazy_compute_pipeline(device, "tsr photo", &module, "resolve", &layout, &[("PHOTO", 1.0)]),
             layout,
             uniform: uniform_buffer(device, "tsr", std::mem::size_of::<TsrUniform>() as u64),
         }
     }
 
-    /// Writes the output size for this frame.
-    pub fn update(&self, queue: &wgpu::Queue, (w, h): (u32, u32)) {
-        let uniform = TsrUniform { output: Vec4::new(w as f32, h as f32, 1.0 / w as f32, 1.0 / h as f32) };
+    /// Writes the output size for this frame, the previous frame's unjittered view-projection
+    /// and whether disocclusion is also judged by the depth history.
+    pub fn update(&self, queue: &wgpu::Queue, (w, h): (u32, u32), prev_view_proj: Mat4, depth_history: bool) {
+        let uniform = TsrUniform {
+            output: Vec4::new(w as f32, h as f32, 1.0 / w as f32, 1.0 / h as f32),
+            prev_inv_view_proj: prev_view_proj.inverse(),
+            params: Vec4::new(depth_history as u32 as f32, 0.0, 0.0, 0.0),
+        };
         queue.write_buffer(&self.uniform, 0, bytemuck::bytes_of(&uniform));
     }
 
     /// Reconstructs `targets.hdr` (internal resolution) with `history[1 - current]` into
     /// `history[current]` (output resolution). `exposure` is the eye adaptation's buffer (its
-    /// value from the previous frame).
-    pub fn record(&self, rec: &mut Recorder, frame: &wgpu::Buffer, targets: &FrameTargets, samplers: &Samplers, exposure: &wgpu::Buffer, current: usize) {
+    /// value from the previous frame). In `photo` mode it writes this frame's reconstruction
+    /// alone with its sample weight (see `photo.rs`).
+    #[allow(clippy::too_many_arguments)]
+    pub fn record(&self, rec: &mut Recorder, frame: &wgpu::Buffer, targets: &FrameTargets, samplers: &Samplers, exposure: &wgpu::Buffer, current: usize, photo: bool) {
         let (w, h) = targets.output;
         let group = bind_group(
             rec.device,
@@ -84,7 +99,7 @@ impl TsrPass {
             ],
         );
         let mut pass = rec.compute_pass("tsr");
-        pass.set_pipeline(&self.pipeline);
+        pass.set_pipeline(if photo { &self.photo } else { &self.pipeline });
         pass.set_bind_group(0, &group, &[]);
         pass.dispatch_workgroups(workgroups(w, 8), workgroups(h, 8), 1);
     }
