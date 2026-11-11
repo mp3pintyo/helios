@@ -1,0 +1,93 @@
+[
+  {
+    "id": "megalights-58-sampling",
+    "title": "MegaLights UE 5.8 mintavételezés: közös sugarak a félárnyékon kívül, sugártömörítés, fontossági vágás",
+    "area": "Fények",
+    "kind": "feature",
+    "status": "done",
+    "phase": "8. kör – 1. hullám",
+    "summary": "A MegaLights 2×2-es blokkonként mindig négy mintát és négy árnyéksugarat vett; ha ugyanazt a fényt kétszer választotta (egy közeli, domináns gyertyát gyakran), mindkét minta külön sugarat lőtt, akkor is, ha a válasz biztos volt. Mostantól, mint az UE 5.8-ban, ha egy fényhez az előző képkockán a csempében futó összes sugár egyetértett (mind elérte, vagy mind elakadt: nincs félárnyék), az ismételt választások egy sugáron osztoznak; a megmaradt sugarak tömör listába kerülnek, így a megspórolt sugár valóban nem kerül időbe. A 33 fényes katedrálisban 17 %-kal kevesebb sugár, a nyomkövetés 0,10 ms-mal gyorsabb; sok fénynél a blokk négy választása többnyire négy különböző fény, ott 6–7 % a megtakarítás. Új a fontossági vágás is (az UE fényerő- és lecsengés-alapú vágása): a fény hatótávja ott ér véget a rácsban, ahol a sugárzása az előző képkocka expozíciójával a küszöb alá esik.",
+    "details": "megalights_sample.wgsl: generate_block + generate (munkacsoportonkénti tömörítés: workgroup atomic, egy globális atomicAdd csoportonként), ml_agreed (a guide maszkok új harmadik szava: 'elakadt' sugár, láthatóság < 0,75; egyetért = volt sugár és látható XOR árnyékolt), ray_args_main (indirekt dispatch-argumentumok, 32768-as X-korlát, rays[0] = darabszám), trace egy szál/listázott sugár. megalights_common.wgsl: ML_SOURCE_SHIFT (mintánként 2 bit a fejlécben: melyik minta sugarát használja), ml_sample_visibility, ML_GUIDE_WORDS 16 → 24. A WebGPU 8 tárolópuffer/fokozat korlátja miatt a két guide puffer egy puffer két fele lett (guide_masks, a képkocka paritása választ), az indirekt argumentumok pedig a generate/ray_args group(1)-ében vannak (indirekt puffer nem köthető írhatóan a saját dispatch-ében). Override-permutáció: ML_SHARED_RAYS. light_cull.wgsl: a fény gömbje min(hatótáv, sqrt(teljesítmény × expozíció / küszöb)) (exposure puffer, binding 4). Beállítások: RenderSettings::mega_lights_shared_rays (alap be, --ml-no-shared-rays), mega_lights_importance_cull (alap 0,01, --ml-importance-cull F), szerkesztő-kapcsolók. Elvetett: froxelenkénti relatív vágás (a froxel legerősebb fényének legsötétebb pontjához mérve: 29,4 → 28,5 fény/froxel, +0,11 ms vágási költség), változó mintaszám (változó blokkelrendezést kívánna; a négy minta a fényválasztás zaját is meghatározza).",
+    "metrics": "RTX 3090, 1600×900, katedrális éjjel, --megalights, 3 váltakozó futás minimuma. Sugarak (minden minta %-ában): 33 fény 93,4 → 77,2 %, 300 fény 85,5 → 80,7 %, 1000 fény 85,7 → 79,7 %. megalights trace: 33 fény 0,745 (alap) → 0,722 ms (közös sugarak nélkül 0,825, lineáris képernyő-nyomkövetéssel 0,696); 300: 0,782 → 0,833 (0,858; 0,791); 1000: 0,789 → 0,837 (0,869; 0,790) – a tömör lista ~0,05 ms-ba kerül, a HZB-nyomkövetés +0,03–0,05 ms. megalights sample 0,305–0,309 → 0,284–0,289 ms. Fontossági vágás a katedrálisban: 0,003–0,03 küszöbbel azonos listák (a gyertyák hatótávja már ott véget ér, ahol még látszanak); 0,1-nél 1000 fénynél 35,5 → 22,6 fény/froxel, de 39,2 dB, láthatóan sötétebb. Mozgó fény (--move-light) a kandeláber-közelképen: 44,3 dB az alaphoz képest, új zaj vagy késés nem látszik.",
+    "showcase": "Katedrális, 33 fény, --megalights, V debug nézet 18 (a minták fényei; a megosztott minták a forrásuk láthatóságát mutatják). Kép: docs/round8/lights/moving-light-base-vs-new.jpg (mozgó fény, alap | új).",
+    "modules": [
+      "crates/helios-render/src/megalights.rs",
+      "crates/helios-render/src/shaders/megalights_sample.wgsl",
+      "crates/helios-render/src/shaders/megalights_common.wgsl",
+      "crates/helios-render/src/shaders/megalights_shade.wgsl",
+      "crates/helios-render/src/shaders/light_cull.wgsl",
+      "crates/helios-render/src/lights.rs",
+      "crates/helios-render/src/renderer.rs",
+      "crates/helios-render/src/util.rs"
+    ],
+    "order": 201,
+    "updated": "2026-11-11"
+  },
+  {
+    "id": "megalights-fog-translucency",
+    "title": "Volumetrikus köd és áttetsző felületek a MegaLights-on át (közös froxel-térfogat)",
+    "area": "Fények",
+    "kind": "feature",
+    "status": "done",
+    "phase": "8. kör – 1. hullám",
+    "summary": "Bekapcsolt MegaLights mellett az átlátszatlan felületeken minden fény árnyékot vetett, de a köd csak a legfeljebb 32 árnyéktérképes fény árnyékát ismerte, az üveg pedig minden fényt árnyék nélkül kapott: több száz gyertyánál a fény átszivárgott a falakon a mellékhajók ködébe és az üvegtáblákra. Mostantól, mint az UE 5.8-ban, a köd és az áttetsző felületek egy közös froxel-térfogatból kapják a helyi fényt, amelyet a MegaLights mintavételez és árnyékol: froxelenként és képkockánként egy fényt választ a froxelen belül véletlenszerű pontban mért árnyékolatlan sugárzása arányában, egy árnyéksugarat lő rá ugyanazokkal a módszerekkel, mint a pixelek (árnyéktérkép-menetelés vagy távolságmezők), és az eredményt az előző képkockák vetített történetével átlagolja. A köd a kamera felé szórt fényt adja hozzá, az üveg a beeső fény irányított és szórt részét árnyalja vele. Home kapcsolja.",
+    "details": "megalights_volume.rs (MegaLightsVolume: 6 rgba16f 3D textúra ping-pongban, csak bekapcsolva; 1×1×1 helyőrző kikapcsolva), megalights_volume.wgsl (inject: 16 rétegzett jelölt, rendszeres újramintavételezés, cellamérettel lágyított lecsengés mint a köd hurkában, HG fázis a köd anizotrópiájának felével, 10 %-os történet-keverés újravetítéssel), megalights_volume_common.wgsl (MlVolume uniform, ml_volume_light: sh0 = sugárzásösszeg, sh1 = fénysűrűséggel súlyozott irány; irányított rész |sh1|/lum(sh0), maradék szórt fény negyede), megalights_rays.wgsl (vsm_ray mip-eltolással és sdf_ray kiemelve a pixel- és a térfogat-sugaraknak). A rács a ködé (16 px oszlopok, 64 exponenciális réteg, a köd mélységtartománya, köd nélkül 0,5–80 m), így a fog.wgsl ugyanazt a froxelt olvassa (binding 140, textureLoad; a helyőrző mélysége jelzi a kikapcsolt állapotot). translucency.wgsl: direct_light a hurok helyett a térfogatot használja a tartományán belül (binding 130 uniform, 131–132 textúrák). FogInputs::megalights_light, LightingInputs::megalights_volume(_light). RenderSettings::mega_lights_volume (alap be, csak MegaLights-szal), --ml-no-volume, Home billentyű, szerkesztő: 'MegaLights fog + translucency'. Mérlegelt: két minta froxelenként (+0,15 ms, statikus képen 60 dB-en belül), külön rács a köd rácsától (a köd ekkor mintavételezné), UE-szerű per-pixel elülső réteg (nem készült el).",
+    "metrics": "RTX 3090, 1600×900, katedrális éjjel, 3 váltakozó futás minimuma. megalights volume 0,240 (33 fény) / 0,311 (300) / 0,314 ms (1000); a köd 0,115/0,188/0,237 → 0,080 ms, az áttetszőség 0,278/0,317/0,342 → 0,269/0,265/0,273 ms; képkocka térfogat nélkül → vele: 6,53 → 6,76, 7,56 → 7,66, 8,52 → 8,52 ms. Északi mellékhajó üvegfalai 1000 fénynél: translucency 1,06 → 0,78 ms. Alapnézet 300 fénnyel ki/be: 38,9 dB. Memória 17,5 MB 1600×900-on.",
+    "showcase": "Katedrális éjjel --lights 300 --megalights (alapnézet, a mellékhajók ködje nem világít át a falakon) és --lights 1000 --eye 11,1.6,9.6 --at 2,2.0,10.4 (az ólomüveg fal); Home ki/be. Képek: docs/round8/lights/fog-volume-off-vs-on.jpg, glass-volume-off-vs-on.jpg.",
+    "modules": [
+      "crates/helios-render/src/megalights_volume.rs",
+      "crates/helios-render/src/shaders/megalights_volume.wgsl",
+      "crates/helios-render/src/shaders/megalights_volume_common.wgsl",
+      "crates/helios-render/src/shaders/megalights_rays.wgsl",
+      "crates/helios-render/src/shaders/fog.wgsl",
+      "crates/helios-render/src/fog.rs",
+      "crates/helios-render/src/shaders/translucency.wgsl",
+      "crates/helios-render/src/translucency.rs",
+      "crates/helios-render/src/passes/shading.rs",
+      "crates/helios-render/src/renderer.rs",
+      "crates/helios-demo/src/app.rs",
+      "crates/helios-demo/src/editor/settings.rs"
+    ],
+    "order": 202,
+    "updated": "2026-11-11"
+  },
+  {
+    "id": "hzb-min-depth-traces",
+    "title": "Legközelebbi mélységű HZB és HZB-bejárás a MegaLights képernyő-nyomkövetéséhez",
+    "area": "Fények",
+    "kind": "feature",
+    "status": "done",
+    "phase": "8. kör – 1. hullám",
+    "summary": "A HZB eddig csak a legtávolabbi mélységet tárolta (a takarási vágáshoz, a korai menet mélységéből), a MegaLights érintkezési árnyékai pedig 8 lineáris lépésben mentek végig 1 méteren, így a lépések között a vékony takarókat átugorhatták. Most a végleges mélységpufferből egy legközelebbi mélységű piramis is épül, és egy újrahasznosítható HZB-bejárás (hzb_trace.wgsl) minden pixelt megvizsgál, amelyen a sugár áthalad, az üres részeket pedig durvább szinteken lépi át. A MegaLights érintkezési árnyékai ezt használják; a Lumen képernyő-nyomkövetése később átállhat rá.",
+    "details": "hzb.wgsl: from_depth_closest / downsample_closest (fordított Z maximum). passes/hzb.rs: ClosestHzb (fél felbontású mip-lánc a kapacitáson), Hzb::record_closest, a közös record_pyramid; a csővezetékek lustán fordulnak. hzb_trace.wgsl: hzb_trace(origin, end, start_pixels, thickness, bias, max_steps) képernyőtérben (a fordított Z lineáris a sugár mentén), L > 0 szinten a cella átugrása, ha a sugár a cella legközelebbi mélysége előtt marad, különben finomabb szint; pixelszinten találat, ha a sugár mélységtartománya metszi a felület héját; a hívó hzb_trace_accept függvénye szűr (MegaLights: emisszív lángok nem takarnak). MegaLights: ML_HZB_TRACE override, ML_HZB_STEPS = 32, ugyanaz az 1 m és 3 cm-es héj. RenderSettings::mega_lights_hzb_traces (alap be, --ml-linear-traces), szerkesztő-kapcsoló. A piramis csak bekapcsolt MegaLights mellett épül.",
+    "metrics": "RTX 3090, 1600×900: hzb closest 0,027 ms; a nyomkövetés a lineárishoz képest +0,026 (33 fény), +0,042 (300), +0,047 ms (1000). Kandeláber-közelkép (--eye 11.8,1.3,3.4 --at 14,0.5,5.1, 300 fény): lineáris és HZB 52 dB; az eltérések a lineáris lépések által átugrott érintkezési árnyékok (pad végének árnyéka a pillér lábán).",
+    "showcase": "Katedrális --lights 300 --megalights --eye 11.8,1.3,3.4 --at 14,0.5,5.1, a szerkesztőben 'MegaLights HZB screen traces' ki/be. Kép: docs/round8/lights/hzb-trace-linear-vs-hzb.jpg (lineáris | HZB).",
+    "modules": [
+      "crates/helios-render/src/shaders/hzb.wgsl",
+      "crates/helios-render/src/passes/hzb.rs",
+      "crates/helios-render/src/shaders/hzb_trace.wgsl",
+      "crates/helios-render/src/shaders/megalights_sample.wgsl",
+      "crates/helios-render/src/megalights.rs"
+    ],
+    "order": 203,
+    "updated": "2026-11-11"
+  },
+  {
+    "id": "hierarchical-light-culling",
+    "title": "Hierarchikus fényvágás: durva cellák, megosztott memóriában áramló fények",
+    "area": "Fények",
+    "kind": "performance",
+    "status": "done",
+    "phase": "8. kör – 1. hullám",
+    "summary": "A fényvágás froxelenként egy szálon a jelenet összes fényét tesztelte (3456 szál, fényenként mátrixszorzással): 1000 fénynél 0,25 ms. Most kétszintű: egy munkacsoport egy 4 × 3 csempe × 4 réteg méretű durva cellát dolgoz fel, a fényeket 64-esével a megosztott memórián át áramoltatja, mindegyiket egyszer teszteli a cellára, és csak a túlélőket a cella 48 froxelére. A listák bitre azonosak a korábbiakkal (ugyanaz a sorrend, ugyanazokat ejti el a 255-ös korlát), a vágás 1000 fénynél 0,25 → 0,07 ms.",
+    "details": "light_cull.wgsl: cull_lights @workgroup_size(64), 72 durva cella (COARSE_X/Y/Z = 4/3/4), spheres[64] és két paritású chunk_mask a megosztott memóriában (két barrier darabonként), a froxel szála firstTrailingBit-tel járja be a maszk bitjeit index-sorrendben. lights.rs: COARSE_CELLS dispatch, params uniform (binding 3) és az expozíció (binding 4) a fontossági vágáshoz. Elvetett: z-binning (a fények mélység szerinti rendezése megváltoztatná az indexeket, amelyekre a MegaLights guide maszkjai és az árnyéktérkép-slotok épülnek), fény-BVH (1024 fénynél több, mint amit ez a rács igényel).",
+    "metrics": "RTX 3090, 1600×900, katedrális éjjel, 3 váltakozó futás minimuma: light culling 33 fény 0,011 → 0,008 ms, 300 fény 0,079–0,092 → 0,030 ms, 1000 fény 0,231–0,247 → 0,068 ms. Klasszikus képkocka 1000 fénynél 9,10 → 8,79 ms, 300-nál 7,46 → 7,38 ms. Kép a klasszikus hurokkal 1000 fénynél: 64,7 dB az alaphoz (két alapfutás 66,7 dB).",
+    "showcase": "Katedrális --lights 1000 (klasszikus vagy --megalights): a GPU sorban a 'light culling' idő. Nincs látható különbség (azonos listák).",
+    "modules": [
+      "crates/helios-render/src/shaders/light_cull.wgsl",
+      "crates/helios-render/src/lights.rs"
+    ],
+    "order": 204,
+    "updated": "2026-11-11"
+  }
+]
