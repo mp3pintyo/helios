@@ -44,16 +44,17 @@
 //! ```text
 //! [0..3) position minimum (i32 grid units)     [3..5) uv minimum (i32 grid units)
 //! [5]    bit widths: position x | y << 5 | z << 10, uv u << 15 | v << 20, normal << 25;
-//!        bit 30: extended (the mesh has optional attributes)
+//!        bit 30: extended (the mesh has optional attributes); bit 31: plant data (positions carry
+//!        the wind weight)
 //! [6]    grid exponents: position (i8) | uv (i8) << 8
 //! only if extended, [7..11):
 //! [7]    uv1 widths u | v << 5, colour widths r << 10 | g << 14 | b << 18 | a << 22,
 //!        has uv1 << 26, has colour << 27, has skin << 28, has plant data << 29
 //! [8..10) uv1 minimum (i32 units of the uv grid)   [10] colour minimum (r | g << 8 | b << 16 | a << 24)
-//! [7..) or [11..)  vertex bit stream: every vertex's position offsets (x, y, z), then every
-//!        vertex's attributes (octahedral normal x | y << normal bits, u, v, then uv1 u, v,
-//!        colour r, g, b, a offsets and the plant data's wind weight, occlusion codes where
-//!        present)
+//! [7..) or [11..)  vertex bit stream: every vertex's position offsets (x, y, z, then the plant
+//!        data's wind weight code), then every vertex's attributes (octahedral normal x | y <<
+//!        normal bits, u, v, then uv1 u, v, colour r, g, b, a offsets and the plant data's
+//!        occlusion code where present)
 //! skin only, word aligned after the vertex stream:
 //!        [0] joint minimum | joint bits << 16 | weight bits << 21 | (influences - 1) << 25,
 //!        then per vertex: `influences` joint offsets, then the weights of influences 1.. (the
@@ -79,6 +80,9 @@ const EXTENDED_BIT: u32 = 1 << 30;
 const SKIN_BIT: u32 = 1 << 28;
 /// Bit of extension word 7 marking a cluster whose vertices carry plant data.
 const PLANT_BIT: u32 = 1 << 29;
+/// Bit of header word 5 (the widths) of a cluster with plant data: each vertex's position offsets are
+/// followed by its wind weight, which the position-only passes then read with them.
+const WIND_WEIGHTS_BIT: u32 = 1 << 31;
 /// Bits per channel of the plant data (wind weight, occlusion): unorm codes `0..=31`.
 pub const PLANT_CHANNEL_BITS: u32 = 5;
 const PLANT_CODE_MAX: f32 = ((1u32 << PLANT_CHANNEL_BITS) - 1) as f32;
@@ -504,7 +508,7 @@ impl ClusterEncoding {
 
     fn to_words(self) -> Vec<u32> {
         let p = self.position_bits;
-        let extended = if self.attributes.any() { EXTENDED_BIT } else { 0 };
+        let extended = if self.attributes.any() { EXTENDED_BIT } else { 0 } | if self.attributes.plant { WIND_WEIGHTS_BIT } else { 0 };
         let widths = p.x | (p.y << 5) | (p.z << 10) | (self.uv_bits.x << 15) | (self.uv_bits.y << 20) | (self.normal_bits << 25) | extended;
         let exponents = (self.position_exponent as i8 as u8 as u32) | ((self.uv_exponent as i8 as u8 as u32) << 8);
         let mut words = vec![
@@ -554,17 +558,18 @@ impl ClusterEncoding {
         encoding
     }
 
+    /// Bits of a vertex's position: its offsets and, with plant data, its wind weight.
     fn position_stride(&self) -> u32 {
-        self.position_bits.element_sum()
+        self.position_bits.element_sum() + if self.attributes.plant { PLANT_CHANNEL_BITS } else { 0 }
     }
 
     fn attribute_stride(&self) -> u32 {
         2 * self.normal_bits + self.uv_bits.element_sum() + self.uv1_bits.element_sum() + self.color_bits.element_sum() + self.plant_bits()
     }
 
-    /// Bits of the plant data per vertex.
+    /// Bits of the plant data among a vertex's attributes (its occlusion).
     fn plant_bits(&self) -> u32 {
-        if self.attributes.plant { 2 * PLANT_CHANNEL_BITS } else { 0 }
+        if self.attributes.plant { PLANT_CHANNEL_BITS } else { 0 }
     }
 
     /// Bits of the vertex stream of a cluster with `vertex_count` vertices.
@@ -626,9 +631,11 @@ impl ClusterEncoding {
         if !self.attributes.plant {
             return Vec2::ONE;
         }
+        // The wind weight follows the position offsets (the rasterisers read it with them), the
+        // occlusion ends the attributes.
+        let wind = read_bits(stream, (index + 1) * self.position_stride() - PLANT_CHANNEL_BITS, PLANT_CHANNEL_BITS) as u8;
         let bit = self.attribute_bit(vertex_count, index) + self.attribute_stride() - self.plant_bits();
-        let wind = read_bits(stream, bit, PLANT_CHANNEL_BITS) as u8;
-        let occlusion = read_bits(stream, bit + PLANT_CHANNEL_BITS, PLANT_CHANNEL_BITS) as u8;
+        let occlusion = read_bits(stream, bit, PLANT_CHANNEL_BITS) as u8;
         decode_plant([wind, occlusion])
     }
 
@@ -659,6 +666,9 @@ pub fn encode_cluster(quantization: &Quantization, vertices: &[QuantizedVertex],
         for axis in 0..3 {
             stream.write(offset[axis], encoding.position_bits[axis]);
         }
+        if encoding.attributes.plant {
+            stream.write(v.plant[0] as u32, PLANT_CHANNEL_BITS);
+        }
     }
     for v in vertices {
         let offset = (v.uv - encoding.uv_min).as_uvec2();
@@ -676,7 +686,6 @@ pub fn encode_cluster(quantization: &Quantization, vertices: &[QuantizedVertex],
             }
         }
         if encoding.attributes.plant {
-            stream.write(v.plant[0] as u32, PLANT_CHANNEL_BITS);
             stream.write(v.plant[1] as u32, PLANT_CHANNEL_BITS);
         }
     }

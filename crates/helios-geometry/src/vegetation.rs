@@ -512,8 +512,8 @@ pub fn fern(seed: u32, fronds: u32, length: f32, leaflets: u32) -> Mesh {
         // The rachis: a stalk following the frond from below the ground to its tip, tapering.
         let side = out.cross(Vec3::Y);
         let mut stalk = vec![(point(0.0) - Vec3::Y * ROOT_DEPTH, 0.008, Vec2::new(0.0, 0.35))];
-        for k in 0..=4 {
-            let s = k as f32 / 4.0;
+        for k in 0..=3 {
+            let s = k as f32 / 3.0;
             stalk.push((point(s), 0.007 * (1.0 - 0.75 * s), plant(s)));
         }
         // Facing up (the strip's winding: side × along).
@@ -546,9 +546,10 @@ pub fn grass_clump(seed: u32, blades: u32, height: f32) -> Mesh {
         let root = out * r - Vec3::Y * ROOT_DEPTH;
         let total = visible + ROOT_DEPTH;
         let darkness = 0.35 + 0.25 * (r / tuft);
-        // Rows from the root below the ground to the tip (attributes interpolate between them:
-        // at the ground the weight is a fifth of its value at the first row).
-        let rows = [0.0, 0.35, 0.7, 1.0];
+        // Rows from the root below the ground to the tip: two segments, 6 triangles a blade (the
+        // attributes interpolate between them: at the ground the weight is a fifth of its value
+        // at the middle row).
+        let rows = [0.0, 0.45, 1.0];
         let points: Vec<(Vec3, f32, Vec2)> = rows
             .iter()
             .map(|&s| {

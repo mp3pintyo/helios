@@ -38,7 +38,7 @@ Part of the `helios-render` GPU pipeline; the pipeline diagram and the index of 
   graph) where its material has one. Shadow pages (sun clipmap and local light faces) rasterise voxels the same way
   in page texels, with the triangles' slope-scaled bias and hashed, static noise per absolute texel (cached and
   refreshed pages agree). Culling treats voxel clusters like triangle clusters (frustum, HZB, LOD, streaming);
-  `.hvm` is version 4. **Assemblies** (`Scene::set_assembly`): a mesh can be made of *parts* — meshes placed by
+  `.hvm` is version 4 (5 since round 8's plant data, below; version 4 files still load). **Assemblies** (`Scene::set_assembly`): a mesh can be made of *parts* — meshes placed by
   transforms in its space — so the forest's conifers share six needle sprays per species (one per branch span, as
   many copies as branches) instead of each species baking all its needles (`vegetation::conifer_assembly`;
   `broadleaf_assembly` builds broadleaf trees from leaf sprays the same way). The parts are resolved on the GPU

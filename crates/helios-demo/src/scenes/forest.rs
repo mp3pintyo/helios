@@ -20,6 +20,8 @@ use helios_render::{
 use super::{add_baked_with, add_built, smoothstep, Detail, Rng, SceneSetup};
 
 const SIZE: f32 = 900.0;
+/// Grid cells per side of the terrain mesh at medium and high detail.
+const TERRAIN_RESOLUTION: (u32, u32) = (384, 768);
 const SUN: (f32, f32, f32) = (2.5, 0.26, 9.0);
 
 pub fn ground_height(x: f32, z: f32) -> f32 {
@@ -197,7 +199,7 @@ fn build_scene(detail: Detail) -> Scene {
 
     // ---- Meshes --------------------------------------------------------------------------------------
     let mut m = Meshes { scene: &mut scene };
-    let terrain_resolution = detail.pick(384, 768);
+    let terrain_resolution = detail.pick(TERRAIN_RESOLUTION.0, TERRAIN_RESOLUTION.1);
     let terrain = add_baked_with(
         m.scene,
         "terrain",
@@ -406,8 +408,18 @@ fn initial_camera() -> Camera {
     camera
 }
 
+/// The ground as rendered at each detail level (camera floor, PCG scattering).
+fn floor_medium(x: f32, z: f32) -> f32 {
+    terrain_mesh_height(x, z, TERRAIN_RESOLUTION.0)
+}
+
+fn floor_high(x: f32, z: f32) -> f32 {
+    terrain_mesh_height(x, z, TERRAIN_RESOLUTION.1)
+}
+
 pub fn build(detail: Detail) -> SceneSetup {
-    SceneSetup { scene: build_scene(detail), camera: initial_camera(), sun: SUN, floor: ground_height, animation: None, motion: Default::default() }
+    let floor: fn(f32, f32) -> f32 = detail.pick(floor_medium, floor_high);
+    SceneSetup { scene: build_scene(detail), camera: initial_camera(), sun: SUN, floor, animation: None, motion: Default::default() }
 }
 
 #[cfg(test)]

@@ -26,6 +26,14 @@ Part of the `helios-render` GPU pipeline; the pipeline diagram and the index of 
   ~1.6 instead of ~1.8 ms of shadow work). Almost every shadow caster in the forest sways (trees included); only
   terrain, rocks and logs are static, so the remaining cost is that of the moving vegetation. A camera flying through
   the forest renders the same number of pages, with 70 k instead of 80 k draws.
+  **Wind weights** (round 8, [`foliage-grounding.md`](../round8/foliage-grounding.md)): every vertex's displacement is
+  scaled by its *wind weight* — the plant data's attachment (`Mesh::plant.x`, baked by the vegetation generators from
+  the distance along the plant from its root: 0 where a blade or stalk leaves the soil or a trunk meets the ground, 1
+  where it moves freely), read per vertex by `vertex_wind_weight` in all four rasterisers and the G-buffer resolve
+  (corners and motion vectors). Grass blades' and ferns' bases no longer move at ground level (the sway and flutter
+  terms reached them), while a frond tip resting near the ground still sways. The weight only reduces the offset, so
+  every bound above holds unchanged; voxels and tessellated surfaces move with weight 1, meshes without plant data
+  (imports) too.
 * **Skeletal meshes** (`skin.rs`, `skinning.wgsl`, `skin_palette.wgsl`; UE 5.5's Nanite skinned meshes). A
   `SkinHandle` is a joint palette (`Scene::add_skin`, `Scene::set_skin_pose` every frame,
   `Scene::set_instance_skin`); each matrix maps a rest vertex to its posed position in the instance's object space.

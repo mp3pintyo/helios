@@ -6,16 +6,17 @@
 // vertex_offset in its page:
 //   [0..3) position minimum, [3..5) uv minimum (i32 units of the mesh's grids)
 //   [5]    bit widths: position x | y << 5 | z << 10, uv u << 15 | v << 20, normal << 25;
-//          bit 30: extended (imported meshes with a second UV set or vertex colours)
+//          bit 30: extended (imported meshes with a second UV set or vertex colours, plant data);
+//          bit 31: positions carry wind weights (plant data)
 //   [6]    grid exponents: position (i8) | uv (i8) << 8
 //   extended only: [7] uv1 widths u | v << 5, colour widths r << 10 | g << 14 | b << 18 |
 //          a << 22, has uv1 << 26, has colour << 27, has skin << 28, has plant data << 29;
 //          [8..10) uv1 minimum; [10] colour minimum (RGBA8: rgb on a square-root curve, alpha
 //          linear)
-//   [7..) or [11..)  vertex bit stream: all position offsets (x, y, z), then all attributes
-//          (octahedral normal x | y << normal bits, u offset, v offset, then the optional
-//          uv1 u, v and colour r, g, b, a offsets and plant data: wind weight, occlusion,
-//          PLANT_CHANNEL_BITS each)
+//   [7..) or [11..)  vertex bit stream: all position offsets (x, y, z, then the wind weight of
+//          plant data, PLANT_CHANNEL_BITS), then all attributes (octahedral normal x | y << normal
+//          bits, u offset, v offset, then the optional uv1 u, v and colour r, g, b, a offsets and
+//          the plant data's occlusion, PLANT_CHANNEL_BITS)
 // At triangle_offset: 3 corner indices per triangle, index_bits(vertex count) bits each.
 // A coordinate decodes as f32(minimum + offset) * 2^exponent, exact in f32, so a vertex shared
 // by two clusters (or LOD levels) lands on the same bits in both: no cracks.
@@ -26,6 +27,9 @@ const CLUSTER_EXTENSION_WORDS: u32 = 4u;
 const CLUSTER_HAS_UV1: u32 = 0x4000000u;
 const CLUSTER_HAS_COLOR: u32 = 0x8000000u;
 const CLUSTER_HAS_PLANT: u32 = 0x20000000u;
+// Widths word bit 31 (plant data): every vertex's position offsets are followed by its wind weight,
+// so the rasterisers read it from the bits they already fetch.
+const CLUSTER_WIND_WEIGHTS: u32 = 0x80000000u;
 const PLANT_CHANNEL_BITS: u32 = 5u;
 
 // `count` (<= 32) bits at bit `bit` of the stream starting at pool word `word`.
@@ -91,15 +95,20 @@ fn vertex_position(c: Cluster, base: u32, index: u32) -> vec3<f32> {
     let widths = geometry[header + 5u];
     let bits = vec3<u32>(widths & 31u, (widths >> 5u) & 31u, (widths >> 10u) & 31u);
     let stream = vertex_stream(header, widths);
-    let bit = index * (bits.x + bits.y + bits.z);
+    let bit = index * position_stride(widths);
     let offset = vec3<u32>(read_bits(stream, bit, bits.x), read_bits(stream, bit + bits.x, bits.y), read_bits(stream, bit + bits.x + bits.y, bits.z));
     let minimum = vec3<i32>(bitcast<i32>(geometry[header]), bitcast<i32>(geometry[header + 1u]), bitcast<i32>(geometry[header + 2u]));
     return vec3<f32>(minimum + vec3<i32>(offset)) * grid_step(geometry[header + 6u], 0u);
 }
 
-// Bits of the plant data per vertex, from the extension word.
+// Bits of a vertex's position: offsets x, y, z and, with plant data, its wind weight.
+fn position_stride(widths: u32) -> u32 {
+    return (widths & 31u) + ((widths >> 5u) & 31u) + ((widths >> 10u) & 31u) + select(0u, PLANT_CHANNEL_BITS, (widths & CLUSTER_WIND_WEIGHTS) != 0u);
+}
+
+// Bits of the plant data among a vertex's attributes (its occlusion), from the extension word.
 fn plant_stride(extension: u32) -> u32 {
-    return select(0u, 2u * PLANT_CHANNEL_BITS, (extension & CLUSTER_HAS_PLANT) != 0u);
+    return select(0u, PLANT_CHANNEL_BITS, (extension & CLUSTER_HAS_PLANT) != 0u);
 }
 
 // Bits of the optional attributes (uv1, colour, plant data) per vertex, from the extension word.
@@ -110,9 +119,8 @@ fn extension_stride(extension: u32) -> u32 {
 
 // Bit of vertex `index`'s attributes (normal, uv, then the optional ones) in the vertex stream.
 fn attribute_bit(c: Cluster, widths: u32, extension: u32, index: u32) -> u32 {
-    let position_stride = (widths & 31u) + ((widths >> 5u) & 31u) + ((widths >> 10u) & 31u);
     let attribute_stride = (2u * ((widths >> 25u) & 31u)) + ((widths >> 15u) & 31u) + ((widths >> 20u) & 31u) + extension_stride(extension);
-    return (cluster_vertex_count(c) * position_stride) + (index * attribute_stride);
+    return (cluster_vertex_count(c) * position_stride(widths)) + (index * attribute_stride);
 }
 
 fn vertex_normal(c: Cluster, base: u32, index: u32) -> vec3<f32> {
@@ -184,11 +192,21 @@ fn vertex_plant(c: Cluster, base: u32, index: u32) -> vec2<f32> {
     if (extension & CLUSTER_HAS_PLANT) == 0u {
         return vec2<f32>(1.0);
     }
-    // The plant data ends the vertex's attributes.
+    // The occlusion ends the vertex's attributes.
     let bit = attribute_bit(c, widths, extension, index + 1u) - plant_stride(extension);
-    let packed = read_bits(vertex_stream(header, widths), bit, 2u * PLANT_CHANNEL_BITS);
-    let mask = (1u << PLANT_CHANNEL_BITS) - 1u;
-    return vec2<f32>(f32(packed & mask), f32((packed >> PLANT_CHANNEL_BITS) & mask)) / f32(mask);
+    let occlusion = read_bits(vertex_stream(header, widths), bit, PLANT_CHANNEL_BITS);
+    return vec2<f32>(vertex_wind_weight_of(header, widths, index), f32(occlusion) / f32((1u << PLANT_CHANNEL_BITS) - 1u));
+}
+
+// The wind weight of vertex `index` of the cluster at `header` (widths word `widths`): it follows
+// the vertex's position offsets.
+fn vertex_wind_weight_of(header: u32, widths: u32, index: u32) -> f32 {
+    if (widths & CLUSTER_WIND_WEIGHTS) == 0u {
+        return 1.0;
+    }
+    let stride = position_stride(widths);
+    let code = read_bits(vertex_stream(header, widths), ((index + 1u) * stride) - PLANT_CHANNEL_BITS, PLANT_CHANNEL_BITS);
+    return f32(code) / f32((1u << PLANT_CHANNEL_BITS) - 1u);
 }
 
 // The wind weight of vertex `index` where the instance moves in the wind (`strength` > 0, from
@@ -197,5 +215,6 @@ fn vertex_wind_weight(c: Cluster, base: u32, index: u32, strength: f32) -> f32 {
     if strength <= 0.0 {
         return 1.0;
     }
-    return vertex_plant(c, base, index).x;
+    let header = base + c.vertex_offset;
+    return vertex_wind_weight_of(header, geometry[header + 5u], index);
 }

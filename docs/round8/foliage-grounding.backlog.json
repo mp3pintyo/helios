@@ -1,0 +1,77 @@
+[
+  {
+    "id": "campfire-foliage-shadows",
+    "title": "A tábortűz árnyékot vet a páfrányokra és a fűre: a talaj normáltérképes foltjai helyett olvasható növényárnyékok",
+    "area": "Árnyékok",
+    "kind": "fix",
+    "status": "done",
+    "phase": "8. kör – 1. hullám",
+    "summary": "Éjjel úgy tűnt, mintha a tűz nem vetne árnyékot a mellette álló növényekre. A páfrányok és a fű valójában benne voltak a tűz helyi virtuális árnyéktérképében, csak a talajt sötét foltminta borította, és ez elnyomta őket. Kiderült, hogy ez se nem árnyék, se nem acne: a 0,8 m magas tűz 2–5 m-ről 9–25°-os szögben éri a talajt, és az erdei talaj erős normáltérképe (avar 1,0, moha és föld 0,6) a felület nagy részét elfordítja a fénytől (N·L = 0), 10–20 cm-es foltokban – pont a páfránylevélkék árnyékának méretében. A talaj domborzata most mérsékeltebb (0,3 / 0,2 / 0,25), a tűz forrássugara a valódi, kb. 30 cm széles lánghoz igazodik (0,25 → 0,15 m), így a páfrányok levélkéi és a fűcsomók puha, de jól olvasható árnyékot vetnek, amelyek sugárirányban futnak szét a tűztől a tisztáson; a kövek és a rönkök árnyéka változatlanul helyes.",
+    "details": "Diagnózis: a --view 15 nézet sötétszürke foltjai a 'nem ér ide fény' (0,08) jelzések, azaz saturate(dot(n, l)) = 0 a normáltérképes árnyalási normállal. Ellenőrzés: négyszeres vevőoldali eltolás (bias) nem változtatott rajtuk; a mélységpufferből számolt geometriai normál a PCSS szűrő vevősíkjához sem; viszont a geometriai normállal számolt N·L-lel eltűntek, és a páfrányárnyékok élesen kirajzolódtak. Javítás (tartalom, nem shader): forest.rs – a talajtextúrák bump értéke 1,0/0,6/0,6 → 0,3/0,2/0,25, a tábortűz fényének source_radius 0,25 → 0,15 m; a növények gyökerezése (227) után a fronds és fűcsomók árnyéka a tűztől kifelé fut. A vsm_local*.rs/.wgsl fájlok NEM változtak. Elvetett: normáltérkép-lapítás súroló fénynél a világításban (pixelenkénti mélységből számolt normál, minden jelenetben fizetni kell érte, és fizikailag a göröngyös talaj súroló fényben valóban kontrasztos), nagyobb bias (hatástalan).",
+    "metrics": "TBD",
+    "showcase": "Erdő, éjjel (--scene forest --sun 200,-30), alapnézet: a tűz előtti páfrány- és fűárnyékok az előtérben; felülnézet --detail medium --eye 7.3,5.5,1.5 --at 7,0,-1, --view 15-tel a foltok eltűnése. Képek: docs/round8/foliage-grounding/campfire-night-before-after.jpg, campfire-debug-before-after.jpg, campfire-low-before-after.jpg.",
+    "modules": [
+      "crates/helios-demo/src/scenes/forest.rs"
+    ],
+    "order": 225,
+    "updated": "2026-11-11"
+  },
+  {
+    "id": "foliage-root-pinning",
+    "title": "A növények töve nem mozog a szélben: csúcspontonkénti szélsúly (rögzítettség) a növénygenerátorokból",
+    "area": "Lombozat",
+    "kind": "fix",
+    "status": "done",
+    "phase": "8. kör – 1. hullám",
+    "summary": "A fűszálak és a páfrányok töve a talajnál is mozgott a szélben (a 'sway' tag a növény tengelyétől mért vízszintes távolsággal nőtt, a 'flutter' súlyozatlan volt), pedig a földben lévő rész nem mozdulhat. Mostantól minden csúcspont egy saját szélsúlyt kap (0 ahol a növény a talajban rögzül, 1 ahol szabadon mozog), amelyet a növénygenerátor a gyökértől a növény mentén mért távolságból számol: a fűszál töve áll, a csúcsa leng; a talajig hajló páfránylevél csúcsa továbbra is mozog. A súly az egész elmozdulást szorozza, így csak csökkenteni tudja – a kivágási és árnyéklap-érvénytelenítési korlátok változatlanul érvényesek.",
+    "details": "helios-geometry: Mesh::plant (Vec<Vec2>: x = szélsúly, y = sütött AO), MeshBuilder::plant_vertex, vegetation::add_leaf_with_plant, add_strip, root_weights (fák, tűlevelűek, bokrok fája és a bokrok levelei: y = 0-nál 0, 0,8 m-től 1). encoding.rs: opcionális klaszterattribútum (kiterjesztő szó 29. bitje, csúcspontonként 2 × 5 bit a színek után, fix szélesség), VertexAttributes::plant, ClusterEncoding::plant; dag.rs: végigviszi az egyszerűsítésen és a pruning-másolatokon, cluster_vertex_plant; .hvm 5-ös verzió (HVM5, a 4-es fájlok változatlanul betöltődnek). Shaderek: geometry.wgsl vertex_plant / vertex_wind_weight (csak ha a példány mozog), wind.wgsl wind_world_position / wind_previous_world_position új weight paraméterrel; hívók: raster.wgsl, sw_raster.wgsl, vsm_page.wgsl (mindkét árnyéklap-raszterizáló), gbuffer.wgsl (sarkok + mozgásvektor interpolált súllyal); voxelek (voxel_raster, vsm_voxel_raster, voxel_resolve) és tesszellált felületek 1-et adnak. A WIND_BEND_BOUND / WIND_FLUTTER_BOUND, wind_reach, wind_speed nem változott. Elvetett: magasság-heurisztika a shaderben (rossz a lehajló páfránylevelekre és lejtőkön), a vertex color alfa (a bázisszín fedését terhelné), klaszterenkénti súly (nem változhat a szál mentén). A későbbi csontalapú 'dynamic wind' erre a tiszta, dokumentált csúcspontonkénti mennyiségre építhet.",
+    "metrics": "TBD",
+    "showcase": "Erdő, fűcsomó közelről (--eye 4.6,0.4,-1.6 --at 5.7,0.12,-2.7): két, 0,5 s-mal eltérő képkocka különbsége (árnyék, TAA, mozgáselmosás nélkül) – előtte a szálak széle a talajig változik, utána a tő mozdulatlan. Kép: docs/round8/foliage-grounding/wind-before-after.jpg; L kapcsolja a szelet.",
+    "modules": [
+      "crates/helios-geometry/src/mesh.rs",
+      "crates/helios-geometry/src/modeling.rs",
+      "crates/helios-geometry/src/vegetation.rs",
+      "crates/helios-geometry/src/encoding.rs",
+      "crates/helios-geometry/src/dag.rs",
+      "crates/helios-render/src/shaders/geometry.wgsl",
+      "crates/helios-render/src/shaders/wind.wgsl",
+      "crates/helios-render/src/shaders/raster.wgsl",
+      "crates/helios-render/src/shaders/sw_raster.wgsl",
+      "crates/helios-render/src/shaders/vsm_page.wgsl",
+      "crates/helios-render/src/shaders/gbuffer.wgsl",
+      "crates/helios-render/src/shaders/voxel_raster.wgsl",
+      "crates/helios-render/src/shaders/vsm_voxel_raster.wgsl",
+      "crates/helios-render/src/shaders/voxel_resolve.wgsl",
+      "crates/helios-render/src/shaders/tess.wgsl",
+      "crates/helios-render/src/shaders/vsm_tess.wgsl"
+    ],
+    "order": 226,
+    "updated": "2026-11-11"
+  },
+  {
+    "id": "foliage-grounding",
+    "title": "A növények a talajon állnak: a renderelt terephálóra ültetve, a földből kinőve, sütött AO-val és rövid hatótávú AO-val",
+    "area": "Lombozat",
+    "kind": "feature",
+    "status": "done",
+    "phase": "8. kör – 1. hullám",
+    "summary": "A fű úgy nézett ki, mintha a talaj fölött lebegne, és a növények 'ráragasztottnak' tűntek. Okok: a jelenet a növényeket az analitikus talajmagasságra tette, de a renderelt terep egy 1,17–2,34 m-es rácsú háló, amely a dombtetőkön az analitikus felület alatt fut (közepes részletességnél akár 14 cm-rel, magasnál 3,3 cm-rel); a fűszálak a talajon egy-egy pontban végződő rombuszok voltak egy ±15 cm-es négyzetben; és semmi sem sötétítette a tövet. Most a növények a terephálón állnak, a fűszálak és páfrányszárak 4 cm mélyről nőnek ki a földből, a fűcsomó egy szűk tőből legyezőszerűen nyílik szét (a szálak tövüknél szélesek, a csúcsuk felé keskenyednek), a páfrányok levélkéit végig szár köti össze, a csomók töve sütött AO-tól sötétebb, és egy új rövid hatótávú képtéri AO (mint a Lumen ShortRangeAO-ja az UE-ben) besötétíti a talajt a fűcsomók és páfrányok alatt, valamint ott, ahol a kövek és rönkök a talajhoz érnek.",
+    "details": "forest.rs: terrain_mesh_height (a ground_height a rács csúcsaiban, a rasztert követő háromszög-interpolációval; minden szórt objektum és a tábortűz kövei, parazsa, rönkjei erre kerülnek), teszt: plants_stand_on_the_terrain_mesh. vegetation.rs: grass_clump (6 cm sugarú tő, kifelé dőlő, ívelt, elvékonyodó szálak, 3 szakasz, szálanként 10 háromszög a korábbi 8 helyett), fern (elvékonyodó szár a föld alól a levél csúcsáig), ROOT_DEPTH = 4 cm, sütött AO a Mesh::plant y csatornájában (fűcsomó töve 0,35–0,6, páfrány közepe 0,35). gbuffer.wgsl: a növény AO-ja szorozza az anyag AO-ját (csak a közvetett fényt sötétíti). short_range_ao.wgsl (új): a lighting.wgsl-ben pixelenként 4 képtéri irány × 4 lépés 0,4 m-en belül (≤ 64 px 900 sornál), irányonként a horizont (a minta cos(v, n)-je a felületi sík fölött, 0,15 eltolás, a sugár felé elhalványítva), az átlag a takart hányad; a Lumen diffúz fényét és a spekuláris takarást sötétíti. RenderSettings::short_range_ao (alapból be), --no-short-range-ao, Home billentyű, szerkesztő: 'Short-range AO' (Lighting); frame flag 4096 (FLAG_SHORT_RANGE_AO). A talaj bump-értékei mérsékeltebbek (lásd 225). A nap VSM-árnyéka a fű- és páfrányszálakról közelről felbontva, távolabb voxel LOD-okkal – ellenőrizve, változatlan. Elvetett: a lebegés elrejtése nagyobb süllyesztéssel (a lapos részeken túl mélyre kerülne), képtéri kontaktárnyék a napra (a gyökerezés és az AO után nem kellett).",
+    "metrics": "TBD",
+    "showcase": "Erdő nappal: fűcsomó közelről (--eye 4.6,0.4,-1.6 --at 5.7,0.12,-2.7) és oldalról (--eye 7.0,0.45,-1.8 --at 6.1,0.05,-3.0), páfrányok a tűz mellett (--eye 5.2,0.7,1.2 --at 6.2,0.0,0.2), alapnézet; Home-mal a rövid hatótávú AO ki/be, --view 7 (közvetett fény) mutatja a legjobban. Képek: docs/round8/foliage-grounding/grass-before-after.jpg, fern-before-after.jpg, default-before-after.jpg, ao-indirect-off-on.jpg.",
+    "modules": [
+      "crates/helios-demo/src/scenes/forest.rs",
+      "crates/helios-geometry/src/vegetation.rs",
+      "crates/helios-render/src/shaders/short_range_ao.wgsl",
+      "crates/helios-render/src/shaders/lighting.wgsl",
+      "crates/helios-render/src/shaders/gbuffer.wgsl",
+      "crates/helios-render/src/renderer.rs",
+      "crates/helios-render/src/gpu_types.rs",
+      "crates/helios-demo/src/app.rs",
+      "crates/helios-demo/src/main.rs",
+      "crates/helios-demo/src/editor/settings.rs"
+    ],
+    "order": 227,
+    "updated": "2026-11-11"
+  }
+]
