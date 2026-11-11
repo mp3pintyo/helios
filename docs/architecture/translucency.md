@@ -73,7 +73,11 @@ Part of the `helios-render` GPU pipeline; the pipeline diagram and the index of 
   particles and volumes +0.05–0.10 ms (the grid 0.02–0.07 ms, the composite's second draw, the march's grid taps);
   the grid takes 36 MiB at 1600×900. Details and limits: `docs/round8/translucency.md`. In the browser only the
   refracting surfaces' classic shading models (and peel variants) are queued while AVBOIT is on (the others compile
-  when it is switched off: `webperf`, 1–2 s each in Firefox).
+  when it is switched off: `webperf`, 1–2 s each in Firefox). The order-independent surfaces' front and back
+  buckets share one shading pipeline per model (`fs_oit`, `webperf2`): the pass's layer range tells them apart
+  (`near` −1: in front of the nearest refracting layer, weighted by everything in front; `near` 0: behind it, weighted
+  from the split on), and the back pass binds the motion target too, writing it with weight 0 — two pipelines instead
+  of four (6.7 → 4.0 s of Firefox compiling on the valley), no new binding, the GPU time unchanged within the noise.
 * **Coloured light through glass** (`glass_shadow.rs`, `glass_shadow.wgsl`; UE5's translucent shadows). Panes that
   let the sun through (not shadow casters) would light the interior white; instead the visible `Glass` instances are
   drawn from the sun into a map of their own — an orthographic view along the sunlight fitted to their boxes, 256²
