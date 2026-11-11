@@ -18,7 +18,8 @@ struct Lumen {
     sky_intensity: f32,
     probe_update_fraction: u32,
     voxel_update_phase: u32,
-    _pad: u32,
+    // World cache (lumen_world_cache_common.wgsl): 0 off, 1 behind the mesh cards, 2 in place of them.
+    world_cache: u32,
     // Near field (lumen_mesh_sdf.wgsl). Culling grid min corner, w = cell size (0: disabled).
     mesh_sdf_grid: vec4<f32>,
     // Cells per axis, w = first vec4 of the cell table in mesh_sdf_data.

@@ -106,6 +106,7 @@ mod vsm_local;
 mod vsm_motion;
 mod water;
 mod wind;
+mod world_cache;
 
 pub use camera::Camera;
 pub use context::{GpuContext, ContextError};
@@ -116,6 +117,7 @@ pub use passes::post_fx::DepthOfField;
 pub use picking::PickResult;
 pub use renderer::{DebugView, DynamicStats, RenderSettings, Renderer, RendererConfig, DEFAULT_SHADOW_DISTANT_LEVEL, DEFAULT_SHADOW_REFRESH_BUDGET};
 pub use lumen_lite::{GiMethod, LiteFallback};
+pub use world_cache::{WorldCacheMode, WorldCacheStats};
 pub use lumen_offload::{run_bake_task, set_bake_offload, BakeOffload, BakePoll};
 pub use resolution::{DynamicResolution, MAX_SCREEN_PERCENTAGE, MIN_SCREEN_PERCENTAGE};
 pub use scene::{

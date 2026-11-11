@@ -14,6 +14,7 @@
 #include "sh.wgsl"
 #include "lumen_common.wgsl"
 #include "lumen_cards.wgsl"
+#include "lumen_world_cache_common.wgsl"
 #include "lights.wgsl"
 
 @group(0) @binding(0) var<uniform> frame: Frame;
@@ -173,9 +174,14 @@ fn update_probes(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocatio
     if hit.hit {
         let lighting_voxel = lumen.sdf_levels[hit.level].w * SDF_RES / LIGHT_RES;
         radiance = voxel_radiance(hit.position - dir * lighting_voxel * 0.6, hit.level);
-        var n = sdf_normal(hit.position, hit.level);
-        n = select(n, -n, dot(n, dir) > 0.0);
-        radiance = card_field_radiance(radiance, hit.position, n, hit.level, lumen.sdf_levels[hit.level].w * 0.5);
+        let normal = sdf_normal(hit.position, hit.level);
+        let n = select(normal, -normal, dot(normal, dir) > 0.0);
+        if lumen.world_cache != WC_OFF {
+            radiance = world_cache_over(radiance, hit.position - normal * sdf_distance(hit.position, hit.level), n);
+        }
+        if lumen.world_cache != WC_REPLACE {
+            radiance = card_field_radiance(radiance, hit.position, n, hit.level, lumen.sdf_levels[hit.level].w * 0.5);
+        }
     }
     let coefficients = array<vec3<f32>, 4>(radiance * 0.282095, radiance * (0.488603 * dir.x), radiance * (0.488603 * dir.y), radiance * (0.488603 * dir.z));
     var sums: array<vec3<f32>, 4>;

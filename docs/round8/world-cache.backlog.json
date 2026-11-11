@@ -1,0 +1,31 @@
+[
+  {
+    "id": "lumen-world-cache",
+    "title": "Lumen World Cache: világtérbeli fénygyorsítótár ritka hash-cellákban, a képernyőről indított, távolságmezőn követett utakkal",
+    "area": "Lumen",
+    "kind": "feature",
+    "status": "done",
+    "phase": "8. kör – 2. hullám",
+    "summary": "A Lumen sugarainak találatait eddig a mesh card-ok és ahol azok nem látnak (100 m-en túl, takart zugok), a voxeles fénygyorsítótár színezte. Ez utóbbi átszivárog a vékony falakon (a katedrális 1,2 m-es mellékhajófalán át a napsütötte külső oldal fénye látszik belül), és mindkét gyorsítótár a szabad ég 15 %-át is hozzáadja, akkor is, ha a felület egy zárt csarnokban van. Mostantól az UE 5.9 World Cache mintájára egy világtérbeli gyorsítótár veszi át a helyüket: ritka, hash-elt cellák (a kamera távolságával duplázódó méret, 8 m-en belül 20 cm), amelyeket a képernyőről indított utak töltenek. A cellát a felület normáljának fő tengelye és iránya is azonosítja, így egy vékony fal két oldala sosem osztozik egy cellán – a szivárgás eleve nem lehetséges. Egy brute-force útkövetett referenciához mérve beltérben a régi út 2,8–5,6-szor túl világos volt, a world cache 12–15 %-on belül van; kültéren mindhárom mód 3–7 %-on belül egyezik. Az alapértelmezés a teljes csere (UE viselkedése), +0,04–0,15 ms költséggel.",
+    "details": "Új: world_cache.rs (WorldCache, WorldCacheMode Off/Fallback/Replace, statisztika-visszaolvasás, referencia útkövető), shaders/lumen_world_cache_common.wgsl (cella-kulcs: szint a kamera távolságából, normál-vödör = fő tengely × előjel, rácscella – a normál mentén kétszer mélyebb és a rácssíkokra centrált –, 32 bites slot-hash + független 32 bites ellenőrzőösszeg, 8-as lineáris próbálás; olvasás: world_cache_radiance / world_cache_over, a második tengely vödrében és a szomszéd szinten is keres), shaders/lumen_world_cache.wgsl (trace_paths: 8×8-as csempénként egy véletlen pixelből út – az első csúcs a G-buffer felülete, egy koszinuszsugár a közeli mezőn és a globális távolságmezőn át a második csúcsig, onnan egy második sugár, amelyet már a gyorsítótárak színeznek, így a fény képkockáról képkockára tovább pattan; csúcsonként nap a VSM-ből vagy távolságmező-árnyékkal, üvegen át színezve, és EGY helyi fény súlyozott rezervoár-mintavétellel a hozzájárulása arányában; a besugárzás fixpontosan, az expozícióhoz skálázva, atomikusan kerül a cellába; resolve: legfeljebb 16 képkockás futó átlag – nagy változásnál 4 –, 64 látogatatlan képkocka után kiürítés; debug: 27-es nézet). A NEHÉZ RÉSZ, az anyag (albedó) a találati pontban hit shader nélkül: a cella megtanulja a rá eső képernyőpixelek pontos albedóját és emisszióját (textúrázott, csontvázas, eltolt, szélben mozgó felületre is), és megtartja; amit sosem látott, az a mesh card-ok befogott texelét kapja (a card mélységéhez és normáljához illesztve), végül a globális mező példány-átlagát; az üveg a voxeles fénnyel zárja az utat (UE sem gyorsítótáraz áttetszőt). Olvasók: trace_world_radiance (képernyő-próbák, tükröződések, Lumen Lite) és update_probes (radiance cache), 150-es kötés (rgba32uint cellatextúra – így a Lumen Lite trace lépése belefér a 8 storage bufferbe). RenderSettings::world_cache (alap: Replace – a card-megvilágítás menete kimarad), --world-cache off|on|replace, 5-ös billentyű, szerkesztő 'Lumen world cache', ?world-cache=…, --exposure EV (fix expozíció az összehasonlításokhoz), HELIOS_WORLD_CACHE_STATS, HELIOS_WORLD_CACHE_REFERENCE (8 pattanásos útkövetés a végső gyűjtés helyett, nyugvó kameránál halmozva). Elvetett: csak a card-ok fénye a találatban (épp ott nem segít, ahol kell), albedó csak a találatokból (fekete-fehér márvány átlaga), kilépő radiancia tárolása a cellában (a képernyős pontos albedó nem javíthatná a korábbi becsléseket), lekérdezés-vezérelt cellák (írható kötés minden Lumen trace-ben), 3 árnyalt csúcs (+0,2 ms, látható különbség nélkül).",
+    "metrics": "RTX 3090 (megosztott), 1600×900, 3 váltakozó futás minimumai. Indirekt fény átlaga (fix expozíció) ki / a card-ok mögött / csere / referencia: katedrális főhajó 0,0260 / 0,0129 / 0,0106 / 0,0092; mellékhajó 0,0234 / 0,0078 / 0,0047 / 0,0042; völgy 0,0667 / 0,0636 / 0,0635 / 0,0664; erdő 0,0357 / 0,0355 / 0,0356 / 0,0368; galéria 0,1851 / 0,1823 / 0,1820 / 0,1965. GI összesen ki → csere (card-ok mögött): katedrális 1,55 → 1,62 (1,95), völgy 1,11 → 1,20 (1,34), erdő 1,26 → 1,35 (1,66), galéria 1,33 → 1,48 (1,58) ms; a world cache menete 0,18–0,31 ms, a végső gyűjtés card-keresés nélkül olcsóbb (katedrális 0,90 → 0,75 ms). 14–58 ezer élő cella (a slotok legfeljebb 22 %-a), 20 MiB. Villogás (statikus kamera, >4/255 · >24/255): katedrális 4,72 · 0,0048 → 4,63 · 0,0082 %, völgy 3,91 · 0,014 → 4,79 · 0,023 %, erdő 9,23 · 0,111 → 9,18 · 0,119 %; mozgó napnál képkockánként legfeljebb 0,2 % változás (lépcső nélkül), séta közben 16 %-kal több képkockánkénti változás. Böngésző (headless Chromium, WebGPU): a Tint mindent lefordít, konzolhiba nincs, az 5-ös billentyű vált.",
+    "showcase": "Katedrális mellékhajó (--scene cathedral --eye 22,1.7,11.5 --at 45,4,11), 7-es nézet (indirekt fény): a régi úton a napsütötte külső fal fénye átszivárog a belső falra, a world cache-sel sötét marad, mint a referencián – docs/round8/world-cache/aisle-indirect.jpg; főhajó: nave-indirect.jpg; megvilágítva: lit-off-vs-replace.jpg; a cellák: 27-es nézet (debug-view-27.jpg); 5-ös billentyűvel ki / card-ok mögött / csere; böngésző: browser-on.jpg.",
+    "modules": [
+      "crates/helios-render/src/world_cache.rs",
+      "crates/helios-render/src/shaders/lumen_world_cache.wgsl",
+      "crates/helios-render/src/shaders/lumen_world_cache_common.wgsl",
+      "crates/helios-render/src/shaders/lumen_trace.wgsl",
+      "crates/helios-render/src/shaders/lumen_light.wgsl",
+      "crates/helios-render/src/shaders/lumen_types.wgsl",
+      "crates/helios-render/src/lumen.rs",
+      "crates/helios-render/src/lumen_lite.rs",
+      "crates/helios-render/src/renderer.rs",
+      "crates/helios-demo/src/app.rs",
+      "crates/helios-demo/src/main.rs",
+      "crates/helios-demo/src/web.rs",
+      "crates/helios-demo/src/editor/settings.rs"
+    ],
+    "order": 214,
+    "updated": "2026-11-11"
+  }
+]

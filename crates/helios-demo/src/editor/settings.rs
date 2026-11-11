@@ -2,7 +2,7 @@
 //! label, a group, a value kind and a getter / setter on [`RenderSettings`]. The panel is built
 //! from [`schema`], scene files store overrides by key, and a new setting is one entry here.
 
-use helios_render::{DebugView, DepthOfField, DynamicResolution, FogScattering, LocalExposure, RenderSettings};
+use helios_render::{DebugView, DepthOfField, DynamicResolution, FogScattering, LocalExposure, RenderSettings, WorldCacheMode};
 use serde_json::{json, Value};
 
 pub enum Kind {
@@ -35,6 +35,8 @@ fn number(
 ) -> Setting {
     Setting { key, label, group, kind: Kind::Number { min, max, step }, get, set }
 }
+
+const WORLD_CACHE_MODES: [WorldCacheMode; 3] = [WorldCacheMode::Off, WorldCacheMode::Fallback, WorldCacheMode::Replace];
 
 fn b(v: &Value) -> bool {
     v.as_bool().unwrap_or(false)
@@ -98,6 +100,18 @@ pub fn all() -> Vec<Setting> {
         flag("translucency_layers", "Translucency layers", "Materials", |s| json!(s.translucency_layers), |s, v| s.translucency_layers = b(v)),
         flag("glass_shadows", "Coloured light through glass", "Materials", |s| json!(s.glass_shadows), |s, v| s.glass_shadows = b(v)),
         flag("avboit", "Voxel-based OIT (AVBOIT)", "Materials", |s| json!(s.avboit), |s, v| s.avboit = b(v)),
+        Setting {
+            key: "world_cache",
+            label: "Lumen world cache",
+            group: "Lighting",
+            kind: Kind::Choice(WORLD_CACHE_MODES.iter().map(|m| m.name()).collect()),
+            get: |s| json!(s.world_cache.name()),
+            set: |s, v| {
+                if let Some(mode) = WORLD_CACHE_MODES.into_iter().find(|m| Some(m.name()) == v.as_str()) {
+                    s.world_cache = mode;
+                }
+            },
+        },
         flag("taa", "Temporal accumulation (TSR)", "Camera", |s| json!(s.taa), |s, v| s.taa = b(v)),
         flag("tsr_depth_history", "TSR depth history (disocclusion)", "Camera", |s| json!(s.tsr_depth_history), |s, v| s.tsr_depth_history = b(v)),
         number("motion_blur", "Motion blur shutter", "Camera", (0.0, 1.0, 0.05), |s| json!(s.motion_blur), |s, v| s.motion_blur = f(v)),

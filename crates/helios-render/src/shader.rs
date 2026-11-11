@@ -53,6 +53,8 @@ const SOURCES: &[(&str, &str)] = &[
     ("lumen_sdf.wgsl", include_str!("shaders/lumen_sdf.wgsl")),
     ("lumen_trace.wgsl", include_str!("shaders/lumen_trace.wgsl")),
     ("lumen_types.wgsl", include_str!("shaders/lumen_types.wgsl")),
+    ("lumen_world_cache.wgsl", include_str!("shaders/lumen_world_cache.wgsl")),
+    ("lumen_world_cache_common.wgsl", include_str!("shaders/lumen_world_cache_common.wgsl")),
     ("material.wgsl", include_str!("shaders/material.wgsl")),
     ("material_graph.wgsl", include_str!("shaders/material_graph.wgsl")),
     ("material_graph_off.wgsl", include_str!("shaders/material_graph_off.wgsl")),
