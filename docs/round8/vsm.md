@@ -119,7 +119,7 @@ or light colour, brightness by cached / rendered, a dot for a pending refresh) a
 the unallocated part in red, retained pages, pages rendered vs. the budget, deferred / held / forced, sun vs. local
 light pages). The pipeline is `lazy_compute_pipeline` (compiled when first selected) and the pass is recorded only
 while the view is selected — the same pattern as the invalidation view (16) — so it costs nothing when off; no hot
-shader got a branch. `Home` toggles the budget and the distant levels together for A/B comparisons.
+shader got a branch. `2` toggles the budget and the distant levels together for A/B comparisons.
 
 ## Alternatives considered
 
