@@ -6,12 +6,12 @@ use std::sync::atomic::{AtomicU32, Ordering};
 /// The most sampled textures per shader stage the device asks for (see [`GpuContext::new`]).
 static SAMPLED_TEXTURES: AtomicU32 = AtomicU32::new(24);
 
-/// Sampled textures per shader stage the renderer needs: the lighting pass binds 20 (the G-buffer,
-/// shadows with the VSM moment atlas, sky, GI, clouds, fog, the volume shadow atlas, MegaLights'
-/// result, sunlight and local light through glass). One more enables the Substrate slab lighting
-/// (21); the translucency shading binds 18, AVBOIT 19. WebGPU guarantees only 16; desktop
-/// adapters offer 48 or more (Chromium 48, Firefox 64 on an RTX 3090).
-pub const MIN_SAMPLED_TEXTURES: u32 = 20;
+/// Sampled textures per shader stage the renderer needs: the lighting pass binds 21 (the G-buffer,
+/// shadows with the VSM moment atlas, sky, GI, the short-range AO, clouds, fog, the volume shadow
+/// atlas, MegaLights' result, sunlight and local light through glass). One more enables the
+/// Substrate slab lighting (22); the translucency shading binds 18, AVBOIT 19. WebGPU guarantees
+/// only 16; desktop adapters offer 48 or more (Chromium 48, Firefox 64 on an RTX 3090).
+pub const MIN_SAMPLED_TEXTURES: u32 = 21;
 
 /// Owns the wgpu instance, adapter, device and queue.
 pub struct GpuContext {
@@ -41,8 +41,8 @@ impl std::error::Error for ContextError {}
 impl GpuContext {
     /// Asks devices created from now on for at most `count` sampled textures per shader stage
     /// (default 24; 16–24), as if the adapter offered no more: for testing the optional variants
-    /// and the error below [`MIN_SAMPLED_TEXTURES`] (`--max-sampled-textures 20`,
-    /// `?max-sampled-textures=20`).
+    /// and the error below [`MIN_SAMPLED_TEXTURES`] (`--max-sampled-textures 21`,
+    /// `?max-sampled-textures=21`).
     pub fn limit_sampled_textures(count: u32) {
         SAMPLED_TEXTURES.store(count.clamp(16, 24), Ordering::Relaxed);
     }

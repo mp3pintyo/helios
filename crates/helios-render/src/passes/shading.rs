@@ -82,6 +82,9 @@ pub struct LightingPass {
     /// The shading with Substrate slabs (bind group 1: `substrate_gpu.rs`), compiled when a
     /// scene first has slab materials.
     substrate: Option<Lazy<wgpu::ComputePipeline>>,
+    /// Short-range AO at half resolution (short_range_ao.wgsl), before the shading.
+    short_range_ao: Lazy<wgpu::ComputePipeline>,
+    short_range_ao_layout: wgpu::BindGroupLayout,
 }
 
 pub struct LightingInputs<'a> {
@@ -115,6 +118,8 @@ pub struct LightingInputs<'a> {
     pub glass_lights: &'a crate::glass_light::GlassLights,
     /// Shadows of heterogeneous volumes (last frame's, see volume_shadow.rs).
     pub volume_shadows: &'a crate::volume_shadow::VolumeShadows,
+    /// Short-range AO on ([`crate::RenderSettings::short_range_ao`]).
+    pub short_range_ao: bool,
 }
 
 impl LightingPass {
@@ -169,6 +174,21 @@ impl LightingPass {
                 // Shadows of heterogeneous volumes (volume_shadow_sample.wgsl).
                 (151, bind::uniform()),
                 (152, bind::texture_3d(true)),
+                // Short-range AO at half resolution (short_range_ao.wgsl).
+                (153, bind::texture(false)),
+            ],
+        );
+        let ao_module = create_module(device, "short_range_ao.wgsl");
+        let short_range_ao_layout = bind_group_layout(
+            device,
+            "short-range ao",
+            C,
+            &[
+                (0, bind::uniform()),
+                (1, bind::texture(false)),
+                (2, bind::storage_texture(TextureFormat::R32Float)),
+                (3, bind::texture(false)),
+                (13, bind::uniform()),
             ],
         );
         Self {
@@ -177,6 +197,8 @@ impl LightingPass {
             local_shadows: in_group(Group::Shadows, || compute_pipeline(device, "local light shadows", &module, "local_shadows", &layout, &[])),
             layout,
             substrate: None,
+            short_range_ao: compute_pipeline(device, "short-range ao", &ao_module, "main", &short_range_ao_layout, &[]),
+            short_range_ao_layout,
         }
     }
 
@@ -238,8 +260,27 @@ impl LightingPass {
                 (150, TextureView(inputs.vsm.moments.view().unwrap_or(inputs.black))),
                 (151, inputs.volume_shadows.uniform.as_entire_binding()),
                 (152, TextureView(inputs.volume_shadows.atlas())),
+                (153, TextureView(&t.short_range_ao)),
             ],
         );
+        if inputs.short_range_ao {
+            let ao_group = bind_group(
+                device,
+                "short-range ao",
+                &self.short_range_ao_layout,
+                &[
+                    (0, inputs.frame.as_entire_binding()),
+                    (1, TextureView(&t.depth)),
+                    (2, TextureView(&t.short_range_ao)),
+                    (3, TextureView(&t.gbuffer_normal)),
+                    (13, inputs.vsm.uniform.as_entire_binding()),
+                ],
+            );
+            let mut pass = rec.compute_pass("short-range ao");
+            pass.set_pipeline(&self.short_range_ao);
+            pass.set_bind_group(0, &ao_group, &[]);
+            dispatch_full(&mut pass, t.width.div_ceil(2), t.height.div_ceil(2));
+        }
         // MegaLights traces the shadows of every light itself.
         if inputs.vsm.local.view().is_some() && inputs.megalights.is_none() {
             let mut pass = rec.compute_pass("local light shadows");

@@ -36,6 +36,20 @@ use crate::util::{bind, storage_buffer, texture, workgroups, TextureSpec};
 pub const CAPACITY: u32 = 1 << 18;
 /// Slots per row of the resolved cell texture (`WC_SLOTS_X`).
 const SLOTS_X: u32 = 512;
+/// Paths a frame starts at most (`WC_PATH_BUDGET` in lumen_world_cache.wgsl): the cells need the
+/// samples, not the pixels, so their number does not grow with the resolution.
+const PATH_BUDGET: u32 = 24000;
+
+/// Side of the screen tiles that start one path each (`wc_path_tile`): 8 pixels, or the
+/// smallest larger size that keeps the paths within [`PATH_BUDGET`] (13 at 2560×1440).
+pub fn path_tile(width: u32, height: u32) -> u32 {
+    let mut tile = 8;
+    while width.div_ceil(tile) * height.div_ceil(tile) > PATH_BUDGET {
+        tile += 1;
+    }
+    tile
+}
+
 /// Words per slot in the record buffer (`WC_RECORD` in lumen_world_cache.wgsl).
 const RECORD_WORDS: u64 = 16;
 /// Counters of the statistics buffer: live cells, cells sampled this frame, debug-view pixels
@@ -403,7 +417,8 @@ impl WorldCache {
             let mut pass = rec.compute_pass("lumen world cache");
             pass.set_pipeline(&self.trace.pipeline);
             pass.set_bind_group(0, &trace, &[]);
-            let tiles = (targets.width.div_ceil(8), targets.height.div_ceil(8));
+            let tile = path_tile(targets.width, targets.height);
+            let tiles = (targets.width.div_ceil(tile), targets.height.div_ceil(tile));
             pass.dispatch_workgroups(workgroups(tiles.0, 8), workgroups(tiles.1, 8), 1);
             pass.set_pipeline(&self.resolve.pipeline);
             pass.set_bind_group(0, &resolve, &[]);
@@ -547,7 +562,22 @@ mod tests {
         assert!(common.contains(&format!("const WC_CAPACITY: u32 = {CAPACITY}u;")));
         assert!(common.contains(&format!("const WC_SLOTS_X: u32 = {SLOTS_X}u;")));
         assert!(update.contains(&format!("const WC_RECORD: u32 = {RECORD_WORDS}u;")));
+        assert!(update.contains(&format!("const WC_PATH_BUDGET: u32 = {PATH_BUDGET}u;")));
         assert!(CAPACITY.is_power_of_two() && CAPACITY % SLOTS_X == 0 && (CAPACITY / 64) <= 65535);
+    }
+
+    /// Path tiles: 8×8 up to ~1600×900, larger above (the path count stays within the budget).
+    #[test]
+    fn path_count_does_not_grow_with_the_resolution() {
+        assert_eq!(path_tile(1600, 900), 8);
+        assert_eq!(path_tile(1280, 720), 8);
+        assert_eq!(path_tile(1715, 965), 9);
+        assert_eq!(path_tile(2560, 1440), 13);
+        for (w, h) in [(1920, 1080), (2560, 1440), (3840, 2160), (7680, 4320)] {
+            let tile = path_tile(w, h);
+            assert!(w.div_ceil(tile) * h.div_ceil(tile) <= PATH_BUDGET);
+            assert!(w.div_ceil(tile - 1) * h.div_ceil(tile - 1) > PATH_BUDGET);
+        }
     }
 
     #[test]

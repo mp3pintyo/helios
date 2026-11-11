@@ -55,6 +55,8 @@ pub struct FrameTargets {
     pub history_motion: [wgpu::TextureView; 2],
     pub gi_raw: wgpu::TextureView,
     pub gi_history: [wgpu::TextureView; 2],
+    /// Short-range ambient occlusion on the GI's half-resolution grid (short_range_ao.wgsl).
+    pub short_range_ao: wgpu::TextureView,
     /// Per pixel, the visibility (unorm8 x 4) of its four strongest lights with virtual shadow
     /// maps (lighting.wgsl, local_shadows).
     pub local_shadow_mask: wgpu::Buffer,
@@ -125,6 +127,7 @@ impl FrameTargets {
             history_motion,
             gi_raw: view(&make("gi raw", half_w, half_h, 1, HDR_FORMAT, storage)),
             gi_history,
+            short_range_ao: view(&make("short-range ao", half_w, half_h, 1, F::R32Float, storage)),
             local_shadow_mask: crate::util::storage_buffer(device, "local shadow mask", width as u64 * height as u64 * 4, wgpu::BufferUsages::empty()),
             bloom_down: (0..bloom_levels).map(|m| mip_view(&bloom_down, m)).collect(),
             bloom_up: (0..bloom_levels).map(|m| mip_view(&bloom_up, m)).collect(),
@@ -156,7 +159,7 @@ impl FrameTargets {
     /// Hands every target to `gpu_memory::destroy_retired` (the targets are being replaced).
     pub fn retire(&self) {
         use crate::gpu_memory::{retire_buffer, retire_view};
-        for view in [&self.hw_depth, &self.hw_visibility, &self.depth, &self.visibility, &self.hzb, &self.gbuffer_albedo, &self.gbuffer_normal, &self.gbuffer_motion, &self.hdr, &self.gi_raw]
+        for view in [&self.hw_depth, &self.hw_visibility, &self.depth, &self.visibility, &self.hzb, &self.gbuffer_albedo, &self.gbuffer_normal, &self.gbuffer_motion, &self.hdr, &self.gi_raw, &self.short_range_ao]
             .into_iter()
             .chain(&self.history)
             .chain(&self.history_motion)

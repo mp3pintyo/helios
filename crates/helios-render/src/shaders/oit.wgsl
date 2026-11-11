@@ -111,13 +111,26 @@ fn fs_avboit_modulate(@builtin(position) position: vec4<f32>) -> @location(0) ve
     let pixel = vec2<i32>(position.xy);
     let t = textureLoad(reveal, pixel, 0).rgb * avboit_volume(pixel, volume).a;
     // Debug view 21: `fs_avboit_front` draws the whole pixel.
-    return select(vec4<f32>(t, 1.0), vec4<f32>(0.0), frame.debug_view == DEBUG_VOLUMES);
+    if frame.debug_view == DEBUG_VOLUMES {
+        return vec4<f32>(0.0);
+    }
+    // Nothing in front of the background here: multiplying by 1 would only cost the blend's
+    // read and write of the HDR pixel (most of the screen in most views).
+    if all(t == vec3<f32>(1.0)) {
+        discard;
+    }
+    return vec4<f32>(t, 1.0);
 }
 
 @fragment
 fn fs_avboit_back(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
     let pixel = vec2<i32>(position.xy);
-    return vec4<f32>(textureLoad(accum, pixel, 0).rgb + avboit_volume(pixel, volume).rgb, 0.0);
+    let light = textureLoad(accum, pixel, 0).rgb + avboit_volume(pixel, volume).rgb;
+    // Adding nothing: skip the blend.
+    if all(light == vec3<f32>(0.0)) {
+        discard;
+    }
+    return vec4<f32>(light, 0.0);
 }
 
 @fragment
