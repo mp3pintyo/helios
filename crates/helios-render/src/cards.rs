@@ -801,6 +801,20 @@ impl CardCache {
         }
     }
 
+    /// Queues the capture pipelines of a scene about to be switched to: those of its visible
+    /// instances' materials (with the graphs among `active`, those the resolve runs), whose
+    /// cards are not known yet (`Renderer::prefetch_next_scene`).
+    pub fn prefetch_captures(&mut self, device: &wgpu::Device, scene: &Scene, active: &HashSet<u64>) {
+        let capture = self.capture_pipelines.get_or_insert_with(|| CapturePipelines::new(device));
+        let materials: std::collections::BTreeSet<u32> = scene.instances.iter().filter(|i| i.visible).map(|i| i.material.0).collect();
+        for material in materials {
+            if let Some((kind, graph)) = capture_pipeline(scene, material, &mut self.graph_code) {
+                let key = capture.pipeline(device, kind, if active.contains(&graph) { graph } else { 0 }, &self.graph_code);
+                capture.pipelines[&key].prefetch();
+            }
+        }
+    }
+
     /// Records the material capture of the next pending pairs (within
     /// [`CAPTURE_TEXELS_PER_FRAME`]) and points their records at their albedo; their instances'
     /// cards are relit next.

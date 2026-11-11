@@ -55,6 +55,21 @@ pub struct ExtendedSlot {
     pub displaces: bool,
 }
 
+/// What [`ExtendedMaterials::assign`] decided for a scene.
+struct Assignment {
+    slabs: Vec<GpuSlab>,
+    params: Vec<[u32; 4]>,
+    slots: Vec<ExtendedSlot>,
+    /// (material, resolve slot).
+    assigned: Vec<(usize, u32)>,
+    /// (material, graph id, parameter offset) of graph-displaced materials.
+    graph_sources: Vec<(usize, u32, u32)>,
+    displacement_key: u64,
+    lighting: bool,
+    subsurface: bool,
+    warnings: Vec<String>,
+}
+
 struct Targets {
     capacity: (u32, u32),
     substrate: wgpu::TextureView,
@@ -156,7 +171,10 @@ impl ExtendedMaterials {
         }
     }
 
-    fn rebuild(&mut self, queue: &wgpu::Queue, scene: &Scene, gpu: &GpuScene, enabled: bool) {
+    /// The slab table, parameter block and slot assignment of `scene`'s materials (`enabled`:
+    /// Substrate on), and the warnings to log; changes nothing.
+    fn assign(&self, scene: &Scene, enabled: bool) -> Assignment {
+        let mut warnings: Vec<String> = Vec::new();
         let mut slabs = vec![GpuSlab::default(); MAX_MATERIALS];
         let mut params: Vec<[u32; 4]> = Vec::new();
         let mut slots: Vec<ExtendedSlot> = Vec::new();
@@ -166,7 +184,7 @@ impl ExtendedMaterials {
         let mut displacement_key = Fnv::default();
         let (mut lighting, mut subsurface) = (false, false);
         if !self.supported && scene.materials.iter().any(|m| m.graph.is_some() || m.slab.features() != 0) {
-            self.warn("the device cannot bind the extended material pipelines: slabs and graphs are ignored");
+            warnings.push("the device cannot bind the extended material pipelines: slabs and graphs are ignored".into());
         }
         for (i, m) in scene.materials.iter().enumerate().take(if self.supported { MAX_MATERIALS } else { 0 }) {
             if m.kind.is_translucent() {
@@ -175,7 +193,7 @@ impl ExtendedMaterials {
             let mut graph = m.graph.and_then(|g| scene.compiled_material_graph(g));
             if graph.is_some_and(|g| params.len() + g.parameters.len() > GRAPH_PARAMETER_SLOTS) {
                 let name = m.graph.map_or("", |g| scene.material_graph(g).name.as_str());
-                self.warn(&format!("graph '{name}' does not fit the parameter block; its materials render without it"));
+                warnings.push(format!("graph '{name}' does not fit the parameter block; its materials render without it"));
                 graph = None;
             }
             let offset = params.len() as u32;
@@ -202,7 +220,7 @@ impl ExtendedMaterials {
                     slots.len() - 1
                 }
                 None => {
-                    self.warn(&format!("more than {EXTENDED_SLOTS} distinct (shading model, graph) pairs: the rest render as plain materials"));
+                    warnings.push(format!("more than {EXTENDED_SLOTS} distinct (shading model, graph) pairs: the rest render as plain materials"));
                     continue;
                 }
             };
@@ -215,6 +233,21 @@ impl ExtendedMaterials {
             }
             lighting |= all != 0;
             subsurface |= all & features::SUBSURFACE != 0;
+        }
+        Assignment { slabs, params, slots, assigned, graph_sources, displacement_key: displacement_key.0, lighting, subsurface, warnings }
+    }
+
+    /// The extended slots `scene` would get, and whether it needs the slab lighting and the
+    /// subsurface passes (a scene about to be switched to: `Renderer::prefetch_next_scene`).
+    pub(crate) fn plan(&self, scene: &Scene, enabled: bool) -> (Vec<ExtendedSlot>, bool, bool) {
+        let a = self.assign(scene, enabled);
+        (a.slots, a.lighting, a.subsurface)
+    }
+
+    fn rebuild(&mut self, queue: &wgpu::Queue, scene: &Scene, gpu: &GpuScene, enabled: bool) {
+        let Assignment { slabs, params, slots, assigned, graph_sources, displacement_key, lighting, subsurface, warnings } = self.assign(scene, enabled);
+        for w in &warnings {
+            self.warn(w);
         }
         queue.write_buffer(&self.slabs, 0, bytemuck::cast_slice(&slabs));
         if !params.is_empty() {
@@ -245,7 +278,7 @@ impl ExtendedMaterials {
             write_graph_motion(queue, gpu, i, displacement_speed(scene, MaterialHandle(i as u32)));
         }
         self.graph_displaced = now;
-        self.displacement_key = displacement_key.0;
+        self.displacement_key = displacement_key;
         self.slots = slots;
         self.lighting = lighting;
         self.subsurface = subsurface;

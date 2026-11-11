@@ -125,6 +125,16 @@ impl TextureLibrary {
         library
     }
 
+    /// Queues the pattern pipelines of `scene`'s procedural textures (a scene about to be
+    /// switched to); builds nothing.
+    pub fn prefetch(&self, scene: &Scene) {
+        for source in &scene.textures {
+            if let TextureSource::Procedural(desc) = source {
+                self.generate[desc.pattern as usize].prefetch();
+            }
+        }
+    }
+
     /// Regenerates the arrays if the scene's textures changed. Returns true if it did.
     pub fn sync(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, scene: &Scene) -> bool {
         if self.version == scene.texture_version {

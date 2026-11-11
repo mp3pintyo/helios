@@ -479,15 +479,29 @@ impl Tessellation {
             if self.permutations.len() >= MAX_PERMUTATIONS {
                 self.permutations.clear();
             }
-            let code = graphs::scene_dispatch_module(scene, &set);
-            let module = |name: &str| create_module_from(device, "tessellation (displacing graphs)", compose_variant(name, &[("displacement_graphs_off.wgsl", &code)]));
-            let permutation = GraphPermutation {
-                main: main_dice(device, &module("tess.wgsl"), &self.main_dice_layout),
-                shadow: shadow_dice(device, &module("vsm_tess.wgsl"), &self.shadow_layout),
-            };
-            self.permutations.insert(key, permutation);
+            self.create_permutation(device, scene, &set, key);
         }
         self.permutation = Some(key);
+    }
+
+    /// Queues the dicing permutation of the displacing graphs of a scene about to be switched to,
+    /// keeping the current scene's (`Renderer::prefetch_next_scene`).
+    pub fn prefetch_graphs(&mut self, device: &wgpu::Device, scene: &Scene) {
+        let set = graphs::displacing_graphs(scene);
+        let key = graphs::set_hash(&set);
+        if !set.is_empty() && !self.permutations.contains_key(&key) && self.permutations.len() < MAX_PERMUTATIONS {
+            self.create_permutation(device, scene, &set, key);
+        }
+    }
+
+    fn create_permutation(&mut self, device: &wgpu::Device, scene: &Scene, set: &[(u32, u64)], key: u64) {
+        let code = graphs::scene_dispatch_module(scene, set);
+        let module = |name: &str| create_module_from(device, "tessellation (displacing graphs)", compose_variant(name, &[("displacement_graphs_off.wgsl", &code)]));
+        let permutation = GraphPermutation {
+            main: main_dice(device, &module("tess.wgsl"), &self.main_dice_layout),
+            shadow: shadow_dice(device, &module("vsm_tess.wgsl"), &self.shadow_layout),
+        };
+        self.permutations.insert(key, permutation);
     }
 
     fn permutation(&self) -> Option<&GraphPermutation> {

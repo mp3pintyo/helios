@@ -183,6 +183,11 @@ fn view_descriptor() -> wgpu::TextureViewDescriptor<'static> {
 
 /// The mask a material asks for: its texture's base colour image and quantised cutoff. Only
 /// mesh-UV mapped image textures carry alpha; other alpha-tested materials render opaque.
+/// Whether some material of `scene` is alpha-tested (without building the masks).
+pub(crate) fn scene_has_masks(scene: &Scene) -> bool {
+    scene.materials.iter().any(|m| mask_source(scene, m).is_some())
+}
+
 fn mask_source<'a>(scene: &'a Scene, m: &Material) -> Option<(MaskKey, &'a Image)> {
     let cutoff = (m.alpha_cutoff?.clamp(0.0, 1.0) * 255.0).round() as u8;
     let texture = m.texture?;

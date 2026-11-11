@@ -196,7 +196,8 @@ impl MaterialPass {
     ) {
         self.permutation = permutation(uv_extensions, skinning, tessellation, debug_views);
         self.kinds = KINDS.iter().copied().filter(|&k| k == SKY_SLOT || kinds & (1 << k) != 0).collect();
-        self.create_resolve(device, self.permutation);
+        let plain = self.kinds.clone();
+        self.create_resolve(device, self.permutation, &plain);
         self.extended.clear();
         for s in &extended.slots {
             let key = self.create_extended(device, extended, s, self.permutation, substrate);
@@ -205,7 +206,7 @@ impl MaterialPass {
         if tessellation_wanted && !tessellation {
             let wanted = permutation(uv_extensions, skinning, true, debug_views);
             in_group(Group::Tessellation, || {
-                self.create_resolve(device, wanted);
+                self.create_resolve(device, wanted, &plain);
                 for s in &extended.slots {
                     self.create_extended(device, extended, s, wanted, substrate);
                 }
@@ -331,9 +332,33 @@ impl MaterialPass {
         key
     }
 
-    /// Creates the resolve pipelines of `permutation` for the scene's shading models.
-    fn create_resolve(&mut self, device: &wgpu::Device, permutation: usize) {
-        for &kind in &self.kinds {
+    /// Queues the resolve pipelines a scene about to be switched to will need — `permutation`'s
+    /// flags, the shading models in `kinds` and the extended `slots` — without changing what the
+    /// current scene's frames resolve with ([`crate::Renderer::prefetch_next_scene`]).
+    #[allow(clippy::too_many_arguments)]
+    pub fn prefetch(
+        &mut self,
+        device: &wgpu::Device,
+        uv_extensions: bool,
+        skinning: bool,
+        tessellation: bool,
+        debug_views: bool,
+        kinds: u32,
+        extended: &ExtendedMaterials,
+        slots: &[ExtendedSlot],
+        substrate: bool,
+    ) {
+        let permutation = permutation(uv_extensions, skinning, tessellation, debug_views);
+        let plain: Vec<u32> = KINDS.iter().copied().filter(|&k| k == SKY_SLOT || kinds & (1 << k) != 0).collect();
+        self.create_resolve(device, permutation, &plain);
+        for s in slots {
+            self.create_extended(device, extended, s, permutation, substrate);
+        }
+    }
+
+    /// Creates the resolve pipelines of `permutation` for the shading models `kinds`.
+    fn create_resolve(&mut self, device: &wgpu::Device, permutation: usize, kinds: &[u32]) {
+        for &kind in kinds {
             self.resolve.entry((permutation, kind)).or_insert_with(|| {
                 let flag = |bit: usize| ((permutation >> bit) & 1) as f64;
                 let constants = [("MATERIAL_KIND", kind as f64), ("RESOLVE_SLOT", kind as f64), ("UV_EXTENSIONS", flag(0)), ("SKINNING", flag(1)), ("TESSELLATION", flag(2)), ("DEBUG_VIEWS", flag(3))];

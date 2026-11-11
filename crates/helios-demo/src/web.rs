@@ -812,7 +812,7 @@ fn frame(st: &mut State, now: f64) {
     }
     st.presented += 1;
 
-    if pipelines::compiler() == Compiler::Serial && !pipelines::waiting().is_empty() {
+    if pipelines::compiler() == Compiler::Serial && pipelines::queued() {
         st.compile_next = true;
     } else if pipelines::waiting().is_empty() && TIMES.with(Cell::get)[2] == 0.0 {
         set_time(2, now);
@@ -863,8 +863,21 @@ fn waiting_features() -> String {
 pub async fn helios_load_scene(name: String) -> bool {
     let Some(kind) = SceneKind::parse(&name).filter(|k| *k != SceneKind::Model) else { return false };
     let Some(detail) = with_state(|st| st.app.detail) else { return false };
-    let setup = crate::scene_bake::build(kind, detail, None, |_| {}, || {}).await;
-    with_state(|st| st.app.set_scene(kind, setup)).is_some()
+    // While the meshes are being preprocessed, a stand-in of the scene queues the pipelines it will
+    // need, ahead of the switch: they compile while the current scene renders on (Firefox in
+    // background batches from one pipeline up) and are the new scene's once it is in.
+    let prefetch = |stand_in: &crate::scenes::SceneSetup| {
+        with_state(|st| {
+            st.app.renderer.prefetch_next_scene(&stand_in.scene);
+            st.batch = FIXED_BATCH.load(Ordering::Relaxed).max(1);
+        });
+    };
+    let setup = crate::scene_bake::build(kind, detail, None, prefetch, || {}).await;
+    with_state(|st| {
+        pipelines::claim_ahead();
+        st.app.set_scene(kind, setup)
+    })
+    .is_some()
 }
 
 /// Presses a hotkey once, by its `KeyboardEvent.code` (e.g. `KeyG` toggles GI), as if typed.

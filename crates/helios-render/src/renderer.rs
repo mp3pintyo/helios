@@ -978,6 +978,55 @@ impl Renderer {
         self.sync_only = false;
     }
 
+    /// Browser, during a scene switch (`heliosLoadScene`): queues the pipelines the next scene
+    /// will need while its meshes are being preprocessed — the material resolve's shading models,
+    /// permutation and extended (slab / graph) pipelines, texture patterns, Substrate's slab
+    /// lighting and subsurface passes, the skinned and alpha-masked culling paths, the
+    /// tessellator's dicing permutation, Lumen's card captures, translucency and the volumes and
+    /// particles — so they compile while the current
+    /// scene renders on. `scene` is a stand-in (empty meshes): what it needs is derived from its
+    /// description alone, without syncing it into the GPU scene, material and texture state the
+    /// current scene renders from. The pipelines are queued [`pipelines::ahead`]: they don't hold
+    /// the current scene's frames or switch its features off; [`pipelines::claim_ahead`] makes
+    /// them the new scene's once it is in. Natively it does nothing.
+    pub fn prefetch_next_scene(&mut self, scene: &Scene) {
+        if !pipelines::deferring() {
+            return;
+        }
+        pipelines::ahead(|| {
+            let device = self.device.clone();
+            let device = &device;
+            self.textures.prefetch(scene);
+            // The frame's own choices (`render_frame`), from the scene's description.
+            let substrate = self.settings.substrate;
+            let (slots, slab_lighting, subsurface) = self.extended.plan(scene, substrate);
+            let (uv_extensions, kinds) = crate::gpu_scene::scene_resolve_needs(scene);
+            let skinning = scene.instances.iter().any(|i| i.skin.is_some());
+            let tessellation = self.requested.tessellation && crate::gpu_scene::displaceable(scene);
+            let debug_views = self.settings.debug_view != DebugView::Lit;
+            self.material.prefetch(device, uv_extensions, skinning, tessellation, debug_views, kinds, &self.extended, &slots, substrate);
+            if slab_lighting {
+                self.lighting.sync_substrate(device, Some(&self.extended.lighting_layout));
+                let r = &self.requested;
+                if r.mega_lights || matches!(r.debug_view, DebugView::MegaLightsSamples | DebugView::MegaLightsDenoising) {
+                    self.megalights.sync_substrate(device, Some(&self.extended.megalights_layout));
+                }
+            }
+            if subsurface {
+                self.subsurface.prefetch();
+            }
+            self.culling.prefetch_next(skinning, crate::alpha_mask::scene_has_masks(scene));
+            if tessellation {
+                self.culling.prefetch_tessellation(device, scene);
+            }
+            let active: std::collections::HashSet<u64> = slots.iter().filter_map(|s| s.graph.as_ref().map(|g| g.0)).collect();
+            self.lumen.prefetch_captures(device, scene, &active);
+            let avboit = self.settings.avboit && self.avboit_supported;
+            self.translucency.prefetch(scene, avboit);
+            self.effects.prefetch(scene, avboit);
+        });
+    }
+
     /// Queues the pipelines of the scene's content features need (its translucent models,
     /// volumes, particles) before the frame decides which features it renders, so a feature does
     /// not come on with pipelines still to compile. (Content the core set needs is queued during

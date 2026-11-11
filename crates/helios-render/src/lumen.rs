@@ -252,6 +252,12 @@ fn texture_3d(device: &wgpu::Device, label: &str, size: (u32, u32, u32), format:
 }
 
 impl Lumen {
+    /// Queues the card capture pipelines of a scene about to be switched to (`active`: the graphs
+    /// its resolve runs).
+    pub fn prefetch_captures(&mut self, device: &wgpu::Device, scene: &Scene, active: &std::collections::HashSet<u64>) {
+        self.cards.prefetch_captures(device, scene, active);
+    }
+
     pub fn new(device: &wgpu::Device) -> Self {
         let levels = SDF_LEVELS as u32;
         let sdf = texture_3d(device, "global sdf", (SDF_RES, SDF_RES, SDF_RES * levels), F::Rgba8Snorm);

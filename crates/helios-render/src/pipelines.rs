@@ -25,6 +25,12 @@
 //!   tools and debug views). [`Lazy::prefetch`] queues one in the background once the scene is
 //!   known to need it.
 //!
+//! * **Ahead of a scene switch** ([`ahead`]): while a new scene's meshes are being preprocessed
+//!   the renderer queues the pipelines it will need ([`crate::Renderer::prefetch_next_scene`]).
+//!   They compile like any other but don't count for [`ready`] (the current scene keeps rendering
+//!   with its features) until [`claim_ahead`] (the new scene is in): then they are the new
+//!   scene's, and a frame waits for the ones still compiling.
+//!
 //! How the queue is worked depends on the browser ([`browser::install`]):
 //!
 //! * **Parallel** (Chromium: Dawn compiles `create*PipelineAsync` on a thread pool and dedups
@@ -38,7 +44,7 @@
 //!   each frame waiting for the previous compile instead of presenting behind it.
 
 use std::cell::{Cell, RefCell};
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::OnceLock;
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -147,6 +153,8 @@ thread_local! {
     static DEFER: Cell<bool> = const { Cell::new(cfg!(target_arch = "wasm32")) };
     static GROUP: Cell<Group> = const { Cell::new(Group::Core) };
     static COMPILER: Cell<Compiler> = const { Cell::new(Compiler::Serial) };
+    /// Inside [`ahead`]: queued entries are marked ahead of a scene switch.
+    static AHEAD: Cell<bool> = const { Cell::new(false) };
     /// Queued entries (and those made since, for the progress count), in creation order.
     static QUEUE: RefCell<Vec<Weak<dyn Job>>> = const { RefCell::new(Vec::new()) };
 }
@@ -184,6 +192,27 @@ fn current_group() -> Group {
     GROUP.with(Cell::get)
 }
 
+/// Runs `f` with the pipelines it queues (and their constructors' nested ones) marked *ahead*:
+/// for a scene that is not rendered yet. They compile in the background like the others but
+/// don't make their group not [`ready`] (nor appear in [`waiting`]) until [`claim_ahead`], and
+/// the serial compiler makes them in its background batches, not with the core set.
+pub fn ahead<R>(f: impl FnOnce() -> R) -> R {
+    let previous = AHEAD.with(|a| a.replace(true));
+    let result = f();
+    AHEAD.with(|a| a.set(previous));
+    result
+}
+
+fn in_ahead() -> bool {
+    AHEAD.with(Cell::get)
+}
+
+/// The scene the [`ahead`] pipelines were queued for is in: they count for their groups from now
+/// on (a frame waits for the core ones still compiling, a feature for its group's).
+pub fn claim_ahead() {
+    QUEUE.with(|q| q.borrow().iter().filter_map(Weak::upgrade).for_each(|j| j.claim()));
+}
+
 /// A value made later: on first use ([`Lazy::new`]) or, for pipelines every frame of a feature
 /// needs, in the background ([`Lazy::background`]). Dereferences to the value (making it if it
 /// is not made yet), so `pass.set_pipeline(&self.pipeline)` reads as before.
@@ -196,6 +225,8 @@ struct Entry<T> {
     make: Make<T>,
     group: Group,
     state: AtomicU8,
+    /// Queued [`ahead`] of a scene switch, not claimed yet.
+    ahead: AtomicBool,
 }
 
 /// A queue entry, whatever it makes.
@@ -204,6 +235,9 @@ trait Job {
     fn state(&self) -> u8;
     #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
     fn set_state(&self, from: u8, to: u8);
+    /// Queued [`ahead`] of a scene switch and not claimed yet.
+    fn ahead(&self) -> bool;
+    fn claim(&self);
     fn make(&self);
     /// Starts an asynchronous compile of what `make` would create; false if there was none (the
     /// constructor made no pipeline, or the browser cannot compile asynchronously).
@@ -214,8 +248,13 @@ impl<T> Entry<T> {
     fn get(&self) -> &T {
         self.value.get_or_init(|| {
             self.state.store(MADE, Ordering::Relaxed);
-            // Pipelines created by the constructor (nested `Lazy` values) share its group.
-            in_group(self.group, || (self.make)())
+            // Pipelines created by the constructor (nested `Lazy` values) share its group (and
+            // its being ahead of a scene switch).
+            if self.ahead.load(Ordering::Relaxed) {
+                in_group(self.group, || ahead(|| (self.make)()))
+            } else {
+                in_group(self.group, || (self.make)())
+            }
         })
     }
 }
@@ -231,6 +270,14 @@ impl<T: 'static> Job for Entry<T> {
 
     fn set_state(&self, from: u8, to: u8) {
         let _ = self.state.compare_exchange(from, to, Ordering::Relaxed, Ordering::Relaxed);
+    }
+
+    fn ahead(&self) -> bool {
+        self.ahead.load(Ordering::Relaxed)
+    }
+
+    fn claim(&self) {
+        self.ahead.store(false, Ordering::Relaxed);
     }
 
     fn make(&self) {
@@ -279,13 +326,22 @@ impl<T: 'static> Lazy<T> {
     }
 
     fn with_state(make: Make<T>, state: u8) -> Self {
-        Self { entry: Shared::new(Entry { value: OnceLock::new(), make, group: current_group(), state: AtomicU8::new(state) }) }
+        Self { entry: Shared::new(Entry { value: OnceLock::new(), make, group: current_group(), state: AtomicU8::new(state), ahead: AtomicBool::new(false) }) }
     }
 
     /// Queues a pipeline made on first use for the background, because a frame will need it
     /// soon (the scene has that content). Does nothing natively, or once it is queued or made.
+    /// Inside [`ahead`] it is queued for the next scene; outside, a value queued ahead is claimed
+    /// (the current scene needs it too).
     pub fn prefetch(&self) {
-        if deferring() && self.entry.state.compare_exchange(IDLE, WANTED, Ordering::Relaxed, Ordering::Relaxed).is_ok() {
+        if !deferring() {
+            return;
+        }
+        if !in_ahead() {
+            self.entry.ahead.store(false, Ordering::Relaxed);
+        }
+        if self.entry.state.compare_exchange(IDLE, WANTED, Ordering::Relaxed, Ordering::Relaxed).is_ok() {
+            self.entry.ahead.store(in_ahead(), Ordering::Relaxed);
             let entry: Shared<dyn Job> = self.entry.clone();
             let job = Shared::downgrade(&entry);
             QUEUE.with(|q| q.borrow_mut().push(job));
@@ -326,9 +382,15 @@ fn pending(state: u8) -> bool {
     matches!(state, WANTED | WARMING | WARM)
 }
 
-/// Whether every queued pipeline of `group` is made (always, natively).
+/// Whether every queued pipeline of `group` is made (always, natively); pipelines queued
+/// [`ahead`] of a scene switch don't count until claimed.
 pub fn ready(group: Group) -> bool {
-    QUEUE.with(|q| q.borrow().iter().filter_map(Weak::upgrade).all(|j| j.group() != group || !pending(j.state())))
+    QUEUE.with(|q| q.borrow().iter().filter_map(Weak::upgrade).all(|j| j.group() != group || j.ahead() || !pending(j.state())))
+}
+
+/// Whether any queued pipeline (ahead of a scene switch included) is still to make.
+pub fn queued() -> bool {
+    entries().iter().any(|j| pending(j.state()))
 }
 
 /// Queued pipelines made so far and in all (made ones stay counted while they live).
@@ -345,7 +407,7 @@ pub fn group_progress(group: Group) -> (usize, usize) {
 
 /// Groups with pipelines still to make, in priority order.
 pub fn waiting() -> Vec<Group> {
-    let mut groups: Vec<Group> = entries().iter().filter(|j| pending(j.state())).map(|j| j.group()).collect();
+    let mut groups: Vec<Group> = entries().iter().filter(|j| !j.ahead() && pending(j.state())).map(|j| j.group()).collect();
     groups.dedup();
     groups
 }
@@ -382,7 +444,9 @@ pub fn pump_and(mut made_core: impl FnMut()) -> usize {
         Compiler::Serial => {
             // Making a value may queue the pipelines it holds: until none are left.
             loop {
-                let core: Vec<_> = entries().into_iter().filter(|j| j.group() == Group::Core && j.state() == WANTED).collect();
+                // (Core pipelines queued ahead of a scene switch go with the background batches:
+                // the current scene keeps rendering between them.)
+                let core: Vec<_> = entries().into_iter().filter(|j| j.group() == Group::Core && !j.ahead() && j.state() == WANTED).collect();
                 if core.is_empty() {
                     break;
                 }
@@ -594,6 +658,46 @@ mod tests {
         assert!(!ready(Group::Shadows));
         assert!(make_next());
         assert!(ready(Group::Shadows));
+        set_deferring(false);
+    }
+
+    #[test]
+    fn pipelines_queued_ahead_of_a_switch_count_once_claimed() {
+        set_deferring(true);
+        set_compiler(Compiler::Serial);
+        let (made, make) = counter();
+        let current = Lazy::background(make.clone());
+        assert_eq!(pump(), 1);
+        let shared = Lazy::new(make.clone());
+        let rare = Lazy::new(make.clone());
+        let inner = make.clone();
+        let (next, shadows, nested) = ahead(|| {
+            rare.prefetch();
+            shared.prefetch();
+            let shadows = in_group(Group::Shadows, || Lazy::background(make.clone()));
+            let nested = in_group(Group::Fog, || Lazy::background(move || Lazy::background(inner.clone())));
+            (Lazy::background(make.clone()), shadows, nested)
+        });
+        // The current scene renders on: nothing of the next one holds its frames or features.
+        assert!(current.is_made() && ready(Group::Core) && ready(Group::Shadows) && ready(Group::Fog));
+        assert!(waiting().is_empty() && queued());
+        // The serial compiler makes them in background batches, not with the core set.
+        assert_eq!(pump(), 0);
+        assert!(make_next() && rare.is_made());
+        // The current scene asks for one of them too: it counts again.
+        shared.prefetch();
+        assert!(!ready(Group::Core));
+        assert_eq!(pump(), 1);
+        assert!(shared.is_made() && ready(Group::Core));
+        assert!(make_next() && next.is_made());
+        assert!(make_next() && shadows.is_made());
+        // A value made ahead queues its nested values ahead too.
+        assert!(make_next() && nested.is_made() && ready(Group::Fog));
+        claim_ahead();
+        assert!(!ready(Group::Fog) && waiting() == vec![Group::Fog]);
+        assert!(make_next() && ready(Group::Fog) && !queued());
+        assert!(nested.is_made_inner());
+        assert_eq!(made.load(Ordering::Relaxed), 6);
         set_deferring(false);
     }
 
