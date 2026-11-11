@@ -30,6 +30,30 @@ pub fn ground_height(x: f32, z: f32) -> f32 {
     hills - hollow * 2.0
 }
 
+/// Height of the terrain *mesh* at (x, z): [`ground_height`] sampled at the vertices of its
+/// `resolution`² grid (`primitives::terrain`, which the scene deforms onto `ground_height`) and
+/// interpolated over the grid triangle that holds (x, z), exactly as the mesh is rasterised. On a
+/// 1.2–2.3 m grid the mesh lies centimetres to decimetres below the analytic height on every
+/// crest: plants placed at `ground_height` float there.
+fn terrain_mesh_height(x: f32, z: f32, resolution: u32) -> f32 {
+    let vertex = |i: i64, j: i64| {
+        let uv = Vec2::new(i as f32, j as f32) / resolution as f32;
+        let xz = (uv - 0.5) * SIZE;
+        ground_height(xz.x, xz.y)
+    };
+    let cell = (Vec2::new(x, z) / SIZE + 0.5) * resolution as f32;
+    let (i, j) = (cell.x.floor() as i64, cell.y.floor() as i64);
+    let (fx, fz) = (cell.x - i as f32, cell.y - j as f32);
+    // Each quad is split along the diagonal from (i + 1, j) to (i, j + 1).
+    if fx + fz <= 1.0 {
+        let h = vertex(i, j);
+        h + fx * (vertex(i + 1, j) - h) + fz * (vertex(i, j + 1) - h)
+    } else {
+        let h = vertex(i + 1, j + 1);
+        h + (1.0 - fx) * (vertex(i, j + 1) - h) + (1.0 - fz) * (vertex(i + 1, j) - h)
+    }
+}
+
 /// Forest density in [0, 1] (clearings where low).
 fn density(x: f32, z: f32) -> f32 {
     let n = fbm(Vec3::new(x, 0.0, z) * 0.012, 3, 91);
@@ -102,9 +126,9 @@ fn build_scene(detail: Detail) -> Scene {
 
     // ---- Textures and materials -------------------------------------------------------------------
     let t = |scene: &mut Scene, d: TextureDesc| scene.add_texture(d);
-    let litter = t(&mut scene, TextureDesc::new(TexturePattern::ForestFloor, Vec3::new(0.3, 0.17, 0.06), Vec3::new(0.09, 0.065, 0.04)).roughness(0.85, 0.9).seed(71));
-    let moss = t(&mut scene, TextureDesc::new(TexturePattern::Moss, Vec3::new(0.1, 0.15, 0.04), Vec3::new(0.07, 0.1, 0.03)).roughness(0.95, 0.9).scale(0.5).bump(0.6).seed(72));
-    let dirt = t(&mut scene, TextureDesc::new(TexturePattern::Dirt, Vec3::new(0.17, 0.12, 0.08), Vec3::new(0.2, 0.18, 0.15)).roughness(0.95, 0.8).bump(0.6).seed(73));
+    let litter = t(&mut scene, TextureDesc::new(TexturePattern::ForestFloor, Vec3::new(0.3, 0.17, 0.06), Vec3::new(0.09, 0.065, 0.04)).roughness(0.85, 0.9).bump(0.3).seed(71));
+    let moss = t(&mut scene, TextureDesc::new(TexturePattern::Moss, Vec3::new(0.1, 0.15, 0.04), Vec3::new(0.07, 0.1, 0.03)).roughness(0.95, 0.9).scale(0.5).bump(0.2).seed(72));
+    let dirt = t(&mut scene, TextureDesc::new(TexturePattern::Dirt, Vec3::new(0.17, 0.12, 0.08), Vec3::new(0.2, 0.18, 0.15)).roughness(0.95, 0.8).bump(0.25).seed(73));
     let rock = t(&mut scene, TextureDesc::new(TexturePattern::Rock, Vec3::new(0.3, 0.29, 0.27), Vec3::new(0.14, 0.14, 0.13)).roughness(0.75, 0.9).seed(74));
     let oak_bark = t(&mut scene, TextureDesc::new(TexturePattern::Bark, Vec3::new(0.24, 0.21, 0.17), Vec3::new(0.06, 0.05, 0.04)).roughness(0.9, 0.95).param(0.6).bump(1.5).seed(75));
     let pine_bark = t(&mut scene, TextureDesc::new(TexturePattern::Bark, Vec3::new(0.2, 0.12, 0.08), Vec3::new(0.06, 0.04, 0.03)).roughness(0.85, 0.95).param(0.2).scale(1.4).bump(1.8).seed(76));
@@ -173,11 +197,12 @@ fn build_scene(detail: Detail) -> Scene {
 
     // ---- Meshes --------------------------------------------------------------------------------------
     let mut m = Meshes { scene: &mut scene };
+    let terrain_resolution = detail.pick(384, 768);
     let terrain = add_baked_with(
         m.scene,
         "terrain",
         &{
-            let mut t = primitives::terrain(SIZE, detail.pick(384, 768), 1.0, 1);
+            let mut t = primitives::terrain(SIZE, terrain_resolution, 1.0, 1);
             t.deform(|p| Vec3::new(p.x, ground_height(p.x, p.z), p.z));
             t
         },
@@ -244,8 +269,9 @@ fn build_scene(detail: Detail) -> Scene {
     // ---- Scatter ---------------------------------------------------------------------------------------
     scene.add_instance(terrain, terrain_material, Mat4::IDENTITY);
     let mut rng = Rng(0x1234_5678);
+    // On the terrain mesh as rendered (not the analytic height it approximates).
     let place = |x: f32, z: f32, sink: f32, scale: Vec3, yaw: f32| {
-        Mat4::from_scale_rotation_translation(scale, Quat::from_rotation_y(yaw), Vec3::new(x, ground_height(x, z) - sink, z))
+        Mat4::from_scale_rotation_translation(scale, Quat::from_rotation_y(yaw), Vec3::new(x, terrain_mesh_height(x, z, terrain_resolution) - sink, z))
     };
     let mut placed_trees: Vec<Vec2> = Vec::new();
     let target = detail.pick(1500, 3200);
@@ -319,7 +345,7 @@ fn build_scene(detail: Detail) -> Scene {
     let lantern = Vec3::new(9.0, ground_height(9.0, -4.0) + 0.6, -4.0);
     scene.add_light(Light { source_radius: 0.1, ..Light::point(lantern, Vec3::new(1.0, 0.65, 0.3), 2.0, 12.0) });
     // Built last, so pre-baked mesh libraries of the rest of the scene stay valid.
-    campfire(&mut scene, CAMPFIRE.x, CAMPFIRE.y);
+    campfire(&mut scene, CAMPFIRE.x, CAMPFIRE.y, terrain_resolution);
     scene
 }
 
@@ -333,8 +359,9 @@ fn in_campfire(x: f32, z: f32) -> bool {
 
 /// A campfire: a ring of stones around a teepee of charred logs over glowing coals, a simulated
 /// fire with its smoke column, sparks and embers, and a light the flames drive.
-fn campfire(scene: &mut Scene, x: f32, z: f32) {
-    let base = Vec3::new(x, ground_height(x, z), z);
+fn campfire(scene: &mut Scene, x: f32, z: f32, terrain_resolution: u32) {
+    let ground = |x: f32, z: f32| terrain_mesh_height(x, z, terrain_resolution);
+    let base = Vec3::new(x, ground(x, z), z);
     let stone_m = scene.add_material(Material { kind: MaterialKind::Rock, base_color: Vec3::new(0.3, 0.29, 0.27), roughness: 0.85, detail_scale: 8.0, detail_strength: 0.3, ..Default::default() });
     let charred = scene.add_material(Material::standard(Vec3::new(0.045, 0.035, 0.03), 0.9, 0.0));
     let coals_m = scene.add_material(Material { base_color: Vec3::new(1.0, 0.32, 0.07), emissive: 1.2, roughness: 0.9, ..Default::default() });
@@ -353,7 +380,7 @@ fn campfire(scene: &mut Scene, x: f32, z: f32) {
         let r = 0.68 + rng.range(-0.04, 0.04);
         let (sx, sz) = (x + angle.cos() * r, z + angle.sin() * r);
         let s = rng.range(0.13, 0.19);
-        let xf = Mat4::from_scale_rotation_translation(Vec3::new(s, s * 0.75, s), Quat::from_rotation_y(rng.range(0.0, 6.3)), Vec3::new(sx, ground_height(sx, sz) + s * 0.2, sz));
+        let xf = Mat4::from_scale_rotation_translation(Vec3::new(s, s * 0.75, s), Quat::from_rotation_y(rng.range(0.0, 6.3)), Vec3::new(sx, ground(sx, sz) + s * 0.2, sz));
         scene.add_instance(stone, stone_m, xf);
     }
     scene.add_instance(coals, coals_m, Mat4::from_scale_rotation_translation(Vec3::new(0.42, 0.06, 0.42), Quat::IDENTITY, base));
@@ -367,7 +394,7 @@ fn campfire(scene: &mut Scene, x: f32, z: f32) {
 
     // In the flames just above the teepee: the logs below it stripe the clearing with shadows, the
     // smoke above is lit without their shadow cone.
-    let light = scene.add_light(Light { source_radius: 0.25, ..Light::point(base + Vec3::Y * 0.8, Vec3::new(1.0, 0.48, 0.18), 4.0, 18.0) });
+    let light = scene.add_light(Light { source_radius: 0.15, ..Light::point(base + Vec3::Y * 0.8, Vec3::new(1.0, 0.48, 0.18), 4.0, 18.0) });
     scene.volumes.push(VolumeEmitter { light: Some(light), ..VolumeEmitter::campfire(base) });
     scene.particles.push(ParticleEmitter::sparks(base + Vec3::Y * 0.3));
     scene.particles.push(ParticleEmitter::embers(base + Vec3::Y * 0.25));
@@ -381,4 +408,40 @@ fn initial_camera() -> Camera {
 
 pub fn build(detail: Detail) -> SceneSetup {
     SceneSetup { scene: build_scene(detail), camera: initial_camera(), sun: SUN, floor: ground_height, animation: None, motion: Default::default() }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The placement height is the terrain mesh's: exact at its vertices, linear along its edges;
+    /// the analytic height it replaces stands centimetres off it (above it on crests).
+    #[test]
+    fn plants_stand_on_the_terrain_mesh() {
+        for resolution in [384u32, 768] {
+            let step = SIZE / resolution as f32;
+            let vertex = |i: i64, j: i64| Vec2::new(i as f32, j as f32) / resolution as f32 * SIZE - SIZE * 0.5;
+            for (i, j) in [(192i64, 192i64), (200, 181), (230, 170)] {
+                let p = vertex(i, j);
+                assert!((terrain_mesh_height(p.x, p.y, resolution) - ground_height(p.x, p.y)).abs() < 1e-3);
+                // The middle of the diagonal shared by a quad's two triangles.
+                let (a, b) = (vertex(i + 1, j), vertex(i, j + 1));
+                let m = (a + b) * 0.5;
+                let expected = 0.5 * (ground_height(a.x, a.y) + ground_height(b.x, b.y));
+                assert!((terrain_mesh_height(m.x, m.y, resolution) - expected).abs() < 1e-3);
+            }
+            // How far the analytic height floats above the mesh where grass and ferns grow.
+            let mut rng = Rng(7);
+            let (mut above, mut sum, mut n) = (0.0f32, 0.0f32, 0);
+            for _ in 0..20000 {
+                let (x, z) = (rng.range(-70.0, 70.0), rng.range(-70.0, 70.0));
+                let d = ground_height(x, z) - terrain_mesh_height(x, z, resolution);
+                above = above.max(d);
+                sum += d.abs();
+                n += 1;
+            }
+            eprintln!("grid {step:.2} m: analytic height above the mesh by up to {:.3} m, mean |difference| {:.4} m", above, sum / n as f32);
+            assert!(above > 0.005, "the mesh approximates the analytic ground");
+        }
+    }
 }

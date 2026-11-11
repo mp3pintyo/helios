@@ -11,6 +11,8 @@
 //   flutter : leaves and blades flutter quickly, with a short spatial wavelength
 // Gusts are waves travelling along the wind, so they roll across a field of grass. A plant's own
 // phase comes from its origin: wood and foliage instances sharing a transform move together.
+// Every vertex's displacement is scaled by its wind weight (the mesh's plant data), which holds
+// a plant where it is rooted: a grass blade's base stays in the soil while its tip sways.
 // Normals are not rotated (the motion is subtle).
 
 struct Wind {
@@ -132,20 +134,24 @@ fn wind_padded(instance: Instance, strength: f32, sphere: vec4<f32>) -> vec4<f32
 }
 
 // World position of an object-space vertex this frame, wind included (`strength` from
-// wind_strength).
-fn wind_world_position(instance: Instance, strength: f32, object: vec3<f32>) -> vec3<f32> {
+// wind_strength). `weight` is the vertex's wind weight (geometry.wgsl vertex_wind_weight: the
+// plant data's attachment, 0 at a plant's root, 1 where it moves freely; 1 for meshes without
+// plant data and for voxels). It scales the whole displacement, so it can only reduce it: every
+// bound above (wind_reach, wind_speed, culling, shadow invalidation) holds for any weight in
+// [0, 1].
+fn wind_world_position(instance: Instance, strength: f32, object: vec3<f32>, weight: f32) -> vec3<f32> {
     let rest = (instance.world * vec4<f32>(object, 1.0)).xyz;
     if strength <= 0.0 {
         return rest;
     }
-    return rest + wind_offset(wind_origin(instance), instance.wind, strength, rest, wind.time.x);
+    return rest + wind_offset(wind_origin(instance), instance.wind, strength, rest, wind.time.x) * weight;
 }
 
 // The same vertex in the previous frame (motion vectors).
-fn wind_previous_world_position(instance: Instance, strength: f32, object: vec3<f32>) -> vec3<f32> {
+fn wind_previous_world_position(instance: Instance, strength: f32, object: vec3<f32>, weight: f32) -> vec3<f32> {
     let rest = (instance.prev_world * vec4<f32>(object, 1.0)).xyz;
     if strength <= 0.0 {
         return rest;
     }
-    return rest + wind_offset(wind_previous_origin(instance), instance.wind, strength, rest, wind.time.y);
+    return rest + wind_offset(wind_previous_origin(instance), instance.wind, strength, rest, wind.time.y) * weight;
 }

@@ -314,6 +314,8 @@ fn resolve(
     var uvs: array<vec2<f32>, 3>;
     var uv1s: array<vec2<f32>, 3>;
     var colors: array<vec4<f32>, 3>;
+    // Plant data (wind weight, baked occlusion; vegetation only).
+    var plants: array<vec2<f32>, 3>;
     var clips: array<vec4<f32>, 3>;
     // Skinned instances: the corners' previous positions (motion vectors).
     var previous_worlds: array<vec3<f32>, 3>;
@@ -325,14 +327,18 @@ fn resolve(
         // to the surface); world positions and normals are posed.
         object_positions[i] = vertex_position(cluster, base, local);
         normals[i] = vertex_normal(cluster, base, local);
+        plants[i] = vec2<f32>(1.0);
+        if extended {
+            plants[i] = vertex_plant(cluster, base, local);
+        }
         var posed = object_positions[i];
         if skinned {
             let v = skinned_vertex(instance, cluster, base, local, object_positions[i], normals[i]);
             posed = v.position;
             normals[i] = v.normal;
-            previous_worlds[i] = wind_previous_world_position(instance, wind_force, v.previous);
+            previous_worlds[i] = wind_previous_world_position(instance, wind_force, v.previous, plants[i].x);
         }
-        world_positions[i] = wind_world_position(instance, wind_force, posed);
+        world_positions[i] = wind_world_position(instance, wind_force, posed, plants[i].x);
         uvs[i] = vertex_uv(cluster, base, local);
         // Optional attributes (imported meshes only).
         uv1s[i] = uvs[i];
@@ -372,7 +378,8 @@ fn resolve(
     // to far below a pixel, which is all motion vectors need. Skinning is affine per triangle: the
     // corners' previous positions interpolate exactly. (Resolved here, before the material, so
     // the corner arrays need not live through it.)
-    var previous_world = wind_previous_world_position(instance, wind_force, input.object_position);
+    let plant = interpolate2(plants, b.lambda);
+    var previous_world = wind_previous_world_position(instance, wind_force, input.object_position, plant.x);
     if skinned {
         previous_world = interpolate3(previous_worlds, b.lambda);
     }
@@ -381,7 +388,7 @@ fn resolve(
         // displacement moves it). The displaced point is a hair off the micro-triangle the depth
         // came from, which must not read as motion (TSR and motion blur would smear a still
         // surface).
-        previous_world = wind_previous_world_position(instance, wind_force, hit.previous) + (hit.world - wind_world_position(instance, wind_force, hit.object));
+        previous_world = wind_previous_world_position(instance, wind_force, hit.previous, 1.0) + (hit.world - wind_world_position(instance, wind_force, hit.object, 1.0));
     }
     input.world_position = interpolate3(world_positions, b.lambda);
     // Where the pixel's surface is.
@@ -444,6 +451,9 @@ fn resolve(
     } else {
         surface = evaluate_kind(m, input);
     }
+
+    // A plant's baked occlusion darkens its indirect light like the material's ambient occlusion.
+    surface.occlusion *= plant.y;
 
     if DEBUG_VIEWS {
         switch frame.debug_view {

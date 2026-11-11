@@ -198,6 +198,8 @@ pub mod flags {
     pub const MEGALIGHTS: u32 = 128;
     /// The motion target's z holds TSR's reactive mask (particles and volumes, `oit.rs`).
     pub const REACTIVE: u32 = 1024;
+    /// Short-range ambient occlusion in the lighting (`short_range_ao.wgsl`).
+    pub const SHORT_RANGE_AO: u32 = 4096;
 }
 
 const _: () = {

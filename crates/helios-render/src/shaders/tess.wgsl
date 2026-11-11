@@ -112,7 +112,9 @@ fn prepare_dice() {
 // A displaced grid vertex in the raster: pixel x, y (snapped), NDC depth; w < 0 behind the near
 // plane.
 fn tess_project(instance: Instance, strength: f32, object: vec3<f32>) -> vec4<f32> {
-    let world = wind_world_position(instance, strength, object);
+    // Displaced (tessellated) surfaces move with weight 1: plant data is not interpolated over
+    // micro-triangles (vegetation is not displaced).
+    let world = wind_world_position(instance, strength, object, 1.0);
     let clip = view.view_proj * vec4<f32>(world, 1.0);
     if clip.w <= tess.dice.z {
         return vec4<f32>(0.0, 0.0, 0.0, -1.0);

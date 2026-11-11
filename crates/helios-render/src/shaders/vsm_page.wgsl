@@ -18,7 +18,8 @@ fn page_vertex(draw: vec4<u32>, cluster: Cluster, base: u32, local: u32) -> vec4
     if SKINNING {
         object = skinned_position(instance, cluster, base, local, object);
     }
-    let world = wind_world_position(instance, wind_strength(instance), object);
+    let strength = wind_strength(instance);
+    let world = wind_world_position(instance, strength, object, vertex_wind_weight(cluster, base, local, strength));
     let level = draw.z >> 16u;
     let page = vec2<f32>(decode_tag(draw.w));
     if level >= LOCAL_LEVEL {

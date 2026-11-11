@@ -9,11 +9,13 @@
 //          bit 30: extended (imported meshes with a second UV set or vertex colours)
 //   [6]    grid exponents: position (i8) | uv (i8) << 8
 //   extended only: [7] uv1 widths u | v << 5, colour widths r << 10 | g << 14 | b << 18 |
-//          a << 22, has uv1 << 26, has colour << 27; [8..10) uv1 minimum; [10] colour minimum
-//          (RGBA8: rgb on a square-root curve, alpha linear)
+//          a << 22, has uv1 << 26, has colour << 27, has skin << 28, has plant data << 29;
+//          [8..10) uv1 minimum; [10] colour minimum (RGBA8: rgb on a square-root curve, alpha
+//          linear)
 //   [7..) or [11..)  vertex bit stream: all position offsets (x, y, z), then all attributes
 //          (octahedral normal x | y << normal bits, u offset, v offset, then the optional
-//          uv1 u, v and colour r, g, b, a offsets)
+//          uv1 u, v and colour r, g, b, a offsets and plant data: wind weight, occlusion,
+//          PLANT_CHANNEL_BITS each)
 // At triangle_offset: 3 corner indices per triangle, index_bits(vertex count) bits each.
 // A coordinate decodes as f32(minimum + offset) * 2^exponent, exact in f32, so a vertex shared
 // by two clusters (or LOD levels) lands on the same bits in both: no cracks.
@@ -23,6 +25,8 @@ const CLUSTER_EXTENDED: u32 = 0x40000000u;
 const CLUSTER_EXTENSION_WORDS: u32 = 4u;
 const CLUSTER_HAS_UV1: u32 = 0x4000000u;
 const CLUSTER_HAS_COLOR: u32 = 0x8000000u;
+const CLUSTER_HAS_PLANT: u32 = 0x20000000u;
+const PLANT_CHANNEL_BITS: u32 = 5u;
 
 // `count` (<= 32) bits at bit `bit` of the stream starting at pool word `word`.
 fn read_bits(word: u32, bit: u32, count: u32) -> u32 {
@@ -93,10 +97,15 @@ fn vertex_position(c: Cluster, base: u32, index: u32) -> vec3<f32> {
     return vec3<f32>(minimum + vec3<i32>(offset)) * grid_step(geometry[header + 6u], 0u);
 }
 
-// Bits of the optional attributes (uv1, colour) per vertex, from the extension word.
+// Bits of the plant data per vertex, from the extension word.
+fn plant_stride(extension: u32) -> u32 {
+    return select(0u, 2u * PLANT_CHANNEL_BITS, (extension & CLUSTER_HAS_PLANT) != 0u);
+}
+
+// Bits of the optional attributes (uv1, colour, plant data) per vertex, from the extension word.
 fn extension_stride(extension: u32) -> u32 {
     return (extension & 31u) + ((extension >> 5u) & 31u) + ((extension >> 10u) & 15u) + ((extension >> 14u) & 15u)
-        + ((extension >> 18u) & 15u) + ((extension >> 22u) & 15u);
+        + ((extension >> 18u) & 15u) + ((extension >> 22u) & 15u) + plant_stride(extension);
 }
 
 // Bit of vertex `index`'s attributes (normal, uv, then the optional ones) in the vertex stream.
@@ -163,4 +172,30 @@ fn vertex_color(c: Cluster, base: u32, index: u32) -> vec4<f32> {
     );
     let code = (unpack4x8unorm(geometry[header + 10u]) * 255.0 + vec4<f32>(offset)) / 255.0;
     return vec4<f32>(code.rgb * code.rgb, code.a);
+}
+
+// Plant data of vertex `index` (helios_geometry::Mesh::plant): x the wind weight (0 where the
+// plant is held at its root, 1 where it moves freely; wind.wgsl scales the displacement by it),
+// y the baked ambient occlusion. (1, 1) for meshes without it.
+fn vertex_plant(c: Cluster, base: u32, index: u32) -> vec2<f32> {
+    let header = base + c.vertex_offset;
+    let widths = geometry[header + 5u];
+    let extension = cluster_extension(header, widths);
+    if (extension & CLUSTER_HAS_PLANT) == 0u {
+        return vec2<f32>(1.0);
+    }
+    // The plant data ends the vertex's attributes.
+    let bit = attribute_bit(c, widths, extension, index + 1u) - plant_stride(extension);
+    let packed = read_bits(vertex_stream(header, widths), bit, 2u * PLANT_CHANNEL_BITS);
+    let mask = (1u << PLANT_CHANNEL_BITS) - 1u;
+    return vec2<f32>(f32(packed & mask), f32((packed >> PLANT_CHANNEL_BITS) & mask)) / f32(mask);
+}
+
+// The wind weight of vertex `index` where the instance moves in the wind (`strength` > 0, from
+// wind_strength), else 1 without reading it.
+fn vertex_wind_weight(c: Cluster, base: u32, index: u32, strength: f32) -> f32 {
+    if strength <= 0.0 {
+        return 1.0;
+    }
+    return vertex_plant(c, base, index).x;
 }

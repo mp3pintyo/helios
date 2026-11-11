@@ -100,7 +100,7 @@ fn rasterize(
         let b = brick_of(i, v.bricks);
         let brick = brick_words[b];
         let object = v.origin + ((voxel_cell(brick, voxel_nth_bit(brick.xy, i - brick_first[b])) + 0.5) * v.size);
-        let world = wind_world_position(instance, strength, object);
+        let world = wind_world_position(instance, strength, object, 1.0); // voxels: no plant data
         let center = clip_to_raster(view.view_proj * vec4<f32>(world, 1.0), size);
         if !voxel_may_cover(center, ax, ay, az, size) {
             continue;

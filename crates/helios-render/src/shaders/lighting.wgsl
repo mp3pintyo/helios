@@ -19,6 +19,7 @@
 #include "fog_common.wgsl"
 #include "stars.wgsl"
 #include "glass_shadow.wgsl"
+#include "short_range_ao.wgsl"
 
 @group(0) @binding(0) var<uniform> frame: Frame;
 @group(0) @binding(1) var depth_texture: texture_2d<f32>;
@@ -497,8 +498,12 @@ fn shade(@builtin(global_invocation_id) gid: vec3<u32>) {
     } else {
         indirect = diffuse_color * sh_irradiance(sky_sh, n) * frame.sun_illuminance.rgb / PI;
     }
-    // Material ambient occlusion (baked creases) darkens indirect light only, as in UE.
-    let occlusion = surface_occlusion_of(motion.w);
+    // Material ambient occlusion (baked creases) darkens indirect light only, as in UE, and so
+    // does the short-range occlusion of the geometry around the pixel (short_range_ao.wgsl).
+    var occlusion = surface_occlusion_of(motion.w);
+    if has_flag(frame.flags, FLAG_SHORT_RANGE_AO) {
+        occlusion *= short_range_ao(pixel, size, world_position, n, noise);
+    }
     indirect *= occlusion;
     // Slabs: the coat and the sheen take their share; subsurface pixels scatter theirs.
     var irradiance = vec3<f32>(0.0);

@@ -240,6 +240,8 @@ impl DemoApp {
             "Slash" => s.translucency_layers = !s.translucency_layers,
             // Sunlight through glass coloured by the panes / white.
             "End" => s.glass_shadows = !s.glass_shadows,
+            // Short-range ambient occlusion (grounded foliage, rock and log contact) on / off.
+            "Home" => s.short_range_ao = !s.short_range_ao,
             "KeyL" => s.wind = !s.wind,
             "Quote" => {
                 let on = !(s.volumes || s.particles);

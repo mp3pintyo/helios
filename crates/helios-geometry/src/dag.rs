@@ -307,6 +307,7 @@ pub fn build_virtual_mesh(mesh: &Mesh, config: &BuildConfig) -> VirtualMesh {
     let mut uv1 = mesh.uv1.clone();
     let mut colors = mesh.colors.clone();
     let mut skin = mesh.skin.clone();
+    let mut plant = mesh.plant.clone();
     let mut canonical = canonical_ids(mesh.vertices.iter().map(|v| v.position));
     let all_triangles: Vec<[u32; 3]> = mesh.triangles().collect();
 
@@ -409,6 +410,9 @@ pub fn build_virtual_mesh(mesh: &Mesh, config: &BuildConfig) -> VirtualMesh {
                 if !skin.is_empty() {
                     skin.push(skin[nv.source as usize]);
                 }
+                if !plant.is_empty() {
+                    plant.push(plant[nv.source as usize]);
+                }
                 canonical.push(base + nv.class);
                 locked_forever.push(false);
             }
@@ -488,7 +492,7 @@ pub fn build_virtual_mesh(mesh: &Mesh, config: &BuildConfig) -> VirtualMesh {
         current = next;
     }
 
-    let vertices = Vertices { positions: &positions, normals: &normals, uvs: &uvs, uv1: &uv1, colors: &colors, skin: &skin };
+    let vertices = Vertices { positions: &positions, normals: &normals, uvs: &uvs, uv1: &uv1, colors: &colors, skin: &skin, plant: &plant };
     let mut vm = pack(&vertices, &work, &voxel_groups, config);
     vm.sdf = bake_sdf(&vm, config.sdf);
     vm
@@ -502,6 +506,7 @@ struct Vertices<'a> {
     uv1: &'a [Vec2],
     colors: &'a [Vec4],
     skin: &'a [SkinWeights],
+    plant: &'a [Vec2],
 }
 
 impl Vertices<'_> {
@@ -521,7 +526,7 @@ impl Vertices<'_> {
             max_abs(&mut self.positions.iter().flat_map(|p| p.to_array())),
             max_abs(&mut self.uvs.iter().chain(self.uv1).flat_map(|uv| uv.to_array())),
         )
-        .with_attributes(VertexAttributes { uv1: !self.uv1.is_empty(), color: !self.colors.is_empty(), skin: !self.skin.is_empty() })
+        .with_attributes(VertexAttributes { uv1: !self.uv1.is_empty(), color: !self.colors.is_empty(), skin: !self.skin.is_empty(), plant: !self.plant.is_empty() })
     }
 
     /// Vertex `v` on the grids of `quantization`.
@@ -535,6 +540,9 @@ impl Vertices<'_> {
         }
         if let Some(&skin) = self.skin.get(v) {
             q = q.with_skin(skin);
+        }
+        if let Some(&plant) = self.plant.get(v) {
+            q = q.with_plant(plant);
         }
         q
     }
@@ -860,6 +868,13 @@ impl VirtualMesh {
         (encoding.uv1(stream, count, i), encoding.color(stream, count, i))
     }
 
+    /// Plant data (wind weight, ambient occlusion) of vertex `i` of `cluster`; (1, 1) for meshes
+    /// without it.
+    pub fn cluster_vertex_plant(&self, cluster: usize, i: u32) -> Vec2 {
+        let (encoding, stream) = self.cluster_encoding(cluster);
+        encoding.plant(stream, self.clusters[cluster].vertex_count(), i)
+    }
+
     /// Skin weights of vertex `i` of `cluster` (`None` for meshes without skin).
     pub fn cluster_vertex_skin(&self, cluster: usize, i: u32) -> Option<SkinWeights> {
         let (encoding, stream) = self.cluster_encoding(cluster);
@@ -898,10 +913,11 @@ impl VirtualMesh {
         self.stats.voxels_per_level.iter().any(|&v| v > 0)
     }
 
-    /// Version 4: voxel clusters ([`crate::voxel`]) and per-level voxel counts. Version 3 files
-    /// (triangles only, no voxel statistics) and version 2 files (float vertices) must be baked
-    /// again.
-    const MAGIC: [u8; 4] = *b"HVM4";
+    /// Version 5: clusters may carry plant data (extension bit 29, [`crate::encoding`]); version
+    /// 4 files are the same format without it and load as they are. Version 4 added voxel
+    /// clusters ([`crate::voxel`]) and per-level voxel counts; version 3 files (triangles only, no
+    /// voxel statistics) and version 2 files (float vertices) must be baked again.
+    const MAGIC: [u8; 4] = *b"HVM5";
     /// Bytes at the start of a `.hvm` that determine its header length ([`VirtualMesh::header_len`]).
     pub const PREFIX_BYTES: usize = 28;
     const SDF_HEADER_WORDS: usize = 14;
@@ -937,9 +953,10 @@ impl VirtualMesh {
     fn check_magic(magic: &[u8]) -> Result<(), String> {
         match magic {
             m if m == Self::MAGIC => Ok(()),
+            b"HVM4" => Ok(()),
             b"HVM3" => Err("virtual mesh version 3 (no voxel LODs) is no longer supported: bake it again".into()),
             b"HVM2" => Err("virtual mesh version 2 (uncompressed vertices) is no longer supported: bake it again".into()),
-            _ => Err("not a helios virtual mesh (HVM4)".into()),
+            _ => Err("not a helios virtual mesh (HVM5)".into()),
         }
     }
 
@@ -1406,6 +1423,34 @@ mod tests {
         let extra = vm.payload_bytes() - vm_plain.payload_bytes();
         assert!(extra > vm.clusters.len() * 16 && extra < vm.clusters.len() * 20 + vertices * 8, "{extra} bytes for {vertices} vertices");
         println!("optional attributes: +{extra} bytes ({:.1} per vertex) on {} bytes", extra as f32 / vertices as f32, vm_plain.payload_bytes());
+    }
+
+    /// Plant data (wind weight, occlusion) follows its vertices through every LOD level and the
+    /// voxel LODs of foliage, at 10 bits per vertex.
+    #[test]
+    fn plant_data_survives_simplification() {
+        let mut plain = primitives::rock(5, 4);
+        let plant_of = |p: Vec3| Vec2::new((p.y * 0.5 + 0.5).clamp(0.0, 1.0), (p.x * 0.5 + 0.5).clamp(0.0, 1.0));
+        let config = BuildConfig { sdf: SdfMode::None, ..Default::default() };
+        let vm_plain = build_virtual_mesh(&plain, &config);
+        plain.plant = plain.positions().iter().map(|&p| plant_of(p)).collect();
+        let vm = build_virtual_mesh(&plain, &config);
+        assert_eq!(vm.clusters.len(), vm_plain.clusters.len(), "plant data does not change the DAG");
+        for c in 0..vm.clusters.len() {
+            for i in 0..vm.clusters[c].vertex_count() {
+                let (p, _, _) = vm.cluster_vertex(c, i);
+                let plant = vm.cluster_vertex_plant(c, i);
+                assert!((plant - plant_of(p)).abs().max_element() <= 0.5 / 31.0 + 1e-3, "{plant} vs {}", plant_of(p));
+            }
+        }
+        let vertices: usize = vm.clusters.iter().map(|c| c.vertex_count() as usize).sum();
+        let extra = vm.payload_bytes() - vm_plain.payload_bytes();
+        assert!(extra <= vm.clusters.len() * 20 + vertices * 10 / 8 + vm.clusters.len() * 4, "{extra} bytes for {vertices} vertices");
+        // Foliage with voxel LODs keeps its plant data on the triangle clusters.
+        let grass = crate::vegetation::grass_clump(3, 40, 0.45);
+        let vm = build_virtual_mesh(&grass, &BuildConfig { voxels: Some(VoxelConfig::default()), ..config });
+        let held = (0..vm.clusters.len()).filter(|&c| !vm.clusters[c].is_voxel()).any(|c| (0..vm.clusters[c].vertex_count()).any(|i| vm.cluster_vertex_plant(c, i).x == 0.0));
+        assert!(held, "the blades' roots keep weight 0");
     }
 
     /// A limb: a capped cylinder (y from 0 to 2) following three joints — blended smoothly

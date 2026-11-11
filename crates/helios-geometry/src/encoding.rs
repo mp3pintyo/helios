@@ -20,6 +20,9 @@
 //!   first, stored the same way, and RGBA8 vertex colours (RGB with a square-root curve, so
 //!   dark colours keep their precision; alpha linear), each channel an offset from the
 //!   cluster's minimum with just enough bits. Meshes without them encode exactly as before.
+//! * **Plant data** (procedural vegetation, [`crate::Mesh::plant`]): per vertex the wind
+//!   attachment weight and the baked ambient occlusion, [`PLANT_CHANNEL_BITS`] bits each
+//!   (unorm, fixed width: a handful of values along a blade need no per-cluster range).
 //! * **Skin weights** (skeletal meshes, [`crate::skin`]): per vertex up to four joint indices,
 //!   stored as offsets from the cluster's smallest joint with just enough bits, and the
 //!   quantised 8-bit weights of all but the heaviest influence (each at most half the total, so
@@ -45,11 +48,12 @@
 //! [6]    grid exponents: position (i8) | uv (i8) << 8
 //! only if extended, [7..11):
 //! [7]    uv1 widths u | v << 5, colour widths r << 10 | g << 14 | b << 18 | a << 22,
-//!        has uv1 << 26, has colour << 27, has skin << 28
+//!        has uv1 << 26, has colour << 27, has skin << 28, has plant data << 29
 //! [8..10) uv1 minimum (i32 units of the uv grid)   [10] colour minimum (r | g << 8 | b << 16 | a << 24)
 //! [7..) or [11..)  vertex bit stream: every vertex's position offsets (x, y, z), then every
-//!        vertex's attributes (octahedral normal x | y << normal bits, u, v, then uv1 u, v and
-//!        colour r, g, b, a offsets where present)
+//!        vertex's attributes (octahedral normal x | y << normal bits, u, v, then uv1 u, v,
+//!        colour r, g, b, a offsets and the plant data's wind weight, occlusion codes where
+//!        present)
 //! skin only, word aligned after the vertex stream:
 //!        [0] joint minimum | joint bits << 16 | weight bits << 21 | (influences - 1) << 25,
 //!        then per vertex: `influences` joint offsets, then the weights of influences 1.. (the
@@ -73,6 +77,11 @@ pub const CLUSTER_EXTENSION_WORDS: u32 = 4;
 const EXTENDED_BIT: u32 = 1 << 30;
 /// Bit of extension word 7 marking a skinned cluster (a skin section follows the vertex stream).
 const SKIN_BIT: u32 = 1 << 28;
+/// Bit of extension word 7 marking a cluster whose vertices carry plant data.
+const PLANT_BIT: u32 = 1 << 29;
+/// Bits per channel of the plant data (wind weight, occlusion): unorm codes `0..=31`.
+pub const PLANT_CHANNEL_BITS: u32 = 5;
+const PLANT_CODE_MAX: f32 = ((1u32 << PLANT_CHANNEL_BITS) - 1) as f32;
 /// Default bits per octahedral normal component.
 pub const NORMAL_BITS: u32 = 10;
 /// Default UV grid: 2^-15 (half a step is 1/32 texel of a 2048² texture).
@@ -125,11 +134,13 @@ pub struct VertexAttributes {
     pub color: bool,
     /// Skin weights ([`SkinWeights`]).
     pub skin: bool,
+    /// Plant data ([`encode_plant`]).
+    pub plant: bool,
 }
 
 impl VertexAttributes {
     pub fn any(&self) -> bool {
-        self.uv1 || self.color || self.skin
+        self.uv1 || self.color || self.skin || self.plant
     }
 }
 
@@ -201,6 +212,7 @@ impl Quantization {
             uv1: IVec2::ZERO,
             color: [255; 4],
             skin: SkinWeights::default(),
+            plant: encode_plant(Vec2::ONE),
         }
     }
 }
@@ -218,9 +230,15 @@ pub struct QuantizedVertex {
     pub color: [u8; 4],
     /// Encoded only if the mesh's [`VertexAttributes::skin`].
     pub skin: SkinWeights,
+    /// [`encode_plant`] (encoded only if the mesh's [`VertexAttributes::plant`]).
+    pub plant: [u8; 2],
 }
 
 impl QuantizedVertex {
+    pub fn with_plant(self, plant: Vec2) -> Self {
+        Self { plant: encode_plant(plant), ..self }
+    }
+
     pub fn with_uv1(self, quantization: &Quantization, uv1: Vec2) -> Self {
         Self { uv1: quantization.quantize_uv(uv1), ..self }
     }
@@ -315,6 +333,18 @@ pub fn encode_color(color: Vec4) -> [u8; 4] {
 pub fn decode_color(color: [u8; 4]) -> Vec4 {
     let v = Vec4::from_array(color.map(|c| c as f32 / 255.0));
     Vec4::new(v.x * v.x, v.y * v.y, v.z * v.z, v.w)
+}
+
+/// Plant data codes (wind weight, occlusion), each clamped to [0, 1] and rounded to
+/// [`PLANT_CHANNEL_BITS`] bits.
+pub fn encode_plant(plant: Vec2) -> [u8; 2] {
+    let code = |v: f32| (v.clamp(0.0, 1.0) * PLANT_CODE_MAX).round() as u8;
+    [code(plant.x), code(plant.y)]
+}
+
+/// Inverse of [`encode_plant`].
+pub fn decode_plant(plant: [u8; 2]) -> Vec2 {
+    Vec2::new(plant[0] as f32, plant[1] as f32) / PLANT_CODE_MAX
 }
 
 fn octahedral(n: Vec3) -> Vec2 {
@@ -489,7 +519,7 @@ impl ClusterEncoding {
         if self.attributes.any() {
             let c = self.color_bits;
             let flags = ((self.attributes.uv1 as u32) << 26) | ((self.attributes.color as u32) << 27);
-            let flags = flags | if self.attributes.skin { SKIN_BIT } else { 0 };
+            let flags = flags | if self.attributes.skin { SKIN_BIT } else { 0 } | if self.attributes.plant { PLANT_BIT } else { 0 };
             let widths = self.uv1_bits.x | (self.uv1_bits.y << 5) | (c.x << 10) | (c.y << 14) | (c.z << 18) | (c.w << 22) | flags;
             words.extend([widths, self.uv1_min.x as u32, self.uv1_min.y as u32, u32::from_le_bytes(self.color_min)]);
         }
@@ -515,7 +545,7 @@ impl ClusterEncoding {
         };
         if words[5] & EXTENDED_BIT != 0 {
             let e = words[7];
-            encoding.attributes = VertexAttributes { uv1: (e >> 26) & 1 != 0, color: (e >> 27) & 1 != 0, skin: e & SKIN_BIT != 0 };
+            encoding.attributes = VertexAttributes { uv1: (e >> 26) & 1 != 0, color: (e >> 27) & 1 != 0, skin: e & SKIN_BIT != 0, plant: e & PLANT_BIT != 0 };
             encoding.uv1_bits = UVec2::new(e & 31, (e >> 5) & 31);
             encoding.color_bits = UVec4::new((e >> 10) & 15, (e >> 14) & 15, (e >> 18) & 15, (e >> 22) & 15);
             encoding.uv1_min = IVec2::new(words[8] as i32, words[9] as i32);
@@ -529,7 +559,12 @@ impl ClusterEncoding {
     }
 
     fn attribute_stride(&self) -> u32 {
-        2 * self.normal_bits + self.uv_bits.element_sum() + self.uv1_bits.element_sum() + self.color_bits.element_sum()
+        2 * self.normal_bits + self.uv_bits.element_sum() + self.uv1_bits.element_sum() + self.color_bits.element_sum() + self.plant_bits()
+    }
+
+    /// Bits of the plant data per vertex.
+    fn plant_bits(&self) -> u32 {
+        if self.attributes.plant { 2 * PLANT_CHANNEL_BITS } else { 0 }
     }
 
     /// Bits of the vertex stream of a cluster with `vertex_count` vertices.
@@ -586,6 +621,17 @@ impl ClusterEncoding {
         decode_color(color)
     }
 
+    /// Plant data (wind weight, occlusion) of vertex `index`; (1, 1) where the mesh has none.
+    pub fn plant(&self, stream: &[u32], vertex_count: u32, index: u32) -> Vec2 {
+        if !self.attributes.plant {
+            return Vec2::ONE;
+        }
+        let bit = self.attribute_bit(vertex_count, index) + self.attribute_stride() - self.plant_bits();
+        let wind = read_bits(stream, bit, PLANT_CHANNEL_BITS) as u8;
+        let occlusion = read_bits(stream, bit + PLANT_CHANNEL_BITS, PLANT_CHANNEL_BITS) as u8;
+        decode_plant([wind, occlusion])
+    }
+
     /// The skin section's descriptor; `None` for clusters of meshes without skin.
     pub fn skin_encoding(&self, stream: &[u32], vertex_count: u32) -> Option<SkinEncoding> {
         self.attributes.skin.then(|| SkinEncoding::from_word(stream[self.vertex_stream_bits(vertex_count).div_ceil(32) as usize]))
@@ -628,6 +674,10 @@ pub fn encode_cluster(quantization: &Quantization, vertices: &[QuantizedVertex],
             for c in 0..4 {
                 stream.write((v.color[c] - encoding.color_min[c]) as u32, encoding.color_bits[c]);
             }
+        }
+        if encoding.attributes.plant {
+            stream.write(v.plant[0] as u32, PLANT_CHANNEL_BITS);
+            stream.write(v.plant[1] as u32, PLANT_CHANNEL_BITS);
         }
     }
 
@@ -782,7 +832,7 @@ mod tests {
         assert_eq!(ClusterEncoding::from_words(&plain).header_words(), CLUSTER_HEADER_WORDS);
         assert_eq!(plain[5] & EXTENDED_BIT, 0);
 
-        let full = q.with_attributes(VertexAttributes { uv1: true, color: true, skin: false });
+        let full = q.with_attributes(VertexAttributes { uv1: true, color: true, ..Default::default() });
         let (words, triangle_offset) = encode(&full);
         let encoding = ClusterEncoding::from_words(&words);
         assert_eq!(encoding.attributes, full.attributes);
@@ -806,13 +856,42 @@ mod tests {
         }
 
         // Absent attributes decode to their defaults.
-        let only_uv1 = q.with_attributes(VertexAttributes { uv1: true, color: false, skin: false });
+        let only_uv1 = q.with_attributes(VertexAttributes { uv1: true, ..Default::default() });
         let (words, _) = encode(&only_uv1);
         let encoding = ClusterEncoding::from_words(&words);
         assert_eq!(encoding.color(&words[encoding.header_words() as usize..], 60, 3), Vec4::ONE);
         let stream = &plain[CLUSTER_HEADER_WORDS as usize..];
         let plain_encoding = ClusterEncoding::from_words(&plain);
         assert_eq!(plain_encoding.uv1(stream, 60, 7), plain_encoding.uv(stream, 60, 7));
+        assert_eq!(plain_encoding.plant(stream, 60, 7), Vec2::ONE);
+    }
+
+    /// Plant data follows the colours, within half a code; it leaves every other attribute
+    /// where it was.
+    #[test]
+    fn plant_data_round_trips() {
+        let q = Quantization::new(None, 0.01, 2.0, 1.0);
+        let plants: Vec<Vec2> = (0..50).map(|i| Vec2::new(i as f32 / 49.0, 1.0 - (i % 7) as f32 / 9.0)).collect();
+        let color = |i: usize| Vec4::new(0.1 * (i % 5) as f32, 0.3, 0.5, 1.0);
+        let full = q.with_attributes(VertexAttributes { color: true, plant: true, ..Default::default() });
+        let vertices: Vec<QuantizedVertex> =
+            plants.iter().enumerate().map(|(i, &p)| q.vertex(Vec3::splat(i as f32 * 0.01), Vec3::Y, Vec2::new(0.5, i as f32 / 50.0)).with_color(color(i)).with_plant(p)).collect();
+        let triangles: Vec<[u32; 3]> = (0..48).map(|i| [i, i + 1, i + 2]).collect();
+        let mut words = Vec::new();
+        let triangle_offset = encode_cluster(&full, &vertices, &triangles, &mut words);
+        let encoding = ClusterEncoding::from_words(&words);
+        assert_eq!(encoding.attributes, full.attributes);
+        let stream = &words[encoding.header_words() as usize..];
+        for (i, &p) in plants.iter().enumerate() {
+            let index = i as u32;
+            assert!((encoding.plant(stream, 50, index) - p).abs().max_element() <= 0.5 / 31.0 + 1e-6);
+            assert!((encoding.color(stream, 50, index) - color(i)).abs().max_element() < 0.01);
+            assert!((encoding.uv(stream, 50, index).y - i as f32 / 50.0).abs() <= q.uv_step());
+        }
+        assert_eq!(encoding.plant(stream, 50, 0), Vec2::new(0.0, 1.0));
+        for (t, tri) in triangles.iter().enumerate() {
+            assert_eq!(decode_triangle(&words[triangle_offset as usize..], 50, t as u32), *tri);
+        }
     }
 
     #[test]
