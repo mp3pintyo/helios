@@ -368,12 +368,17 @@ Honest differences that remain:
     built (no live re-meshing of edited chunks; ~1 s of surface nets for the valley's 80 × 80 m natively). Resolution
     is two fixed levels per chunk (0.25 / 0.5 m) joined by overlapping skirts rather than a crack-free transition mesh
     (Transvoxel); the seam with the landscape relies on the landscape's grid. Its material is the landscape's layers
-    evaluated per pixel (no runtime virtual texture for the mesh terrain, no per-region paint layers or weight maps).
+    evaluated per pixel (no runtime virtual texture for the mesh terrain, no per-region paint layers or weight maps);
+    its cliff rock is one procedural texture at two scales plus colour from per-vertex strata and cavity (no
+    stochastic or texture-bombed sampling, no scanned rock materials, no displacement of the cliff faces by Nanite
+    tessellation; moss and dirt follow the normal and a cavity probe, not an erosion or deposition simulation; the
+    strata colour is only as fine as the 0.25 m vertices — finer laminae are the texture's).
     Collision is the CPU triangle grid (no physics engine; the camera and placement use it). Rivers: one simulated
     river per scene on a fixed grid (no spline-defined river, no grid following the river's course, no paintable water
     input in the editor — sources are code); the shallow-water model is the virtual-pipes scheme (no momentum
     advection, so no hydraulic jumps or eddies behind obstacles beyond what the pipes' flow does; Manning friction only;
-    first-order, a little diffusive). Obstacles are static (boulders baked into the bed; the raft and other moving
+    first-order, a little diffusive); foam is a heuristic of divergence, shear, surface slope and speed (no aeration
+    model, no spray or splash particles at the cave's step). Obstacles are static (boulders baked into the bed; the raft and other moving
     instances don't push water, nothing floats on the river), the river has no underwater view, Lumen and shadows don't
     see its water, and its surface is the sim grid (no tessellation beyond it; waves are the lake's normal-mapped ones
     advected by a two-phase flow map, which can show its period as gentle pulsing on slow water).

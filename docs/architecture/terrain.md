@@ -53,12 +53,41 @@ non-destructive modifiers. Helios' version:
   its RVT shading and its heightfield distance field. That field (and the RVT's heightfield) is
   baked from a *filled* landscape whose heights inside the rectangle are the mesh terrain's
   heightfield part (channel included); the rock is in the chunks' own fields.
-* **Shading.** The mesh terrain's material is the landscape's (`MaterialKind::Terrain`, same four
-  layers) with `TextureMapping::WorldTriplanar`, which the G-buffer resolve reads as "volumetric
-  terrain": no runtime virtual texture (its top-down pages can't hold a wall or an overhang's
-  underside), the layers evaluated per pixel with every layer projected triplanar and the texel
-  footprint measured in 3D. Slope selects rock on walls and undersides as on mountains; the shore
-  material (lake bed, wet band) applies as on the landscape.
+* **Shading.** The mesh terrain's material is the landscape's (`MaterialKind::Terrain`, its grass
+  and dirt layers) with `TextureMapping::WorldTriplanar`, which the G-buffer resolve reads as
+  "volumetric terrain": no runtime virtual texture (its top-down pages can't hold a wall or an
+  overhang's underside), the layers evaluated per pixel by `mesh_terrain_layering` (rvt.wgsl) with
+  every layer projected triplanar and the texel footprint measured in 3D. Slope selects rock on
+  walls and undersides as on mountains; the shore material (lake bed, wet band) applies as on the
+  landscape. The rock is **cliff rock** (round 8, `terrain-rock-material`):
+  * *Texture*: its rock layer is `TexturePattern::Cliff` (texgen.wgsl `cliff`), made for walls
+    (v up): rounded masses flattened along the bedding, faint lamination, broad fracture planes and
+    small chips as randomly tilted planar facets per Voronoi cell (not crack lines), fractures along
+    only some plane borders (a noise mask fades them in and out), dark streaks running down the
+    face and fine grain. The landscape keeps its cracked `Rock` layer (mountains, far away).
+  * *Two scales*: `cliff_rock` samples it at 0.083 and 0.37 repeats per metre (12 m and 2.7 m
+    tiles, a ratio that is not a whole number, so they never repeat together); the detail scale is
+    projected turned about the vertical so on ledges and undersides its grain crosses the large
+    scale's; only its data texels are fetched: its height (mean ≈ 0.5, mip-filtered towards it
+    where the detail is sub-pixel) modulates the large scale's colour and its normals add to the
+    large scale's. It is skipped where a pixel covers more than 1/32 of its tile. `triplanar_sparse`
+    skips projections whose weight is under 2 % (on a wall one or two of three), so the two scales
+    fetch fewer texels than the one full triplanar sample before.
+  * *Strata from the geometry*: `MeshTerrain::shading_attributes` stores two values per vertex in
+    the UVs (the triplanar material needs no texture coordinates): the **strata coordinate** — the
+    warped height the rock modifiers cut their ledges at (`rock_warp`, `STRATA_FREQUENCY`), in half
+    periods, so the ledges lie at its integers and the parity tells the protruding (hard) beds from
+    the recessed (soft) ones; blended between rocks by distance, plain height away from them — and
+    the **cavity**, the density probed 0.5 and 1.5 m out along the normal (0 open, up to 1 in a
+    crevice; only near volume modifiers). The resolve decodes UVs for Terrain pixels only when the
+    material is world-mapped (the landscape needs none), so only the mesh terrain pays for them. The shader gives every bed its own tone (±13 %, warmer or
+    greyer), hard beds 7 % lighter and smoother, fine laminae (faded once sub-pixel, from the
+    coordinate's screen derivative), and a thin dark parting at bedding planes that is open on some
+    planes and comes and goes along each. Because the coordinate comes from the same warp as the
+    geometry, colour bands and ledges coincide.
+  * *Weathering*: dirt (the dirt layer's mean colour) settles where the cavity is high and the
+    surface faces up or sideways; moss and lichen (the boulders' moss colour) on up-facing rock,
+    more in hollows and on soft beds; undersides and steep faces stay bare.
 * **Collision and placement** (`TerrainCollider`). The chunks' triangles go into a 2 m grid of
   buckets: `raycast` walks the cells a ray's ground projection crosses (2D DDA), `ground_below(p)`
   returns the highest surface at or under a point (the floor under the arch, the arch's top above
@@ -94,8 +123,11 @@ UE 5.9's rivers are simulation driven (shallow water with paintable water input)
   water than it holds; `depth_step` moves the water, adds the sources, holds outlet cells at the
   lake's level, drains the grid's border (spills leave instead of piling up), derives the velocity
   from the flow through the cell and advects foam semi-Lagrangian along it — foam fades over 5 s and
-  is born where the flow is fast or the water surface breaks steeply between wet cells (behind
-  boulders, at the cave's step). Fixed steps of 1/120 s, at most 6 per frame (a slow frame runs the
+  is born only where the water is turbulent (round 8, `terrain-rock-material`): where the flow
+  converges or decelerates sharply (negative divergence of the velocity: the pool under the cave's
+  step, the bow of a boulder), where it shears (the curl: the wake behind a boulder; dry neighbours
+  count as the cell's own velocity, so banks don't shear), where fast water (> 1.5 m/s) breaks
+  over a steep surface, and a little where it runs very fast (> 2.5 m/s); it fades over 3 s. Fixed steps of 1/120 s, at most 6 per frame (a slow frame runs the
   river slow rather than unstable); compute only, two dispatches per step over 19 k cells.
 * **Surface**: the river's water instance is a grid mesh over the cell centres whose quads have
   vertices of their own (decoded once into the translucency pass's vertex buffer like any forward
@@ -109,14 +141,18 @@ UE 5.9's rivers are simulation driven (shallow water with paintable water input)
   forward water shading (`shade_water`) then advects its waves along the velocity with a two-phase
   flow map (period 1.6 s; the lake's waves from the fifth, 1 m and shorter — no swell on a stream;
   ripples choppier where faster), tilts them onto the sloped surface and
-  draws the simulated foam as streaks drifting with the current; refraction, absorption, caustics,
-  reflections and shore foam are the lake's. The river's surface counts as a single layer for
+  draws the simulated foam as a lace of thin lines drifting with the current (the zero crossings of
+  an advected noise, thickening with the amount; patches only where the foam is thick);
+  refraction, absorption, caustics, reflections and shore foam are the lake's, except that running
+  water is rougher than its resolved waves (roughness² + 0.03 · speed², so a fast stretch blurs
+  its sky reflection while a pool stays a mirror) and only the shore foam's thin line shows on it. The river's surface counts as a single layer for
   depth peeling and is not a flat water body (no lake-bed rectangle, no underwater view).
 * **Shores**: `surface_step` writes the water surface height per cell — on dry cells within three
   cells of water the highest neighbouring water surface — to an `R32Float` texture the G-buffer
   resolve reads (binding 150, `Water::river` gives the grid); `shore_surface` takes the higher of
   the lake's and the river's level, so the river's bed and banks get the lake's sediment, pebbles and
-  wet band along the simulated water line.
+  wet band along the simulated water line (not its sand ripples, which the lake's waves draw: where
+  the river's level is the higher, its bed is gravel).
 * **Settings**: `RenderSettings::river_simulation` (default on; `--no-river-sim`, `Numpad2`, editor
   toggle under Atmosphere) pauses the simulation; the surface keeps its last state.
 
