@@ -38,6 +38,7 @@ pub mod mesh_terrain;
 pub mod modeling;
 mod morton;
 pub mod noise;
+pub mod page_codec;
 mod partition;
 pub mod plant_bones;
 pub mod primitives;

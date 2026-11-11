@@ -14,6 +14,28 @@ Part of the `helios-render` GPU pipeline; the pipeline diagram and the index of 
   bounded per source, failed reads are retried later. Page payloads stay compressed in the pool (`geometry.wgsl`
   decodes vertices on the fly in every consumer), so resident memory and streamed bytes are both 2.1–2.5× smaller
   (valley 118 → 48 MiB, cathedral 167 → 80 MiB, forest 85 → 40 MiB).
+* **Entropy-coded pages on disk and over the wire** (round 8, [`streaming.md`](../round8/streaming.md);
+  `helios_geometry::page_codec`, `page_decode.rs`). `--bake-hvm` writes `.hvm` version 7: the version-6 header (with the plant bones) plus
+  every stored page's byte offset, then each page coded by a model that knows the cluster format — the decoder
+  reads the page back into field values and re-packs them with the encoder's own `encode_cluster`, so the pool gets
+  bit-identical GPU pages (no shader change). Triangles: an edge FIFO of the last 32 triangles (slot + rotation +
+  third vertex, "new" or a distance back); vertices that repeat an earlier vertex of the page (cluster borders, a
+  quarter of them) are references; positions are predicted per vertex from its first triangle (multi-parallelogram,
+  parallelogram, midpoint, corner) with the y/z contexts chosen by the size of the earlier axes' residuals; normals
+  from the area-weighted face normals of the decoded geometry or from the neighbours, UVs by the position predictors
+  or mapped affinely from the neighbouring triangle's positions (both chosen per cluster); colours, plant data and
+  skin weights from a neighbour; voxel clusters byte-wise against the previous brick or voxel. Residuals become a token
+  (exact below 8, else bit length + next bit) and raw extra bits; tokens are rANS-coded with one static table per
+  context and page (quantised to 31 levels, delta-coded; a context shares its parent's table where its own would not
+  pay). Each page stays self-contained, and a page that would not shrink or not round-trip is stored as it is (a mode
+  byte). Page payloads shrink to 38–48 % of the GPU format (zstd −19: 80–96 %, LZ4: 94–100 %); whole files to 45–55 %
+  (cathedral high 86.8 → 36.9 MiB). Decoding runs off the render thread: native decode threads (≤ 4) take each
+  completed read, the browser's bake workers (`HPDT` tasks) or, without them, the render thread for 2 ms a frame; a
+  page is `Decoding` between `Requested` and `Arrived`. ~50–65 MB/s of GPU pages per core natively, ~50 MB/s in V8's
+  wasm. Root pages are decoded with the header at load. `--hvm-raw` writes raw version 6, and versions 4–6 load as
+  before. `--io-bandwidth-mbps N` (with `--io-latency-ms`) emulates a network link for `--stream-from`: at 100 Mbit/s
+  and 20 ms the valley (high) fills its view in 1.65 instead of 2.31 s and finishes prefetching in 2.0 instead of
+  4.2 s; from a local SSD decoding makes it a little later (0.79 instead of 0.52 s).
 * **Software rasteriser** (`sw_raster.wgsl`). Clusters whose triangles are smaller than ~2.5 px are rasterised in
   compute: a workgroup per cluster, exact sub-pixel edge functions with the top-left rule. Without 64-bit atomics the
   depth and payload are written in two passes (32-bit `atomicMax` of depth, then the ids of pixels that won); a merge

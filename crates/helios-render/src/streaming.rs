@@ -21,6 +21,11 @@
 //!   └──────────────────────────────── a while ─────────────────────── evicted ◀──────────┘
 //! ```
 //!
+//! Pages of meshes read from a `.hvm` with entropy-coded pages (version 7) pass through
+//! **Decoding** between Requested and Arrived: a completed read goes to the decoders
+//! (`page_decode.rs`: decode threads natively, the bake workers in the browser), and its pages
+//! arrive once their payload words are back, usually a frame or two later.
+//!
 //! Pages of in-memory meshes go straight from Absent to Arrived. Pages are requested together
 //! with their dependencies, so a whole chain of LOD levels is fetched in parallel; an arrived
 //! page then waits on the CPU until its dependencies are resident. That is the **residency
@@ -35,6 +40,7 @@ use std::sync::Arc;
 
 use helios_geometry::VirtualMesh;
 
+use crate::page_decode::{DecodeJob, Decoded, Decoders};
 use crate::page_source::{coalesce, PageLocation, PageRead, PageSource, ReadCompletion};
 
 pub const NOT_RESIDENT: u32 = u32::MAX;
@@ -116,6 +122,9 @@ struct PageRef {
     mesh: u32,
     local: u32,
     words: u32,
+    /// Bytes of the stored page in its file (its words, or its coded bytes when `coded`).
+    stored: u32,
+    coded: bool,
     root: bool,
     level: u32,
     origin: Origin,
@@ -132,16 +141,20 @@ enum PageState {
     Absent,
     /// Part of an outstanding read.
     Requested,
+    /// Read; its coded payload is being decoded.
+    Decoding,
     /// Payload on the CPU, waiting for its dependencies, pool space or upload budget.
     Arrived,
     Resident,
 }
 
-/// The payload of an arrived page: `bytes` bytes at `start` of a read's buffer (shared by all
-/// pages of a coalesced read, so arrival copies nothing).
-struct Staged {
-    buffer: Arc<Vec<u8>>,
-    start: usize,
+/// The payload of an arrived page.
+enum Staged {
+    /// Its bytes at `start` of a read's buffer (shared by all pages of a coalesced read, so
+    /// arrival copies nothing).
+    Read { buffer: Arc<Vec<u8>>, start: usize },
+    /// Its decoded words.
+    Decoded(Vec<u32>),
 }
 
 /// An outstanding read of consecutive pages of one file.
@@ -172,12 +185,16 @@ pub struct StreamingStats {
     pub pending: u32,
     /// Pages being read from a [`PageSource`].
     pub in_flight: u32,
+    /// Pages being decoded (read from a `.hvm` with entropy-coded pages).
+    pub decoding: u32,
     /// Arrived pages waiting for their dependencies, pool space or upload budget.
     pub waiting: u32,
     /// CPU memory of requested and waiting page payloads.
     pub staged_mb: f32,
-    /// Total payload received from page sources.
+    /// Total payload received from page sources (stored bytes: coded pages are smaller).
     pub streamed_mb: f32,
+    /// Total payload of the streamed pages once decoded (as resident in the pool).
+    pub decoded_mb: f32,
     /// Total failed reads (their pages are requested again later).
     pub failed_reads: u32,
 }
@@ -217,6 +234,10 @@ pub(crate) struct Residency {
     /// Streamed pages to fetch while the pool has room, coarse first.
     prefetch: Vec<u32>,
     completions: Vec<ReadCompletion>,
+    /// Where coded pages are decoded, and the pages of each outstanding decode by ticket.
+    decoders: Decoders,
+    decodes: HashMap<u64, Vec<u32>>,
+    decoded: Vec<Decoded>,
     page_table_dirty: bool,
     stats: StreamingStats,
 }
@@ -243,6 +264,9 @@ impl Residency {
             arrived: Vec::new(),
             prefetch: Vec::new(),
             completions: Vec::new(),
+            decoders: Decoders::default(),
+            decodes: HashMap::new(),
+            decoded: Vec::new(),
             page_table_dirty: true,
             stats: StreamingStats::default(),
         }
@@ -254,18 +278,23 @@ impl Residency {
     /// abandoned. Returns false if the roots alone do not fit in the pool.
     pub fn reset(&mut self, meshes: &[VirtualMesh], locations: &[Option<PageLocation>], upload: &mut Upload) -> bool {
         let capacity = self.allocator.capacity;
-        *self = Self { next_ticket: self.next_ticket, ..Self::new(capacity) };
+        // Tickets keep counting, so reads and decodes of the previous scene are recognised
+        // (and dropped) when they complete; the decoders (and their threads) stay.
+        let decoders = std::mem::take(&mut self.decoders);
+        *self = Self { next_ticket: self.next_ticket, decoders, ..Self::new(capacity) };
         for (m, mesh) in meshes.iter().enumerate() {
             let base = self.pages.len() as u32;
             let location = locations.get(m).and_then(Option::as_ref);
-            let stream = location.map(|l| (self.source_index(&l.source), l.file, mesh.header_bytes() as u64));
+            let stream = location.map(|l| (self.source_index(&l.source), l.file));
             for (p, page) in mesh.pages.iter().enumerate() {
+                let range = mesh.page_byte_range(p);
                 let origin = match stream {
                     _ if mesh.has_payload(p) => Origin::Memory,
-                    Some((source, file, header)) => Origin::Stream { source, file, offset: header + mesh.page_offsets[p] as u64 * 4 },
+                    Some((source, file)) => Origin::Stream { source, file, offset: range.start },
                     None => Origin::Missing,
                 };
-                self.pages.push(PageRef { mesh: m as u32, local: p as u32, words: page.data_words, root: page.root != 0, level: page.lod_level, origin });
+                let (stored, coded) = ((range.end - range.start) as u32, mesh.is_coded());
+                self.pages.push(PageRef { mesh: m as u32, local: p as u32, words: page.data_words, stored, coded, root: page.root != 0, level: page.lod_level, origin });
                 self.dependencies.push(mesh.page_dependencies(p).iter().map(|&d| d + base).collect());
             }
         }
@@ -357,6 +386,7 @@ impl Residency {
 
         self.stats.pending = self.wanted.iter().filter(|&&p| self.state[p as usize] != PageState::Resident).count() as u32;
         self.stats.in_flight = self.reads.values().map(|r| r.pages.len() as u32).sum();
+        self.stats.decoding = self.decodes.values().map(|pages| pages.len() as u32).sum();
         self.stats.waiting = self.arrived.len() as u32;
         self.stats.staged_mb = self.staged_bytes as f32 / 1048576.0;
     }
@@ -386,14 +416,59 @@ impl Residency {
             };
             self.stats.streamed_mb += bytes.len() as f32 / 1048576.0;
             let buffer = Arc::new(bytes);
+            let mut coded = Vec::new();
             for &p in &read.pages {
-                let Origin::Stream { offset, .. } = self.pages[p as usize].origin else { unreachable!("only streamed pages are read") };
-                self.staged.insert(p, Staged { buffer: buffer.clone(), start: (offset - read.start) as usize });
-                self.state[p as usize] = PageState::Arrived;
-                self.arrived.push(p);
+                let page = self.pages[p as usize];
+                let Origin::Stream { offset, .. } = page.origin else { unreachable!("only streamed pages are read") };
+                let start = (offset - read.start) as usize;
+                if page.coded {
+                    coded.push((p, start..start + page.stored as usize));
+                    self.state[p as usize] = PageState::Decoding;
+                } else {
+                    self.staged.insert(p, Staged::Read { buffer: buffer.clone(), start });
+                    self.arrived(p);
+                }
+            }
+            if !coded.is_empty() {
+                let ticket = completion.ticket;
+                self.decodes.insert(ticket, coded.iter().map(|c| c.0).collect());
+                self.decoders.submit(DecodeJob { ticket, buffer, pages: coded });
             }
         }
         self.completions = completions;
+
+        let mut decoded = std::mem::take(&mut self.decoded);
+        self.decoders.poll(&mut decoded);
+        for job in decoded.drain(..) {
+            // Unknown tickets belong to decodes abandoned by a reset.
+            if self.decodes.remove(&job.ticket).is_none() {
+                continue;
+            }
+            for (p, result) in job.pages {
+                let words = self.pages[p as usize].words as usize;
+                match result {
+                    Ok(payload) if payload.len() == words => {
+                        self.stats.decoded_mb += words as f32 * 4.0 / 1048576.0;
+                        self.staged.insert(p, Staged::Decoded(payload));
+                        self.arrived(p);
+                    }
+                    result => {
+                        let error = result.err().unwrap_or_else(|| "wrong size".into());
+                        log::warn!("streaming: page {p} did not decode ({error}); retrying later");
+                        self.stats.failed_reads += 1;
+                        self.state[p as usize] = PageState::Absent;
+                        self.retry_at[p as usize] = frame + RETRY_FRAMES;
+                        self.staged_bytes -= self.pages[p as usize].bytes();
+                    }
+                }
+            }
+        }
+        self.decoded = decoded;
+    }
+
+    fn arrived(&mut self, p: u32) {
+        self.state[p as usize] = PageState::Arrived;
+        self.arrived.push(p);
     }
 
     fn apply_feedback(&mut self, feedback: &[u32], feedback_frame: u32) {
@@ -474,13 +549,14 @@ impl Residency {
                 self.arrived.push(p as u32);
             }
             Origin::Stream { source, .. } => {
+                // Staging holds pages as they will be uploaded; reads move their stored bytes.
                 let bytes = page.bytes();
                 let source = source as usize;
                 if bytes > *staging || room[source] == 0 {
                     return false;
                 }
                 *staging -= bytes;
-                room[source] = room[source].saturating_sub(bytes as u64);
+                room[source] = room[source].saturating_sub(page.stored as u64);
                 // Requested right away, so a page that is both wanted and prefetched is picked
                 // once; `issue` returns it to Absent if its read cannot start this frame.
                 self.state[p] = PageState::Requested;
@@ -502,7 +578,7 @@ impl Residency {
         let free_slots = slot.source.max_in_flight().saturating_sub(slot.in_flight);
         let max_gap = slot.source.max_gap_bytes();
         let span = |p: u32| match self.pages[p as usize].origin {
-            Origin::Stream { file, offset, .. } => (file, offset..offset + self.pages[p as usize].bytes() as u64),
+            Origin::Stream { file, offset, .. } => (file, offset..offset + self.pages[p as usize].stored as u64),
             _ => unreachable!("only streamed pages are read"),
         };
 
@@ -629,9 +705,13 @@ impl Residency {
         debug_assert!(self.dependencies_resident(p), "residency invariant: dependencies first");
         let page = self.pages[p];
         match self.staged.remove(&(p as u32)) {
-            Some(staged) => {
+            Some(Staged::Read { buffer, start }) => {
                 self.staged_bytes -= page.bytes();
-                upload(offset, &staged.buffer[staged.start..staged.start + page.bytes()]);
+                upload(offset, &buffer[start..start + page.bytes()]);
+            }
+            Some(Staged::Decoded(words)) => {
+                self.staged_bytes -= page.bytes();
+                upload(offset, bytemuck::cast_slice(&words));
             }
             None => {
                 let payload = meshes[page.mesh as usize].page_payload(page.local as usize);
@@ -1142,5 +1222,75 @@ mod tests {
         r.update(&meshes, 2, None, &mut pool.upload());
         assert_eq!(r.stats.resident_pages, resident, "stale completions are ignored");
         assert_eq!(r.stats.waiting, 0);
+    }
+
+    /// Pages of a `.hvm` with entropy-coded pages: read as their (smaller) stored bytes, decoded
+    /// (inline, or on the decode threads a few updates later), uploaded as their payload words.
+    #[test]
+    fn coded_pages_are_read_small_and_decoded() {
+        let (vm, _) = rock();
+        let bytes = vm.to_coded_bytes();
+        let meshes = [streamed(&bytes)];
+        assert!(meshes[0].is_coded());
+        let reference = [vm];
+        for threads in [false, true] {
+            let source = ManualSource::new(bytes.clone(), 3);
+            let locations = [Some(PageLocation { source: source.clone(), file: 0 })];
+            let mut pool = Pool(vec![0; 1 << 22]);
+            let mut r = Residency::new(1 << 22);
+            if !threads {
+                r.decoders = Decoders::Inline(Vec::new());
+            }
+            assert!(r.reset(&meshes, &locations, &mut pool.upload()));
+            let n = r.pages.len();
+            let mut frame = 1u32;
+            let start = std::time::Instant::now();
+            let mut decoding_seen = false;
+            while r.stats.resident_pages < n as u32 {
+                assert!(start.elapsed().as_secs() < 60, "streaming stalled at {} of {n} pages", r.stats.resident_pages);
+                let feedback = frame.is_multiple_of(4).then(|| feedback_all(&r, frame));
+                r.update(&meshes, frame, feedback.as_deref().map(|f| (f, frame)), &mut pool.upload());
+                check(&r, &reference, &pool);
+                decoding_seen |= r.stats.decoding > 0;
+                source.complete(2, &[]);
+                frame += 1;
+                if threads {
+                    std::thread::yield_now();
+                }
+            }
+            assert!(!threads || decoding_seen || frame < 4, "threaded decodes take a frame or more");
+            let stored: usize = (0..n).filter(|&p| !r.pages[p].root).map(|p| r.pages[p].stored as usize).sum();
+            let words: usize = (0..n).filter(|&p| !r.pages[p].root).map(|p| r.pages[p].bytes()).sum();
+            assert_eq!(source.bytes_read(), stored, "every streamed page is read exactly once, as stored");
+            assert!(stored * 3 < words * 2, "coded pages are much smaller: {stored} of {words} bytes");
+            assert_eq!(r.staged_bytes, 0);
+            assert!(r.decodes.is_empty());
+        }
+    }
+
+    #[test]
+    fn corrupt_coded_pages_fail_and_are_retried() {
+        let (vm, _) = rock();
+        let mut bytes = vm.to_coded_bytes();
+        let meshes = [streamed(&bytes)];
+        // Damage the first non-root page's stored bytes (its tables and symbols).
+        let range = meshes[0].page_byte_range(0);
+        for b in &mut bytes[range.start as usize + 2..range.end as usize] {
+            *b ^= 0x5a;
+        }
+        let source = ManualSource::new(bytes, 8);
+        let locations = [Some(PageLocation { source: source.clone(), file: 0 })];
+        let mut pool = Pool(vec![0; 1 << 22]);
+        let mut r = Residency::new(1 << 22);
+        r.decoders = Decoders::Inline(Vec::new());
+        r.reset(&meshes, &locations, &mut pool.upload());
+        for frame in 1..20 {
+            r.update(&meshes, frame, Some((&feedback_all(&r, frame), frame)), &mut pool.upload());
+            source.complete(usize::MAX, &[]);
+        }
+        let reference = [vm];
+        check(&r, &reference, &pool);
+        assert!(r.stats.failed_reads > 0, "the damaged page failed");
+        assert_ne!(r.state[0], PageState::Resident);
     }
 }

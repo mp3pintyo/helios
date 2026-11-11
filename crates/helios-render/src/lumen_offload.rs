@@ -212,6 +212,10 @@ impl Output {
 /// The worker's entry: decodes a [`Work`], runs it, encodes its [`Output`] (empty for input that
 /// does not decode, which the page then runs itself).
 pub fn run_bake_task(input: &[u8]) -> Vec<u8> {
+    // The workers also decode streamed pages (`page_decode.rs`).
+    if crate::page_decode::is_decode_task(input) {
+        return crate::page_decode::run_decode_task(input);
+    }
     Work::decode(input).map(|work| work.run().encode()).unwrap_or_default()
 }
 
@@ -257,6 +261,12 @@ pub(crate) fn submit(work: &Work) -> Option<Offloaded> {
         let offload = offload.as_ref()?;
         offload.submit(&work.encode()).map(Offloaded)
     })
+}
+
+/// Submits a task already encoded (another kind of work than a [`Work`]: `page_decode.rs`).
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+pub(crate) fn submit_bytes(input: &[u8]) -> Option<Offloaded> {
+    OFFLOAD.with(|o| o.borrow().as_ref()?.submit(input).map(Offloaded))
 }
 
 /// A task running on the offload; dropped unfinished (a scene left), it is cancelled.

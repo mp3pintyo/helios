@@ -5,10 +5,16 @@ Back to the [README](../README.md).
 
 Honest differences that remain:
 
-1. **Streaming**: page payloads use a quantised, bit-packed GPU format like Nanite's, but are not entropy-coded on
-   disk on top of it (Nanite adds Oodle): measured per page, LZ4 would save only 0.4–5 % and DEFLATE 3–16 %, so `.hvm`
-   files store the GPU format as is. Triangle indices are plain fixed-width (no strip / delta coding). Every mesh's
-   header — including all cluster records — stays resident. Cached shadow pages are invalidated per instance for
+1. **Streaming**: page payloads use a quantised, bit-packed GPU format like Nanite's; since round 8 `.hvm` files
+   (version 7) store them entropy coded with a structure-aware model (parallelogram-predicted positions,
+   geometry-predicted normals, edge-FIFO triangle coding, rANS; 38–48 % of the GPU format, where zstd −19 leaves
+   80–96 %) and decode them on load — on CPU threads natively and on the bake workers in the browser, not in a GPU
+   transcode pass as UE does, at ~50–65 MB/s per core (Oodle-class decoders are 10× faster), so a fast local disk
+   streams a little later than with the raw format (valley high: all wanted pages resident after 0.79 instead of
+   0.52 s), while a 100 Mbit/s link fills the view 0.7 s sooner. Headers (cluster records, distance fields: 18–35 % of
+   a coded file) are not compressed. The GPU format itself still stores triangle indices fixed-width and its fields
+   at per-cluster widths (the pool holds pages as they are). Every mesh's header — including all cluster records —
+   stays resident. Cached shadow pages are invalidated per instance for
    moves, streaming, wind and skeletal animation; structural scene changes (instances added or hidden, materials
    reassigned, shadow casting toggled, new geometry), moves that grow the scene bounds and toggling voxel LODs or tessellation
    invalidate them globally.

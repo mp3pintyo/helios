@@ -75,16 +75,24 @@ impl FileSource {
     /// started (independently of the thread count), emulating a slow disk or network to
     /// exercise the streamer's asynchronous paths.
     pub fn with_latency(paths: &[PathBuf], threads: usize, latency: Duration) -> std::io::Result<Self> {
+        Self::with_link(paths, threads, latency, None)
+    }
+
+    /// Like [`FileSource::with_latency`], and reads also share a link of `bandwidth` bytes per
+    /// second (a network connection): each one's bytes cross it after the latency, one read after
+    /// another.
+    pub fn with_link(paths: &[PathBuf], threads: usize, latency: Duration, bandwidth: Option<f64>) -> std::io::Result<Self> {
+        let link = Arc::new(Link { bandwidth: bandwidth.filter(|&b| b > 0.0), free: Mutex::new(Instant::now()) });
         let files: Arc<Vec<File>> = Arc::new(paths.iter().map(File::open).collect::<Result<_, _>>()?);
         let (jobs, job_queue) = channel::<Job>();
         let (finished, receiver) = channel();
         let job_queue = Arc::new(Mutex::new(job_queue));
         let counters = Arc::new(Counters::default());
         for i in 0..threads.max(1) {
-            let (files, job_queue, finished, counters) = (files.clone(), job_queue.clone(), finished.clone(), counters.clone());
+            let (files, job_queue, finished, counters, link) = (files.clone(), job_queue.clone(), finished.clone(), counters.clone(), link.clone());
             std::thread::Builder::new()
                 .name(format!("helios-io-{i}"))
-                .spawn(move || io_thread(&files, &job_queue, &finished, &counters, latency))?;
+                .spawn(move || io_thread(&files, &job_queue, &finished, &counters, latency, &link))?;
         }
         Ok(Self { jobs, done: Mutex::new(Done { receiver, held: Vec::new() }), counters })
     }
@@ -103,15 +111,35 @@ impl FileSource {
     }
 }
 
+/// An emulated network link shared by a source's reads.
+struct Link {
+    /// Bytes per second (`None`: unlimited).
+    bandwidth: Option<f64>,
+    /// When the link is free again.
+    free: Mutex<Instant>,
+}
+
+impl Link {
+    /// When `bytes` requested at `queued` have crossed the link (after `latency`).
+    fn arrival(&self, queued: Instant, latency: Duration, bytes: usize) -> Instant {
+        let Some(bandwidth) = self.bandwidth else { return queued + latency };
+        let Ok(mut free) = self.free.lock() else { return queued + latency };
+        let start = (queued + latency).max(*free);
+        *free = start + Duration::from_secs_f64(bytes as f64 / bandwidth);
+        *free
+    }
+}
+
 /// Serves jobs until the [`FileSource`] (the job sender) is dropped.
-fn io_thread(files: &[File], job_queue: &Mutex<Receiver<Job>>, finished: &Sender<Finished>, counters: &Counters, latency: Duration) {
+fn io_thread(files: &[File], job_queue: &Mutex<Receiver<Job>>, finished: &Sender<Finished>, counters: &Counters, latency: Duration, link: &Link) {
     loop {
         // The lock is only held while waiting for the next job, never during a read.
         let Ok(job) = job_queue.lock().map_err(drop).and_then(|queue| queue.recv().map_err(drop)) else { return };
         let start = Instant::now();
         let result = read_range(files, &job.read);
         let now = Instant::now();
-        let latency_us = (now - job.queued).max(latency).as_micros() as u64;
+        let ready = link.arrival(job.queued, latency, result.as_ref().map_or(0, Vec::len)).max(now);
+        let latency_us = (ready - job.queued).as_micros() as u64;
         counters.reads.fetch_add(1, Ordering::Relaxed);
         counters.latency_us.fetch_add(latency_us, Ordering::Relaxed);
         counters.max_latency_us.fetch_max(latency_us, Ordering::Relaxed);
@@ -120,7 +148,7 @@ fn io_thread(files: &[File], job_queue: &Mutex<Receiver<Job>>, finished: &Sender
             Ok(bytes) => counters.bytes.fetch_add(bytes.len() as u64, Ordering::Relaxed),
             Err(_) => counters.failed.fetch_add(1, Ordering::Relaxed),
         };
-        if finished.send((job.queued + latency, ReadCompletion { ticket: job.read.ticket, result })).is_err() {
+        if finished.send((ready, ReadCompletion { ticket: job.read.ticket, result })).is_err() {
             return;
         }
     }

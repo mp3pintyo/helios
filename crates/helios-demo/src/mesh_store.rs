@@ -1,7 +1,9 @@
 //! Pre-baked, streamed scene geometry.
 //!
 //! `helios --bake-hvm DIR` bakes a scene and writes each virtual mesh as a `.hvm` file plus a
-//! [`Manifest`]. `helios --stream-from DIR` (native) and `?stream=URL` (browser) then build the
+//! [`Manifest`] — with entropy-coded pages (`.hvm` version 7, `helios_geometry::page_codec`: page
+//! payloads 2.2–2.7 times smaller on disk and over the wire, decoded on load), or with
+//! `--hvm-raw` as the GPU format (version 6). `helios --stream-from DIR` (native) and `?stream=URL` (browser) then build the
 //! *same* scene — materials, instances, lights, camera all come from the procedural builder — but
 //! substitute every baked mesh with its pre-baked counterpart, keeping only its header (records,
 //! dependencies, bounds, distance field) and root pages in memory. All other page payloads are
@@ -315,44 +317,58 @@ mod native {
     pub struct Recorder {
         dir: PathBuf,
         manifest: Manifest,
+        /// Entropy-code the pages (version 7).
+        coded: bool,
         bytes: usize,
+        /// Bytes of the page payloads as the GPU holds them.
+        payload: usize,
         error: Option<String>,
     }
 
     impl Recorder {
         pub(super) fn add(&mut self, scene: &mut Scene, name: &str, mesh: VirtualMesh) -> MeshHandle {
             let file = file_name(self.manifest.meshes.len(), name);
-            let bytes = mesh.to_bytes();
+            let bytes = if self.coded { mesh.to_coded_bytes() } else { mesh.to_bytes() };
             if let Err(e) = std::fs::write(self.dir.join(&file), &bytes) {
                 self.error.get_or_insert(format!("writing {file}: {e}"));
             }
             self.bytes += bytes.len();
-            self.manifest.meshes.push(ManifestEntry { file, header_bytes: mesh.header_bytes(), name: name.into() });
+            self.payload += mesh.payload_bytes();
+            let header_bytes = VirtualMesh::header_len(&bytes).expect("a .hvm just written");
+            self.manifest.meshes.push(ManifestEntry { file, header_bytes, name: name.into() });
             scene.add_mesh(mesh)
         }
     }
 
-    /// Bakes scene `kind` and writes its meshes as `.hvm` files plus a manifest into `dir`.
-    pub fn bake_to(dir: &Path, kind: SceneKind, detail: Detail) -> Result<(), String> {
+    /// Bakes scene `kind` and writes its meshes as `.hvm` files plus a manifest into `dir`, with
+    /// entropy-coded pages if `coded`.
+    pub fn bake_to(dir: &Path, kind: SceneKind, detail: Detail, coded: bool) -> Result<(), String> {
         if kind == SceneKind::Model {
             return Err("only the procedural scenes can be baked to a mesh library (imported models bake at load)".into());
         }
         std::fs::create_dir_all(dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
-        let recorder = Recorder { dir: dir.into(), manifest: Manifest { scene: kind, detail, meshes: Vec::new() }, bytes: 0, error: None };
+        let recorder = Recorder { dir: dir.into(), manifest: Manifest { scene: kind, detail, meshes: Vec::new() }, coded, bytes: 0, payload: 0, error: None };
         let (_, store) = scenes::build_with(kind, detail, None, MeshStore::Record(recorder));
         let MeshStore::Record(recorder) = store else { unreachable!("the store is handed back unchanged") };
         if let Some(error) = recorder.error {
             return Err(error);
         }
         std::fs::write(dir.join(MANIFEST), recorder.manifest.to_text()).map_err(|e| format!("writing the manifest: {e}"))?;
-        log::info!("wrote {} meshes ({:.1} MiB) to {}", recorder.manifest.meshes.len(), recorder.bytes as f64 / 1048576.0, dir.display());
+        log::info!(
+            "wrote {} meshes ({:.1} MiB; page payloads {:.1} MiB in the GPU format) to {}",
+            recorder.manifest.meshes.len(),
+            recorder.bytes as f64 / 1048576.0,
+            recorder.payload as f64 / 1048576.0,
+            dir.display()
+        );
         Ok(())
     }
 
     /// Opens the mesh library in `dir`: reads every header and root tail now, and streams the
     /// other pages through a [`FileSource`] (returned too, for its I/O statistics). Every read
-    /// takes at least `latency` (to emulate slow storage).
-    pub fn open(dir: &Path, latency: Duration) -> Result<(Library, Arc<FileSource>), String> {
+    /// takes at least `latency`, and with a `bandwidth` (bytes per second) the reads share a link
+    /// that fast (to emulate slow storage or a network).
+    pub fn open(dir: &Path, latency: Duration, bandwidth: Option<f64>) -> Result<(Library, Arc<FileSource>), String> {
         let start = Instant::now();
         let text = std::fs::read_to_string(dir.join(MANIFEST)).map_err(|e| format!("reading {}: {e}", dir.join(MANIFEST).display()))?;
         let manifest = Manifest::parse(&text)?;
@@ -366,7 +382,7 @@ mod native {
             paths.push(path);
             loaded += bytes;
         }
-        let source = Arc::new(FileSource::with_latency(&paths, 2, latency).map_err(|e| format!("opening the mesh files: {e}"))?);
+        let source = Arc::new(FileSource::with_link(&paths, 2, latency, bandwidth).map_err(|e| format!("opening the mesh files: {e}"))?);
         let library = Library::new(manifest, meshes, source.clone());
         log::info!(
             "mesh library {}: {} meshes, read {:.1} MiB of headers and root pages in {:.0} ms ({:.1} MiB in RAM)",
@@ -406,12 +422,15 @@ mod native {
             let dir = std::env::temp_dir().join(format!("helios-mesh-store-{}", std::process::id()));
             std::fs::create_dir_all(&dir).unwrap();
             let path = dir.join("rock.hvm");
-            std::fs::write(&path, vm.to_bytes()).unwrap();
-            let (mesh, bytes) = load_header_and_roots(&path).unwrap();
-            assert_eq!(mesh.clusters, vm.clusters);
-            assert!(bytes < vm.header_bytes() + vm.payload_bytes());
-            for p in mesh.root_tail_start()..vm.pages.len() {
-                assert_eq!(mesh.page_payload(p), vm.page_payload(p));
+            for coded in [false, true] {
+                std::fs::write(&path, if coded { vm.to_coded_bytes() } else { vm.to_bytes() }).unwrap();
+                let (mesh, bytes) = load_header_and_roots(&path).unwrap();
+                assert_eq!(mesh.clusters, vm.clusters);
+                assert_eq!(mesh.is_coded(), coded);
+                assert!(bytes < vm.header_bytes() + vm.payload_bytes());
+                for p in mesh.root_tail_start()..vm.pages.len() {
+                    assert_eq!(mesh.page_payload(p), vm.page_payload(p));
+                }
             }
             let _ = std::fs::remove_dir_all(&dir);
         }

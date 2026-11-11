@@ -68,7 +68,7 @@ cargo run -p helios-demo --release -- --gltf path/to/Fox.glb          # - (Minus
 #   ?bake-workers=0: the scene and Lumen's displaced variants bake on the page instead of Web Workers; ?f16=0 (see docs/architecture/browser.md)
 
 # Streaming geometry from pre-baked .hvm files instead of baking at startup
-cargo run -p helios-demo --release -- --scene forest --bake-hvm hvm/forest      # bake once
+cargo run -p helios-demo --release -- --scene forest --bake-hvm hvm/forest      # bake once (.hvm v7: entropy-coded pages, ~2.3× smaller)
 cargo run -p helios-demo --release -- --stream-from hvm/forest                  # stream from disk
 helios --bake-hvm web/forest --scene forest --detail medium; python serve.py 8080 web
                                                 # open http://localhost:8080/?stream=forest (HTTP Range)
