@@ -87,7 +87,7 @@ turning sculpture, drifting raft), `-` next animation clip of a skinned model (0
 it pauses), `;` GI final gather Lumen ↔ Lumen Lite (ends the automatic choice), `=` MegaLights, `'` volumes +
 particles, `Insert` voxel LODs (off: the triangle-only cut of the same DAG), `PageUp` Substrate slabs (off: every
 material renders as its plain base), `PageDown` Nanite tessellation (off: displaced materials render undisplaced), `End` coloured sunlight
-through glass (off: it lands white), `Tab` editor (natively: the editor tools without panels — click to select,
+through glass (off: it lands white), `2` shadow refresh budget + distant shadow levels at their own rate (off: all at once), `Tab` editor (natively: the editor tools without panels — click to select,
 `Del`, `Ctrl+D`, `F`, `Ctrl+Z` / `Ctrl+Y`, `Ctrl+S` saves the scene file; in `editor.html`: play mode).
 
 Editor (`web/editor.html`, viewport focused, right mouse button not held): `W` / `E` / `R` move / rotate / scale,

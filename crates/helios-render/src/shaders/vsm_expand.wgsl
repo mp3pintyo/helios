@@ -10,6 +10,8 @@
 //   [0, 4)   hardware draw args        [4] hardware count     [5] software count
 //   [8, 11)  software raster dispatch  [12] draws emitted, before clamping to the capacity
 //   [13]     dynamic-only pages        [14] split pages (statistics)
+//   [6], [7], [11] refresh queue: deferred, distant pages held, refreshed past the budget
+//            (statistics)
 //   entries (instance, cluster, physical | level << 16, tag) from word 16, `draw_capacity` of
 //   them.
 // A second list from word SPLIT_DRAWS (same header layout, SPLIT_CAPACITY entries) holds the
@@ -124,8 +126,7 @@ fn expand(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups
     let sphere = skin_padded(instance, wind_padded(instance, strength, displacement_padded(instance, transform_sphere(instance.world, clusters[item.y].bounds, instance.max_scale))));
     let level = u32(view.vsm.x);
     let page_world = vsm.level_info[level].x;
-    let ls = (vsm.light_view * vec4<f32>(sphere.xyz, 1.0)).xyz;
-    let v = vec2<f32>(ls.x, -ls.y) / page_world;
+    let v = vsm_level_xy(sphere.xyz, level) / page_world;
     let r = sphere.w / page_world;
     let origin = vsm.level_origin[level].xy;
     let n = i32(vsm.level_pages);
@@ -266,6 +267,11 @@ fn draw_args() {
     atomicStore(&draws[12], atomicLoad(&draws[4]) + atomicLoad(&draws[5]) + atomicLoad(&draws[SPLIT_DRAWS + 4u]));
     atomicStore(&draws[13], u32(info_word(INFO_COUNTERS)));
     atomicStore(&draws[14], u32(info_word(INFO_COUNTERS + 1u)));
+    // The refresh queue (vsm.wgsl): pages deferred by the budget, distant pages waiting for
+    // their level's turn, pages refreshed past the budget for being too stale.
+    atomicStore(&draws[6], u32(info_word(INFO_REFRESH_DEFERRED)));
+    atomicStore(&draws[7], u32(info_word(INFO_REFRESH_HELD)));
+    atomicStore(&draws[11], u32(info_word(INFO_REFRESH_FORCED)));
     atomicStore(&draws[SPLIT_DRAWS], MAX_CLUSTER_TRIANGLES * 3u);
     atomicStore(&draws[SPLIT_DRAWS + 1u], min(atomicLoad(&draws[SPLIT_DRAWS + 4u]), SPLIT_CAPACITY));
     atomicStore(&draws[SPLIT_DRAWS + 2u], 0u);

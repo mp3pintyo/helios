@@ -63,6 +63,8 @@ use crate::pipelines::Lazy;
 pub const MAX_LEVELS: usize = 16;
 const PAGE_TEXELS: u32 = 128;
 const LEVEL_PAGES: u32 = 128;
+/// The first local light page entry of the page cache (after the clipmap levels' entries).
+pub(crate) const LOCAL_ENTRY_BASE: u32 = MAX_LEVELS as u32 * LEVEL_PAGES * LEVEL_PAGES;
 /// The physical atlas is TILES_PER_ROW² pages, shared by the sun and local lights: 1024 pages
 /// of 128² texels, 64 MiB of depth (plus as much for the software raster's u32 mirror, which
 /// also holds the pages' static layers).
@@ -100,8 +102,18 @@ const INFO_PAGE_STATIC: u32 = INFO_PAGE_STATE + PHYSICAL_PAGES;
 /// texels (speed, distance; `PAGE_MOTION_UNITS` in vsm_common.wgsl), by which its refreshes are
 /// scheduled (vsm_invalidate.wgsl).
 const INFO_PAGE_MOTION: u32 = INFO_PAGE_STATIC + 2 * PHYSICAL_PAGES;
-const INFO_WORDS: u64 = (INFO_PAGE_MOTION + 2 * PHYSICAL_PAGES) as u64;
-const _: () = assert!(INFO_LOCAL_SLOTS == 16520 && INFO_LOCAL_RECTS == 17544 && INFO_PAGE_STATE == 22152 && INFO_WORDS == 27272);
+/// Per physical page why it was last invalidated (the shadow overview debug view), then the
+/// refresh queue's priority histogram and counters (`INFO_REFRESH` in vsm_common.wgsl), cleared
+/// every frame.
+const INFO_PAGE_REASON: u32 = INFO_PAGE_MOTION + 2 * PHYSICAL_PAGES;
+pub(crate) const INFO_REFRESH: u32 = INFO_PAGE_REASON + PHYSICAL_PAGES;
+pub(crate) const REFRESH_WORDS: u32 = 72;
+const INFO_WORDS: u64 = (INFO_REFRESH + REFRESH_WORDS) as u64;
+const _: () = assert!(INFO_LOCAL_SLOTS == 16520 && INFO_LOCAL_RECTS == 17544 && INFO_PAGE_STATE == 22152 && INFO_REFRESH == 28296 && INFO_WORDS == 28368);
+/// A distant level (`VsmFrame::far_level`) that has fallen this far behind a moving sun follows
+/// it at once rather than on its turn: the sun is moving fast (dragged by hand), and the seam
+/// between levels that follow it and those that lag would show.
+const DISTANT_MAX_LAG: f32 = 0.5 * std::f32::consts::PI / 180.0;
 const _: () = assert!(vsm_local::LOCAL_LEVEL == MAX_LEVELS as u32);
 /// Items of the info buffer reset each frame (info_begin in vsm.wgsl).
 const INFO_ITEMS: u32 = MAX_LEVELS as u32 + vsm_local::LOCAL_SLOTS as u32 + vsm_local::FACE_MIPS;
@@ -152,9 +164,14 @@ pub struct VsmUniform {
     enabled: u32,
     draw_capacity: u32,
     eye: Vec4,
+    /// Refresh queue budget, staleness bound, first distant level, distant levels' interval
+    /// (`Vsm::refresh` in vsm_common.wgsl).
+    refresh: [u32; 4],
+    /// Per level its light view (distant levels may lag a moving sun).
+    level_light: [Mat4; MAX_LEVELS],
 }
 
-const _: () = assert!(std::mem::size_of::<VsmUniform>() == 64 + 64 * 16 + 16 * 16 * 2 + 48 + 16);
+const _: () = assert!(std::mem::size_of::<VsmUniform>() == 64 + 64 * 16 + 16 * 16 * 2 + 48 + 16 + 16 + 64 * 16);
 
 /// Per-frame inputs to [`VirtualShadowMap::update`].
 pub struct VsmFrame<'a> {
@@ -195,6 +212,15 @@ pub struct VsmFrame<'a> {
     pub volume_distance: f32,
     /// `CullViewUniform::flags` of the shadow views (voxel LODs as in the main view).
     pub cull_flags: u32,
+    /// Pages refreshed per frame at most (pages whose casters moved or streamed; 0: all of them
+    /// at once). Pages past the budget keep their cached depth and wait, by priority.
+    pub refresh_budget: u32,
+    /// Frames a page may wait for its refresh before it is refreshed regardless of the budget.
+    pub max_staleness: u32,
+    /// First distant clipmap level (0: none): distant levels follow a moving sun and refresh
+    /// their moving casters every `far_interval` frames, in turns, instead of every frame.
+    pub far_level: u32,
+    pub far_interval: u32,
 }
 
 pub struct VirtualShadowMap {
@@ -227,6 +253,9 @@ pub struct VirtualShadowMap {
     info_begin: Lazy<wgpu::ComputePipeline>,
     dirty_info: Lazy<wgpu::ComputePipeline>,
     count_local_requests: Lazy<wgpu::ComputePipeline>,
+    /// The refresh queue (vsm.wgsl): histogram, cut, append.
+    refresh_count: Lazy<wgpu::ComputePipeline>,
+    refresh_plan: Lazy<wgpu::ComputePipeline>,
     refresh: Lazy<wgpu::ComputePipeline>,
     expand: Lazy<wgpu::ComputePipeline>,
     expand_local: Lazy<wgpu::ComputePipeline>,
@@ -260,7 +289,9 @@ pub struct VirtualShadowMap {
     /// The wind moved shadow casters when the invalidation last ran: when it stops, the casters
     /// it moved return to the static layers once more.
     wind_collected: bool,
-    last_sun: Vec3,
+    /// Per level the sun direction its pages were rendered for (distant levels lag a moving
+    /// sun; zero: none yet).
+    level_sun: [Vec3; MAX_LEVELS],
     enabled: bool,
 }
 
@@ -429,6 +460,8 @@ impl VirtualShadowMap {
             info_begin: vsm_pipeline("vsm info", "info_begin"),
             dirty_info: vsm_pipeline("vsm info", "dirty_info"),
             count_local_requests: vsm_pipeline("vsm info", "count_local_requests"),
+            refresh_count: vsm_pipeline("vsm refresh", "refresh_count"),
+            refresh_plan: vsm_pipeline("vsm refresh", "refresh_plan"),
             refresh: vsm_pipeline("vsm refresh", "refresh"),
             expand: expand_pipeline("vsm expand", "expand"),
             expand_local: expand_pipeline("vsm expand local", "expand_local"),
@@ -498,7 +531,7 @@ impl VirtualShadowMap {
             moves: MoveFootprints::default(),
             cache,
             atlas,
-            last_sun: Vec3::ZERO,
+            level_sun: [Vec3::ZERO; MAX_LEVELS],
             residency_changed: true,
             wind: false,
             animated_displacement: false,
@@ -524,25 +557,45 @@ impl VirtualShadowMap {
             queue.write_buffer(&self.info, INFO_PAGE_MOTION as u64 * 4, &vec![0xffu8; PHYSICAL_PAGES as usize * 8]);
         }
         let sun = f.sun_direction.normalize();
-        let up = if sun.y.abs() > 0.99 { Vec3::Z } else { Vec3::Y };
-        let light_view = look_to_mat4(Vec3::ZERO, -sun, up);
-
+        let light_view = sun_light_view(sun);
         // Depth range: the whole scene along the light direction (fixed, so pages stay valid).
-        let mut z_min = f32::MAX;
-        let mut z_max = f32::MIN;
-        for i in 0..8 {
-            let corner = Vec3::new(
-                if i & 1 == 0 { f.scene_min.x } else { f.scene_max.x },
-                if i & 2 == 0 { f.scene_min.y } else { f.scene_max.y },
-                if i & 4 == 0 { f.scene_min.z } else { f.scene_max.z },
-            );
-            let z = light_view.transform_point3(corner).z;
-            z_min = z_min.min(z);
-            z_max = z_max.max(z);
-        }
-        let (near, far) = (-z_max - 1.0, -z_min + 1.0);
+        let depth_range = |light_view: &Mat4| {
+            let mut z_min = f32::MAX;
+            let mut z_max = f32::MIN;
+            for i in 0..8 {
+                let corner = Vec3::new(
+                    if i & 1 == 0 { f.scene_min.x } else { f.scene_max.x },
+                    if i & 2 == 0 { f.scene_min.y } else { f.scene_max.y },
+                    if i & 4 == 0 { f.scene_min.z } else { f.scene_max.z },
+                );
+                let z = light_view.transform_point3(corner).z;
+                z_min = z_min.min(z);
+                z_max = z_max.max(z);
+            }
+            (-z_max - 1.0, -z_min + 1.0)
+        };
 
-        let eye_ls = light_view.transform_point3(f.camera.position);
+        // Distant levels follow a moving sun at their own rate: each re-aims on its turn
+        // (vsm_level_turn in vsm_common.wgsl), or at once when the sun has moved far.
+        let first_distant = if f.far_level > 0 { f.far_level.min(levels) } else { MAX_LEVELS as u32 };
+        let interval = f.far_interval.max(1);
+        let mut invalidate = 0u32;
+        for level in 0..levels as usize {
+            let aimed = self.level_sun[level];
+            let follow = f.scene_changed || follows_sun(level as u32, first_distant, interval, f.frame, aimed, sun);
+            if follow && (aimed - sun).length() > 1e-5 {
+                self.level_sun[level] = sun;
+                invalidate |= 1 << level;
+            }
+            if f.scene_changed {
+                invalidate |= 1 << level;
+            }
+        }
+        // Levels beyond the active count start afresh when they are enabled.
+        for aimed in &mut self.level_sun[levels as usize..] {
+            *aimed = Vec3::ZERO;
+        }
+
         let mut u = VsmUniform {
             light_view,
             level_view_proj: [Mat4::IDENTITY; MAX_LEVELS],
@@ -561,6 +614,8 @@ impl VirtualShadowMap {
             enabled: f.enabled as u32,
             draw_capacity: DRAW_CAPACITY,
             eye: f.camera.position.extend(f.volume_distance),
+            refresh: [f.refresh_budget, f.max_staleness.max(1), first_distant, interval],
+            level_light: [light_view; MAX_LEVELS],
         };
         if f.scene_changed {
             self.moves.reset();
@@ -577,11 +632,14 @@ impl VirtualShadowMap {
         // by their rank on screen (page_cache.wgsl).
         cache.local_base = MAX_LEVELS as u32 * LEVEL_PAGES * LEVEL_PAGES;
         cache.ranks = self.local.slot_ranks();
-        let sun_moved = (sun - self.last_sun).length() > 1e-5;
-        cache.invalidate = (sun_moved || f.scene_changed) as u32;
-        self.last_sun = sun;
+        // A bit per level whose light changed (page_cache.wgsl).
+        cache.invalidate = invalidate;
 
         for level in 0..levels as usize {
+            let light_view = sun_light_view(self.level_sun[level]);
+            let (near, far) = depth_range(&light_view);
+            let eye_ls = light_view.transform_point3(f.camera.position);
+            u.level_light[level] = light_view;
             let texel = FIRST_TEXEL * (1u32 << level) as f32;
             let page_world = texel * PAGE_TEXELS as f32;
             let extent = page_world * LEVEL_PAGES as f32;
@@ -714,6 +772,7 @@ impl VirtualShadowMap {
         }
         self.cache.record(rec);
         rec.encoder.clear_buffer(&self.info, INFO_DIRTY_MASK * 4, Some(2 * DIRTY_MASK_WORDS * 4));
+        rec.encoder.clear_buffer(&self.info, INFO_REFRESH as u64 * 4, Some(REFRESH_WORDS as u64 * 4));
         {
             // The page cache's dirty pages, then the pages to refresh appended to them.
             let mut pass = rec.compute_pass("vsm dirty info");
@@ -726,6 +785,11 @@ impl VirtualShadowMap {
                 pass.set_pipeline(&self.count_local_requests);
                 pass.dispatch_workgroups(workgroups(crate::vsm_local::ENTRIES, 64), 1, 1);
             }
+            // The refresh queue: pending refreshes by priority within the frame's budget.
+            pass.set_pipeline(&self.refresh_count);
+            pass.dispatch_workgroups(workgroups(self.cache.physical_count, 64), 1, 1);
+            pass.set_pipeline(&self.refresh_plan);
+            pass.dispatch_workgroups(1, 1, 1);
             pass.set_pipeline(&self.refresh);
             pass.dispatch_workgroups(workgroups(self.cache.physical_count, 64), 1, 1);
         }
@@ -918,6 +982,12 @@ impl VirtualShadowMap {
         )
     }
 
+    /// The info buffer (vsm.wgsl's layout): page states, refresh flags and the refresh queue's
+    /// counters (the shadow overview debug view reads it).
+    pub(crate) fn info(&self) -> &wgpu::Buffer {
+        &self.info
+    }
+
     /// The (cluster, page) draws buffer, whose header counts the frame's draws (statistics).
     pub fn draws(&self) -> &wgpu::Buffer {
         &self.draws
@@ -929,6 +999,22 @@ impl VirtualShadowMap {
         let local = self.local.view().filter(|_| self.enabled);
         self.levels[..self.level_count as usize].iter().chain(local).map(|v| &v.state)
     }
+}
+
+/// Whether clipmap `level`, rendered for the sun direction `aimed` (zero: never), takes the
+/// current direction `sun` this frame: levels before `first_distant` always do, distant ones on
+/// their turn (every `interval` frames, staggered by level, as `vsm_level_turn` in
+/// vsm_common.wgsl) or once they lag more than [`DISTANT_MAX_LAG`].
+fn follows_sun(level: u32, first_distant: u32, interval: u32, frame: u32, aimed: Vec3, sun: Vec3) -> bool {
+    let lag = aimed.dot(sun).clamp(-1.0, 1.0).acos();
+    let turn = frame.wrapping_add(level) % interval.max(1) == 0;
+    level < first_distant || aimed == Vec3::ZERO || lag > DISTANT_MAX_LAG || turn
+}
+
+/// The sun's light view for the (normalised) direction towards it.
+fn sun_light_view(sun: Vec3) -> Mat4 {
+    let up = if sun.y.abs() > 0.99 { Vec3::Z } else { Vec3::Y };
+    look_to_mat4(Vec3::ZERO, -sun, up)
 }
 
 /// The clipmap levels are culled one after another, each expanded to page draws before the
@@ -1122,6 +1208,8 @@ mod tests {
             ("INFO_PAGE_STATIC", INFO_PAGE_STATIC),
             ("INFO_PAGE_REFRESH", INFO_PAGE_STATIC + PHYSICAL_PAGES),
             ("INFO_PAGE_MOTION", INFO_PAGE_MOTION),
+            ("INFO_PAGE_REASON", INFO_PAGE_REASON),
+            ("INFO_REFRESH", INFO_REFRESH),
             ("VSM_PHYSICAL_PAGES", PHYSICAL_PAGES),
             ("LOCAL_INFO_SLOTS", INFO_LOCAL_SLOTS),
             ("LOCAL_INFO_SLOT_WORDS", LOCAL_SLOT_WORDS),
@@ -1134,6 +1222,26 @@ mod tests {
         assert_eq!(shader_constant("cull.wgsl", "VSM_DIRTY_MASK"), INFO_DIRTY_MASK as u32);
         assert_eq!(shader_constant("cull.wgsl", "VSM_FULL_MASK"), (INFO_DIRTY_MASK + DIRTY_MASK_WORDS) as u32);
         assert_eq!(shader_constant("cull.wgsl", "LOCAL_SLOT_WORDS"), LOCAL_SLOT_WORDS);
+        // The refresh queue's words fit the part of the buffer cleared every frame.
+        assert!(shader_constant("vsm.wgsl", "INFO_REFRESH_FORCED") < INFO_REFRESH + REFRESH_WORDS);
+    }
+
+    #[test]
+    fn distant_levels_follow_the_sun_in_turns() {
+        let sun = Vec3::new(0.3, 0.8, 0.2).normalize();
+        let slightly_behind = Vec3::new(0.301, 0.8, 0.2).normalize();
+        let far_behind = Vec3::new(0.4, 0.8, 0.2).normalize();
+        // Near levels follow every frame, a level never rendered at once.
+        assert!((0..8).all(|frame| follows_sun(3, 7, 4, frame, slightly_behind, sun)));
+        assert!(follows_sun(9, 7, 4, 1, Vec3::ZERO, sun));
+        // A distant level slightly behind follows once every interval, levels in different frames.
+        let turns = |level| (0..8).filter(|&frame| follows_sun(level, 7, 4, frame, slightly_behind, sun)).collect::<Vec<_>>();
+        assert_eq!(turns(8), vec![0, 4]);
+        assert_eq!(turns(9), vec![3, 7]);
+        // Far behind (the sun dragged by hand): at once.
+        assert!(follows_sun(9, 7, 4, 1, far_behind, sun));
+        // No distant levels: every level follows.
+        assert!(follows_sun(11, MAX_LEVELS as u32, 4, 1, slightly_behind, sun));
     }
 
     #[test]

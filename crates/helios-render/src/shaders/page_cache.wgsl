@@ -73,7 +73,8 @@ struct CacheParams {
     physical_count: u32,
     frame: u32,
     retain: u32,
-    // 1: re-render every requested page (contents invalidated, e.g. the light moved).
+    // Non-zero: re-render every requested page (contents invalidated, e.g. the light moved);
+    // the clipmap client: a bit per level.
     invalidate: u32,
     // Workgroups the client dispatches per dirty page.
     groups_per_page: u32,
@@ -149,9 +150,14 @@ fn bucket(entry: u32) -> u32 {
     return BUCKET_LOCAL + rank * LOCAL_FINE_MIPS + (LOCAL_FINE_MIPS - 1u - mip);
 }
 
+// Clipmap client: `invalidate` is a bit mask of levels (distant levels follow a moving sun at
+// their own rate, vsm.rs); the static client invalidates everything if it is set.
 fn invalidated(entry: u32) -> bool {
-    let levels = params.level_count * params.level_pages * params.level_pages;
-    return params.invalidate != 0u && (CLIENT != CLIENT_CLIPMAP || entry < levels);
+    if CLIENT != CLIENT_CLIPMAP {
+        return params.invalidate != 0u;
+    }
+    let level = entry / (params.level_pages * params.level_pages);
+    return level < params.level_count && ((params.invalidate >> level) & 1u) != 0u;
 }
 
 @compute @workgroup_size(256)

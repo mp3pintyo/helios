@@ -51,6 +51,12 @@ pub fn all() -> Vec<Setting> {
         number("gi_intensity", "GI intensity", "Lighting", (0.0, 4.0, 0.05), |s| json!(s.gi_intensity), |s, v| s.gi_intensity = f(v)),
         flag("shadows", "Virtual shadow maps", "Lighting", |s| json!(s.shadows), |s, v| s.shadows = b(v)),
         flag("local_light_shadow_maps", "Local light shadow maps", "Lighting", |s| json!(s.local_light_shadow_maps), |s, v| s.local_light_shadow_maps = b(v)),
+        number("shadow_refresh_budget", "Shadow page refreshes per frame (0 = all)", "Lighting", (0.0, 512.0, 8.0), |s| json!(s.shadow_refresh_budget), |s, v| {
+            s.shadow_refresh_budget = f(v).max(0.0) as u32
+        }),
+        number("shadow_distant_level", "Distant shadow levels from (0 = none)", "Lighting", (0.0, 15.0, 1.0), |s| json!(s.shadow_distant_level), |s, v| {
+            s.shadow_distant_level = f(v).max(0.0) as u32
+        }),
         flag("auto_exposure", "Auto exposure", "Lighting", |s| json!(s.auto_exposure), |s, v| s.auto_exposure = b(v)),
         flag("local_exposure", "Local exposure", "Lighting", |s| json!(s.local_exposure.is_some()), |s, v| {
             s.local_exposure = b(v).then(LocalExposure::default)

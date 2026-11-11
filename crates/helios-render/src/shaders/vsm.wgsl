@@ -13,9 +13,10 @@
 //                arguments; for local lights a world box around each light's dirty pages, its
 //                finest dirty mip and per face mip a dirty page rectangle. The page cache's dirty
 //                pages are rendered in full (PAGE_FULL).
-//   refresh    : appends the pages whose dynamic casters moved (vsm_invalidate.wgsl) to the
-//                dirty list: PAGE_DYNAMIC over their static layer, or PAGE_SPLIT for pages that
-//                have none yet (vsm_common.wgsl)
+//   refresh_count / refresh_plan / refresh : the refresh queue — appends the pages whose
+//                dynamic casters moved (vsm_invalidate.wgsl) to the dirty list, by priority within
+//                a per-frame budget: PAGE_DYNAMIC over their static layer, or PAGE_SPLIT for pages
+//                that have none yet (vsm_common.wgsl), PAGE_FULL for streamed ones
 //   expand     : visible clusters of a level x overlapping dirty pages -> (cluster, page)
 //                hardware draws and software raster items
 //   draw_args  : indirect arguments of the page raster draws and software raster dispatch
@@ -398,30 +399,150 @@ fn count_local_requests(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 }
 
-// After dirty_info: appends the pages whose dynamic casters moved (vsm_invalidate.wgsl) and that
-// are needed this frame to the dirty list. A page with a static layer only re-renders its
-// dynamic casters over it; one without is rendered in full once more, keeping its static casters
-// as its static layer from then on. A pending refresh of a page that is not needed this frame
+// The refresh queue. After dirty_info, pages with a pending refresh (vsm_invalidate.wgsl) that
+// are needed this frame are appended to the dirty list: a page with a static layer only
+// re-renders its dynamic casters over it; one without is rendered in full once more, keeping
+// its static casters as its static layer from then on; a page whose static casters streamed
+// (REFRESH_FULL) is rendered in full. A pending refresh of a page that is not needed this frame
 // waits until it is.
+//
+// Budget (UE's r.Shadow.Virtual.DeferredInvalidationBudget): with vsm.refresh.x > 0 at most that
+// many pages are refreshed per frame. Pages are ranked into REFRESH_BUCKETS buckets by how far
+// their casters may have moved (in their own texels: what the cached shadow is off by on screen,
+// since texels match pixels) and how many frames they have waited; the cut is the first bucket
+// that no longer fits (as cache_plan's). Pages past the budget keep their cached depth — stale
+// by a few texels, never a hole — and wait with a growing priority; one that has waited
+// vsm.refresh.y frames is refreshed regardless of the budget (bucket 0), so staleness stays
+// bounded. Pages of distant levels (vsm.refresh.z and beyond) are only refreshed on their
+// level's turn, every vsm.refresh.w frames (the far shadows' own rate).
+//   refresh_count : per pending page its bucket (histogram)
+//   refresh_plan  : the cut-off bucket and how many of its pages fit
+//   refresh       : appends the pages within the budget
+
+// Whether the page `p` with pending refresh `pending` is refreshed this frame: 0 no (waits), 1
+// yes, 2 its refresh is dropped (the page was freed or rendered in full this frame).
+fn refresh_needed(p: u32) -> u32 {
+    let entry = owner[p];
+    let valid = entry != INVALID_ID && entries[entry].x == p && entries[entry].w != vsm.frame;
+    if !valid {
+        return 2u;
+    }
+    return select(0u, 1u, entries[entry].z == vsm.frame);
+}
+
+// Frames since the page of `entry` was last rendered.
+fn refresh_age(entry: u32) -> u32 {
+    return vsm.frame - entries[entry].w;
+}
+
+// A distant level's page waiting for its level's turn (unless it is too stale or streamed).
+fn refresh_held(entry: u32, pending: u32) -> bool {
+    if entry >= local_vsm.entry_base || (pending & REFRESH_FULL) != 0u || refresh_age(entry) >= vsm.refresh.y {
+        return false;
+    }
+    return !vsm_level_turn(entry / (vsm.level_pages * vsm.level_pages));
+}
+
+// The page's priority bucket: 0 for pages too stale to wait, then by the texels its casters may
+// have moved plus a doubling for every frame it has waited (lower first).
+fn refresh_bucket(entry: u32, pending: u32) -> u32 {
+    let age = refresh_age(entry);
+    if age >= vsm.refresh.y {
+        return 0u;
+    }
+    let texels = f32(pending & ~REFRESH_FULL) / REFRESH_TEXEL_UNITS;
+    let score = log2(max(texels, 0.0625)) + f32(age);
+    let rank = i32(floor((score + 4.0) * 2.0));
+    return u32(clamp(i32(REFRESH_BUCKETS) - 1 - rank, 1, i32(REFRESH_BUCKETS) - 1));
+}
+
 @compute @workgroup_size(64)
-fn refresh(@builtin(global_invocation_id) gid: vec3<u32>) {
+fn refresh_count(@builtin(global_invocation_id) gid: vec3<u32>) {
     let p = gid.x;
-    if p >= vsm.physical_count || atomicLoad(&info[INFO_PAGE_REFRESH + p]) == 0 {
+    if p >= vsm.physical_count {
+        return;
+    }
+    let pending = bitcast<u32>(atomicLoad(&info[INFO_PAGE_REFRESH + p]));
+    if pending == 0u {
+        return;
+    }
+    let needed = refresh_needed(p);
+    if needed == 2u {
+        atomicStore(&info[INFO_PAGE_REFRESH + p], 0);
+        return;
+    }
+    if needed == 0u {
         return;
     }
     let entry = owner[p];
-    let valid = entry != INVALID_ID && entries[entry].x == p && entries[entry].w != vsm.frame;
-    if valid && entries[entry].z != vsm.frame {
+    if refresh_held(entry, pending) {
+        atomicAdd(&info[INFO_REFRESH_HELD], 1);
+        return;
+    }
+    atomicAdd(&info[INFO_REFRESH + refresh_bucket(entry, pending)], 1);
+}
+
+@compute @workgroup_size(1)
+fn refresh_plan() {
+    let budget = vsm.refresh.x;
+    var cutoff = REFRESH_BUCKETS;
+    var quota = 0u;
+    // Bucket 0 goes in any case.
+    let forced = u32(atomicLoad(&info[INFO_REFRESH]));
+    var taken = forced;
+    if budget > 0u {
+        for (var b = 1u; b < REFRESH_BUCKETS; b++) {
+            let pages = u32(atomicLoad(&info[INFO_REFRESH + b]));
+            if taken + pages > budget {
+                cutoff = b;
+                quota = budget - min(taken, budget);
+                break;
+            }
+            taken += pages;
+        }
+    }
+    atomicStore(&info[INFO_REFRESH_CUTOFF], i32(cutoff));
+    atomicStore(&info[INFO_REFRESH_QUOTA], i32(quota));
+    atomicStore(&info[INFO_REFRESH_KEPT], 0);
+    atomicStore(&info[INFO_REFRESH_FORCED], i32(select(0u, forced - min(forced, budget), budget > 0u)));
+}
+
+@compute @workgroup_size(64)
+fn refresh(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let p = gid.x;
+    if p >= vsm.physical_count {
+        return;
+    }
+    let pending = bitcast<u32>(atomicLoad(&info[INFO_PAGE_REFRESH + p]));
+    if pending == 0u || refresh_needed(p) != 1u {
+        return;
+    }
+    let entry = owner[p];
+    if refresh_held(entry, pending) {
+        return;
+    }
+    let b = refresh_bucket(entry, pending);
+    let cutoff = u32(atomicLoad(&info[INFO_REFRESH_CUTOFF]));
+    if b > cutoff || (b == cutoff && u32(atomicAdd(&info[INFO_REFRESH_KEPT], 1)) >= u32(atomicLoad(&info[INFO_REFRESH_QUOTA]))) {
+        // Past the budget: the cached depth stays one more frame.
+        atomicAdd(&info[INFO_REFRESH_DEFERRED], 1);
         return;
     }
     atomicStore(&info[INFO_PAGE_REFRESH + p], 0);
-    if !valid {
-        return; // freed, or already rendered in full this frame
-    }
     atomicStore(&cache_lists[DIRTY_START + atomicAdd(&cache_lists[CACHE_DIRTY_COUNT], 1u)], entry);
     atomicAdd(&info[INFO_ARGS + 1u], 1);
-    var state = PAGE_SPLIT;
     let static_layer = bitcast<u32>(atomicLoad(&info[INFO_PAGE_STATIC + p]));
+    if (pending & REFRESH_FULL) != 0u {
+        // Its static casters changed: rendered in full, without a static layer (as dirty_info).
+        var state = PAGE_FULL;
+        if static_layer != INVALID_ID {
+            state |= PAGE_CLEAR;
+            atomicStore(&info[INFO_PAGE_STATIC + p], bitcast<i32>(INVALID_ID));
+        }
+        dirty_page(entry, state);
+        return;
+    }
+    var state = PAGE_SPLIT;
     if static_layer == entry {
         atomicAdd(&info[INFO_COUNTERS], 1);
         let scratch = u32(atomicAdd(&info[INFO_COUNTERS + 2u], 1));

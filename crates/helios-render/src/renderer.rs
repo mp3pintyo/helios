@@ -118,10 +118,15 @@ pub enum DebugView {
     /// micro-triangle per patch, through green, to red: deeply split), shaded per micro-triangle;
     /// the rest grey.
     Tessellation = 25,
+    /// Virtual shadow map overview, four panels: clipmap levels (distant levels hatched), each
+    /// page's work this frame (rendered in full / dynamic casters / deferred by the refresh
+    /// budget / held for its level's turn / cached), why pages were invalidated, and the
+    /// physical page pool with its pressure (`vsm_overview.rs`).
+    ShadowOverview = 26,
 }
 
 impl DebugView {
-    pub const ALL: [DebugView; 26] = [
+    pub const ALL: [DebugView; 27] = [
         Self::Lit,
         Self::Clusters,
         Self::Triangles,
@@ -148,6 +153,7 @@ impl DebugView {
         Self::AssemblyParts,
         Self::MaterialFeatures,
         Self::Tessellation,
+        Self::ShadowOverview,
     ];
 
     /// The view with index `index` (its `--view` number), if any.
@@ -183,6 +189,7 @@ impl DebugView {
             Self::AssemblyParts => "Assembly parts",
             Self::MaterialFeatures => "Material features (Substrate slabs)",
             Self::Tessellation => "Tessellation (depth, micro-triangles)",
+            Self::ShadowOverview => "Shadow overview (levels | page work | invalidation | pool)",
         }
     }
 
@@ -316,6 +323,20 @@ pub struct RenderSettings {
     /// the volumetric fog is spread over its neighbourhood, so lights and lit areas glow through
     /// fog (`fog_scattering.rs`). `None` = off.
     pub fog_scattering: Option<FogScattering>,
+    /// Shadow pages refreshed per frame at most because their casters moved (wind, skins, moved
+    /// instances) or streamed (UE's `r.Shadow.Virtual.DeferredInvalidationBudget`; 0: all at
+    /// once). Pages past the budget keep their cached depth for a frame or a few, by priority
+    /// (how far their casters may have moved, in texels, and how long they have waited).
+    pub shadow_refresh_budget: u32,
+    /// Frames a shadow page may wait for its refresh before it is refreshed regardless of the
+    /// budget.
+    pub shadow_max_staleness: u32,
+    /// First distant virtual shadow map level (0: none). Distant levels follow a moving sun and
+    /// refresh their moving casters at their own rate (every `shadow_distant_interval` frames,
+    /// in turns) instead of every frame: the far shadows' cost under a day-night cycle or wind
+    /// is spread out (UE 5.9's far shadows at their own update rate).
+    pub shadow_distant_level: u32,
+    pub shadow_distant_interval: u32,
 }
 
 impl Default for RenderSettings {
@@ -368,9 +389,19 @@ impl Default for RenderSettings {
             substrate: true,
             tsr_depth_history: true,
             fog_scattering: None,
+            shadow_refresh_budget: DEFAULT_SHADOW_REFRESH_BUDGET,
+            shadow_max_staleness: 4,
+            shadow_distant_level: DEFAULT_SHADOW_DISTANT_LEVEL,
+            shadow_distant_interval: 4,
         }
     }
 }
+
+/// Default of [`RenderSettings::shadow_refresh_budget`] (pages per frame).
+pub const DEFAULT_SHADOW_REFRESH_BUDGET: u32 = 96;
+/// Default of [`RenderSettings::shadow_distant_level`]: level 7 has 12.5 cm texels, which the
+/// level selection gives receivers beyond ~50 m at 1600 x 900 (60 degree field of view).
+pub const DEFAULT_SHADOW_DISTANT_LEVEL: u32 = 7;
 
 /// Default of [`RenderSettings::moving_light_pages`].
 pub const DEFAULT_MOVING_LIGHT_PAGES: f32 = 32.0;
@@ -456,6 +487,7 @@ pub struct Renderer {
     /// This frame's instance moves.
     motion: MotionTracker,
     invalidation_debug: crate::dynamic_debug::InvalidationDebug,
+    shadow_overview: crate::vsm_overview::ShadowOverview,
     frame_index: u32,
     history_valid: bool,
     previous_view_proj: Option<Mat4>,
@@ -554,6 +586,7 @@ impl Renderer {
             profiler: GpuProfiler::new(device, queue),
             motion: MotionTracker::default(),
             invalidation_debug: crate::dynamic_debug::InvalidationDebug::new(device),
+            shadow_overview: crate::vsm_overview::ShadowOverview::new(device),
             frame_index: 0,
             history_valid: false,
             previous_view_proj: None,
@@ -1149,6 +1182,9 @@ impl Renderer {
         if self.settings.debug_view == DebugView::Invalidation {
             self.invalidation_debug.record(&mut rec, &self.frame_uniform, &self.targets, &self.vsm, &self.lumen, &self.samplers);
         }
+        if self.settings.debug_view == DebugView::ShadowOverview && self.settings.shadows {
+            self.shadow_overview.record(&mut rec, &self.frame_uniform, &self.targets, &self.vsm, &self.samplers);
+        }
         self.effects.record_before_translucency(&mut rec, &lighting, &self.scene, &self.translucency);
         self.translucency.record(&mut rec, &lighting, &self.scene, &self.textures);
         self.effects.record_after_translucency(&mut rec, &lighting);
@@ -1360,6 +1396,10 @@ impl Renderer {
                 instances_changed: !self.motion.changes.moved.is_empty(),
                 volume_distance: if self.fog.enabled() { scene.fog.distance } else { 0.0 },
                 cull_flags: self.cull_flags(),
+                refresh_budget: s.shadow_refresh_budget,
+                max_staleness: s.shadow_max_staleness,
+                far_level: s.shadow_distant_level,
+                far_interval: s.shadow_distant_interval,
             },
         );
         unjittered

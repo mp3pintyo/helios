@@ -49,6 +49,12 @@ pub struct RenderStats {
     /// (cluster, page) draws of the rendered shadow pages; beyond the capacity they are lost.
     pub shadow_draws: u32,
     pub shadow_draw_capacity: u32,
+    /// The shadow refresh queue (vsm.wgsl): pages whose refresh the budget deferred, pages of
+    /// distant levels waiting for their turn, and pages refreshed past the budget because they
+    /// had waited too long.
+    pub shadow_refresh_deferred: u32,
+    pub shadow_refresh_held: u32,
+    pub shadow_refresh_forced: u32,
 }
 
 const IDLE: u32 = 0;
@@ -166,6 +172,9 @@ impl StatsReadback {
             stats.shadow_draws = view_word(self.views + 1, 12);
             stats.shadow_dynamic_pages = view_word(self.views + 1, 13);
             stats.shadow_split_pages = view_word(self.views + 1, 14);
+            stats.shadow_refresh_deferred = view_word(self.views + 1, 6);
+            stats.shadow_refresh_held = view_word(self.views + 1, 7);
+            stats.shadow_refresh_forced = view_word(self.views + 1, 11);
             stats.shadow_draw_capacity = self.shadow_draw_capacity;
             stats.assembly_parts_requested = view_word(self.views + 2, 0);
             stats.assembly_parts = stats.assembly_parts_requested.min(crate::assembly::PART_CAPACITY);

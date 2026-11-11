@@ -71,7 +71,7 @@ pub const PHOTO_SAMPLES: u32 = 128;
 const SCREEN_PERCENTAGES: [f32; 4] = [50.0, 67.0, 75.0, 100.0];
 
 pub const HELP: &str = "WASD/QE fly · drag to look · wheel speed · Shift fast\n\
-N next scene · 0 demo motion · V debug view · Insert voxel LODs · PageDown tessellation · G GI · ; GI method (Lumen / Lumen Lite) · H shadows · 1 local light shadow maps · [ ] screen percentage (50/67/75/100 %) · \\ dynamic resolution · T TAA · O occlusion · K software raster · I texture streaming · - animation clip / pause · F fog · C clouds · U translucency · End coloured light through glass · Home fog scattering · / translucency layers · ' volumes + particles · L wind · M motion blur · B depth of field · Enter photo (accumulated still) · ` local exposure · = MegaLights · Z/X zoom · , . LOD error · PageUp Substrate materials · ←→↑↓ sun · P animate sun · J day/night cycle · Y camera tour · R reset · Tab editor tools (native)";
+N next scene · 0 demo motion · V debug view · Insert voxel LODs · PageDown tessellation · G GI · ; GI method (Lumen / Lumen Lite) · H shadows · 1 local light shadow maps · [ ] screen percentage (50/67/75/100 %) · \\ dynamic resolution · T TAA · O occlusion · K software raster · I texture streaming · - animation clip / pause · F fog · C clouds · U translucency · End coloured light through glass · Home fog scattering · 2 shadow refresh budget · / translucency layers · ' volumes + particles · L wind · M motion blur · B depth of field · Enter photo (accumulated still) · ` local exposure · = MegaLights · Z/X zoom · , . LOD error · PageUp Substrate materials · ←→↑↓ sun · P animate sun · J day/night cycle · Y camera tour · R reset · Tab editor tools (native)";
 
 impl DemoApp {
     pub fn new(
@@ -254,6 +254,13 @@ impl DemoApp {
             }
             // Fog screen space scattering (glow of lights through fog) on / off.
             "Home" => s.fog_scattering = if s.fog_scattering.is_some() { None } else { Some(helios_render::FogScattering::default()) },
+            // Shadow page refreshes throttled (refresh budget, distant levels at their own rate)
+            // / every invalidated page re-rendered at once.
+            "Digit2" => {
+                let on = !(s.shadow_refresh_budget > 0 || s.shadow_distant_level > 0);
+                s.shadow_refresh_budget = if on { helios_render::DEFAULT_SHADOW_REFRESH_BUDGET } else { 0 };
+                s.shadow_distant_level = if on { helios_render::DEFAULT_SHADOW_DISTANT_LEVEL } else { 0 };
+            }
             "KeyL" => s.wind = !s.wind,
             "Quote" => {
                 let on = !(s.volumes || s.particles);
@@ -489,6 +496,19 @@ impl DemoApp {
             self.renderer.shadow_mapped_lights(),
             self.renderer.shadow_held_lights(),
         ));
+        if s.shadow_refresh_budget > 0 || s.shadow_distant_level > 0 {
+            text.push_str(&format!(
+                "
+shadow refreshes: budget {} a frame, {} deferred, {} past the budget (waited {} frames) · distant levels from {} every {} frames: {} pages waiting for their turn",
+                s.shadow_refresh_budget,
+                st.shadow_refresh_deferred,
+                st.shadow_refresh_forced,
+                s.shadow_max_staleness,
+                s.shadow_distant_level,
+                s.shadow_distant_interval,
+                st.shadow_refresh_held,
+            ));
+        }
         let pool = self.renderer.local_pool_stats();
         if pool.requested > 0 {
             text.push_str(&format!(

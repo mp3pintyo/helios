@@ -55,6 +55,29 @@ const NO_SCRATCH: u32 = 0xffffffu;
 // (vsm_expand.wgsl), its invalidation schedules the next refresh by them (vsm_invalidate.wgsl).
 const PAGE_MOTION_UNITS: f32 = 16.0;
 
+// Pending refreshes (INFO_PAGE_REFRESH, written by vsm_invalidate.wgsl, consumed by vsm.wgsl's
+// refresh passes): 0 none; otherwise how far the page's casters may have moved since it was
+// rendered, in 1 / REFRESH_TEXEL_UNITS of its texels (at least 1: the refresh's priority), and
+// REFRESH_FULL if its static casters changed too (streaming, deferred instead of freeing the
+// page): it is then rendered in full.
+const REFRESH_FULL: u32 = 0x80000000u;
+const REFRESH_TEXEL_UNITS: f32 = 16.0;
+// After the motion bounds: per physical page why it was last invalidated (vsm_invalidate.wgsl's
+// HIT_* bits | frame << 8; the shadow overview debug view), then the refresh queue: per priority
+// bucket its pending pages (REFRESH_BUCKETS words, cleared every frame), then the cut-off
+// bucket, how many of its pages go, the counter of those that did, the pages deferred by the
+// budget, those of distant levels waiting for their turn and those refreshed past the budget
+// because they were too stale (statistics, vsm.wgsl's refresh_*).
+const INFO_PAGE_REASON: u32 = INFO_PAGE_MOTION + VSM_PHYSICAL_PAGES + VSM_PHYSICAL_PAGES;
+const INFO_REFRESH: u32 = INFO_PAGE_REASON + VSM_PHYSICAL_PAGES;
+const REFRESH_BUCKETS: u32 = 64u;
+const INFO_REFRESH_CUTOFF: u32 = INFO_REFRESH + REFRESH_BUCKETS;
+const INFO_REFRESH_QUOTA: u32 = INFO_REFRESH_CUTOFF + 1u;
+const INFO_REFRESH_KEPT: u32 = INFO_REFRESH_CUTOFF + 2u;
+const INFO_REFRESH_DEFERRED: u32 = INFO_REFRESH_CUTOFF + 3u;
+const INFO_REFRESH_HELD: u32 = INFO_REFRESH_CUTOFF + 4u;
+const INFO_REFRESH_FORCED: u32 = INFO_REFRESH_CUTOFF + 5u;
+
 fn page_kind(state: u32) -> u32 {
     return state & PAGE_KIND_MASK;
 }
@@ -84,6 +107,26 @@ struct Vsm {
     enabled: u32,
     draw_capacity: u32,
     eye: vec4<f32>,
+    // Refresh scheduling (vsm.rs, vsm.wgsl's refresh_*): x: pages refreshed per frame at most
+    // (0: every pending page at once), y: frames a page may stay stale before it is refreshed
+    // regardless of the budget, z: first distant level (refreshed at its own rate; level_count:
+    // none), w: frames between two refreshes of a distant level.
+    refresh: vec4<u32>,
+    // Per level its light view: the sun's, except for distant levels, which follow a moving sun
+    // at their own rate (vsm.rs). Addresses and depths of a level are in its own light space.
+    level_light: array<mat4x4<f32>, 16>,
+}
+
+// A world point in `level`'s light space (x, -y in world units: page coordinates times the
+// level's page size).
+fn vsm_level_xy(world: vec3<f32>, level: u32) -> vec2<f32> {
+    let ls = (vsm.level_light[level] * vec4<f32>(world, 1.0)).xyz;
+    return vec2<f32>(ls.x, -ls.y);
+}
+
+// Whether `level` is a distant level that refreshes this frame (its turn of the round robin).
+fn vsm_level_turn(level: u32) -> bool {
+    return level < vsm.refresh.z || ((vsm.frame + level) % max(vsm.refresh.w, 1u)) == 0u;
 }
 
 struct VsmAddress {
@@ -102,8 +145,7 @@ fn vsm_level(world: vec3<f32>) -> u32 {
 
 fn vsm_address(world: vec3<f32>, level: u32) -> VsmAddress {
     var a: VsmAddress;
-    let ls = (vsm.light_view * vec4<f32>(world, 1.0)).xyz;
-    let v = vec2<f32>(ls.x, -ls.y) / vsm.level_info[level].x;
+    let v = vsm_level_xy(world, level) / vsm.level_info[level].x;
     let page = vec2<i32>(floor(v));
     let local = page - vsm.level_origin[level].xy;
     let n = i32(vsm.level_pages);
