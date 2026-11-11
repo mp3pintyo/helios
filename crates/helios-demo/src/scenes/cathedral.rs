@@ -47,6 +47,11 @@ pub fn set_lantern(on: bool) {
     LANTERN.store(on, Ordering::Relaxed);
 }
 
+/// Whether cathedrals are built with the lantern.
+pub(crate) fn lantern_on() -> bool {
+    LANTERN.load(Ordering::Relaxed)
+}
+
 pub fn floor_height(x: f32, z: f32) -> f32 {
     terrain_height(x, z).max(if inside_footprint(x, z) { 0.0 } else { f32::MIN })
 }

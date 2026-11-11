@@ -39,6 +39,7 @@ mod morton;
 pub mod noise;
 mod partition;
 pub mod primitives;
+pub mod progress;
 mod sdf;
 mod simplify;
 pub mod skin;

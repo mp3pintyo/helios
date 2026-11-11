@@ -128,6 +128,9 @@ impl MeshSdf {
         let index = |x: u32, y: u32, z: u32| (x + res[0] * (y + res[1] * z)) as usize;
 
         for (ti, tri) in triangles.iter().enumerate() {
+            if ti % 1024 == 0 {
+                crate::progress::tick();
+            }
             let lo = ((Aabb::from_points(tri.iter().copied()).min - Vec3::splat(band) - origin) / voxel_size).floor().max(Vec3::ZERO);
             let hi = ((Aabb::from_points(tri.iter().copied()).max + Vec3::splat(band) - origin) / voxel_size).ceil();
             let hi = hi.min(Vec3::new(res[0] as f32 - 1.0, res[1] as f32 - 1.0, res[2] as f32 - 1.0));

@@ -1,4 +1,4 @@
-//! Lumen's displaced-variant bakes in Web Workers.
+//! Bakes in Web Workers: the scene's meshes (`scene_bake.rs`) and Lumen's displaced variants.
 //!
 //! Natively the refinement and the bake of a displaced variant (its distance field and cards)
 //! run on worker threads; the browser has no threads without cross-origin isolation, which
@@ -9,11 +9,15 @@
 //! render thread. The render thread only copies the inputs out and the results in.
 //!
 //! A variant must never stay missing because of a worker: the pool fails a task whose worker
-//! errors, does not report its instance ready within seconds or does not answer within 10 s (and
-//! terminates that worker), and the engine then runs the task on the render thread itself.
+//! errors, does not report its instance ready within seconds or stays silent for 10 s (and
+//! terminates that worker), and the engine then runs the task on the render thread itself. A
+//! long bake is not silent: the worker's bakes report progress (`helios_geometry::progress`),
+//! which the worker passes on to the page as a heartbeat at most once a second.
 //!
 //! `?bake-workers=0` turns the workers off (the bakes then run on the render thread, as they also
 //! do when a worker cannot start).
+
+use std::cell::RefCell;
 
 use helios_render::{BakeOffload, BakePoll};
 use wasm_bindgen::prelude::*;
@@ -34,9 +38,20 @@ extern "C" {
 
     #[wasm_bindgen(method)]
     fn cancel(this: &BakePool, id: u32);
+
+    /// In a worker: tells the page that the running task is alive (rate-limited there).
+    #[wasm_bindgen(js_name = bakeBeat)]
+    fn bake_beat();
 }
 
-struct WorkerPool(BakePool);
+pub(crate) struct WorkerPool(BakePool);
+
+impl Clone for WorkerPool {
+    fn clone(&self) -> Self {
+        let pool: &JsValue = self.0.as_ref();
+        Self(pool.clone().unchecked_into())
+    }
+}
 
 impl BakeOffload for WorkerPool {
     fn submit(&self, input: &[u8]) -> Option<u32> {
@@ -66,17 +81,35 @@ fn pool_size() -> u32 {
     cores.saturating_sub(2).clamp(1, 4)
 }
 
-/// Installs the worker pool (unless `enabled` is false); the workers start with the first bake.
-pub(crate) fn install(enabled: bool) {
-    let pool = if enabled { bake_pool_create(wasm_bindgen::module(), pool_size()) } else { None };
-    if pool.is_none() {
-        log::info!("lumen: displaced variants bake on the page (no bake workers)");
-    }
-    helios_render::set_bake_offload(pool.map(|p| Box::new(WorkerPool(p)) as Box<dyn BakeOffload>));
+thread_local! {
+    /// The page's pool and its size, for the scene bake.
+    static POOL: RefCell<Option<(WorkerPool, u32)>> = const { RefCell::new(None) };
 }
 
-/// A bake worker's entry (`bake_worker.js`): runs one task of Lumen's displaced variants.
+/// Installs the worker pool (unless `enabled` is false); the workers start with the first bake.
+pub(crate) fn install(enabled: bool) {
+    let size = pool_size();
+    let pool = if enabled { bake_pool_create(wasm_bindgen::module(), size).map(WorkerPool) } else { None };
+    if pool.is_none() {
+        log::info!("the scene and Lumen's displaced variants bake on the page (no bake workers)");
+    }
+    POOL.with(|p| *p.borrow_mut() = pool.clone().map(|pool| (pool, size)));
+    helios_render::set_bake_offload(pool.map(|p| Box::new(p) as Box<dyn BakeOffload>));
+}
+
+/// The bake workers and their number (`None` without workers).
+pub(crate) fn pool() -> Option<(WorkerPool, u32)> {
+    POOL.with(|p| p.borrow().clone())
+}
+
+/// A bake worker's entry (`bake_worker.js`): runs one task, a share of the scene bake or one of
+/// Lumen's displaced variants.
 #[wasm_bindgen(js_name = heliosBakeTask)]
 pub fn helios_bake_task(input: &[u8]) -> Vec<u8> {
-    helios_render::run_bake_task(input)
+    helios_geometry::progress::set_hook(Some(bake_beat));
+    if crate::scene_bake::is_task(input) {
+        crate::scene_bake::run_task(input)
+    } else {
+        helios_render::run_bake_task(input)
+    }
 }
