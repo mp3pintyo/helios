@@ -326,10 +326,14 @@ pub fn add_river(scene: &mut Scene, terrain: &MeshTerrain, ground: fn(f32, f32) 
         [1.0, 2.0, 3.0, 4.0].into_iter().find_map(|above| terrain.surface_below(Vec3::new(p.x, h + above, p.y), above + 3.0, 0.1)).unwrap_or(h + 20.0)
     };
     let mut river = helios_render::River::new(RIVER_ORIGIN, RIVER_CELL, RIVER_CELLS, bed_at);
-    // Under walls the dry surface hides at the heightfield's ground, inside the rock.
+    // Under walls the dry surface hides at the heightfield's ground, inside the rock; elsewhere
+    // just under the bed it lies on - in the cave that is the cave's floor, not the heightfield
+    // ground far below it (hiding there made the surface's dry corners plunge through the floor
+    // and stand as sheets in front of the step at the cave's mouth).
     river.hide = (0..river.bed.len()).map(|i| {
         let c = river.center(i);
-        terrain.height(c.x, c.y)
+        let h = terrain.height(c.x, c.y);
+        if river.bed[i] > h + 10.0 { h } else { river.bed[i] }
     }).collect();
     // Boulders in the stream: instances, and their tops in the bed.
     for (i, &(x, z, size)) in STREAM_BOULDERS.iter().enumerate() {

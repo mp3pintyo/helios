@@ -199,8 +199,10 @@ fn wet(c: vec2<i32>) -> bool {
 }
 
 // The water surface height for the shores: wet cells' own, dry cells within three cells of
-// water the highest neighbouring water surface (the banks above the water line get the wet
-// band), the rest none.
+// water the highest neighbouring water surface that lies below their ground (the banks above
+// the water line get the wet band; ground below a pool's level - under the step at the cave's
+// mouth - is not a bank of that pool and must not be dressed as its submerged bed), the rest
+// none.
 @compute @workgroup_size(8, 8)
 fn surface_step(@builtin(global_invocation_id) id: vec3<u32>) {
     if any(id.xy >= river.size) {
@@ -211,11 +213,15 @@ fn surface_step(@builtin(global_invocation_id) id: vec3<u32>) {
     if wet(c) {
         level = surface_level(c);
     } else {
+        let ground = terrain[index_of(c)].x + 0.05;
         for (var dz = -3; dz <= 3; dz++) {
             for (var dx = -3; dx <= 3; dx++) {
                 let n = c + vec2<i32>(dx, dz);
                 if inside(n) && wet(n) {
-                    level = max(level, surface_level(n));
+                    let l = surface_level(n);
+                    if l <= ground {
+                        level = max(level, l);
+                    }
                 }
             }
         }
@@ -224,15 +230,31 @@ fn surface_step(@builtin(global_invocation_id) id: vec3<u32>) {
 }
 
 // Height of the drawn surface at cell `c`: the water's where wet (outlet cells hide under the
-// bed: the lake's own surface shows there), just under the bed where dry, so the surface meets
-// the ground at the water line.
+// bed: the lake's own surface shows there). A dry cell next to water carries the neighbouring
+// water surface on, level, unless its ground is lower than that (then just under the ground):
+// the bank cuts the level sheet exactly at the water line. Letting every dry corner dip under its
+// bed instead tilted the shore's triangles down into the bank, and where such a triangle rose out
+// of the ground at a grazing view its back face showed (blue slivers along the banks).
 fn drawn_height(c: vec2<i32>) -> f32 {
     let i = index_of(c);
     let bed = terrain[i];
-    if bed.y > 0.5 || water_in[i].x <= WET {
-        return bed.z - 0.12;
+    let hidden = bed.z - 0.12;
+    if bed.y > 0.5 {
+        return hidden;
     }
-    return bed.x + water_in[i].x;
+    if water_in[i].x > WET {
+        return bed.x + water_in[i].x;
+    }
+    var level = NO_WATER;
+    for (var dz = -1; dz <= 1; dz++) {
+        for (var dx = -1; dx <= 1; dx++) {
+            let n = c + vec2<i32>(dx, dz);
+            if inside(n) && wet_drawn(n) {
+                level = max(level, surface_level(n));
+            }
+        }
+    }
+    return select(hidden, min(level, hidden), level > NO_WATER);
 }
 
 // Whether the drawn surface shows water at `c` (outlet cells show the lake's own surface).

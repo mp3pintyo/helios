@@ -381,14 +381,69 @@ fn grass(uv: vec2<f32>) -> Texel {
     return t;
 }
 
+// A stone of Voronoi cell `v` at `p` (cell units): turned and squashed by its hash, sized from
+// a few large to many small. Returns its dome (0 at its outline, 1 on top; negative outside).
+fn stone_dome(v: Voronoi, p: vec2<f32>) -> f32 {
+    let a = idf(v.id, 4u) * 6.2831853;
+    let axis = vec2<f32>(cos(a), sin(a));
+    let d = p - v.center;
+    let local = vec2<f32>(dot(d, axis), dot(d, vec2<f32>(-axis.y, axis.x)) * (1.0 + 0.8 * idf(v.id, 5u)));
+    let r = mix(0.16, 0.44, pow(idf(v.id, 6u), 1.6));
+    let t = dot(local, local) / (r * r);
+    return select(-1.0, sqrt(max(1.0 - t, 0.0)), t < 1.0);
+}
+
+// Earth with gravel and stones, made to look like ground rather than a dot pattern: the stones
+// gather in patches (sparse elsewhere), come in two populations of varied sizes and shapes,
+// and lie partly buried - each sinks by its own amount into a lumpy soil, so its visible outline
+// is wherever it rises out of the clods, not a circle. Stones are dusted with the soil and
+// darker where it covers them.
 fn dirt(uv: vec2<f32>) -> Texel {
-    let pebbles = pvoronoi(uv, vec2<f32>(40.0) * recipe.scale, 1.0, recipe.seed);
-    let pebble = smoothstep(0.38, 0.26, pebbles.f1) * step(0.7, idf(pebbles.id, 3u));
-    let n = pfbm(uv, vec2<f32>(12.0), 5u, recipe.seed + 1u);
+    let seed = recipe.seed;
+    let n = pfbm(uv, vec2<f32>(12.0), 5u, seed + 1u);
+    let clods = pfbm(uv, vec2<f32>(40.0) * recipe.scale, 3u, seed + 2u);
+    let gather = smoothstep(-0.35, 0.45, pfbm(uv, vec2<f32>(5.0), 3u, seed + 3u));
+    let warp = vec2<f32>(pfbm(uv, vec2<f32>(24.0), 2u, seed + 4u), pfbm(uv, vec2<f32>(24.0), 2u, seed + 5u)) * 0.004;
+    let soil_height = 0.42 + 0.1 * n + 0.07 * clods;
+    let soil = recipe.color_a.rgb * (0.75 + 0.4 * n) * (0.92 + 0.16 * clods);
+    var height = soil_height;
+    var albedo = soil;
+    var cover = 0.0;
+    for (var layer = 0u; layer < 2u; layer++) {
+        // Gravel (many, small, low) and stones (fewer, larger, higher).
+        let cells = select(vec2<f32>(60.0), vec2<f32>(23.0), layer == 1u) * recipe.scale;
+        let density = select(0.5, 0.3, layer == 1u) * (0.15 + 1.1 * gather);
+        let amplitude = select(0.16, 0.32, layer == 1u);
+        let q = uv + warp;
+        let v = pvoronoi(q, cells, 0.8, seed + 20u + 7u * layer);
+        if idf(v.id, 3u) > density {
+            continue;
+        }
+        let dome = stone_dome(v, q * cells);
+        if dome < 0.0 {
+            continue;
+        }
+        // Each stone sinks by its own share of its height into the soil's mean level.
+        let bury = 0.15 + 0.6 * idf(v.id, 7u);
+        let top = 0.42 + amplitude * (dome - bury);
+        let above = top - soil_height;
+        if above <= 0.0 || top <= height {
+            continue;
+        }
+        height = top;
+        let tone = idf(v.id, 8u);
+        let hue = mix(vec3<f32>(1.06, 0.98, 0.88), vec3<f32>(0.92, 0.97, 1.04), idf(v.id, 9u));
+        var stone = recipe.color_b.rgb * (0.6 + 0.65 * tone) * hue * (0.9 + 0.2 * clods);
+        // Dusted with the soil, and coated with it where it is about to disappear under it.
+        let coat = 0.3 + 0.6 * (1.0 - smoothstep(0.0, 0.05, above));
+        stone = mix(stone, soil, coat);
+        albedo = stone;
+        cover = smoothstep(0.0, 0.03, above);
+    }
     var t: Texel;
-    t.albedo = mix(recipe.color_a.rgb * (0.75 + 0.4 * n), recipe.color_b.rgb * (0.8 + 0.4 * idf(pebbles.id, 5u)), pebble);
-    t.height = 0.4 + 0.25 * n + 0.4 * pebble * (1.0 - pebbles.f1);
-    t.roughness = mix(recipe.color_a.w, recipe.color_b.w, pebble);
+    t.albedo = mix(soil, albedo, cover);
+    t.height = height;
+    t.roughness = mix(recipe.color_a.w, recipe.color_b.w, cover);
     return t;
 }
 

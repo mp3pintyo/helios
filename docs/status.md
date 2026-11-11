@@ -406,8 +406,14 @@ Honest differences that remain:
     river per scene on a fixed grid (no spline-defined river, no grid following the river's course, no paintable water
     input in the editor — sources are code); the shallow-water model is the virtual-pipes scheme (no momentum
     advection, so no hydraulic jumps or eddies behind obstacles beyond what the pipes' flow does; Manning friction only;
-    first-order, a little diffusive); foam is a heuristic of divergence, shear, surface slope and speed (no aeration
-    model, no spray or splash particles at the cave's step). Obstacles are static (boulders baked into the bed; the raft and other moving
+    first-order, a little diffusive); foam is a heuristic of divergence, shear, surface slope and speed, and water
+    over the cave's step is white because its drawn surface is steep (no aeration model, no falling-water sheet
+    separate from the bed, no spray or splash particles at the step). The river's surface is a height per 0.25 m cell
+    centre (dry corners carry the neighbouring level on into the bank, which cuts it at the water line): where the
+    level changes within a cell (the step) its shape is that coarse, and folds that still show their back face are
+    shaded as seen from above.
+    The ground near the water is procedural (sediment, gravel and cobbles in patches, an algae film thickening
+    with depth; no scanned river-bed materials, no deposition from the simulated flow). Obstacles are static (boulders baked into the bed; the raft and other moving
     instances don't push water, nothing floats on the river), the river has no underwater view, Lumen and shadows don't
     see its water, and its surface is the sim grid (no tessellation beyond it; waves are the lake's normal-mapped ones
     advected by a two-phase flow map, which can show its period as gentle pulsing on slow water).

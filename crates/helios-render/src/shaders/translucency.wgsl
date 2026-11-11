@@ -724,18 +724,19 @@ fn surface_reflection(p: vec3<f32>, n: vec3<f32>, r: vec3<f32>, roughness: f32, 
 }
 
 fn shade_water(in: VertexOutput, input: SurfaceInput, m: Material, px: Pixel) -> Shaded {
-    if input.back_facing {
+    // A simulated river (river.rs) marks its vertices with alpha 0 and carries its velocity in
+    // the second UV set and its foam in red. It has no underwater view: where its sheet folds
+    // at a bank and a triangle shows its back, that is still the water seen from above.
+    let simulated = in.color.a < 0.5;
+    if input.back_facing && !simulated {
         return shade_water_below(in, input, m, px);
     }
     let p = in.world_position;
     let v = -px.view_dir;
     let footprint = max(length(input.dpdx.xz), length(input.dpdy.xz));
-    let up = input.normal;
+    let up = select(input.normal, -input.normal, input.back_facing);
     var waves: WaterSurface;
     var n: vec3<f32>;
-    // A simulated river (river.rs) marks its vertices with alpha 0 and carries its velocity in
-    // the second UV set and its foam in red.
-    let simulated = in.color.a < 0.5;
     let flow = select(vec2<f32>(0.0), in.uv1, simulated);
     let flow_phase = fract(frame.time / RIVER_FLOW_PERIOD);
     // Weight of the second phase: 0 where it restarts, 1 where the first does.
@@ -793,13 +794,16 @@ fn shade_water(in: VertexOutput, input: SurfaceInput, m: Material, px: Pixel) ->
 
     // Shore foam: a white, rough layer floating on top (on a river only its thin line).
     var foam = water_foam(p.xz, depth0, frame.time, footprint) * select(1.0, 0.4, simulated);
-    if simulated && in.color.r > 0.01 {
+    // Water falling over a step (the cave's mouth) is aerated white water whatever the
+    // simulation's foam: the steeper its surface, the whiter.
+    let falling = select(0.0, 1.0 - smoothstep(0.55, 0.85, up.y), simulated);
+    if simulated && max(in.color.r, falling) > 0.01 {
         // The simulation's foam as a lace of thin streaks drifting with the current (the ridges
         // of a noise), patches only where it is thick.
         let s0 = fbm(vec3<f32>((p.xz - flow * (flow_phase * RIVER_FLOW_PERIOD)) * 1.8, 5.1), 3u, footprint * 1.8);
         let s1 = fbm(vec3<f32>((p.xz - flow * (fract(flow_phase + 0.5) * RIVER_FLOW_PERIOD)) * 1.8, 9.7), 3u, footprint * 1.8);
         let pattern = mix(s0, s1, flow_blend);
-        let amount = saturate(in.color.r);
+        let amount = max(saturate(in.color.r), falling);
         // Lines thicken with the amount; sub-pixel lines fade to their coverage.
         let width = 0.02 + 0.1 * amount + footprint * 0.5;
         let lace = (1.0 - smoothstep(0.0, width, abs(pattern))) * smoothstep(0.1, 0.5, amount);
