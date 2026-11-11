@@ -24,7 +24,7 @@ use crate::pipelines::Lazy;
 
 pub const TEXTURE_SIZE: u32 = 512;
 /// [`TexturePattern`] variants (`PATTERN_*` in texgen.wgsl).
-const PATTERNS: u32 = TexturePattern::Cobblestone as u32 + 1;
+const PATTERNS: u32 = TexturePattern::Cliff as u32 + 1;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]

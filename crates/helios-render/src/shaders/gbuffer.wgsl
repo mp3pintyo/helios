@@ -175,8 +175,15 @@ fn evaluate_landscape(m: Material, input: SurfaceInput) -> Surface {
             return s;
         }
     }
-    // No virtual texture (or nothing resident yet): evaluate the layers directly.
-    let t = terrain_layering(input.world_position, input.normal, footprint, m.layers, volumetric);
+    // No virtual texture (or nothing resident yet): evaluate the layers directly. A mesh
+    // terrain's vertices carry its strata and cavity in their UVs.
+    var t: TerrainSample;
+    if volumetric {
+        let a = RockAttributes(input.uv.x, max(abs(input.duv_dx.x), abs(input.duv_dy.x)), saturate(input.uv.y));
+        t = mesh_terrain_layering(input.world_position, input.normal, footprint, m.layers, a);
+    } else {
+        t = terrain_layering(input.world_position, input.normal, footprint, m.layers);
+    }
     s.albedo = t.albedo * m.base_color.rgb;
     s.roughness = t.roughness;
     s.normal = t.normal;

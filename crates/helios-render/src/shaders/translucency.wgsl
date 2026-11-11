@@ -760,7 +760,10 @@ fn shade_water(in: VertexOutput, input: SurfaceInput, m: Material, px: Pixel) ->
     }
     // Never let a wave face away from the viewer (grazing views).
     n = normalize(n + v * max(0.0, 0.02 - dot(n, v)));
-    let roughness = sqrt(m.roughness * m.roughness + waves.slope_variance * 2.0);
+    // Running water is rougher than its resolved waves: the faster, the more small-scale chop
+    // breaks up its reflections (a still pool stays a mirror).
+    let speed = length(flow);
+    let roughness = sqrt(m.roughness * m.roughness + waves.slope_variance * 2.0 + 0.03 * speed * speed);
     let n_dot_v = max(dot(n, v), 1e-4);
 
     // Water column behind the surface: refract the lookup, then measure the path to the bottom.
@@ -788,16 +791,20 @@ fn shade_water(in: VertexOutput, input: SurfaceInput, m: Material, px: Pixel) ->
         caustics = bed_caustics(bottom, uv, vertical, bed_footprint, sky_in, px.noise);
     }
 
-    // Shore foam: a white, rough layer floating on top.
-    var foam = water_foam(p.xz, depth0, frame.time, footprint);
+    // Shore foam: a white, rough layer floating on top (on a river only its thin line).
+    var foam = water_foam(p.xz, depth0, frame.time, footprint) * select(1.0, 0.4, simulated);
     if simulated && in.color.r > 0.01 {
-        // The simulation's foam, as streaks and patches drifting with the current.
-        let s0 = fbm(vec3<f32>((p.xz - flow * (flow_phase * RIVER_FLOW_PERIOD)) * 2.2, 5.1), 3u, footprint * 2.2);
-        let s1 = fbm(vec3<f32>((p.xz - flow * (fract(flow_phase + 0.5) * RIVER_FLOW_PERIOD)) * 2.2, 9.7), 3u, footprint * 2.2);
-        let pattern = mix(s0, s1, flow_blend) + 0.5;
+        // The simulation's foam as a lace of thin streaks drifting with the current (the ridges
+        // of a noise), patches only where it is thick.
+        let s0 = fbm(vec3<f32>((p.xz - flow * (flow_phase * RIVER_FLOW_PERIOD)) * 1.8, 5.1), 3u, footprint * 1.8);
+        let s1 = fbm(vec3<f32>((p.xz - flow * (fract(flow_phase + 0.5) * RIVER_FLOW_PERIOD)) * 1.8, 9.7), 3u, footprint * 1.8);
+        let pattern = mix(s0, s1, flow_blend);
         let amount = saturate(in.color.r);
-        let streaks = smoothstep(0.62 - 0.4 * amount, 0.8 - 0.3 * amount, pattern) * min(amount * 3.0, 1.0);
-        foam = max(foam, streaks * 0.85);
+        // Lines thicken with the amount; sub-pixel lines fade to their coverage.
+        let width = 0.02 + 0.1 * amount + footprint * 0.5;
+        let lace = (1.0 - smoothstep(0.0, width, abs(pattern))) * smoothstep(0.1, 0.5, amount);
+        let patches = smoothstep(0.8, 1.0, amount) * smoothstep(0.1, 0.3, pattern);
+        foam = max(foam, max(lace * 0.6, patches * 0.75));
     }
     let foam_light = light / PI * 0.8;
 

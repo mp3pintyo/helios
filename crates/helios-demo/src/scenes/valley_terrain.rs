@@ -10,7 +10,7 @@ use glam::{Mat4, Vec2, Vec3};
 use helios_geometry::mesh_terrain::{ChunkConfig, LandscapeSeam, MeshTerrain, Modifier, TerrainChunk, TerrainCollider};
 use helios_geometry::{build_virtual_mesh, BuildConfig, Mesh, MeshSdf, SdfMode, SimplifyOptions, Vertex};
 use helios_pcg::{Graph, Node, Op, SpawnEntry, SpawnPart, TransformParams, TriangleSurface, Volume};
-use helios_render::{Material, MaterialHandle, MaterialKind, MeshHandle, Scene, TextureMapping};
+use helios_render::{Material, MaterialHandle, MaterialKind, MeshHandle, Scene, TextureDesc, TextureMapping, TexturePattern};
 
 use super::{add_baked_with, add_built};
 
@@ -276,9 +276,14 @@ pub fn river_distance(p: Vec2) -> (f32, f32) {
 }
 
 /// The landscape material made for meshes: no runtime virtual texture (its top-down pages
-/// can't hold cliffs or overhangs), every layer projected triplanar.
+/// can't hold cliffs or overhangs), every layer projected triplanar, and cliff rock (bedding,
+/// fracture planes, chips; in the landscape's rock colours) in place of the landscape's cracked
+/// rock, which tiles into a paving pattern on walls this large.
 pub fn material(scene: &mut Scene, landscape: &Material) -> MaterialHandle {
-    let material = scene.add_material(Material { kind: MaterialKind::Terrain, mapping: TextureMapping::WorldTriplanar, ..*landscape });
+    let cliff = scene.add_texture(TextureDesc::new(TexturePattern::Cliff, Vec3::new(0.33, 0.3, 0.26), Vec3::new(0.15, 0.14, 0.13)).roughness(0.78, 0.92).bump(1.5).seed(31));
+    let mut layers = landscape.layers;
+    layers[2] = Some(cliff);
+    let material = scene.add_material(Material { kind: MaterialKind::Terrain, mapping: TextureMapping::WorldTriplanar, layers, ..*landscape });
     scene.set_material_name(material, "mesh terrain");
     material
 }
