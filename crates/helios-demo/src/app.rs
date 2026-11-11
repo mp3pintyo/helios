@@ -538,6 +538,19 @@ impl DemoApp {
             on(s.fog_scattering.is_some()),
             if s.avboit { "AVBOIT" } else { "weighted blended" },
         );
+        // Round 8 toggles whose state the showcase page reads (labels without digits or hyphens).
+        text.push_str(&format!(
+            "\nround 8 features: MegaLights volume {} · short range AO {} · volume shadows {} · prefiltered distant shadows {} · shadow refresh budget {} · Lite screen reflections {} · river simulation {} · wind bones {} · depth of field {}",
+            on(s.mega_lights_volume),
+            on(s.short_range_ao),
+            on(s.volume_shadows),
+            on(s.shadow_distant_prefiltered),
+            on(s.shadow_refresh_budget > 0 || s.shadow_distant_level > 0),
+            on(s.lumen_lite_ssr),
+            on(s.river_simulation),
+            on(s.wind_bones),
+            on(s.depth_of_field.is_some()),
+        ));
         text.push_str(&format!(
             "\nshadow pages: {}/{} in use, {} requested, {} rendered ({} dynamic casters only, {} split; {}/{} draws), {} unallocated · local lights with shadow maps: {} ({} moving, cached)",
             st.shadow_pages,

@@ -184,6 +184,7 @@ footer .wide-inner { gap: 10px; }
       <a href="#world" data-en="World">Világ</a>
       <a href="#round4" data-en="Round 4">4. kör</a>
       <a href="#editor" data-en="Editor">Szerkesztő</a>
+      <a href="#round8" data-en="Round 8">8. kör</a>
       <a href="#built" data-en="How it was built">Hogyan készült</a>
     </nav>
     <div class="lang" role="group" aria-label="Nyelv / Language">
@@ -764,6 +765,335 @@ footer .wide-inner { gap: 10px; }
       </div>
     </section>
 
+    <div class="era" id="round8">
+      <div class="eyebrow" data-en="Round 8">8. kör</div>
+      <h2 data-en="Light that stays indoors, plants that take root">Bent maradó fény, gyökeret eresztő növények</h2>
+      <p data-en="Following what Unreal Engine 5.8 and 5.9 brought: about twenty features in three waves of parallel agents, then fixes for what the owner noticed while looking at the scenes, and a closing performance pass. Lumen gained a world-space light cache, MegaLights shadows the fog and the glass too, an adaptive grid orders translucent layers, smoke casts shadows, plants have bones, and the valley gained a cliff with a cave, a stone arch and a river. The buttons drive the live engine here too.">Az Unreal Engine 5.8 és 5.9 újdonságai nyomán: nagyjából húsz funkció párhuzamos ügynökök három hullámában, utána a megrendelő által a jelenetekben észrevett hibák javítása, végül egy záró teljesítménymenet. A Lumen világtérbeli fénygyorsítótárat kapott, a MegaLights a ködöt és az üveget is árnyékolja, az áttetsző rétegek sorrendjét egy adaptív rács méri, a füst árnyékot vet, a növényeknek csontvázuk van, a völgyben pedig sziklafal áll barlanggal, kőív és patak. A gombok itt is az élő motort vezérlik.</p>
+    </div>
+
+    <section class="chapter" id="world-cache">
+      <div class="eyebrow">17 · Lumen World Cache</div>
+      <h2 data-en="Indirect light that stays on its side of the wall">Közvetett fény, amely nem szivárog át a falon</h2>
+      <p data-en="Where Lumen's rays hit a surface, the light used to come from per-mesh cards, and where no card saw the surface, from a voxel cache. The voxels leaked through thin walls: inside the cathedral's 1.2 m aisle wall the sunlit outside showed through, and both caches added a share of open sky even in a closed hall. After UE 5.9's World Cache, sparse hashed world-space cells now take their place, filled by paths started from the screen and traced through the distance fields. A cell is keyed by its surface's normal direction too, so the two sides of a wall never share one: the leak cannot happen.">Ahol a Lumen sugarai egy felületet érnek, ott eddig az objektumonkénti kártyák adták a fényt, ahol pedig egyik kártya sem látta a felületet, ott egy voxeles gyorsítótár. A voxelek átszivárogtak a vékony falakon: a katedrális 1,2 m-es mellékhajófalán belül is látszott a napsütötte külső oldal fénye, és mindkét gyorsítótár a szabad ég egy részét is hozzáadta, akkor is, ha a felület zárt csarnokban volt. Az UE 5.9 World Cache-ének mintájára most ritka, hash-elt világtérbeli cellák veszik át a helyüket, amelyeket a képernyőről indított, a távolságmezőkben követett utak töltenek fel. A cellát a felület normáljának iránya is azonosítja, így egy fal két oldala sosem osztozik egy cellán: a szivárgás eleve lehetetlen.</p>
+      <div class="controls">
+        <button class="btn primary" type="button" data-preset="wc-aisle" data-en="The aisle's indirect light (7)">A mellékhajó közvetett fénye (7)</button>
+        <button class="btn" type="button" data-toggle="Digit5" data-label="world cache">World Cache <span class="state"></span></button>
+        <button class="btn" type="button" data-preset="wc-cells" data-en="Cells (27)">Cellák (27)</button>
+        <button class="btn" type="button" data-preset="wc-lit" data-en="Back to the image">Vissza a képhez</button>
+      </div>
+      <p class="dim" data-en="The 5 key or the World Cache button cycles: off (cards and voxels) → behind the cards → in place of the cards (the default). The cell view shows the light each pixel's cell holds: the cells grow with the distance from the camera.">Az 5-ös billentyű vagy a World Cache gomb körbeléptet: ki (kártyák és voxelek) → a kártyák mögött → a kártyák helyett (ez az alapértelmezés). A cellanézet azt a fényt mutatja, amelyet a pixel cellája tárol: a cellák a kamerától távolodva nőnek.</p>
+      <figure>
+        <div class="compare" style="--cut:50%">
+          <img src="media/wc_off.webp" alt="" data-alt-hu="Közvetett fény kártyákkal és voxelekkel" data-alt-en="Indirect light from cards and voxels">
+          <img class="after" src="media/wc_on.webp" alt="" data-alt-hu="Közvetett fény a World Cache-ből" data-alt-en="Indirect light from the world cache">
+          <span class="handle" aria-hidden="true"></span>
+          <span class="tag l" data-en="Cards + voxels">Kártyák + voxelek</span><span class="tag r">World Cache</span>
+          <input type="range" min="0" max="100" value="50" aria-label="Összehasonlítás">
+        </div>
+        <figcaption data-en="Indirect light only, in the south aisle, at a fixed exposure: on the old path the light of the sunlit outer wall leaks onto the inner surfaces; with the world cache they stay almost as dark as in the path-traced reference.">Csak a közvetett fény a déli mellékhajóban, rögzített expozícióval: a régi úton a napsütötte külső fal fénye átszivárog a belső felületekre, a World Cache-sel ezek majdnem olyan sötétek maradnak, mint az útkövetett referencián.</figcaption>
+      </figure>
+      <div class="metrics">
+        <div class="metric"><b>12–15 %</b><span data-en="indoor indirect light off a path-traced reference (the old path: 2.8–5.6 times too bright)">eltérés egy útkövetett referenciától beltérben (a régi út 2,8–5,6-szor túl világos volt)</span></div>
+        <div class="metric"><b>+0,04–0,15 ms</b><span data-en="all of GI with the cache in place of the cards">a teljes GI, a gyorsítótárral a kártyák helyett</span></div>
+        <div class="metric"><b>20 MiB</b><span data-en="for 14–58 thousand live cells">14–58 ezer élő cellára</span></div>
+      </div>
+      <p data-en="Lumen Lite, the probe-grid GI for weaker GPUs, now follows UE 5.8's Lumen Lite and traces no world rays for glossy reflections: they march in screen space over a closest-depth HZB, and where they find nothing (off screen or occluded) the irradiance field supplies the light from the reflected direction, with a sharp sky. Lumen's surface cache samples local lights from a world-space light grid, two per texel, so its cost no longer grows with a thousand candles.">A Lumen Lite, a gyengébb GPU-knak szánt próbarácsos GI, az UE 5.8 Lumen Lite-jához igazodva a fényes tükröződésekhez már nem követ sugarat a világban: azok képtérben, egy legközelebbi mélységeket tartó HZB-n haladnak, és ahol semmit sem találnak (a képen kívül vagy takarásban), ott a besugárzási mező adja a tükrözött irányból érkező fényt, az ég helyén éles éggel. A Lumen felületi gyorsítótára a helyi fényeket egy világtérbeli fényrácsból mintavételezi, texelenként kettőt, így a költsége ezer gyertyánál sem nő tovább.</p>
+      <div class="controls">
+        <button class="btn" type="button" data-preset="lite-puddles" data-en="Puddles in the gallery (Lite)">Pocsolyák a galériában (Lite)</button>
+        <button class="btn" type="button" data-toggle="Digit6" data-label="lite screen reflections" data-en="Screen reflections (6)">Képtérbeli tükröződés (6) <span class="state"></span></button>
+      </div>
+      <figure>
+        <div class="compare" style="--cut:50%">
+          <img src="media/lite_refl_off.webp" alt="" data-alt-hu="Követett tükröződés a pocsolyákban" data-alt-en="Traced reflections in the puddles">
+          <img class="after" src="media/lite_refl_on.webp" alt="" data-alt-hu="Képtérbeli tükröződés a pocsolyákban" data-alt-en="Screen-space reflections in the puddles">
+          <span class="handle" aria-hidden="true"></span>
+          <span class="tag l" data-en="Traced">Követett</span><span class="tag r" data-en="Screen + field">Képtér + mező</span>
+          <input type="range" min="0" max="100" value="50" aria-label="Összehasonlítás">
+        </div>
+        <figcaption data-en="The gallery's puddles seen from low down, with Lumen Lite: the traced reflection is crisper; the screen traces reflect what is on screen and fill the rest with the irradiance field's soft light, for about half the cost.">A galéria pocsolyái alacsonyról, Lumen Lite-tal: a követett tükröződés élesebb; a képtérbeli azt tükrözi, ami a képen van, a többit a besugárzási mező lágy fénye pótolja, nagyjából feleannyiért.</figcaption>
+      </figure>
+      <div class="metrics">
+        <div class="metric"><b>0,238 → 0,130 ms</b><span data-en="Lite's reflections in the gallery (cathedral 0.215 → 0.157)">a Lite tükröződése a galériában (katedrális 0,215 → 0,157)</span></div>
+        <div class="metric"><b>1,20 → 0,37 ms</b><span data-en="surface and radiance cache with 1000 candles">felületi és radiance cache 1000 gyertyával</span></div>
+        <div class="metric"><b>9,21 → 8,21 ms</b><span data-en="GPU frame with 1000 candles">GPU-idő képkockánként 1000 gyertyával</span></div>
+      </div>
+      <div class="shots">
+        <img src="media/wc_cells.webp" alt="" loading="lazy" data-alt-hu="A World Cache cellái a főhajóban (27)" data-alt-en="The world cache's cells in the nave (27)">
+      </div>
+    </section>
+
+    <section class="chapter" id="megalights-58">
+      <div class="eyebrow">18 · MegaLights 5.8</div>
+      <h2 data-en="Candlelight in the fog, but not through the walls">Gyertyafény a ködben is, de nem a falon át</h2>
+      <p data-en="MegaLights shadowed every light on opaque surfaces only: the fog knew the shadows of at most 32 shadow-mapped lights and the glass got every light unshadowed, so with hundreds of candles light leaked through the walls into the aisles' fog. Now, as in UE 5.8, the fog and translucent surfaces take their local light from a shared froxel volume: per froxel and frame it picks one light in proportion to its contribution, traces one shadow ray to it with the same methods as the pixels, and averages the result over time. Samples share a ray where last frame's rays to that light all agreed, contact shadows march a closest-depth HZB, and light culling runs on a two-level grid, in a third of the time at a thousand lights.">A MegaLights eddig csak az átlátszatlan felületeken árnyékolt minden fényt: a köd legfeljebb 32 árnyéktérképes fény árnyékát ismerte, az üveg pedig minden fényt árnyék nélkül kapott, így több száz gyertyánál a fény a falakon át a mellékhajók ködébe szivárgott. Most, ahogy az UE 5.8-ban, a köd és az áttetsző felületek egy közös froxel-térfogatból kapják a helyi fényt: froxelenként és képkockánként egy fényt választ a hozzájárulása arányában, a pixelekével azonos módszerekkel egy árnyéksugarat követ felé, és az eredményt időben átlagolja. Ahol az előző képkocka sugarai egy fény felé mind egyetértettek, ott a minták egy sugáron osztoznak, az érintkezési árnyékok egy legközelebbi mélységű HZB-n haladnak, a fények eldobása pedig kétszintű rácson fut, ezer fénynél harmadannyi idő alatt.</p>
+      <div class="controls">
+        <button class="btn primary" type="button" data-preset="ml-fog" data-en="Candle-lit cathedral (300 lights)">Gyertyafényes katedrális (300 fény)</button>
+        <button class="btn" type="button" data-toggle="Digit3" data-label="megalights volume" data-en="MegaLights volume (3)">MegaLights-térfogat (3) <span class="state"></span></button>
+        <button class="btn" type="button" data-toggle="Equal" data-label="megalights">MegaLights <span class="state"></span></button>
+        <button class="btn" type="button" data-preset="ml-1000" data-en="1000 candles in the aisle">1000 gyertya a mellékhajóban</button>
+        <button class="btn" type="button" data-preset="candles-off" data-en="Back to 33 lights">Vissza a 33 fényhez</button>
+      </div>
+      <div class="readout"><span data-en="Light culling right now">Fényeldobás most</span><b id="t-cull">–</b></div>
+      <figure>
+        <div class="compare" style="--cut:50%">
+          <img src="media/ml_volume_off.webp" alt="" data-alt-hu="A köd árnyék nélküli gyertyafénnyel" data-alt-en="The fog with unshadowed candlelight">
+          <img class="after" src="media/ml_volume_on.webp" alt="" data-alt-hu="A köd a MegaLights-térfogattal" data-alt-en="The fog with the MegaLights volume">
+          <span class="handle" aria-hidden="true"></span>
+          <span class="tag l" data-en="Clustered fog">Fürtözött köd</span><span class="tag r" data-en="MegaLights volume">MegaLights-térfogat</span>
+          <input type="range" min="0" max="100" value="50" aria-label="Összehasonlítás">
+        </div>
+        <figcaption data-en="300 candles at night: without the volume the aisles' candlelight shines through the arcades into the nave's fog; with it the fog glows only where the light really reaches.">300 gyertya éjjel: a térfogat nélkül a mellékhajók gyertyáinak fénye az árkádokon át a főhajó ködébe világít, vele a köd csak ott dereng, ahová a fény valóban eljut.</figcaption>
+      </figure>
+      <div class="metrics">
+        <div class="metric"><b>0,25 → 0,07 ms</b><span data-en="light culling with 1000 lights">fényeldobás 1000 fénnyel</span></div>
+        <div class="metric"><b>93 → 77 %</b><span data-en="shadow rays per sample with 33 lights (shared rays)">árnyéksugár mintánként 33 fénynél (közös sugarak)</span></div>
+        <div class="metric"><b>1,06 → 0,78 ms</b><span data-en="translucency at the glass screens with 1000 lights">áttetszőség az üvegfalaknál 1000 fénnyel</span></div>
+      </div>
+    </section>
+
+    <section class="chapter" id="avboit">
+      <div class="eyebrow" data-en="19 · Translucency">19 · Áttetszőség</div>
+      <h2 data-en="Glass, sparks and smoke in the right order">Üveg, szikra és füst helyes sorrendben</h2>
+      <p data-en="Three methods used to assemble translucent things: depth peeling for glass and water (up to four layers), weighted blending for particles and box by box for smoke, and the three met only at the nearest surface. Sparks between two panes fell into the farther group, and sparks flying in smoke were not dimmed by the smoke in front of them. Now, after UE 5.9's adaptive voxel-based OIT, a camera-aligned grid measures the translucency: 4×4-pixel columns with 16 cells each, placed where the translucent content is. Every non-refracting surface, particle and volume step is added weighted by the transmittance measured in front of it, coloured and in any order; refracting glass and water keep their nearest layer.">Eddig három módszer rakta össze az áttetsző dolgokat: az üveget és a vizet rétegenkénti lehántás (legfeljebb négy réteg), a részecskéket súlyozott keverés, a füstöt dobozonkénti összeállítás, és a három csak a legközelebbi felületnél találkozott. A két üveglap közötti szikrák így a távolabbi csoportba kerültek, a füstben repülő szikrákat pedig nem tompította az előttük lévő füst. Most, az UE 5.9 adaptív voxeles OIT-jének mintájára, egy kamerához igazított rács méri az áttetszőséget: 4×4 pixeles oszlopok, oszloponként 16 cella ott, ahol áttetsző tartalom van. Minden nem fénytörő felület, részecske és térfogatlépés a saját előtte mért áteresztésével súlyozva adódik hozzá, színesen és sorrendfüggetlenül; a fénytörő üveg és a víz a legközelebbi rétegét tartja meg.</p>
+      <div class="controls">
+        <button class="btn primary" type="button" data-preset="lake-panels" data-en="The lake's crossing panels">A tó keresztező paneljei</button>
+        <button class="btn" type="button" data-toggle="Digit4" data-label="avboit">AVBOIT (4) <span class="state"></span></button>
+        <button class="btn" type="button" data-preset="campfire" data-en="Sparks in the smoke (night)">Szikrák a füstben (éjjel)</button>
+      </div>
+      <figure>
+        <div class="compare" style="--cut:50%">
+          <img src="media/avboit_off.webp" alt="" data-alt-hu="A panelek lehántással és súlyozott keveréssel" data-alt-en="The panels with depth peeling and weighted blending">
+          <img class="after" src="media/avboit_on.webp" alt="" data-alt-hu="A panelek AVBOIT-tal" data-alt-en="The panels with AVBOIT">
+          <span class="handle" aria-hidden="true"></span>
+          <span class="tag l" data-en="Peeling + weighted">Lehántás + súlyozott</span><span class="tag r">AVBOIT</span>
+          <input type="range" min="0" max="100" value="50" aria-label="Összehasonlítás">
+        </div>
+        <figcaption data-en="The red and blue panels crossing at the lake's north end: the same order without peeling layers off, for less.">A tó északi végén keresztező piros és kék panel: ugyanaz a sorrend rétegek lehántása nélkül, olcsóbban.</figcaption>
+      </figure>
+      <p data-en="In round 7 the stained glass coloured only the sun; the candles' and chandeliers' light passed it white. Now the eight local lights nearest the camera whose range reaches a pane get a cube map of their own with the panes' colour and distance, so their light falls on the floor behind in the pane's colour, in the classic light loop and under MegaLights alike.">A 7. körben az ólomüveg csak a napfényt színezte, a gyertyák és csillárok fénye fehéren haladt át rajta. Most a kamerához legközelebbi nyolc olyan helyi fény, amelynek hatótávolsága üvegtáblát ér, saját kockatérképet kap a táblák színéről és távolságáról, így a fényük a tábla színében esik a mögötte lévő padlóra, a klasszikus fényciklusban és a MegaLights alatt is.</p>
+      <div class="controls">
+        <button class="btn" type="button" data-preset="glass-candles" data-en="Candles behind the glass screen (1008 lights)">Gyertyák az üvegfal mögött (1008 fény)</button>
+        <button class="btn" type="button" data-toggle="End" data-label="glass shadows" data-en="Coloured glass light">Színes üvegfény <span class="state"></span></button>
+        <button class="btn" type="button" data-preset="candles-off" data-en="Back to 33 lights">Vissza a 33 fényhez</button>
+      </div>
+      <figure>
+        <div class="compare" style="--cut:50%">
+          <img src="media/glass_candles_off.webp" alt="" data-alt-hu="Gyertyafény fehéren az üvegen át" data-alt-en="Candlelight through the glass, white">
+          <img class="after" src="media/glass_candles_on.webp" alt="" data-alt-hu="Gyertyafény az üveg színében" data-alt-en="Candlelight in the colour of the glass">
+          <span class="handle" aria-hidden="true"></span>
+          <span class="tag l" data-en="White">Fehér</span><span class="tag r" data-en="Through the glass">Az üvegen át</span>
+          <input type="range" min="0" max="100" value="50" aria-label="Összehasonlítás">
+        </div>
+        <figcaption data-en="The votive candles 30 cm behind the north aisle's stained-glass screen: behind the blue and red panes their light on the floor is muted and cool.">A fogadalmi gyertyák 30 cm-re az északi mellékhajó ólomüveg fala mögött: a kék és piros táblák mögött a fényük a padlón tompa és hideg.</figcaption>
+      </figure>
+      <div class="metrics">
+        <div class="metric"><b>1,25 → 0,92 ms</b><span data-en="all translucency at the lake's panels">a teljes áttetszőség a tó paneljeinél</span></div>
+        <div class="metric"><b>0,82 → 0,68 ms</b><span data-en="the aisle's glass screens">a mellékhajó üvegfalai</span></div>
+        <div class="metric"><b>+0,06 ms</b><span data-en="lighting with 33 candles behind glass">megvilágítás 33 gyertyával az üveg mögött</span></div>
+      </div>
+    </section>
+
+    <section class="chapter" id="shadows-8">
+      <div class="eyebrow" data-en="20 · Shadows and smoke">20 · Árnyékok és füst</div>
+      <h2 data-en="Shadow pages on a budget, smoke that casts a shadow">Árnyéklapok kerettel, füst, amely árnyékot vet</h2>
+      <p data-en="In the forest the wind moves almost every shadow caster, so about 157 shadow pages were redrawn every frame, all at once. Now, as with UE 5.8's deferred invalidation budget, the pages of moving casters refresh within a budget of 96 pages a frame, by priority: first those whose shadow may have moved the most texels and those that have waited longest; the rest keep their cached depth for a frame or a few. The distant levels (beyond about 50 m) follow a moving sun at their own pace, are drawn at half resolution and filtered as moment shadow maps into soft, anti-aliased shadows. The shadow overview (26) shows on four panels what happens to the pages.">Az erdőben a szél szinte minden árnyékvetőt mozgat, ezért minden képkockában nagyjából 157 árnyéklap rajzolódott újra, mind egyszerre. Most, ahogy az UE 5.8 halasztott érvénytelenítési keretében, a mozgó vetők lapjai képkockánként legfeljebb 96 lapos keretben frissülnek, fontossági sorrendben: előbb azok, amelyeken az árnyék a legtöbb texelnyit mozdulhatott, és amelyek a legrégebben várnak; a többi egy-két képkockáig a gyorsítótárazott mélységét tartja. A távoli szintek (nagyjából 50 m-en túl) a saját ütemükben követik a mozgó napot, fél felbontáson rajzolódnak, és momentum-árnyéktérképként szűrve lágy, élsimított árnyékot adnak. Az árnyék-áttekintő nézet (26) négy panelen mutatja, mi történik a lapokkal.</p>
+      <div class="controls">
+        <button class="btn" type="button" data-preset="vsm-overview" data-en="Shadow overview (26)">Árnyék-áttekintő (26)</button>
+        <button class="btn" type="button" data-key="KeyP" data-en="Turning sun (P)">Forgó nap (P)</button>
+        <button class="btn" type="button" data-toggle="Digit2" data-label="shadow refresh budget" data-en="Refresh budget (2)">Frissítési keret (2) <span class="state"></span></button>
+        <button class="btn" type="button" data-preset="lit" data-en="Back to the image">Vissza a képhez</button>
+      </div>
+      <p class="dim" data-en="In the overview's top-right panel red pages are redrawn in full this frame, yellow ones redraw their moving casters only, blue ones wait for the budget and grey ones come from the cache; the top-left panel hatches the distant levels.">Az áttekintő jobb felső paneljén a piros lapok ebben a képkockában teljesen újrarajzolódnak, a sárgák csak a mozgó vetőiket rajzolják újra, a kékek a keretre várnak, a szürkék a gyorsítótárból jönnek; a bal felső panel a távoli szinteket sraffozza.</p>
+      <div class="shots">
+        <img src="media/vsm_overview.webp" alt="" loading="lazy" data-alt-hu="Árnyék-áttekintő az erdőben" data-alt-en="Shadow overview in the forest">
+      </div>
+      <p data-en="Smoke, fire and mist were lit, but cast no shadow. Now every simulated volume writes into a shared transmittance atlas how much light passes through it towards the sun and towards its own fire: the smoke's shadow falls on the ground, into the fog and onto the sparks, and the smoke column darkens upwards, because its fire lights it from below. The button builds a smokier campfire (damp wood) whose shadow shows plainly.">A füst, a tűz és a pára eddig meg volt világítva, de árnyékot nem vetett. Most minden szimulált térfogat egy közös áteresztés-atlaszba írja, mennyi fény jut át rajta a nap és a saját tüze felé: a füst árnyéka a talajra, a ködbe és a szikrákra is ráesik, a füstoszlop pedig felfelé sötétedik, mert a tüze alulról világítja. A gomb egy füstösebb, nedves fát égető tábortüzet épít, amelynek árnyéka jól látszik.</p>
+      <div class="controls">
+        <button class="btn primary" type="button" data-preset="smoke-shadow" data-en="Smoky campfire by day">Füstös tábortűz nappal</button>
+        <button class="btn" type="button" data-feature="volshadow" data-label="volume shadows" data-en="Volume shadows (7)">Térfogatárnyék (7) <span class="state"></span></button>
+        <button class="btn" type="button" data-preset="forest" data-en="Back to the forest">Vissza az erdőbe</button>
+      </div>
+      <figure>
+        <div class="compare" style="--cut:50%">
+          <img src="media/smoke_shadow_off.webp" alt="" data-alt-hu="A füst árnyék nélkül" data-alt-en="The smoke without a shadow">
+          <img class="after" src="media/smoke_shadow_on.webp" alt="" data-alt-hu="A füst árnyéka a tisztáson" data-alt-en="The smoke's shadow on the clearing">
+          <span class="handle" aria-hidden="true"></span>
+          <span class="tag l" data-en="No shadow">Árnyék nélkül</span><span class="tag r" data-en="Smoke shadow">Füstárnyék</span>
+          <input type="range" min="0" max="100" value="50" aria-label="Összehasonlítás">
+        </div>
+        <figcaption data-en="The smoky campfire from above: its smoke lays a shadow several metres long across the clearing.">A füstös tábortűz felülről: a füstje több méter hosszú árnyékot vet a tisztásra.</figcaption>
+      </figure>
+      <div class="metrics">
+        <div class="metric"><b>5,90 → 2,53 ms</b><span data-en="shadow page passes in the forest under a turning sun">árnyéklap-menetek az erdőben forgó nappal</span></div>
+        <div class="metric"><b>157 → 96</b><span data-en="pages redrawn per frame in the wind">újrarajzolt lap képkockánként a szélben</span></div>
+        <div class="metric"><b>0,01 ms</b><span data-en="the volume shadows' pass, atlas under 1 MiB">a térfogatárnyék menete, az atlasz 1 MiB alatt</span></div>
+      </div>
+    </section>
+
+    <section class="chapter" id="photo">
+      <div class="eyebrow" data-en="21 · Image">21 · Kép</div>
+      <h2 data-en="A glow in the fog, bokeh from many frames">Derengés a ködben, bokeh sok képkockából</h2>
+      <p data-en="The volumetric fog used to absorb the light behind it, and what it scattered only slightly off the view ray was lost. After UE 5.8's fog screen-space scattering, a post-process step now spreads that forward-scattered light over its neighbourhood: chandeliers, candles and the lantern glow softly in the haze, and the far end of the nave loses contrast. No light is created, only spread; the longer the fog along the ray, the stronger it is.">A volumetrikus köd eddig elnyelte a mögötte lévő fényt, és ami a nézeti sugárról csak kicsit szóródott félre, az elveszett. Az UE 5.8 képtérbeli ködszórásának mintájára most egy utófeldolgozó lépés ezt az előre szórt fényt a környezetére teríti: a csillárok, a gyertyák és a lámpás lágyan derengenek a párában, a hajó vége felé csökken a kontraszt. Fény nem keletkezik, csak szétterül; minél hosszabb a köd a sugár mentén, annál erősebb.</p>
+      <div class="controls">
+        <button class="btn" type="button" data-preset="fog-glow" data-en="Lantern in the hazy nave">Lámpás a párás hajóban</button>
+        <button class="btn" type="button" data-toggle="Home" data-label="fog scattering" data-en="Fog scattering (Home)">Ködszórás (Home) <span class="state"></span></button>
+      </div>
+      <figure>
+        <div class="compare" style="--cut:50%">
+          <img src="media/fog_glow_off.webp" alt="" data-alt-hu="A hajó ködszórás nélkül" data-alt-en="The nave without fog scattering">
+          <img class="after" src="media/fog_glow_on.webp" alt="" data-alt-hu="A hajó ködszórással" data-alt-en="The nave with fog scattering">
+          <span class="handle" aria-hidden="true"></span>
+          <span class="tag l" data-en="Off">Kikapcsolva</span><span class="tag r" data-en="Fog scattering">Ködszórás</span>
+          <input type="range" min="0" max="100" value="50" aria-label="Összehasonlítás">
+        </div>
+        <figcaption data-en="The candle-lit nave at night with the lantern, at the strongest setting (4; the default is 1): the light is spread into the haze, the far end softens and the contrast drops. In the scenes' light haze the effect is subtle.">A gyertyafényes hajó éjjel a lámpással, a legerősebb fokozaton (4; az alapérték 1): a fény szétterül a párában, a hajó vége ellágyul, a kontraszt csökken. A jelenetek enyhe párájában a hatás finom.</figcaption>
+      </figure>
+      <p data-en="Photo mode accumulates many frames from a still camera into one still, each with a new sub-pixel offset and, with depth of field on, a new lens sample, like UE's accumulation depth of field: the blur behaves like a real lens, bright flames stay round bokeh discs, and the leftover noise of Lumen, MegaLights and the fog averages out. Round 8's beauty stills on this page were taken this way. TSR also checks depth now: a history pixel whose surface does not lie on the current surface's plane is rejected, so less ghosting trails the swinging chandeliers.">A fotó mód álló kamerával sok képkockát összegez egyetlen állóképpé, mindegyiket új alpixeles eltolással és, bekapcsolt mélységélességnél, új lencsemintával, mint az UE akkumulációs mélységélessége: az elmosás úgy viselkedik, mint egy valódi objektívé, a fényes lángok kerek bokeh-korongok maradnak, a Lumen, a MegaLights és a köd maradék zaja pedig kiátlagolódik. Az oldal 8. körös szépségképei is így készültek. A TSR mostantól a mélységet is figyeli: az az előzménypixel, amelynek felülete nem a mostani felület síkjára esik, kiesik, így kevesebb szellemkép húzódik a lengő csillárok után.</p>
+      <div class="controls">
+        <button class="btn" type="button" data-preset="photo-nave" data-en="Chandeliers at night, depth of field">Csillárok éjjel, mélységélességgel</button>
+        <button class="btn primary" type="button" data-photo="128" data-en="Take a photo (128 frames)">Fotó (128 képkocka)</button>
+        <button class="btn" type="button" data-preset="photo-off" data-en="Back to real time">Vissza a valós időhöz</button>
+      </div>
+      <div class="readout"><span data-en="Photo">Fotó</span><b id="t-photo">–</b></div>
+      <figure>
+        <div class="compare" style="--cut:50%">
+          <img src="media/photo_realtime.webp" alt="" data-alt-hu="Valós idejű mélységélesség" data-alt-en="Real-time depth of field">
+          <img class="after" src="media/photo_accum.webp" alt="" data-alt-hu="Fotó 256 lencsemintával" data-alt-en="Photo with 256 lens samples">
+          <span class="handle" aria-hidden="true"></span>
+          <span class="tag l" data-en="Real-time DOF">Valós idejű DOF</span><span class="tag r" data-en="Photo, 256 samples">Fotó, 256 minta</span>
+          <input type="range" min="0" max="100" value="50" aria-label="Összehasonlítás">
+        </div>
+        <figcaption data-en="The nave at night at f/1.2, focused at 6 m: the real-time blur fades the distant chandeliers' flames, while the photo keeps them as bright bokeh discs.">A hajó éjjel f/1,2-vel, 6 m-re fókuszálva: a valós idejű elmosás elhalványítja a távoli csillárok lángjait, a fotón viszont fényes bokeh-korongok maradnak.</figcaption>
+      </figure>
+      <div class="metrics">
+        <div class="metric"><b>0,05 ms</b><span data-en="accumulation per frame">az összegzés képkockánként</span></div>
+        <div class="metric"><b>1,0 s</b><span data-en="a 48-frame photo in the browser">48 képkockás fotó a böngészőben</span></div>
+        <div class="metric"><b>0,11 ms</b><span data-en="the fog scattering pass">a ködszórás menete</span></div>
+      </div>
+    </section>
+
+    <section class="chapter" id="wind">
+      <div class="eyebrow" data-en="22 · Foliage and wind">22 · Növényzet és szél</div>
+      <h2 data-en="Grass that grows out of the ground and bends in arcs">Fű, amely a földből nő ki, és ívben hajlik</h2>
+      <p data-en="The owner noticed that the grass floated above the ground, the plants looked glued on, and at night the campfire seemed to cast no shadow on the ferns. The causes: plants stood on the analytic ground height, but the rendered terrain mesh runs up to 14 cm lower on hilltops; grass blades were diamonds ending in a point; nothing darkened their base; and the fire's low-angle light was turned away by the ground's strong normal map in patches that drowned the real plant shadows. Now the plants stand on the terrain mesh, the blades grow out of the soil and fan out from a narrow base, the base is darker from baked AO and a new short-range screen-space AO (as Lumen's in UE), the ground's relief is gentler, and the ferns' leaflets cast readable shadows around the fire.">A megrendelő észrevette, hogy a fű a talaj fölött lebeg, a növények mintha rá lennének ragasztva, és éjjel a tábortűz mintha nem vetne árnyékot a páfrányokra. Az okok: a növények az analitikus talajmagasságra kerültek, de a renderelt terepháló a dombtetőkön akár 14 cm-rel lejjebb fut; a fűszálak egy pontban végződő rombuszok voltak; a tövüket semmi sem sötétítette; a tűz alacsony szögű fényét pedig a talaj erős normáltérképe foltokban elfordította, és ez elnyomta a valódi növényárnyékokat. Most a növények a terephálón állnak, a szálak a földből nőnek ki, és egy szűk tőből nyílnak szét, a tövüket beégetett AO és egy új, rövid hatótávú képtéri AO (mint a Lumené az UE-ben) sötétíti, a talaj domborzata mérsékeltebb, így a páfrányok levélkéi jól olvasható árnyékot vetnek a tűz körül.</p>
+      <div class="controls">
+        <button class="btn primary" type="button" data-preset="grass-close" data-en="Grass tuft up close">Fűcsomó közelről</button>
+        <button class="btn" type="button" data-preset="ferns-fire" data-en="Ferns by the fire">Páfrányok a tűz mellett</button>
+        <button class="btn" type="button" data-toggle="Digit9" data-label="short range ao" data-en="Short-range AO (9)">Rövid hatótávú AO (9) <span class="state"></span></button>
+        <button class="btn" type="button" data-preset="campfire" data-en="Campfire at night">Tábortűz éjjel</button>
+      </div>
+      <figure>
+        <div class="compare" style="--cut:50%">
+          <img src="media/grounded_off.webp" alt="" data-alt-hu="A fűcsomó a javítás előtt" data-alt-en="The grass tuft before the fix">
+          <img class="after" src="media/grounded_on.webp" alt="" data-alt-hu="A fűcsomó a javítás után" data-alt-en="The grass tuft after the fix">
+          <span class="handle" aria-hidden="true"></span>
+          <span class="tag l" data-en="Before">Előtte</span><span class="tag r" data-en="After">Utána</span>
+          <input type="range" min="0" max="100" value="50" aria-label="Összehasonlítás">
+        </div>
+        <figcaption data-en="Before, the tuft was a bundle of diamonds standing on the ground; now it grows out of the soil, fans out and is darker at its base.">Előtte a fűcsomó rombuszok kötege volt, amely a talajon állt; most a földből nő ki, legyezőszerűen nyílik szét, és a töve sötétebb.</figcaption>
+      </figure>
+      <figure>
+        <div class="compare" style="--cut:50%">
+          <img src="media/campfire_plants_off.webp" alt="" data-alt-hu="A tábortűz a javítás előtt" data-alt-en="The campfire before the fix">
+          <img class="after" src="media/campfire_plants_on.webp" alt="" data-alt-hu="A tábortűz a javítás után" data-alt-en="The campfire after the fix">
+          <span class="handle" aria-hidden="true"></span>
+          <span class="tag l" data-en="Before">Előtte</span><span class="tag r" data-en="After">Utána</span>
+          <input type="range" min="0" max="100" value="50" aria-label="Összehasonlítás">
+        </div>
+        <figcaption data-en="The campfire at night: the ground's patches used to drown the plants' shadows; now the ferns' and the grass's shadows fan out from the fire.">A tábortűz éjjel: korábban a talaj foltjai elnyomták a növények árnyékát, most a páfrányok és a fű árnyéka sugárirányban fut szét a tűztől.</figcaption>
+      </figure>
+      <p data-en="The wind used to be a per-vertex offset: leaves trembled about their own position, long blades sheared sideways and the light on a swaying fern stood still. After UE 5.9's Dynamic Wind the procedural plants now have skeletons: trunk, branches, leaves, blades and fern leaflets, each bending in an arc about its pivot, the normals turning with it; a pose pass assembles each plant's skeleton once per instance. Near the camera small plants get a spring simulation: a capsule following the camera parts the grass as you walk through it, and Numpad1 sends a gust ring outwards in front of the camera.">A szél eddig csúcspontonkénti eltolás volt: a levelek a saját helyük körül remegtek, a hosszú fűszálak oldalra nyíródtak, és a lengő páfrányon a fény mozdulatlan maradt. Az UE 5.9 Dynamic Wind-jének mintájára a procedurális növényeknek most csontvázuk van: törzs, ágak, levelek, fűszálak és páfránylevélkék, mindegyik ívben hajlik a forgáspontja körül, a normálok pedig vele fordulnak; a csontvázat egy pózmenet példányonként egyszer állítja össze. A kamera közelében a kis növények rugós szimulációt kapnak: a kamerát követő kapszula szétnyitja a füvet, ahogy átsétálsz rajta, a Numpad1 pedig a kamera előtt kifelé terjedő szélrohamot indít.</p>
+      <div class="controls">
+        <button class="btn" type="button" data-preset="gust-view" data-en="Over the clearing">A tisztás fölött</button>
+        <button class="btn primary" type="button" data-key="Numpad1" data-en="Gust (Numpad1)">Szélroham (Numpad1)</button>
+        <button class="btn" type="button" data-toggle="KeyL" data-label="wind" data-en="Wind">Szél <span class="state"></span></button>
+      </div>
+      <figure class="clip">
+        <video src="media/wind_gust.mp4" poster="media/wind_gust.webp" controls muted playsinline loop preload="none"></video>
+        <figcaption data-en="A gust sweeps the clearing: the grass tufts, ferns and bushes bow one after another, then spring back.">Szélroham söpör végig a tisztáson: a fűcsomók, a páfrányok és a bokrok egymás után hajolnak meg, majd visszarugóznak.</figcaption>
+      </figure>
+      <div class="metrics">
+        <div class="metric"><b>14 cm → 0</b><span data-en="grass floating above the rendered ground (medium detail)">a fű lebegése a renderelt talaj fölött (közepes részletesség)</span></div>
+        <div class="metric"><b>0,06–0,10 ms</b><span data-en="short-range AO at half resolution">rövid hatótávú AO fél felbontáson</span></div>
+        <div class="metric"><b>0,03 ms</b><span data-en="the plants' pose pass in the forest">a növények pózmenete az erdőben</span></div>
+      </div>
+      <div class="shots">
+        <img src="media/ferns_photo.webp" alt="" loading="lazy" data-alt-hu="Páfrányok a tábortűz mellett" data-alt-en="Ferns by the campfire">
+      </div>
+    </section>
+
+    <section class="chapter" id="terrain">
+      <div class="eyebrow" data-en="23 · Mesh terrain and river">23 · Hálós terep és patak</div>
+      <h2 data-en="A cliff with a cave, a stone arch and a river">Sziklafal barlanggal, kőív és patak</h2>
+      <p data-en="Like UE 5.8's experimental Mesh Terrain, the valley's ground is no longer a heightfield inside one rectangle but a mesh, so it can hold overhangs, caves and arches. Left of the sculpture stands a 27 m long, 13 m high layered cliff with a cave and a ledge reaching 5 m out over the meadow; to the east a free-standing rock rib carries a 6.4 m arch. A modifier stack (rock blocks, tunnels, channels) produces the mesh at adaptive resolution in Nanite chunks, and it meets the rest of the landscape without cracks.">Az UE 5.8 kísérleti Mesh Terrainjéhez hasonlóan a völgy talaja egy téglalapban már nem magasságmező, hanem háló, ezért lehetnek benne átlógó párkányok, barlangok és ívek. A szobortól balra egy 27 m hosszú, 13 m magas, rétegzett sziklafal áll barlanggal és egy a rét fölé 5 m-re kinyúló párkánnyal, keletre pedig egy szabadon álló kőborda 6,4 m-es ívvel. A hálót egy módosító-verem (sziklatömbök, alagutak, medrek) állítja elő, adaptív felbontással, Nanite-darabokban, és repedés nélkül illeszkedik a táj többi részéhez.</p>
+      <p data-en="A brook rises in the cave, tumbles out over a foaming step and runs down its bed into the lake. It is no normal-mapped sheet but a shallow-water simulation on the GPU, after UE 5.9's simulation-driven rivers: the surface follows the slope of the bed, the water parts around the stones and foams behind them, ripples and foam drift with the flow, and the banks are wet along the water line.">A barlangból patak ered, habzó lépcsőn bukik ki, és a medrében a tóba fut. Ez nem normáltérképes lemez, hanem sekélyvíz-szimuláció a GPU-n, az UE 5.9 szimulációvezérelt folyóinak mintájára: a felszín követi a meder lejtését, a víz a kövek körül szétválik, mögöttük habzik, a fodrok és a hab az áramlással sodródnak, a partok pedig a vízvonal mentén nedvesek.</p>
+      <div class="controls">
+        <button class="btn primary" type="button" data-preset="cliff" data-en="Cliff and ledge">Sziklafal és párkány</button>
+        <button class="btn" type="button" data-preset="arch" data-en="Stone arch">Kőív</button>
+        <button class="btn" type="button" data-preset="cave" data-en="Cave">Barlang</button>
+        <button class="btn" type="button" data-preset="river" data-en="River">Patak</button>
+        <button class="btn" type="button" data-toggle="Numpad2" data-label="river simulation" data-en="River simulation (Numpad2)">Patakszimuláció (Numpad2) <span class="state"></span></button>
+        <button class="btn" type="button" data-preset="valley" data-en="Valley">Völgy</button>
+      </div>
+      <figure class="clip">
+        <video src="media/river_flow.mp4" poster="media/river_flow.webp" controls muted playsinline loop preload="none"></video>
+        <figcaption data-en="The brook in real time: the water parts around the stones and the foam drifts with the flow.">A patak valós időben: a víz szétválik a kövek körül, a hab az áramlással sodródik.</figcaption>
+      </figure>
+      <div class="shots">
+        <img src="media/cliff.webp" alt="" loading="lazy" data-alt-hu="A sziklafal a párkánnyal" data-alt-en="The cliff with its ledge">
+        <img src="media/arch.webp" alt="" loading="lazy" data-alt-hu="A kőív" data-alt-en="The stone arch">
+        <img src="media/cave_river.webp" alt="" loading="lazy" data-alt-hu="A barlang és a patak" data-alt-en="The cave and the brook">
+        <img src="media/river_close.webp" alt="" loading="lazy" data-alt-hu="A patak a sziklafal alatt" data-alt-en="The brook below the cliff">
+      </div>
+      <p data-en="Two fixes the owner asked for. The cliff wore the landscape rock's Voronoi crack pattern, which read as a mosaic or crazed glaze; it is now layered rock whose strata follow the ledges cut into the geometry, with moss on the ledges. At the cave mouth vertical &quot;slabs&quot; and blue lines showed, and the ground wore a regular pattern of dots: the slabs were lake bed painted onto the rock step, the lines the river surface's back faces. Now the step is wet rock with white water, and the gravel gathers in patches, half buried.">Két javítás a megrendelő jelzésére. A sziklán a táj kőzetének Voronoi-repedésmintája mozaikburkolatnak vagy megrepedt máznak hatott; most rétegzett kőzet, amelynek rétegei a geometriába vágott párkányokat követik, a párkányokon moha ül. A barlangszájnál függőleges „lapok” és kék vonalak látszottak, a talajt pedig szabályos pöttyminta borította: a lapok a sziklalépcsőre festett tómeder, a vonalak a patak vízfelszínének hátoldalai voltak. Most a lépcső nedves szikla fehér vízzel, a kavics pedig foltokban gyűlik, részben a földbe süllyedve.</p>
+      <figure>
+        <div class="compare" style="--cut:50%">
+          <img src="media/rock_off.webp" alt="" data-alt-hu="A sziklafal a javítás előtt" data-alt-en="The cliff before the fix">
+          <img class="after" src="media/rock_on.webp" alt="" data-alt-hu="A sziklafal a javítás után" data-alt-en="The cliff after the fix">
+          <span class="handle" aria-hidden="true"></span>
+          <span class="tag l" data-en="Before">Előtte</span><span class="tag r" data-en="After">Utána</span>
+          <input type="range" min="0" max="100" value="50" aria-label="Összehasonlítás">
+        </div>
+        <figcaption data-en="The valley from its initial view: the cliff's cracked tiles became layered rock.">A völgy a kezdőnézetből: a szikla repedezett csempéiből rétegzett kőzet lett.</figcaption>
+      </figure>
+      <figure>
+        <div class="compare" style="--cut:50%">
+          <img src="media/cave_fix_off.webp" alt="" data-alt-hu="A barlangszáj a javítás előtt" data-alt-en="The cave mouth before the fix">
+          <img class="after" src="media/cave_fix_on.webp" alt="" data-alt-hu="A barlangszáj a javítás után" data-alt-en="The cave mouth after the fix">
+          <span class="handle" aria-hidden="true"></span>
+          <span class="tag l" data-en="Before">Előtte</span><span class="tag r" data-en="After">Utána</span>
+          <input type="range" min="0" max="100" value="50" aria-label="Összehasonlítás">
+        </div>
+        <figcaption data-en="The cave mouth: slabs, blue lines and dots before; a wet rock step and scattered gravel after.">A barlangszáj: előtte lapok, kék vonalak és pöttyök, utána nedves sziklalépcső és szórt kavics.</figcaption>
+      </figure>
+      <div class="metrics">
+        <div class="metric"><b>250 000</b><span data-en="triangles in 25 chunks (0.25 and 0.5 m)">háromszög 25 darabban (0,25 és 0,5 m-es felbontás)</span></div>
+        <div class="metric"><b>0,04 ms</b><span data-en="the river simulation, 19 000 cells">a patak szimulációja, 19 ezer cella</span></div>
+        <div class="metric"><b>2,8 s</b><span data-en="building the mesh terrain in Chromium">a hálós terep felépítése Chromiumban</span></div>
+      </div>
+    </section>
+
+    <section class="chapter" id="editor-8">
+      <div class="eyebrow" data-en="24 · Editor and browser">24 · Szerkesztő és böngésző</div>
+      <h2 data-en="Actors in the editor, a quicker start in the browser">Aktorok a szerkesztőben, gyorsabb indulás a böngészőben</h2>
+      <p data-en="The editor used to edit instances: a tree's trunk and foliage were two separate selections, and the campfire was 18 instances, a light, a fire volume and two emitters. Now the scene is made of UE-style actors with a name, a transform relative to their parent and components. Moving an actor moves its components and children (the campfire travels with its light and sparks), the Outliner's tree reparents by dragging, Alt+click selects a component, and while dragged the moved instances are Movable, so only the dynamic shadow casters are redrawn.">A szerkesztő eddig példányokat szerkesztett: egy fa törzse és lombja két külön kijelölés volt, a tábortűz pedig 18 példány, egy fény, egy tűztérfogat és két részecskekibocsátó. Most a jelenet UE-szerű aktorokból áll, névvel, a szülőhöz viszonyított transzformációval és komponensekkel. Egy aktor mozgatása viszi a komponenseit és a gyerekeit (a tábortűz a fényével és a szikráival együtt költözik), az Outliner fanézetében húzással lehet újraszülősíteni, az Alt+kattintás a komponenst jelöli ki, húzás közben pedig a mozgatott példányok Movable-ök, így csak a dinamikus árnyékvetők rajzolódnak újra.</p>
+      <div class="controls">
+        <a class="btn primary" href="editor.html?scene=forest" target="_blank" rel="noopener" data-en="Open the editor (forest)">A szerkesztő megnyitása (erdő)</a>
+      </div>
+      <div class="shots">
+        <img src="media/editor_actor_drag.webp" alt="" loading="lazy" data-alt-hu="A tábortűz aktor húzása a szerkesztőben" data-alt-en="Dragging the campfire actor in the editor">
+        <img src="media/editor_outliner.webp" alt="" loading="lazy" data-alt-hu="A fák az Outliner fanézetében" data-alt-en="The trees in the Outliner's tree">
+        <img src="media/editor_component.webp" alt="" loading="lazy" data-alt-hu="Egy komponens kijelölése" data-alt-en="A component selected">
+      </div>
+      <p data-en="In the browser the scene's preprocessing (every mesh's cluster DAG, pages and distance field) used to run on the page's thread before the first image, and the page did not respond for seconds. Now it runs on Web Workers, up to four sharing it, while a mesh-less stand-in of the scene already starts compiling its shaders. On a scene switch the old scene keeps running, the new one's pipelines compile during the preprocessing, and no frame compiles a shader synchronously any more. Preprocessed geometry pages are entropy coded on disk and over the network, at half the size. Firefox on Windows may lose the device after a longer run: its GPU process keeps memory from every frame, a browser leak Helios can only report with a message.">A böngészőben a jelenet előfeldolgozása (minden háló klaszter-DAG-ja, lapjai és távolságmezője) eddig a lap szálán futott az első kép előtt, és a lap másodpercekig nem reagált. Most Web Workereken fut, legfeljebb négy osztozik rajta, miközben a jelenet egy háló nélküli helyettese már elindítja a shaderek fordítását. Jelenetváltáskor a régi jelenet fut tovább, az új pipeline-jai az előfeldolgozás alatt fordulnak, és egyetlen képkocka sem fordít többé szinkron shadert. Az előfeldolgozott geometrialapok a lemezen és a hálózaton entrópiakódolva, feleakkora méretben utaznak. A Firefox Windowson hosszabb futás után elveszítheti az eszközt: a GPU-folyamata minden képkockából memóriát tart meg, ez a böngésző szivárgása, amelyet a Helios csak egy üzenettel tud jelezni.</p>
+      <div class="metrics">
+        <div class="metric"><b>9,1–10,1 → 6,8–7,4 s</b><span data-en="first image of the cathedral in Chromium">a katedrális első képe Chromiumban</span></div>
+        <div class="metric"><b>18–26 → 1,3–1,5 s</b><span data-en="the canvas held on a switch from the valley to the gallery (Chromium)">a vászon állása völgy → galéria váltáskor (Chromium)</span></div>
+        <div class="metric"><b>86,8 → 36,9 MiB</b><span data-en="the cathedral's preprocessed files, high detail">a katedrális előfeldolgozott fájljai, magas részletesség</span></div>
+        <div class="metric"><b>13,9 → 11,0 ms</b><span data-en="dragging the campfire in the forest, per frame">a tábortűz húzása az erdőben, képkockánként</span></div>
+      </div>
+    </section>
+
   </main>
 
   <aside class="stage" aria-label="Élő motor">
@@ -809,7 +1139,7 @@ footer .wide-inner { gap: 10px; }
     <p data-en="Helios was written by Claude Code in a few days of conversation with its owner. The lead session planned the work, split it into features and handed each to a specialist agent working in its own copy of the repository. Nothing was merged on the agent's word: every merge had to pass the same gates.">A Heliost a Claude Code írta, néhány napnyi beszélgetésben a megrendelőjével. A vezető munkamenet tervezte meg a munkát, funkciókra bontotta, és mindegyiket egy szakosodott ügynök kapta meg, a tároló saját másolatán dolgozva. Semmi sem került be csak az ügynök szavára: minden összefésülésnek ugyanazokon a kapukon kellett átmennie.</p>
     <div class="process">
       <div><h3 data-en="Isolated copies">Elszigetelt másolatok</h3><p data-en="Each agent works in its own git copy of the repository (in round 4, a worktree with its own branch). Its work is merged three-way; when the target has moved too far meanwhile, the agent ports its own changes.">Minden ügynök a tároló saját git-másolatán dolgozik (a 4. körben saját worktree-ben és ágon). A munkája háromutas összefésüléssel kerül be; ha a cél közben túl messzire jutott, az ügynök maga ülteti át rá a változtatásait.</p></div>
-      <div><h3 data-en="Tests and two lints">Tesztek és statikus ellenőrzés</h3><p data-en="About 270 unit tests, clippy natively and for wasm32, and a test that checks every shader against Chrome's stricter WGSL compiler, not only naga.">Kb. 270 egységteszt, clippy natívan és wasm32-re, és egy teszt, amely minden shadert a Chrome szigorúbb WGSL-fordítójának szabályai szerint is ellenőriz, nem csak a wgpu saját fordítója (naga) szerint.</p></div>
+      <div><h3 data-en="Tests and two lints">Tesztek és statikus ellenőrzés</h3><p data-en="About 380 unit tests, clippy natively and for wasm32, and a test that checks every shader against Chrome's stricter WGSL compiler, not only naga.">Kb. 380 egységteszt, clippy natívan és wasm32-re, és egy teszt, amely minden shadert a Chrome szigorúbb WGSL-fordítójának szabályai szerint is ellenőriz, nem csak a wgpu saját fordítója (naga) szerint.</p></div>
       <div><h3 data-en="A number for 'it flickers'">Mérőszám a villogásra</h3><p data-en="A static camera, twelve dumped frames at 2560×1440, and the share of pixels that change by more than 24 levels. Every merge is measured on all three scenes.">Álló kamera, tizenkét mentett képkocka 2560×1440-ben, és azon pixelek aránya, amelyek 24 szintnél többet változnak. Minden összefésülés után mindhárom jelenetben mérve.</p></div>
       <div><h3 data-en="Look at the pictures">A képek megnézése</h3><p data-en="Numbers miss things. Every change was rendered, cropped and looked at, and checked in headless Chromium on the real GPU, where WebGPU actually runs.">A számok nem látnak mindent. Minden változtatást lerendereltünk és kinagyítva megnéztünk, és headless Chromiumban is ellenőriztük a valódi GPU-n, ahol a WebGPU ténylegesen fut.</p></div>
       <div><h3 data-en="An integration branch">Integrációs ág</h3><p data-en="In round 4 finished branches went into a round4 integration branch, not into main. Merge agents looked for semantic conflicts too: two changes that are correct on their own and wrong together.">A 4. körben a kész ágak nem a főágra, hanem egy round4 integrációs ágra kerültek. Az összefésülést végző ügynökök a jelentésbeli ütközéseket is keresték: két változtatást, amely külön-külön helyes, együtt viszont hibás.</p></div>
@@ -822,6 +1152,9 @@ footer .wide-inner { gap: 10px; }
       </div>
       <div class="round"><h3 data-en="Round 4 · Agents on parallel branches">4. kör · Ügynökök párhuzamos ágakon</h3><p data-en="Nine features in two waves. Each agent worked in its own git worktree and branch from the same brief: Chrome's WGSL rules, how to measure, which keys and debug views were taken, and to touch shared files only as much as needed. The seven branches of the first wave were merged one by one into the round4 integration branch; the second wave (Substrate and material graphs, Nanite tessellation, this page) built on it. Git flagged the textual conflicts; the merge agents found the semantic ones with tests, measurements and browser runs. Up to seven agents shared one RTX 3090, so every timing is the minimum or median of interleaved runs. A final pass benchmarked the merged build on an idle GPU, bisected the regressions merge by merge against the round-3 build, and fixed them: the cathedral ended faster than in round 3.">Kilenc funkció, két hullámban. Minden ügynök saját git worktree-ben és ágon dolgozott, ugyanabból a feladatleírásból: a Chrome WGSL-szabályai, a mérési módszer, a foglalt billentyűk és debug nézetek, és hogy a közös fájlokhoz csak a legszükségesebb mértékben nyúljon. Az első hullám hét ága egyenként került a round4 integrációs ágra; a második hullám (Substrate és anyaggráfok, Nanite-tesszelláció, ez az oldal) már erre épült. A szöveges ütközéseket a git jelezte, a jelentésbelieket az összefésülést végző ügynökök találták meg tesztekkel, mérésekkel és böngészős futtatással. Egyszerre legfeljebb hét ügynök osztozott egyetlen RTX 3090-en, ezért minden időmérés váltakozó futások minimuma vagy mediánja. Végül egy záró kör üres GPU-n mérte le az egyesített buildet, a 3. kör buildjével összevetve összefésülésenként felezte meg a lassulásokat, és kijavította őket: a katedrális gyorsabb lett, mint a 3. körben.</p>
         <div class="chips"><span class="chip" data-en="dynamic world">dinamikus világ</span><span class="chip" data-en="skeletal animation">csontvázas animáció</span><span class="chip">MegaLights</span><span class="chip">Lumen Lite</span><span class="chip" data-en="volumes &amp; particles">térfogatok és részecskék</span><span class="chip" data-en="OIT">sorrendfüggetlen átlátszóság</span><span class="chip">Nanite Foliage</span><span class="chip" data-en="Nanite tessellation">Nanite-tesszelláció</span><span class="chip" data-en="editor">szerkesztő</span><span class="chip">PCG</span><span class="chip" data-en="scene files">jelenetfájlok</span><span class="chip">Substrate</span><span class="chip" data-en="material graphs">anyaggráfok</span><span class="chip" data-en="glTF PBR extensions">glTF PBR-bővítmények</span></div>
+      </div>
+      <div class="round"><h3 data-en="Round 8 · From UE 5.8 and 5.9, in three waves">8. kör · Az UE 5.8 és 5.9 nyomán, három hullámban</h3><p data-en="The round began with research: what Unreal Engine 5.8 and 5.9 brought to rendering (World Cache, the MegaLights volume, adaptive voxel OIT, Dynamic Wind, Mesh Terrain, prefiltered distant shadows, fog scattering) and what of it WebGPU can do. Three waves of parallel agents built it, each in its own worktree and branch, from a shared rule sheet that grew between the waves: taken keys and binding slots, the limit of sampled textures per shader stage, the Hungarian wording. The lead merged each wave before the next started. Then the owner looked through the scenes, and what the owner reported (floating grass, patchy ground around the fire, a cliff like cracked tiles, slabs at the cave mouth, a bright line at the end of the lake) went to agents of its own. Finally a closing pass measured on an idle GPU what the round had cost, 0.3–1.7 ms per default view at 2560×1440, traced it per feature and won back 0.3–0.9 ms without a visible change: the forest ended faster than in round 7.">A kör kutatással kezdődött: mit hozott az Unreal Engine 5.8 és 5.9 a renderelésben (World Cache, MegaLights-térfogat, adaptív voxeles OIT, Dynamic Wind, Mesh Terrain, előszűrt távoli árnyékok, ködszórás), és ebből mi valósítható meg WebGPU-n. Párhuzamos ügynökök három hulláma építette meg, mindegyik saját worktree-ben és ágon, egy közös szabálylapból, amely a hullámok között bővült: foglalt billentyűk és kötési helyek, a shaderfokozatonkénti mintavételezett textúrák korlátja, a magyar szóhasználat. A vezető minden hullámot összefésült, mielőtt a következő elindult. Utána a megrendelő végignézte a jeleneteket, és amit jelzett (lebegő fű, foltos talaj a tűz körül, repedezett csempére emlékeztető szikla, lapok a barlangszájnál, fényes vonal a tó végén), azt külön ügynökök javították. Végül egy záró kör tétlen GPU-n mérte meg, mennyibe került a kör: 2560×1440-ben alapnézetenként 0,3–1,7 ms-ba; funkciónként szétszedte, és látható változás nélkül 0,3–0,9 ms-ot visszanyert belőle: az erdő gyorsabb lett, mint a 7. körben.</p>
+        <div class="chips"><span class="chip">World Cache</span><span class="chip">Lumen Lite 5.8</span><span class="chip">MegaLights 5.8</span><span class="chip" data-en="MegaLights volume">MegaLights-térfogat</span><span class="chip" data-en="hierarchical light culling">hierarchikus fényeldobás</span><span class="chip">AVBOIT</span><span class="chip" data-en="local lights through glass">helyi fény üvegen át</span><span class="chip" data-en="shadow refresh budget">árnyékfrissítési keret</span><span class="chip" data-en="prefiltered distant shadows">előszűrt távoli árnyékok</span><span class="chip" data-en="volume shadows">térfogatárnyék</span><span class="chip" data-en="fog scattering">ködszórás</span><span class="chip" data-en="photo mode">fotó mód</span><span class="chip" data-en="TSR depth history">TSR-mélységtörténet</span><span class="chip" data-en="leaner Nanite culling">karcsúbb Nanite-eldobás</span><span class="chip" data-en="grounded foliage">lehorgonyzott növényzet</span><span class="chip" data-en="dynamic wind">dinamikus szél</span><span class="chip" data-en="mesh terrain">hálós terep</span><span class="chip" data-en="shallow-water river">sekélyvizes patak</span><span class="chip" data-en="editor actors">aktorok a szerkesztőben</span><span class="chip" data-en="worker preprocessing">előfeldolgozás workereken</span><span class="chip" data-en="entropy-coded streaming">entrópiakódolt streamelés</span><span class="chip" data-en="GPU memory ledger">GPU-memória-nyilvántartás</span></div>
       </div>
     </div>
   </div>
@@ -853,6 +1186,12 @@ footer .wide-inner { gap: 10px; }
       <article class="story"><span class="round-tag" data-en="Round 6">6. kör</span><h3 data-en="Green light from red mushrooms">Piros gombák zöld fénye</h3><p data-en="The mushroom bed's red bounced back green, because Lumen's cards carried each material's average colour, and the moss dominated it. The cards now capture colour per texel, their filtering respects depth so the caps' light does not bleed onto the ground, and the voxel cache gets the captured colour too.">A gombaágyás vöröse zölden verődött vissza, mert a Lumen-kártyák az anyag átlagszínét hordozták, abban pedig a moha dominált. A kártyák most texelenként rögzítik a színt, a szűrésük figyeli a mélységet, így a kalapok fénye nem szivárog át a talajra, és a voxeles gyorsítótár is a rögzített színt kapja.</p><div class="delta" data-en="red/green ratio of the bounced light 0.800 → 0.870">vörös/zöld arány a visszavert fényben 0,800 → 0,870</div></article>
       <article class="story"><span class="round-tag" data-en="Round 6">6. kör</span><h3 data-en="Six candles without shadows">Hat gyertya árnyék nélkül</h3><p data-en="In the 300-candle cathedral the moving candles redrew more shadow pages than they should, and the full page pool was handed out in queue order: the six candles nearest the camera got no page at all. Now moving lights claim slots by what their maps cost, a full pool serves requests by importance, and fainter lights' resolution adapts to the load, as with UE's VSM dynamic resolution.">A 300 gyertyás katedrálisban a mozgó gyertyák több árnyéklapot rajzoltak újra, mint kellett volna, és a betelt lapkészletet sorrendben osztották ki: a kamerához legközelebbi hat gyertya egyetlen lapot sem kapott. Most a mozgó fények annyi helyet igényelnek, amennyibe a térképük kerül, telített készletnél a kérések fontosság szerint kapnak lapot, és a halványabb fények felbontása a terheléshez igazodik, mint az UE VSM dinamikus felbontásánál.</p><div class="delta" data-en="16.0 → 14.7 ms · lights without a page 6 → 0">16,0 → 14,7 ms · lap nélküli fények 6 → 0</div></article>
       <article class="story"><span class="round-tag" data-en="Round 7">7. kör</span><h3 data-en="White light under coloured windows">Fehér fény a színes ablakok alatt</h3><p data-en="The sun shone through windows full of red, blue and gold glass and landed white on the piers: glass casts no shadow, so nothing coloured the light. The shadow map could not carry it, as it keeps one depth per texel, no colour. Multiplying every pane along the way was wrong too: a pane behind the lit surface would tint it. The fix is a map of its own, drawn from the sun, that keeps only the nearest pane's colour and depth.">A nap piros, kék és arany üveggel teli ablakokon sütött át, és fehéren ért a pillérekre: az üveg nem vet árnyékot, így semmi sem színezte a fényt. Az árnyéktérkép nem vihette, mert texelenként egy mélységet tart, színt nem. Minden útba eső tábla összeszorzása is hibás lett volna: a megvilágított felület mögötti tábla is színezte volna. A megoldás egy saját, a nap felől rajzolt térkép, amely csak a legközelebbi tábla színét és mélységét tartja.</p></article>
+      <article class="story"><span class="round-tag" data-en="Round 8 · reported">8. kör · bejelentés</span><h3 data-en="Patches that were not shadows">Foltok, amelyek nem árnyékok voltak</h3><p data-en="At night the campfire seemed to cast no shadow on the ferns. They were in the fire's shadow map, but the ground was covered in dark patches. Neither shadow nor acne: the 0.8 m fire meets the ground at 9–25°, and the forest floor's strong normal map turned most of it away from the light, in 10–20 cm patches, just the size of a leaflet's shadow. A gentler relief and a source radius matched to the flame made the plants' shadows readable.">Éjjel úgy tűnt, a tábortűz nem vet árnyékot a páfrányokra. Benne voltak a tűz árnyéktérképében, csak a talajt sötét foltok borították. Nem árnyék volt és nem is acne: a 0,8 m magas tűz 9–25°-os szögben éri a talajt, és az erdei talaj erős normáltérképe a felület nagy részét elfordította a fénytől, 10–20 cm-es foltokban, épp egy levélke árnyékának méretében. Mérsékeltebb domborzat és a lánghoz igazított forrássugár után a növények árnyéka olvasható lett.</p><div class="delta" data-en="normal map strength 1.0 → 0.3 · source radius 0.25 → 0.15 m">normáltérkép-erősség 1,0 → 0,3 · forrássugár 0,25 → 0,15 m</div></article>
+      <article class="story"><span class="round-tag" data-en="Round 8 · reported">8. kör · bejelentés</span><h3 data-en="The line at the end of the lake">A vonal a tó végén</h3><p data-en="A thin bright line ran across the landscape and the glass panels, already in round 7. Suspicion fell on the water's bounding box, the shore foam and the seam between them; the culprit was the 4 cm top edge of a glass pane standing in the water, seen at a very flat angle. There glass reflects half the light, but the shader's shortcut for faint reflections averaged a whole hemisphere, half of it sky. The edge now shows its real reflection.">Egy vékony, fényes vonal futott át a tájon és az üveglapokon, már a 7. körben is. A gyanú a víztest befoglaló dobozára, a parti habra és a kettő varratára esett; a tettes a vízben álló üveglap 4 cm-es felső éle volt, amelyet a kamera nagyon lapos szögben lát. Ilyen szögben az üveg a fény felét visszaveri, az árnyaló viszont a halvány tükröződésekre szánt rövidítéssel egy egész félgömböt átlagolt, amelynek fele égbolt. Most a perem a valódi tükörképét mutatja.</p><div class="delta">RGB (82, 114, 138) → (50, 78, 86)</div></article>
+      <article class="story"><span class="round-tag" data-en="Round 8 · reported">8. kör · bejelentés</span><h3 data-en="Blue lines at the cave">Kék vonalak a barlangnál</h3><p data-en="Thin, saturated blue lines ran along the brook's banks. They were the water surface's back faces: dry corners sank below the bed, and where a triangle broke out of the ground, the renderer shaded its back as an underwater view, deep blue. Now a dry corner carries its wet neighbour's level on into the bank, so the bank cuts the surface exactly at the water line.">A patak partjai mentén vékony, telített kék vonalak látszottak. A vízfelszín hátoldalai voltak: a száraz sarkok a meder alá süllyedtek, és ahol egy háromszög kibukott a talajból, a renderer a hátoldalát víz alóli nézetként, mélykéken árnyalta. Most a száraz sarok a nedves szomszéd vízszintjét viszi tovább a partba, így a part pontosan a vízvonalon metszi a felszínt.</p><div class="delta" data-en="saturated blue pixels in the cave view 166 → 0">telített kék pixel a barlangnézetben 166 → 0</div></article>
+      <article class="story"><span class="round-tag" data-en="Round 8 · perf">8. kör · teljesítmény</span><h3 data-en="An off switch that still cost">Kikapcsolva is fizetett</h3><p data-en="The plant bones cost 0.45 ms even switched off. It was not the data that cost but the plant code's register pressure: while it was in the shader, every pass placing geometry ran slower. Now the rasterisers compile without the plant code where there are no boned plants, and the skeleton is posed once per instance, so a vertex reads one entry instead of walking its chain.">A növények csontjai kikapcsolva is 0,45 ms-ba kerültek. Nem az adat volt drága, hanem a növénykód regiszterigénye: amíg benne volt a shaderben, minden geometriát elhelyező menet lassabban futott. Most a raszterizálók csontos növények nélkül növénykód nélkül fordulnak, a csontváz pedig példányonként egyszer pózolódik, így egy csúcspont egyetlen bejegyzést olvas a lánc bejárása helyett.</p><div class="delta" data-en="cathedral 6.66 → 6.39 ms · fern shadow pages 0.64 → 0.24 ms">katedrális 6,66 → 6,39 ms · páfrány-árnyéklapok 0,64 → 0,24 ms</div></article>
+      <article class="story"><span class="round-tag" data-en="Round 8 · perf">8. kör · teljesítmény</span><h3 data-en="An AO that cost more than its taps">Az AO, amely többe került a mintáinál</h3><p data-en="The closing pass found the short-range AO costing 0.3–0.6 ms, more than its own samples explained: embedded in the lighting pass, it held that pass's registers too. It moved into a half-resolution pass of its own, as UE does by default, and the GI's depth-aware upsampling reads it back; the picture stayed the same.">A záró mérés szerint a rövid hatótávú AO 0,3–0,6 ms-ba került, többe, mint amit a saját mintavételei indokoltak: a megvilágítási menetbe ágyazva annak regisztereit is lekötötte. Saját, fél felbontású menetbe került, ahogy az UE-ben is alapból, és a GI mélységérzékeny felskálázása olvassa vissza; a kép ugyanaz maradt.</p><div class="delta" data-en="AO 0.30–0.61 → 0.06–0.10 ms (2560×1440)">AO 0,30–0,61 → 0,06–0,10 ms (2560×1440)</div></article>
+      <article class="story"><span class="round-tag" data-en="Round 8 · Firefox">8. kör · Firefox</span><h3 data-en="The leak that was not ours">A szivárgás, amely nem a miénk volt</h3><p data-en="In Firefox the page stopped after a minute or two with 'Not enough memory left'. Helios's own ledger stood at 1.3–1.4 GB and no allocation failed. A 30-line page that only clears and presents the canvas did the same: on Windows Firefox's GPU process keeps about two canvases' worth of memory from every frame. Helios now shows a message instead of a frozen canvas and gives back what the scene does not use.">Firefoxban a lap egy-két perc után „Not enough memory left” hibával megállt. A Helios saját nyilvántartása 1,3–1,4 GB-on állt, és egyetlen foglalás sem hibázott. Egy 30 soros oldal, amely csak törli és megjeleníti a vásznat, ugyanígy viselkedett: Windowson a Firefox GPU-folyamata minden képkockából nagyjából két vászonnyi memóriát megtart. A Helios most üzenetet mutat a lefagyott vászon helyett, és visszaadja, amit a jelenet nem használ.</p><div class="delta" data-en="Firefox GPU process 1.3 → 12.8 GB in ~80 s · the page's own memory flat">a Firefox GPU-folyamata 1,3 → 12,8 GB kb. 80 s alatt · a lap saját memóriája állandó</div></article>
     </div>
   </div>
 </section>
@@ -864,13 +1203,13 @@ footer .wide-inner { gap: 10px; }
     <div class="pipeline-wrap">
       <div class="pipeline">
         <div class="stage-box"><span class="cat" style="background:#8fb7e6"></span><h3 data-en="Culling">Láthatóság</h3><ul><li>instance → cluster</li><li>assembly parts</li><li>HZB, two passes</li><li>LOD cut &lt; 1 px</li></ul></div>
-        <div class="stage-box"><span class="cat" style="background:#8fb7e6"></span><h3 data-en="Rasterising">Raszterizálás</h3><ul><li>hardware</li><li>compute (tiny tris)</li><li>tessellation (displacement)</li><li>voxels (foliage)</li><li>skinning</li><li>visibility buffer</li></ul></div>
+        <div class="stage-box"><span class="cat" style="background:#8fb7e6"></span><h3 data-en="Rasterising">Raszterizálás</h3><ul><li>hardware</li><li>compute (tiny tris)</li><li>tessellation (displacement)</li><li>voxels (foliage)</li><li>skinning</li><li>plant bones</li><li>visibility buffer</li></ul></div>
         <div class="stage-box"><span class="cat" style="background:#c7a6e8"></span><h3 data-en="Materials">Anyagok</h3><ul><li>classify &amp; resolve</li><li>Substrate slabs</li><li>material graphs</li><li>BC7 tile streaming</li></ul></div>
-        <div class="stage-box"><span class="cat" style="background:#e88c6f"></span><h3 data-en="Shadows">Árnyékok</h3><ul><li>mark pages</li><li>static / dynamic cache</li><li>movable casters</li><li>sun + 32 lights</li><li>coloured glass</li></ul></div>
-        <div class="stage-box"><span class="cat" style="background:#f2b04a"></span><h3>Lumen</h3><ul><li>cards &amp; voxels</li><li>radiance cache</li><li>screen probes or Lite probes</li><li>reflections</li></ul></div>
-        <div class="stage-box"><span class="cat" style="background:#7fd1a3"></span><h3 data-en="Sky, fog, volumes">Ég, köd, térfogatok</h3><ul><li>clouds</li><li>froxel fog</li><li>fluid volumes</li><li>particles (OIT)</li></ul></div>
-        <div class="stage-box"><span class="cat" style="background:#ece6da"></span><h3 data-en="Lighting">Megvilágítás</h3><ul><li>deferred</li><li>clustered lights or MegaLights</li><li>subsurface</li><li>glass, water, layers</li></ul></div>
-        <div class="stage-box"><span class="cat" style="background:#9fa8ba"></span><h3 data-en="Image">Kép</h3><ul><li>TSR</li><li>DOF, motion blur</li><li>exposure, bloom</li><li>tonemap</li></ul></div>
+        <div class="stage-box"><span class="cat" style="background:#e88c6f"></span><h3 data-en="Shadows">Árnyékok</h3><ul><li>mark pages</li><li>static / dynamic cache</li><li>movable casters</li><li>sun + 32 lights</li><li>coloured glass</li><li>refresh budget</li><li>prefiltered distant</li><li>volume shadows</li></ul></div>
+        <div class="stage-box"><span class="cat" style="background:#f2b04a"></span><h3>Lumen</h3><ul><li>world cache</li><li>cards &amp; voxels</li><li>radiance cache</li><li>screen probes or Lite probes</li><li>reflections</li><li>short-range AO</li></ul></div>
+        <div class="stage-box"><span class="cat" style="background:#7fd1a3"></span><h3 data-en="Sky, fog, volumes">Ég, köd, térfogatok</h3><ul><li>clouds</li><li>froxel fog</li><li>fluid volumes</li><li>particles</li><li>river simulation</li></ul></div>
+        <div class="stage-box"><span class="cat" style="background:#ece6da"></span><h3 data-en="Lighting">Megvilágítás</h3><ul><li>deferred</li><li>clustered lights or MegaLights</li><li>MegaLights volume</li><li>subsurface</li><li>glass, water, AVBOIT</li></ul></div>
+        <div class="stage-box"><span class="cat" style="background:#9fa8ba"></span><h3 data-en="Image">Kép</h3><ul><li>TSR</li><li>DOF, motion blur</li><li>fog scattering</li><li>exposure, bloom</li><li>tonemap</li><li>photo mode</li></ul></div>
       </div>
     </div>
   </div>
@@ -881,19 +1220,22 @@ footer .wide-inner { gap: 10px; }
     <div class="eyebrow" data-en="Honest limits">Őszinte korlátok</div>
     <h2 data-en="What Unreal still does better">Amit az Unreal még jobban csinál</h2>
     <ul class="limits">
-      <li data-en="<b>Lumen cards</b> are axis-aligned; they carry the texture's colour, but the voxel cache gets one average colour per instance and material.">A <b>Lumen-kártyák</b> tengelyhez igazítottak; a textúra színét hordozzák, de a voxeles gyorsítótár példányonként és anyagonként csak egy átlagszínt kap.</li>
+      <li data-en="<b>The world cache</b> traces distance fields, not hardware rays: skinned meshes, particles and volumes are missing from its paths, its cells average detail finer than 2.5–5 % of their distance, and there is no far field beyond the clipmap.">A <b>World Cache</b> távolságmezőkben követ, nem hardveres sugarakkal: a bőrözött hálók, a részecskék és a térfogatok kimaradnak az útjaiból, a cellák a távolságuk 2,5–5 %-ánál finomabb részletet kiátlagolnak, és a klipmapen túl nincs távoli mező.</li>
       <li data-en="<b>Shadow pages</b> share a 1024-page pool, a quarter of UE's default: with hundreds of shadowed lights the fainter ones get coarser pages.">Az <b>árnyéklapok</b> egy közös, 1024 lapos készletből jönnek, ami az UE alapértékének negyede: több száz árnyékoló fénynél a halványabbak durvább lapokat kapnak.</li>
-      <li data-en="<b>Coloured glass light</b> comes from the sun only and keeps one pane per texel; local lights and Lumen's voxel cache still see glass as clear.">A <b>színes üvegfény</b> csak a napé, és texelenként egy tábla színét tartja; a helyi fények és a Lumen voxeles gyorsítótára az üveget még színtelennek látja.</li>
-      <li data-en="<b>The first visit</b> compiles the shaders in the browser: the first image takes about 10 s, and in Firefox full quality arrives after 35–50 s.">Az <b>első látogatáskor</b> a böngésző fordítja a shadereket: az első kép kb. 10 s, Firefoxban a teljes minőség 35–50 s múlva érkezik.</li>
-      <li data-en="<b>Water</b> is a flat sheet with per-pixel waves; under water there are no light shafts.">A <b>víz</b> lapos felület pixelenkénti hullámokkal; víz alatt nincsenek fénynyalábok.</li>
+      <li data-en="<b>Coloured glass light</b> comes from the sun and the 8 nearest local lights only, one pane per texel; the fog, particles, volumes and Lumen still see glass as clear for local lights.">A <b>színes üvegfény</b> csak a napé és a nyolc legközelebbi helyi fényé, texelenként egy táblával; a köd, a részecskék, a térfogatok és a Lumen a helyi fényeknél az üveget még színtelennek látják.</li>
+      <li data-en="<b>The first visit</b> preprocesses the scene and compiles the shaders in the browser (UE ships them cooked): the first image takes 7–10 s, and in Firefox full quality arrives after about 45 s.">Az <b>első látogatáskor</b> a böngésző előfeldolgozza a jelenetet és lefordítja a shadereket (az UE ezeket készen szállítja): az első kép 7–10 s, Firefoxban a teljes minőség kb. 45 s múlva érkezik.</li>
+      <li data-en="<b>Firefox on Windows</b> keeps GPU memory from every frame in its GPU process until it loses the device after a few minutes: a browser leak, which Helios reports with a message.">A <b>Firefox Windowson</b> a GPU-folyamatában minden képkockából memóriát tart meg, amíg néhány perc után el nem veszíti az eszközt: ez a böngésző szivárgása, a Helios egy üzenettel jelzi.</li>
+      <li data-en="<b>Water</b>: the lake is a flat sheet with per-pixel waves; the river is one simulated grid per scene without eddies or spray, and Lumen and shadows don't see its water; under water there are no light shafts.">A <b>víz</b>: a tó lapos felület pixelenkénti hullámokkal; a patak jelenetenként egyetlen szimulált rács örvények és permet nélkül, a vizét pedig a Lumen és az árnyékok nem látják; víz alatt nincsenek fénynyalábok.</li>
+      <li data-en="<b>The mesh terrain</b> covers one rectangle of the landscape, is meshed once when the scene is built and is shaped by code, without sculpting brushes or erosion.">A <b>hálós terep</b> a táj egyetlen téglalapját fedi le, a jelenet felépítésekor egyszer készül el, és kód formálja, szobrászecset és erózió nélkül.</li>
       <li data-en="<b>Mobile GPUs</b> get uncompressed texture tiles: there is no ASTC or ETC2 encoder yet.">A <b>mobil GPU-k</b> tömörítetlen textúracsempéket kapnak: ASTC- és ETC2-kódoló még nincs.</li>
-      <li data-en="<b>Translucency</b> is exact up to four layers; particles are blended order-independently, which only approximates the order of layers at similar depths.">Az <b>átlátszóság</b> négy rétegig pontos; a részecskék sorrendfüggetlen keverése a hasonló mélységű rétegek sorrendjét csak közelíti.</li>
+      <li data-en="<b>Translucency</b> (AVBOIT) orders layers in a 16-cell grid per 4×4-pixel column: within a cell the order is approximate, and refracting glass keeps only its nearest layer.">Az <b>áttetszőség</b> (AVBOIT) a rétegeket 4×4 pixeles oszloponként 16 cellás rácsban rendezi: egy cellán belül a sorrend közelítő, a fénytörő üveg pedig csak a legközelebbi rétegét tartja meg.</li>
       <li data-en="<b>Below 50 % resolution</b> thin wires break up under motion."><b>50% alatti felbontásnál</b> a vékony drótok mozgás közben szétesnek.</li>
       <li data-en="<b>MegaLights</b> traces no hardware rays (WebGPU has none): beyond a 1 m screen trace, shadows come from shadow maps or coarse distance fields.">A <b>MegaLights</b> nem követ hardveres sugarakat (WebGPU-n nincs ilyen): az 1 m-es képtérbeli követésen túl az árnyékot árnyéktérképek vagy durva távolságmezők adják.</li>
-      <li data-en="<b>Volumes</b> cast no shadows on the scene and Lumen does not see them; only the fire's light reaches the surroundings.">A <b>térfogatok</b> nem vetnek árnyékot a jelenetre, és a Lumen sem látja őket; csak a tűz fénye jut el a környezetbe.</li>
+      <li data-en="<b>Volumes</b> shadow only the sun and their own fire's light (other lights pass through smoke), the translucent surfaces ignore their shadow, and Lumen does not see them.">A <b>térfogatok</b> csak a nap és a saját tüzük fényét árnyékolják (a többi fény átjut a füstön), az áttetsző felületek nem veszik figyelembe az árnyékukat, és a Lumen sem látja őket.</li>
       <li data-en="<b>Substrate</b> has one slab per material; UE layers and mixes any number of them.">A <b>Substrate</b> anyagonként egyetlen réteget (slabot) kezel; az UE akárhányat egymásra rétegez és kever.</li>
       <li data-en="<b>Displacement</b> reaches Lumen only at its voxel and ~10 cm card resolution: finer relief such as mortar joints shows only in screen traces, and an animated surface is represented by its average.">Az <b>elmozdítást</b> a Lumen csak a voxelei és ~10 cm-es kártyatexelei felbontásában látja: a finomabb domborzat, például a fugák, csak a képtérbeli követésben jelenik meg, az animált felületet pedig az átlaga képviseli.</li>
-      <li data-en="<b>The editor</b> has no actors or hierarchy: a tree's trunk and foliage are two separate instances.">A <b>szerkesztőben</b> nincsenek aktorok és hierarchia: egy fa törzse és lombja két külön példány.</li>
+      <li data-en="<b>The editor's actors</b> have no classes, Blueprints or sockets, and glTF node hierarchies are not imported as actors.">A <b>szerkesztő aktorainak</b> nincsenek osztályai, Blueprintjei és foglalatai (socket), a glTF-csomóponthierarchia pedig nem aktorokként töltődik be.</li>
+      <li data-en="<b>Dynamic wind</b> bones only the procedural plants, each vertex follows one bone, and only small plants (grass, ferns, bushes) are simulated near the camera.">A <b>dinamikus szél</b> csak a procedurális növényeknek ad csontot, minden csúcspont egyetlen csontot követ, és a kamera közelében csak a kis növények (fű, páfrány, bokor) szimuláltak.</li>
     </ul>
   </div>
 </section>
@@ -1033,16 +1375,20 @@ $("#sun").addEventListener("input", (e) => setSun(Number(e.target.value)));
 // Candle lights the cathedral was last built with (0: its 33 fixture lights).
 let candles = 0;
 let lantern = false;
+// Soot scale the forest's campfire was last built with (1: the default fire).
+let smoke = 1;
 const SCENE_NAMES = {
   valley: ["A völgy", "valley"], cathedral: ["A katedrális", "cathedral"], forest: ["Az erdő", "forest"],
   gallery: ["Az anyaggaléria", "material gallery"],
 };
 // Builds a procedural scene; `candleLights` (cathedral only) rebuilds it with that many candle
-// lights and `lanternOn` with or without the carried lantern; undefined keeps the current state.
-async function loadScene(name, candleLights, lanternOn) {
+// lights and `lanternOn` with or without the carried lantern; `soot` (forest only) rebuilds the
+// forest with a smokier or the default campfire; undefined keeps the current state.
+async function loadScene(name, candleLights, lanternOn, soot) {
   if (!engine || busy) return false;
-  const relight = name === "cathedral" && ((candleLights !== undefined && candleLights !== candles)
-    || (lanternOn !== undefined && lanternOn !== lantern));
+  const relight = (name === "cathedral" && ((candleLights !== undefined && candleLights !== candles)
+    || (lanternOn !== undefined && lanternOn !== lantern)))
+    || (name === "forest" && soot !== undefined && soot !== smoke && engine.heliosSetCampfireSmoke);
   if (engine.heliosScene() === name && !relight) return true;
   busy = true;
   const [hu, en] = SCENE_NAMES[name];
@@ -1055,6 +1401,10 @@ async function loadScene(name, candleLights, lanternOn) {
     if (lanternOn !== undefined) lantern = lanternOn;
     engine.heliosSetCandleLights(candles);
     engine.heliosSetLantern(lantern);
+  }
+  if (name === "forest" && soot !== undefined && engine.heliosSetCampfireSmoke) {
+    smoke = soot;
+    engine.heliosSetCampfireSmoke(smoke);
   }
   // The scene bakes in the engine's workers; the call resolves once it is in.
   await engine.heliosLoadScene(name);
@@ -1098,14 +1448,35 @@ function hudStates(hud) {
   if (!("tessellation" in s) && (hud.startsWith("valley ") || hud.startsWith("gallery "))) s.tessellation = false;
   const local = /local lights with shadow maps: (\d+)/.exec(hud);
   if (local) s["local lights"] = Number(local[1]) > 0;
+  // Round 8: the OIT method and the Lumen world cache's mode (off / behind cards / replaces cards).
+  const oit = /\bOIT (AVBOIT|weighted blended)/.exec(hud);
+  if (oit) s.avboit = oit[1] === "AVBOIT";
+  if (gi && gi[1] !== "off") {
+    const wc = /world cache (behind cards|replaces cards)/.exec(hud);
+    s["world cache"] = wc ? wc[1] : "off";
+  }
   return s;
 }
-// Presses `key` if the HUD says `label` is not `want` yet.
+// Presses `key` until the HUD says `label` is `want` (a few presses for keys that cycle, such
+// as 7 or 5; a state the HUD does not report is left alone).
 function ensure(key, label, want) {
-  const on = hudStates(engine.heliosHud())[label];
-  if (on !== undefined && on !== want) engine.heliosKey(key);
+  for (let i = 0; i < 3; i++) {
+    const on = hudStates(engine.heliosHud())[label];
+    if (on === undefined || on === want) return;
+    engine.heliosKey(key);
+  }
 }
-const ENSURE = { megalights: ["Equal", "megalights"], lite: ["Semicolon", "lumen lite"], volumes: ["Quote", "volumes + particles"], substrate: ["PageUp", "substrate"], tessellation: ["PageDown", "tessellation"], glass: ["End", "glass shadows"] };
+const ENSURE = {
+  megalights: ["Equal", "megalights"], lite: ["Semicolon", "lumen lite"], volumes: ["Quote", "volumes + particles"],
+  substrate: ["PageUp", "substrate"], tessellation: ["PageDown", "tessellation"], glass: ["End", "glass shadows"],
+  // Round 8
+  worldcache: ["Digit5", "world cache"], litessr: ["Digit6", "lite screen reflections"], mlvolume: ["Digit3", "megalights volume"],
+  avboit: ["Digit4", "avboit"], budget: ["Digit2", "shadow refresh budget"], volshadow: ["Digit7", "volume shadows"],
+  fogscatter: ["Home", "fog scattering"], ao: ["Digit9", "short range ao"], dof: ["KeyB", "depth of field"],
+  river: ["Numpad2", "river simulation"], wind: ["KeyL", "wind"],
+};
+// World cache modes as the page names them.
+const WC_NAMES = { off: ["ki", "off"], "behind cards": ["kártyák mögött", "behind cards"], "replaces cards": ["kártyák helyett", "replaces cards"] };
 
 // Presets: scene (or glTF model), camera (eye/at, heights above ground), sun, debug view, and
 // features to switch on or off (`set`).
@@ -1160,13 +1531,37 @@ const PRESETS = {
   "gallery-features": { scene: "gallery", view: 24, set: { substrate: true } },
   // Round 7: the cathedral's own sun (azimuth 66°) shines through the south windows.
   "glass-sun": { scene: "cathedral", view: 0, az: 66, sun: 41, eye: [45, 1.7, 10.3], at: [5, 4, 10.8], set: { glass: true } },
+  // Round 8 (the same cameras as site/capture.py's stills).
+  "wc-aisle": { scene: "cathedral", view: 7, sun: 18, eye: [22, 1.7, 11.5], at: [45, 4, 11], set: { worldcache: "replaces cards" } },
+  "wc-cells": { scene: "cathedral", view: 27, sun: 18, eye: [5, 1.7, 0], at: [77, 9, 0], set: { worldcache: "replaces cards" } },
+  "wc-lit": { view: 0 },
+  "lite-puddles": { scene: "gallery", view: 0, sun: 18, eye: [0, 0.6, 6], at: [0, 0.5, 0], set: { lite: true, litessr: true } },
+  "ml-fog": { scene: "cathedral", candles: 300, view: 0, sun: -30, eye: [5, 1.7, 0], at: [77, 9, 0], set: { megalights: true, mlvolume: true } },
+  "ml-1000": { scene: "cathedral", candles: 1000, view: 0, sun: -30, eye: [15, 1.7, 9], at: [35, 0.8, 12.5], set: { megalights: true, mlvolume: true } },
+  "lake-panels": { scene: "valley", view: 0, sun: 18, eye: [-2.8, 3.2, 27], at: [-1.5, 2.6, 30.6], set: { avboit: true } },
+  "glass-candles": { scene: "cathedral", candles: 1008, view: 0, sun: -30, eye: [0.8, 1.6, 7.0], at: [2.0, 0.4, 12.0], set: { glass: true } },
+  "vsm-overview": { scene: "forest", view: 26, set: { budget: true } },
+  "smoke-shadow": { scene: "forest", smoke: 8, view: 0, az: 143, sun: 40, eye: [11, 4, 2.5], at: [7.5, 0, -2], set: { volumes: true, volshadow: true } },
+  "fog-glow": { scene: "cathedral", candles: 300, lantern: true, view: 0, sun: -30, eye: [5, 1.7, 0], at: [77, 9, 0], set: { fogscatter: true } },
+  "photo-nave": { scene: "cathedral", view: 0, sun: -30, eye: [5, 1.7, 0], at: [77, 9, 0], set: { dof: true } },
+  "photo-off": { photo: 0, view: 0, set: { dof: false } },
+  "grass-close": { scene: "forest", view: 0, sun: 18, eye: [4.6, 0.4, -1.6], at: [5.7, 0.12, -2.7], set: { ao: true, wind: true } },
+  "ferns-fire": { scene: "forest", view: 0, sun: 18, eye: [5.2, 0.7, 1.2], at: [6.2, 0.0, 0.2], set: { ao: true, wind: true } },
+  "gust-view": { scene: "forest", view: 0, sun: 18, eye: [3.0, 2.6, 2.5], at: [7.0, 0.0, -2.0], set: { wind: true } },
+  cliff: { scene: "valley", view: 0, sun: 18, eye: [7, 1.8, -25], at: [-3.9, -3, -38.9] },
+  arch: { scene: "valley", view: 0, sun: 18, eye: [20.7, 1.8, -9.8], at: [34, -5.5, -22] },
+  cave: { scene: "valley", view: 0, sun: 18, eye: [-14, 2.2, -28], at: [-12.5, 1.8, -40] },
+  river: { scene: "valley", view: 0, sun: 18, eye: [-2, 3, -6], at: [-9, 0, -20], set: { river: true } },
 };
 async function applyPreset(name) {
   const p = PRESETS[name];
   if (!engine || !p) return;
   if (p.model && !(await loadModel(p.model, p.name))) return;
   // Cathedral presets without a lantern take it away again (a rebuild).
-  if (p.scene && !(await loadScene(p.scene, p.candles, p.lantern ?? (p.scene === "cathedral" ? false : undefined)))) return;
+  // Forest presets without a smoky campfire bring the default one back (a rebuild).
+  if (p.scene && !(await loadScene(p.scene, p.candles, p.lantern ?? (p.scene === "cathedral" ? false : undefined),
+    p.smoke ?? (p.scene === "forest" ? 1 : undefined)))) return;
+  if (p.photo !== undefined) stopPhoto();
   if (p.view !== undefined) engine.heliosSetView(p.view);
   if (p.sun !== undefined) { sunAzimuth = p.az ?? 200; $("#sun").value = p.sun; setSun(p.sun); }
   if (p.eye) engine.heliosLookAt(...p.eye, ...p.at);
@@ -1178,20 +1573,50 @@ for (const b of $$("[data-scene]")) b.addEventListener("click", () => loadScene(
 for (const b of $$("[data-preset]")) b.addEventListener("click", () => applyPreset(b.dataset.preset));
 for (const b of $$("[data-key]")) b.addEventListener("click", () => engine?.heliosKey(b.dataset.key));
 for (const b of $$("[data-toggle]")) b.addEventListener("click", () => { engine?.heliosKey(b.dataset.toggle); setTimeout(updateTelemetry, 60); });
+// Toggles on keys that cycle through more than two states (7: distant prefiltered and volume
+// shadows): pressed until the feature flips.
+for (const b of $$("[data-feature]")) b.addEventListener("click", () => {
+  if (!engine) return;
+  const [key, label] = ENSURE[b.dataset.feature];
+  const on = hudStates(engine.heliosHud())[label];
+  if (on !== undefined) ensure(key, label, !on);
+  setTimeout(updateTelemetry, 60);
+});
+
+// Photo mode: `heliosPhoto(n)` accumulates n frames from the still camera; the readout follows it.
+let photoTimer = 0;
+function stopPhoto() {
+  clearInterval(photoTimer);
+  engine?.heliosPhoto?.(0);
+  $("#t-photo").textContent = "–";
+}
+for (const b of $$("[data-photo]")) b.addEventListener("click", () => {
+  if (!engine?.heliosPhoto) return;
+  clearInterval(photoTimer);
+  engine.heliosPhoto(Number(b.dataset.photo));
+  photoTimer = setInterval(() => {
+    const raw = engine.heliosPhotoProgress();
+    if (!raw) { clearInterval(photoTimer); $("#t-photo").textContent = "–"; return; }
+    const p = JSON.parse(raw);
+    $("#t-photo").textContent = p.done ? t("kész", "done")
+      : p.focusing ? t("fókuszál…", "focusing…") : `${p.accumulated} / ${p.samples}`;
+    if (p.done) clearInterval(photoTimer);
+  }, 200);
+});
 
 // ---- Telemetry ------------------------------------------------------------------------------
 const CATS = [
-  { id: "geo", color: "#8fb7e6", hu: "Geometria", en: "Geometry", match: /^(cull|raster|hzb|assembly)/ },
+  { id: "geo", color: "#8fb7e6", hu: "Geometria", en: "Geometry", match: /^(cull|raster|hzb|assembly|plant)/ },
   { id: "mat", color: "#c7a6e8", hu: "Anyagok", en: "Materials", match: /material|rvt|svt|texture|subsurface/ },
   { id: "fx", color: "#e98fb4", hu: "Térfogatok", en: "Volumes", match: /^volume |particle|^oit/ },
   { id: "vsm", color: "#e88c6f", hu: "Árnyékok", en: "Shadows", match: /vsm|shadow/ },
-  { id: "lumen", color: "#f2b04a", hu: "Lumen", en: "Lumen", match: /lumen|gi temporal/ },
-  { id: "air", color: "#7fd1a3", hu: "Ég és köd", en: "Sky & fog", match: /sky|cloud|fog/ },
-  { id: "light", color: "#ece6da", hu: "Megvilágítás", en: "Lighting", match: /light|translucen/ },
+  { id: "lumen", color: "#f2b04a", hu: "Lumen", en: "Lumen", match: /lumen|gi temporal|short-range ao/ },
+  { id: "air", color: "#7fd1a3", hu: "Ég és köd", en: "Sky & fog", match: /sky|cloud|fog|river/ },
+  { id: "light", color: "#ece6da", hu: "Megvilágítás", en: "Lighting", match: /light|translucen|avboit/ },
   { id: "post", color: "#9fa8ba", hu: "Kép", en: "Image", match: /.*/ },
 ];
 // Live readouts in the chapters: GPU passes summed by name.
-const READOUTS = { "t-direct": /^(light culling|local light shadows|lighting|megalights)/, "t-gather": /final gather|^lumen lite/, "t-fx": /^volume |particle|^oit/, "t-tess-raster": /^raster sw/ };
+const READOUTS = { "t-direct": /^(light culling|local light shadows|lighting|megalights)/, "t-gather": /final gather|^lumen lite/, "t-fx": /^volume |particle|^oit/, "t-tess-raster": /^raster sw/, "t-cull": /^light cull/ };
 const fmt = (n, d = 1) => n.toLocaleString(lang === "en" ? "en-US" : "hu-HU", { minimumFractionDigits: d, maximumFractionDigits: d });
 function updateTelemetry() {
   if (!engine) return;
@@ -1209,10 +1634,14 @@ function updateTelemetry() {
   $("#t-tess").textContent = micro ? fmt(Number(micro[1]), 2) + " M" : "–";
   // Feature states of the toggle buttons.
   const states = hudStates(hud);
-  for (const b of $$("[data-toggle]")) {
+  for (const b of $$("[data-toggle], [data-feature]")) {
     const label = b.dataset.label;
     const on = label in states ? states[label] : Object.entries(states).find(([k]) => k.includes(label))?.[1];
-    if (on !== undefined) {
+    if (typeof on === "string") {
+      // The world cache's three modes.
+      b.setAttribute("aria-pressed", String(on !== "off"));
+      $(".state", b).textContent = t(...(WC_NAMES[on] || [on, on]));
+    } else if (on !== undefined) {
       b.setAttribute("aria-pressed", String(on));
       $(".state", b).textContent = on ? t("be", "on") : t("ki", "off");
     }
