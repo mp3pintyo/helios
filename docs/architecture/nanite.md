@@ -15,7 +15,7 @@ Part of the `helios-render` GPU pipeline; the pipeline diagram and the index of 
   decodes vertices on the fly in every consumer), so resident memory and streamed bytes are both 2.1–2.5× smaller
   (valley 118 → 48 MiB, cathedral 167 → 80 MiB, forest 85 → 40 MiB).
 * **Entropy-coded pages on disk and over the wire** (round 8, [`streaming.md`](../round8/streaming.md);
-  `helios_geometry::page_codec`, `page_decode.rs`). `--bake-hvm` writes `.hvm` version 7: the version-5 header plus
+  `helios_geometry::page_codec`, `page_decode.rs`). `--bake-hvm` writes `.hvm` version 7: the version-6 header (with the plant bones) plus
   every stored page's byte offset, then each page coded by a model that knows the cluster format — the decoder
   reads the page back into field values and re-packs them with the encoder's own `encode_cluster`, so the pool gets
   bit-identical GPU pages (no shader change). Triangles: an edge FIFO of the last 32 triangles (slot + rotation +
@@ -32,7 +32,7 @@ Part of the `helios-render` GPU pipeline; the pipeline diagram and the index of 
   (cathedral high 86.8 → 36.9 MiB). Decoding runs off the render thread: native decode threads (≤ 4) take each
   completed read, the browser's bake workers (`HPDT` tasks) or, without them, the render thread for 2 ms a frame; a
   page is `Decoding` between `Requested` and `Arrived`. ~50–65 MB/s of GPU pages per core natively, ~50 MB/s in V8's
-  wasm. Root pages are decoded with the header at load. `--hvm-raw` still writes version 5, and versions 4/5 load as
+  wasm. Root pages are decoded with the header at load. `--hvm-raw` writes raw version 6, and versions 4–6 load as
   before. `--io-bandwidth-mbps N` (with `--io-latency-ms`) emulates a network link for `--stream-from`: at 100 Mbit/s
   and 20 ms the valley (high) fills its view in 1.65 instead of 2.31 s and finishes prefetching in 2.0 instead of
   4.2 s; from a local SSD decoding makes it a little later (0.79 instead of 0.52 s).

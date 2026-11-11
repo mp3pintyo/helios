@@ -82,6 +82,7 @@ pub fn all() -> Vec<Setting> {
             s.local_exposure = b(v).then(LocalExposure::default)
         }),
         flag("short_range_ao", "Short-range AO", "Lighting", |s| json!(s.short_range_ao), |s, v| s.short_range_ao = b(v)),
+        flag("river_simulation", "River simulation", "Atmosphere", |s| json!(s.river_simulation), |s, v| s.river_simulation = b(v)),
         number("bloom_intensity", "Bloom", "Lighting", (0.0, 0.3, 0.005), |s| json!(s.bloom_intensity), |s, v| s.bloom_intensity = f(v)),
         flag("aerial_perspective", "Aerial perspective", "Atmosphere", |s| json!(s.aerial_perspective), |s, v| s.aerial_perspective = b(v)),
         number("aerial_perspective_scale", "Haze density", "Atmosphere", (0.0, 16.0, 0.25), |s| json!(s.aerial_perspective_scale), |s, v| {
@@ -93,6 +94,8 @@ pub fn all() -> Vec<Setting> {
             s.fog_scattering = (f(v) > 0.0).then(|| FogScattering { intensity: f(v), ..Default::default() })
         }),
         flag("wind", "Wind animation", "Atmosphere", |s| json!(s.wind), |s, v| s.wind = b(v)),
+        flag("wind_bones", "Dynamic wind (plant bones)", "Atmosphere", |s| json!(s.wind_bones), |s, v| s.wind_bones = b(v)),
+        flag("wind_simulation", "Dynamic wind simulation (push, gusts)", "Atmosphere", |s| json!(s.wind_simulation), |s, v| s.wind_simulation = b(v)),
         number("lod_threshold", "Nanite error (px)", "Geometry", (0.125, 16.0, 0.125), |s| json!(s.lod_threshold), |s, v| s.lod_threshold = f(v)),
         flag("tessellation", "Nanite tessellation (displacement)", "Geometry", |s| json!(s.tessellation), |s, v| s.tessellation = b(v)),
         number("dice_rate", "Tessellation dice rate (px)", "Geometry", (0.5, 8.0, 0.25), |s| json!(s.dice_rate), |s, v| s.dice_rate = f(v)),

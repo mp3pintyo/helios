@@ -148,9 +148,9 @@ Honest differences that remain:
    the screen-space copy (what is off screen or hidden is not refracted; where a nearer layer covers the displaced
    lookup it falls back to the pixel behind); translucent surfaces don't request shadow pages (where the
    opaque scene didn't request theirs, they fall back to coarser resident levels) and are drawn without LOD. **Water**
-   is a normal-mapped plane (no displacement or tessellation, no FFT spectrum, no simulation or interaction with
-   objects, no flow maps or rivers / oceans, no spline-shaped bodies: a body is its instance's bounding rectangle, at
-   most 4 per scene); the waves ignore `Scene::wind`. Caustics come from the analytic waves (a single preimage, so
+   bodies (lakes) are normal-mapped planes (no displacement or tessellation, no FFT spectrum, no spline-shaped bodies:
+   a body is its instance's bounding rectangle, at most 4 per scene, no oceans); rivers are simulated (item 18); the
+   waves ignore `Scene::wind`. Caustics come from the analytic waves (a single preimage, so
    overlapping folds are not summed; no chromatic dispersion) and only light the bed seen through the water or from
    inside it, not the fog or other translucent surfaces. Underwater fog is lit by the light entering the surface above
    the middle of each view ray (no light shafts or volumetric shadowing along it), total internal reflection shows
@@ -169,10 +169,18 @@ Honest differences that remain:
    window, a round aperture without blades). **Fog screen space scattering** spreads the forward lobe at
    single-scattering angles (many orders widen it in reality), weights the kernel per pixel only through τ (not per
    source depth), and ignores aerial perspective and underwater fog.
-7. **Wind** is procedural (no pivot-painter data per branch or leaf, no simulation) and does not rotate normals;
-   leaves flutter around their position rather than their stem. A per-vertex wind weight (round 8) holds plants at
-   their roots, but only the procedural vegetation bakes it (imported foliage moves with weight 1, as do voxel LODs and
-   tessellated surfaces), and it is one scalar per vertex, not a bone hierarchy (UE 5.9's skeletal *dynamic wind*). Shadow pages cache static casters separately (as
+7. **Wind**: the procedural plants have bones (round 8, *dynamic wind*): a parametric mode (UE's `Mode 0`) bends them
+   as arcs about their pivots with rotated normals, and a simulated tier gives the plants a push capsule or a gust ring
+   reaches spring states. Simpler than UE 5.9's Dynamic Wind: only the procedural vegetation has bones — imported
+   foliage keeps the procedural wind (no skeletal plant import, no bone weights from content); a vertex follows one
+   bone (no blending at joints; deeper twigs ride rigidly on their depth-2 branch); the parametric rotations reuse the
+   procedural layers' time functions (no drag or vortex-shedding model, no per-bone wind sampling — gusts are one
+   travelling wave per plant); the simulated tier has one force kind each (a capsule following the camera, a radial
+   gust burst; no directional / swirl / cone forces or velocity volumes, no CPU-side API to add them), simulates only
+   plants of up to 512 bones (grass, ferns, bushes — not trees), keeps leaves parametric, and integrates a spring per
+   bone (as UE: no constraint solver); assembly parts hang rigidly on their bone's frame apart from their own leaves;
+   voxels move rigidly per brick with its branch bone (no flutter); bones cost per vertex in every pass that positions
+   geometry (UE evaluates bones once per instance and skins). Shadow pages cache static casters separately (as
    UE's static cache); the wind, `Mobility::Movable` and animated skins make a caster dynamic. Refreshes are decided
    per instance and redraw every dynamic caster in the
    page, so in the forest — where trees, bushes, ferns and grass all sway and only terrain, rocks and logs are
@@ -227,8 +235,8 @@ Honest differences that remain:
     normal and their brick's mean texture coordinate — no per-voxel colour, so textures varying within a brick, vertex colours and alpha-masked (card) foliage's mask
     coverage are averaged away or ignored; coverage along a diagonal is modelled from the three axes (exact for
     axis-aligned and isotropic leaves). Voxels are rasterised as stochastic cubes (no ray-marched depth buckets or
-    front-to-back ordering), rely on TSR to average their dithering, move rigidly with the wind at their centre (no
-    flutter, no bone-driven wind), and have no hardware path: in shadow pages refreshed over a static layer without a
+    front-to-back ordering), rely on TSR to average their dithering, move rigidly with the wind at their centre (a plant's
+    bricks with their branch bone since the dynamic wind; no flutter), and have no hardware path: in shadow pages refreshed over a static layer without a
     scratch tile, or split pages, they sit out that refresh. Voxels win only where pruning reports a larger error than
     the voxel budget allows (4 voxels per kept triangle: the forest's conifers and ferns from mid-distance, the
     broadleaf canopies near their roots). Assemblies are one level deep (no nested parts), their parts take the
@@ -266,16 +274,25 @@ Honest differences that remain:
     collision), no ribbons, meshes, sub-UV flipbooks, events or GPU sorting; lighting is per particle (no per-pixel
     normal-mapped lighting). Memory: 72 bytes per internal pixel while volumes and particles are on screen (volume
     march + history front/back, OIT targets, nearest translucent depth: 104 MiB at 1600×900).
-12. **Editor**: no actors or hierarchy — a tree's trunk and foliage are two instances, selected separately; deleted
-    instances and lights stay as hidden / disabled slots (reused, never compacted); undo history is in memory (200
-    steps); no landscape sculpting or painting, no multi-viewport, no editor-only billboards in the renderer (light and
-    volume icons are a 2D overlay without depth test), the gizmo draws over everything; typed transform values apply to
-    the primary selection only; the native window has the editor core without panels. Edited instances stay
-    `Static`, so the shadow pages under a dragged object are rendered in full every preview frame, and hiding,
-    deleting, duplicating, reassigning materials and PCG regeneration are structural changes (all instance data
-    re-uploaded, Lumen's instance lists rebuilt). Scene files address base instances by build order (a changed scene
-    builder is detected by mesh name and the edit skipped with a warning); dropped `.glb` files are referenced by file
-    name and must be hosted next to the page to reload; glTF imports bake on the main thread in the browser.
+12. **Editor**: actors with components and a hierarchy exist (round 8), but simpler than UE's: no actor classes or
+    Blueprints, no sockets (children attach to the actor, not to a component or bone), no outliner folders separate
+    from actors (a builder's folder is an actor without components), no per-component mobility settings in the UI,
+    no level instances / sub-levels or World Partition; glTF node hierarchies are not imported as actors (each
+    instance of a model scene is an actor of its own); PCG volumes are their own list, not components of actors;
+    duplicated actors leave out volume and particle components (base-scene emitters are not serialisable); props the
+    demo animates (key 0) are moved by their motion every frame and ignore the editor's transform while it runs.
+    Actor keys of scattered objects contain their position, so a builder that moves an object orphans its edits
+    (reported, skipped). Removed components' slots are compacted lazily (idle 1.5 s with ≥ 32 free instances or
+    ≥ 8 free lights, or idle 30 s), and compaction itself is a structural change; a deleted prop the demo animated
+    comes back static on undo. Dragging makes the moved instances `Movable` (cached static shadow pages, dynamic
+    casters redrawn) and restores them 30 frames after the last move, which re-renders the static layer under them
+    once; hiding, deleting, duplicating, reassigning materials and PCG regeneration are still structural changes
+    (all instance data re-uploaded, Lumen's instance lists rebuilt). Undo history is in memory (200 steps); no
+    landscape sculpting or painting, no multi-viewport, no editor-only billboards in the renderer (light and volume
+    icons are a 2D overlay without depth test), the gizmo draws over everything; typed transform values apply to the
+    primary selection only; the native window has the editor core without panels (click selects an actor, Delete /
+    Ctrl+D act on it with its children). Dropped `.glb` files are referenced by file name and must be hosted next to
+    the page to reload; glTF imports bake on the main thread in the browser.
 13. **PCG**: a fixed node set without a graph canvas (nodes and their parameters are edited in the Details panel; the
     graph's structure comes from the presets / the file), no attribute system or custom nodes, no spline editing in
     the viewport (distance targets are volume-local data), spawners reference meshes and materials by name, generation
@@ -338,12 +355,20 @@ Honest differences that remain:
     over up to four by a deterministic least-loaded assignment (the page only runs the builder without bakes,
     ≈ 0.3 s), and a stand-in of the scene queues its content pipelines while they bake; scene switches bake there
     too. Still simpler than UE, which cooks offline: every visit bakes the scene again (a bake takes as long as its
-    largest mesh: the valley's terrain, 2.5 s on a page thread), imported glTF models bake on the page, Firefox's
-    compile set is unchanged (≈ 43 s of background compiling for the valley, led by the translucency shading,
-    tessellation dicing and the resolve's tessellation permutation), and the device needs 20 sampled textures per
+    largest mesh: the valley's terrain, 2.5 s on a page thread), imported glTF models bake on the page, and the
+    device needs 20 sampled textures per
     shader stage (WebGPU guarantees 16; desktop browsers offer 48–64) — there is no reduced variant for smaller
     adapters. `shader-f16` is requested and wired up (`half.wgsl`), but no pass uses it: TSR and MegaLights'
     denoiser gained nothing on the RTX 3090, where UE 5.8.1 runs TSR in 16-bit by default.
+    Round 8 (`webperf`, `docs/round8/webperf.md`): a frame whose scene sync queues pipelines (a new scene, an
+    editor change) is held — the canvas keeps its last image — while they compile in the background, instead of
+    compiling them inside the frame (a switch to the gallery held the canvas 18–26 s in Chrome, now ≈ 3–4 s); the
+    valley's Firefox set shrank from 214 to 200 pipelines (45 → 38.5 s of compiling: the resolve's tessellation
+    permutation used from the start, the dicing two levels per pipeline, classic translucency only for refracting
+    surfaces, the underwater view on demand). Still simpler: the new scene's pipelines compile after its bake,
+    not during it (its stand-in cannot be synced while the old scene renders: one GPU scene), so a switch still
+    shows a frozen frame for the compile (Firefox 12–16 s for the gallery's ten resolve pipelines, one at a time), and
+    AVBOIT's front / back variants (≈ 10 s of the valley's Firefox compile) are separate pipelines.
 16. **Coloured light through glass** (round 7, `glass-shadows`): the sun's map of the glass panes keeps one pane
     per texel (light through two panes in a row takes the nearer one's colour) and spans every visible pane (glass
     spread over a large world gets coarse texels); Lumen's voxel surface cache and the volumes' lighting cache still
@@ -359,3 +384,19 @@ Honest differences that remain:
     multi-level DAG step: a per-mesh level table skipping finer levels at once cost as much as it saved and was
     removed; coarse pages above the LOD cut still send every cluster to the cluster test
     (`docs/round8/nanite-culling.md`).
+18. **Terrain and rivers** (round 8, `mesh-terrain`, `shallow-water-rivers`): the mesh terrain replaces a rectangle of
+    the landscape, not the whole landscape (no world-sized mesh terrain, no streaming of terrain regions, no paging of
+    modifiers); its modifier stack is code (rock boxes with taper, capsule tunnels, polyline channels, flatten — no
+    sculpt or paint brushes, no editor tools, no spline modifiers, no erosion), and it is meshed once when the scene is
+    built (no live re-meshing of edited chunks; ~1 s of surface nets for the valley's 80 × 80 m natively). Resolution
+    is two fixed levels per chunk (0.25 / 0.5 m) joined by overlapping skirts rather than a crack-free transition mesh
+    (Transvoxel); the seam with the landscape relies on the landscape's grid. Its material is the landscape's layers
+    evaluated per pixel (no runtime virtual texture for the mesh terrain, no per-region paint layers or weight maps).
+    Collision is the CPU triangle grid (no physics engine; the camera and placement use it). Rivers: one simulated
+    river per scene on a fixed grid (no spline-defined river, no grid following the river's course, no paintable water
+    input in the editor — sources are code); the shallow-water model is the virtual-pipes scheme (no momentum
+    advection, so no hydraulic jumps or eddies behind obstacles beyond what the pipes' flow does; Manning friction only;
+    first-order, a little diffusive). Obstacles are static (boulders baked into the bed; the raft and other moving
+    instances don't push water, nothing floats on the river), the river has no underwater view, Lumen and shadows don't
+    see its water, and its surface is the sim grid (no tessellation beyond it; waves are the lake's normal-mapped ones
+    advected by a two-phase flow map, which can show its period as gentle pulsing on slow water).

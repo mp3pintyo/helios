@@ -16,6 +16,7 @@
 #include "alpha_mask.wgsl"
 #include "wind.wgsl"
 #include "skinning.wgsl"
+#include "plant_wind.wgsl"
 
 // Late-pass draws start after the clusters drawn by the early pass.
 override LATE: bool = false;
@@ -32,6 +33,8 @@ override LATE: bool = false;
 @group(0) @binding(42) var alpha_mask_sampler: sampler;
 @group(0) @binding(65) var<uniform> wind: Wind;
 @group(0) @binding(66) var skin_palette: texture_2d<f32>;
+@group(0) @binding(170) var plant_bones: texture_2d<f32>;
+@group(0) @binding(171) var plant_sim: texture_2d<f32>;
 
 // Cull state words (CullState in cull.wgsl).
 const STATE_HW_EARLY: u32 = 4u;
@@ -67,7 +70,7 @@ fn corner(entry: vec4<u32>, cluster: Cluster, vertex_index: u32) -> Corner {
     c.index = cluster_triangle(cluster, base, triangle)[vertex_index % 3u];
     let instance = instances[entry.x];
     let strength = wind_strength(instance);
-    let world = wind_world_position(instance, strength, skinned_vertex_position(instance, cluster, base, c.index), vertex_wind_weight(cluster, base, c.index, strength));
+    let world = plant_world_position(instance, strength, cluster, base, c.index, skinned_vertex_position(instance, cluster, base, c.index));
     c.position = view.view_proj * vec4<f32>(world, 1.0);
     c.visible = true;
     return c;

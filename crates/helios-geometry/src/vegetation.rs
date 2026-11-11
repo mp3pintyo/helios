@@ -7,6 +7,7 @@
 use glam::{Mat4, Quat, Vec2, Vec3};
 
 use crate::modeling::{tube, MeshBuilder};
+use crate::plant_bones::{bind_all, BoneClass, PlantRig};
 use crate::Mesh;
 
 /// Deterministic xorshift generator.
@@ -40,7 +41,9 @@ impl Rng {
     }
 }
 
-/// A tree split by material.
+/// A tree split by material. Both meshes carry the plant's bones ([`Mesh::bones`]): the
+/// branches first (all the wood's bones), then the leaves, so one plant's wood and foliage move
+/// as one.
 pub struct Plant {
     pub wood: Mesh,
     pub foliage: Mesh,
@@ -53,6 +56,9 @@ pub struct PlantAssembly {
     pub sprays: Vec<Mesh>,
     /// (spray, transform in plant space) of every copy.
     pub placements: Vec<(usize, Mat4)>,
+    /// The bone of `wood.bones` each copy hangs from (its sprays' leaves are bones without a
+    /// parent: [`crate::plant_bones::part_bone_table`]).
+    pub part_bones: Vec<u16>,
 }
 
 /// Lengths of the spray variants, a geometric series from `shortest` by `ratio`: a copy uses
@@ -123,6 +129,66 @@ fn leaf(b: &mut MeshBuilder, base: Vec3, dir: Vec3, up: Vec3, shape: LeafShape, 
     }
 }
 
+/// Rotation per unit flutter (metres of the material's response) of a leaf of `length`: its tip
+/// moves 2.5 × the response.
+fn leaf_amplitude(length: f32) -> f32 {
+    2.5 / length.max(0.02)
+}
+
+/// Flutter frequency fraction of a leaf of `length`: larger leaves flutter slower.
+fn leaf_frequency(length: f32) -> f32 {
+    (0.12 / length.max(0.02)).sqrt().clamp(0.6, 1.0)
+}
+
+/// A leaf's bone: from its base along its blade, hanging from `parent`.
+fn leaf_bone(rig: &mut PlantRig, parent: Option<u16>, base: Vec3, dir: Vec3, length: f32, phase: f32) -> u16 {
+    rig.add(parent, base, base + dir.normalize_or(Vec3::Y) * length, BoneClass::Flutter, leaf_amplitude(length), leaf_frequency(length), phase)
+}
+
+/// Mechanics of a branch for its wind response: base radius, length and the leaf area it holds
+/// (its own and its sub-branches').
+#[derive(Clone, Copy, Default)]
+struct Limb {
+    radius: f32,
+    length: f32,
+    leaf_area: f32,
+}
+
+/// Gives the [`BoneClass::Sway`] bones of a rig their amplitude and frequency from their
+/// mechanics, as a cantilever loaded by the wind: stiffness `∝ r⁴/L³`, mass `∝ r²L` plus the
+/// leaves', drag area `∝ 2rL` plus the leaves'. The static deflection angle (drag / (stiffness ·
+/// L)) relative to the plant's median sets the amplitude (compressed, 0.5–2.5 rad per unit
+/// sway), the natural frequency `√(k/m)` relative to the fastest branch the frequency (0.4–1):
+/// thin twigs whip quickly, heavy leafy limbs swing slowly and far.
+fn tune_branches(rig: &mut PlantRig, limbs: &[Limb]) {
+    let sway: Vec<usize> = (0..rig.bones.len().min(limbs.len())).filter(|&i| rig.bones[i].class == BoneClass::Sway).collect();
+    if sway.is_empty() {
+        return;
+    }
+    let mechanics = |l: &Limb| {
+        let (r, len) = (l.radius.max(0.003), l.length.max(0.05));
+        let stiffness = r.powi(4) / len.powi(3);
+        let mass = std::f32::consts::PI * r * r * len + 3e-4 * l.leaf_area;
+        let area = 2.0 * r * len + l.leaf_area;
+        (area / (stiffness * len), (stiffness / mass).sqrt())
+    };
+    let values: Vec<(f32, f32)> = sway.iter().map(|&i| mechanics(&limbs[i])).collect();
+    let mut deflections: Vec<f32> = values.iter().map(|v| v.0).collect();
+    deflections.sort_by(f32::total_cmp);
+    let median = deflections[deflections.len() / 2].max(1e-12);
+    let fastest = values.iter().map(|v| v.1).fold(0.0f32, f32::max).max(1e-12);
+    for (&i, &(deflection, frequency)) in sway.iter().zip(&values) {
+        rig.bones[i].amplitude = (deflection / median).powf(0.3).clamp(0.5, 2.5);
+        rig.bones[i].frequency = (frequency / fastest).sqrt().clamp(0.4, 1.0);
+    }
+}
+
+/// Rotation per unit bend of a stem of `length` that bends like the procedural wind's
+/// cantilever (`bend · h²` at its tip): an arc of angle θ moves its tip by θL/2.
+fn stem_amplitude(length: f32) -> f32 {
+    2.0 * length
+}
+
 /// Broadleaf tree parameters.
 #[derive(Clone, Copy, Debug)]
 pub struct TreeParams {
@@ -162,13 +228,21 @@ struct Grower<'a> {
     p: &'a TreeParams,
     rng: Rng,
     wood: Vec<Mesh>,
-    leaves: MeshBuilder,
-    /// The leaf-bearing outer part of every terminal twig: (start, end).
-    twigs: Vec<(Vec3, Vec3)>,
+    /// Leaves as (base, direction, up, shape, branch bone), built into the foliage once every
+    /// branch has its bone (leaf bones follow the branches').
+    leaves: Vec<(Vec3, Vec3, Vec3, LeafShape, u16)>,
+    /// The leaf-bearing outer part of every terminal twig: (start, end, bone).
+    twigs: Vec<(Vec3, Vec3, u16)>,
+    rig: PlantRig,
+    limbs: Vec<Limb>,
 }
 
+/// Branching depth up to which branches get bones of their own; deeper twigs ride rigidly on
+/// their ancestor's (a bone chain is at most trunk → two branch levels → leaf).
+const BONE_DEPTH: u32 = 2;
+
 impl Grower<'_> {
-    fn branch(&mut self, start: Vec3, dir: Vec3, length: f32, radius: f32, depth: u32) {
+    fn branch(&mut self, start: Vec3, dir: Vec3, length: f32, radius: f32, depth: u32, parent: Option<u16>) {
         let segments = (6 + (length * 1.5) as usize).min(14);
         let mut points = vec![start];
         let mut radii = vec![radius];
@@ -182,9 +256,24 @@ impl Grower<'_> {
             points.push(p);
             radii.push(radius * (1.0 - 0.75 * i as f32 / segments as f32).max(0.08));
         }
+        let bone = match parent {
+            Some(parent) if depth > BONE_DEPTH => parent,
+            _ => {
+                let class = if depth == 0 { BoneClass::Bend } else { BoneClass::Sway };
+                let chord = start.distance(points[segments]);
+                let amplitude = if depth == 0 { stem_amplitude(chord) } else { 1.0 };
+                // A deterministic phase (the rng's stream shapes the tree).
+                let phase = (self.limbs.len() as f32 * 0.618_034).fract();
+                let b = self.rig.add(parent, start, points[segments], class, amplitude, 1.0, phase);
+                self.limbs.push(Limb { radius, length: chord, leaf_area: 0.0 });
+                b
+            }
+        };
         let sides = if depth == 0 { self.p.sides } else { (self.p.sides / (depth as usize + 1)).max(4) };
         if radius > 0.006 {
-            self.wood.push(tube(&points, &radii, sides, true));
+            let mut tube = tube(&points, &radii, sides, true);
+            bind_all(&mut tube, bone);
+            self.wood.push(tube);
         }
 
         if depth < self.p.depth {
@@ -200,12 +289,12 @@ impl Grower<'_> {
                 let child = (around * (Quat::from_axis_angle(perpendicular, angle) * along)).normalize();
                 let child_length = length * self.rng.range(0.45, 0.65) * (1.15 - t * 0.4);
                 let child_radius = radii[index] * self.rng.range(0.55, 0.75);
-                self.branch(origin, child, child_length, child_radius, depth + 1);
+                self.branch(origin, child, child_length, child_radius, depth + 1, Some(bone));
             }
         }
         if depth + 1 >= self.p.depth {
             // Leaves along the outer half of terminal twigs.
-            self.twigs.push((points[((0.35 * segments as f32) as usize).min(segments)], points[segments]));
+            self.twigs.push((points[((0.35 * segments as f32) as usize).min(segments)], points[segments], bone));
             for _ in 0..self.p.leaves_per_twig {
                 let t = self.rng.range(0.35, 1.0);
                 let index = ((t * segments as f32) as usize).min(segments);
@@ -214,9 +303,46 @@ impl Grower<'_> {
                 let up = (Vec3::Y + self.rng.unit() * 0.5).normalize();
                 let scale = self.rng.range(0.75, 1.25);
                 let shape = LeafShape { length: self.p.leaf.length * scale, width: self.p.leaf.width * scale, fold: self.p.leaf.fold };
-                add_leaf(&mut self.leaves, base, out, up, shape);
+                self.leaves.push((base, out, up, shape, bone));
             }
         }
+    }
+
+    /// Sums every bone's leaf area up its chain and tunes the branches ([`tune_branches`]).
+    fn tune(&mut self) {
+        for &(_, _, _, shape, bone) in &self.leaves {
+            let mut b = Some(bone);
+            while let Some(i) = b {
+                self.limbs[i as usize].leaf_area += 0.5 * shape.length * shape.width;
+                b = self.rig.bones[i as usize].parent;
+            }
+        }
+        tune_branches(&mut self.rig, &self.limbs);
+    }
+
+    /// The wood with the branches' bones (call before [`Grower::foliage`]).
+    fn wood(&self) -> Mesh {
+        let mut wood = MeshBuilder::default();
+        for m in &self.wood {
+            wood.append(m);
+        }
+        wood.skin = self.wood.iter().flat_map(|m| m.skin.iter().copied()).collect();
+        let mut wood = wood.build();
+        wood.bones = self.rig.bones.clone();
+        wood
+    }
+
+    /// The foliage: one bone per leaf after the branches' (`rig` then holds every bone).
+    fn foliage(&mut self) -> Mesh {
+        let mut b = MeshBuilder::default();
+        for (k, &(base, out, up, shape, branch)) in self.leaves.iter().enumerate() {
+            let bone = leaf_bone(&mut self.rig, Some(branch), base, out, shape.length, (k as f32 * 0.618_034).fract());
+            b.set_bone(bone);
+            add_leaf(&mut b, base, out, up, shape);
+        }
+        let mut mesh = b.build();
+        mesh.bones = self.rig.bones.clone();
+        mesh
     }
 }
 
@@ -240,47 +366,42 @@ const TREE_FREE_HEIGHT: f32 = 0.8;
 
 /// A broadleaf tree (oak / beech like) rooted at the origin.
 pub fn broadleaf_tree(params: &TreeParams) -> Plant {
-    let g = grow_broadleaf(params);
-    let mut wood = MeshBuilder::default();
-    for m in &g.wood {
-        wood.append(m);
-    }
-    let mut wood = wood.build();
+    let mut g = grow_broadleaf(params);
+    g.tune();
+    let mut wood = g.wood();
     root_weights(&mut wood, TREE_FREE_HEIGHT.min(0.25 * params.height));
-    Plant { wood, foliage: g.leaves.build() }
+    let foliage = g.foliage();
+    Plant { wood, foliage }
 }
 
 /// The same tree with its foliage as an assembly: every terminal twig carries a copy of one of
 /// `2 × 5` leaf sprays (two seeds, five lengths), turned so its leaves face up like the
 /// originals and scaled to the twig.
 pub fn broadleaf_assembly(params: &TreeParams) -> PlantAssembly {
-    let g = grow_broadleaf(params);
-    let mut wood = MeshBuilder::default();
-    for m in &g.wood {
-        wood.append(m);
-    }
+    let mut g = grow_broadleaf(params);
+    g.tune();
+    let mut wood = g.wood();
     let lengths = spray_lengths(0.3, 1.6, 5);
     let sprays = (0..2u32)
         .flat_map(|seed| lengths.iter().map(move |&length| (seed, length)))
         .map(|(seed, length)| leaf_spray(params.seed * 31 + seed, params.leaves_per_twig, length, params.leaf))
         .collect();
     let mut rng = Rng::new(params.seed ^ 0x5eed);
-    let placements = g
+    let (placements, part_bones) = g
         .twigs
         .iter()
-        .map(|&(start, end)| {
+        .map(|&(start, end, bone)| {
             let (variant, scale) = nearest_spray(&lengths, start.distance(end));
             // Spray space: the twig along +y, up (+z) towards the sky, a little rolled.
             let y = (end - start).normalize_or(Vec3::Y);
             let z = (Vec3::Y - y * y.y).normalize_or(y.any_orthonormal_vector());
             let frame = Quat::from_mat3(&glam::Mat3::from_cols(y.cross(z), y, z)) * Quat::from_rotation_y(rng.range(-0.5, 0.5));
             let seed = (rng.float() * 2.0) as usize % 2;
-            (seed * lengths.len() + variant, Mat4::from_scale_rotation_translation(Vec3::splat(scale), frame, start))
+            ((seed * lengths.len() + variant, Mat4::from_scale_rotation_translation(Vec3::splat(scale), frame, start)), bone)
         })
-        .collect();
-    let mut wood = wood.build();
+        .unzip();
     root_weights(&mut wood, TREE_FREE_HEIGHT.min(0.25 * params.height));
-    PlantAssembly { wood, sprays, placements }
+    PlantAssembly { wood, sprays, placements, part_bones }
 }
 
 /// Leaves along a twig of `length` on +y (as the trees place them along a twig's outer half),
@@ -288,18 +409,23 @@ pub fn broadleaf_assembly(params: &TreeParams) -> PlantAssembly {
 fn leaf_spray(seed: u32, leaves: u32, length: f32, leaf: LeafShape) -> Mesh {
     let mut rng = Rng::new(seed);
     let mut b = MeshBuilder::default();
-    for _ in 0..leaves {
+    let mut rig = PlantRig::default();
+    for k in 0..leaves {
         let base = Vec3::Y * (rng.float() * length) + rng.unit() * 0.03;
         let out = (rng.unit() + Vec3::Y * 0.6 + Vec3::Z * 0.25).normalize();
         let up = (Vec3::Z + rng.unit() * 0.5).normalize();
         let scale = rng.range(0.75, 1.25);
-        add_leaf(&mut b, base, out, up, LeafShape { length: leaf.length * scale, width: leaf.width * scale, fold: leaf.fold });
+        let shape = LeafShape { length: leaf.length * scale, width: leaf.width * scale, fold: leaf.fold };
+        b.set_bone(leaf_bone(&mut rig, None, base, out, shape.length, (k as f32 * 0.618_034).fract()));
+        add_leaf(&mut b, base, out, up, shape);
     }
-    b.build()
+    let mut mesh = b.build();
+    mesh.bones = rig.bones;
+    mesh
 }
 
 fn grow_broadleaf(params: &TreeParams) -> Grower<'_> {
-    let mut g = Grower { p: params, rng: Rng::new(params.seed), wood: Vec::new(), leaves: MeshBuilder::default(), twigs: Vec::new() };
+    let mut g = Grower { p: params, rng: Rng::new(params.seed), wood: Vec::new(), leaves: Vec::new(), twigs: Vec::new(), rig: PlantRig::default(), limbs: Vec::new() };
     let lean = Vec3::new(g.rng.range(-0.08, 0.08), 1.0, g.rng.range(-0.08, 0.08));
     // Root flare under the trunk.
     let flare: Vec<Mesh> = (0..5)
@@ -310,8 +436,12 @@ fn grow_broadleaf(params: &TreeParams) -> Grower<'_> {
             tube(&path, &[params.trunk_radius * 0.5, params.trunk_radius * 0.35, params.trunk_radius * 0.12], 6, true)
         })
         .collect();
-    g.wood.extend(flare);
-    g.branch(Vec3::new(0.0, -0.2, 0.0), lean, params.height * 0.62, params.trunk_radius, 0);
+    // The trunk is bone 0; the root flare rides on it (held where it meets the ground).
+    g.wood.extend(flare.into_iter().map(|mut m| {
+        bind_all(&mut m, 0);
+        m
+    }));
+    g.branch(Vec3::new(0.0, -0.2, 0.0), lean, params.height * 0.62, params.trunk_radius, 0, None);
     g
 }
 
@@ -322,12 +452,17 @@ pub fn conifer(seed: u32, height: f32, radius: f32, needles_per_branch: u32, det
     let mut needle_rng = Rng::new(seed ^ 0x6e65_6564);
     let mut wood = MeshBuilder::default();
     let mut foliage = MeshBuilder::default();
+    let mut rig = PlantRig::default();
+    let mut limbs = Vec::new();
     let trunk: Vec<Vec3> = (0..=12).map(|i| Vec3::new(rng.range(-0.02, 0.02), height * i as f32 / 12.0, rng.range(-0.02, 0.02))).collect();
     let radii: Vec<f32> = (0..=12).map(|i| radius * (1.0 - i as f32 / 12.0 * 0.95)).collect();
+    let trunk_bone = conifer_trunk(&mut rig, &mut limbs, height, radius);
+    wood.set_bone(trunk_bone);
     wood.append(&tube(&trunk, &radii, detail_sides, true));
     let whorls = (height * 1.6) as u32;
     // Needle sprays: flat blades carrying the needle texture.
     let needle = LeafShape { length: 0.42, width: 0.16, fold: 0.15 };
+    let mut needles = Vec::new();
     for w in 0..whorls {
         let t = 0.18 + 0.8 * w as f32 / whorls as f32;
         let y = height * t;
@@ -343,6 +478,8 @@ pub fn conifer(seed: u32, height: f32, radius: f32, needles_per_branch: u32, det
                 })
                 .collect();
             let r0 = radius * 0.22 * (1.0 - t) + 0.01;
+            let branch = conifer_branch(&mut rig, &mut limbs, trunk_bone, &path, r0, w);
+            wood.set_bone(branch);
             wood.append(&tube(&path, &[r0, r0 * 0.8, r0 * 0.6, r0 * 0.45, r0 * 0.3, r0 * 0.15], 4, true));
             // Needle sprays along the branch, mostly sideways and drooping (their own random
             // stream: `conifer_assembly` grows the same branches).
@@ -353,18 +490,41 @@ pub fn conifer(seed: u32, height: f32, radius: f32, needles_per_branch: u32, det
                 let side = out.cross(Vec3::Y);
                 let dir = (side * needle_rng.range(-1.0, 1.0) + out * needle_rng.range(0.2, 0.8) - Vec3::Y * needle_rng.range(0.0, 0.6)).normalize();
                 let s = needle_rng.range(0.7, 1.2) * (0.6 + 0.4 * (1.0 - t));
-                add_leaf(&mut foliage, base, dir, Vec3::Y, LeafShape { length: needle.length * s, width: needle.width * s, fold: needle.fold });
+                let shape = LeafShape { length: needle.length * s, width: needle.width * s, fold: needle.fold };
+                limbs[branch as usize].leaf_area += 0.5 * shape.length * shape.width;
+                needles.push((base, dir, shape, branch));
             }
         }
     }
     // Leader at the top.
     for _ in 0..needles_per_branch {
         let base = Vec3::new(0.0, height * needle_rng.range(0.9, 1.0), 0.0);
-        add_leaf(&mut foliage, base, (needle_rng.unit() + Vec3::Y).normalize(), Vec3::Y, needle);
+        needles.push((base, (needle_rng.unit() + Vec3::Y).normalize(), needle, trunk_bone));
     }
+    tune_branches(&mut rig, &limbs);
     let mut wood = wood.build();
+    wood.bones = rig.bones.clone();
     root_weights(&mut wood, TREE_FREE_HEIGHT);
-    Plant { wood, foliage: foliage.build() }
+    for (k, &(base, dir, shape, branch)) in needles.iter().enumerate() {
+        foliage.set_bone(leaf_bone(&mut rig, Some(branch), base, dir, shape.length, (k as f32 * 0.618_034).fract()));
+        add_leaf(&mut foliage, base, dir, Vec3::Y, shape);
+    }
+    let mut foliage = foliage.build();
+    foliage.bones = rig.bones;
+    Plant { wood, foliage }
+}
+
+/// A conifer's trunk bone (bone 0): a straight stem from the ground.
+fn conifer_trunk(rig: &mut PlantRig, limbs: &mut Vec<Limb>, height: f32, radius: f32) -> u16 {
+    limbs.push(Limb { radius, length: height, leaf_area: 0.0 });
+    rig.add(None, Vec3::ZERO, Vec3::Y * height, BoneClass::Bend, stem_amplitude(height), 1.0, 0.0)
+}
+
+/// The bone of a conifer branch along `path` (from the trunk), base radius `r0`, whorl `w`.
+fn conifer_branch(rig: &mut PlantRig, limbs: &mut Vec<Limb>, trunk: u16, path: &[Vec3], r0: f32, w: u32) -> u16 {
+    let (start, end) = (path[0], path[path.len() - 1]);
+    limbs.push(Limb { radius: r0, length: start.distance(end), leaf_area: 0.0 });
+    rig.add(Some(trunk), start, end, BoneClass::Sway, 1.0, 1.0, (limbs.len() as f32 * 0.618_034 + w as f32 * 0.29).fract())
 }
 
 /// The same conifer with its needles as an assembly: each branch carries a copy of one of six
@@ -373,10 +533,15 @@ pub fn conifer(seed: u32, height: f32, radius: f32, needles_per_branch: u32, det
 pub fn conifer_assembly(seed: u32, height: f32, radius: f32, needles_per_branch: u32, detail_sides: usize) -> PlantAssembly {
     let mut rng = Rng::new(seed);
     let mut wood = MeshBuilder::default();
+    let mut rig = PlantRig::default();
+    let mut limbs = Vec::new();
     let trunk: Vec<Vec3> = (0..=12).map(|i| Vec3::new(rng.range(-0.02, 0.02), height * i as f32 / 12.0, rng.range(-0.02, 0.02))).collect();
     let radii: Vec<f32> = (0..=12).map(|i| radius * (1.0 - i as f32 / 12.0 * 0.95)).collect();
+    let trunk_bone = conifer_trunk(&mut rig, &mut limbs, height, radius);
+    wood.set_bone(trunk_bone);
     wood.append(&tube(&trunk, &radii, detail_sides, true));
     let whorls = (height * 1.6) as u32;
+    let mut part_bones = Vec::new();
     // Spans from the top whorl (t = 0.98) to the lowest (t = 0.18), as `conifer` grows them.
     let span_at = |t: f32| (1.0 - t).powf(0.9) * height * 0.28 + 0.25;
     let lengths = spray_lengths(span_at(0.98), (span_at(0.18) / span_at(0.98)).powf(1.0 / 5.0), 6);
@@ -394,25 +559,37 @@ pub fn conifer_assembly(seed: u32, height: f32, radius: f32, needles_per_branch:
             let out = Vec3::new(a.cos(), 0.0, a.sin());
             let path: Vec<Vec3> = (0..=5).map(|i| branch_point(out, span, i as f32 / 5.0) + Vec3::Y * y).collect();
             let r0 = radius * 0.22 * (1.0 - t) + 0.01;
+            let branch = conifer_branch(&mut rig, &mut limbs, trunk_bone, &path, r0, w);
+            wood.set_bone(branch);
             wood.append(&tube(&path, &[r0, r0 * 0.8, r0 * 0.6, r0 * 0.45, r0 * 0.3, r0 * 0.15], 4, true));
             let (variant, scale) = nearest_spray(&lengths, span);
             // Spray space has the branch along +x: turn it to `out` about the trunk.
             placements.push((variant, Mat4::from_scale_rotation_translation(Vec3::splat(scale), Quat::from_rotation_y(-a), Vec3::Y * y)));
+            part_bones.push(branch);
+            limbs[branch as usize].leaf_area += needles_per_branch as f32 * 0.5 * 0.42 * 0.16 * (0.6 + 0.4 * (1.0 - t)).powi(2);
         }
     }
+    tune_branches(&mut rig, &limbs);
     // The leader's needles at the top.
     let needle = LeafShape { length: 0.42, width: 0.16, fold: 0.15 };
     let mut leader = MeshBuilder::default();
+    let mut leader_rig = PlantRig::default();
     let mut needle_rng = Rng::new(seed ^ 0x6c65_6164);
-    for _ in 0..needles_per_branch {
+    for k in 0..needles_per_branch {
         let base = Vec3::new(0.0, height * needle_rng.range(0.9, 1.0), 0.0);
-        add_leaf(&mut leader, base, (needle_rng.unit() + Vec3::Y).normalize(), Vec3::Y, needle);
+        let dir = (needle_rng.unit() + Vec3::Y).normalize();
+        leader.set_bone(leaf_bone(&mut leader_rig, None, base, dir, needle.length, (k as f32 * 0.618_034).fract()));
+        add_leaf(&mut leader, base, dir, Vec3::Y, needle);
     }
-    sprays.push(leader.build());
+    let mut leader = leader.build();
+    leader.bones = leader_rig.bones;
+    sprays.push(leader);
     placements.push((sprays.len() - 1, Mat4::IDENTITY));
+    part_bones.push(trunk_bone);
     let mut wood = wood.build();
+    wood.bones = rig.bones;
     root_weights(&mut wood, TREE_FREE_HEIGHT);
-    PlantAssembly { wood, sprays, placements }
+    PlantAssembly { wood, sprays, placements, part_bones }
 }
 
 /// Point `s` (0..1) along a conifer branch of `span` growing towards `out` from the trunk: out
@@ -426,17 +603,22 @@ fn branch_point(out: Vec3, span: f32, s: f32) -> Vec3 {
 fn needle_spray(seed: u32, needles: u32, span: f32, t: f32) -> Mesh {
     let mut rng = Rng::new(seed);
     let mut b = MeshBuilder::default();
+    let mut rig = PlantRig::default();
     let needle = LeafShape { length: 0.42, width: 0.16, fold: 0.15 };
     let path: Vec<Vec3> = (0..=5).map(|i| branch_point(Vec3::X, span, i as f32 / 5.0)).collect();
-    for _ in 0..needles {
+    for k in 0..needles {
         let s = rng.range(0.15, 1.0);
         let i = (s * 5.0) as usize;
         let base = path[i.min(5)] + (path[(i + 1).min(5)] - path[i.min(5)]) * (s * 5.0).fract();
         let dir = (Vec3::Z * rng.range(-1.0, 1.0) + Vec3::X * rng.range(0.2, 0.8) - Vec3::Y * rng.range(0.0, 0.6)).normalize();
         let size = rng.range(0.7, 1.2) * (0.6 + 0.4 * (1.0 - t));
-        add_leaf(&mut b, base, dir, Vec3::Y, LeafShape { length: needle.length * size, width: needle.width * size, fold: needle.fold });
+        let shape = LeafShape { length: needle.length * size, width: needle.width * size, fold: needle.fold };
+        b.set_bone(leaf_bone(&mut rig, None, base, dir, shape.length, (k as f32 * 0.618_034).fract()));
+        add_leaf(&mut b, base, dir, Vec3::Y, shape);
     }
-    b.build()
+    let mut mesh = b.build();
+    mesh.bones = rig.bones;
+    mesh
 }
 
 /// Depth below the ground (the plant's origin) at which grass blades and fern stalks start:
@@ -488,6 +670,7 @@ fn add_strip(b: &mut MeshBuilder, points: &[(Vec3, f32, Vec2)], side: Vec3, norm
 pub fn fern(seed: u32, fronds: u32, length: f32, leaflets: u32) -> Mesh {
     let mut rng = Rng::new(seed);
     let mut b = MeshBuilder::default();
+    let mut rig = PlantRig::default();
     // Wind weight and occlusion at fraction `s` along a frond.
     let plant = |s: f32| Vec2::new(smoothstep(0.03, 0.35, s), 0.35 + 0.65 * smoothstep(0.0, 0.5, s));
     for f in 0..fronds {
@@ -496,6 +679,10 @@ pub fn fern(seed: u32, fronds: u32, length: f32, leaflets: u32) -> Mesh {
         let lift = rng.range(0.7, 1.2);
         let len = length * rng.range(0.75, 1.1);
         let point = |s: f32| out * len * s + Vec3::Y * len * (lift * s - 0.9 * s * s);
+        // The frond: a stem from its root below the ground to its tip, bending as an arc; the
+        // fronds of a fern swing a little out of step.
+        let root = point(0.0) - Vec3::Y * ROOT_DEPTH;
+        let frond = rig.add(None, root, point(1.0), BoneClass::Bend, 0.6 * stem_amplitude(root.distance(point(1.0))), 1.0, 0.15 * (f as f32 * 0.618_034).fract());
         for k in 1..leaflets {
             let s = k as f32 / leaflets as f32;
             let p = point(s);
@@ -506,6 +693,8 @@ pub fn fern(seed: u32, fronds: u32, length: f32, leaflets: u32) -> Mesh {
             let along = (plant(s), plant((s + size / len).min(1.0)));
             for sign in [-1.0f32, 1.0] {
                 let dir = (side * sign + tangent * 0.35 - Vec3::Y * 0.15).normalize();
+                let phase = ((f * leaflets + k) as f32 * 0.618_034 + sign * 0.25).rem_euclid(1.0);
+                b.set_bone(leaf_bone(&mut rig, Some(frond), p, dir, size, phase));
                 add_leaf_with_plant(&mut b, p, dir, Vec3::Y, LeafShape { length: size, width: size * 0.32, fold: 0.2 }, along);
             }
         }
@@ -518,9 +707,12 @@ pub fn fern(seed: u32, fronds: u32, length: f32, leaflets: u32) -> Mesh {
         }
         // Facing up (the strip's winding: side × along).
         let normal = side.cross(point(0.5) - point(0.4)).normalize_or(Vec3::Y);
+        b.set_bone(frond);
         add_strip(&mut b, &stalk, side, normal, 0.6);
     }
-    b.build()
+    let mut mesh = b.build();
+    mesh.bones = rig.bones;
+    mesh
 }
 
 /// A clump of grass: blades grow out of the soil from a tuft a few centimetres wide and fan out,
@@ -530,6 +722,7 @@ pub fn fern(seed: u32, fronds: u32, length: f32, leaflets: u32) -> Mesh {
 pub fn grass_clump(seed: u32, blades: u32, height: f32) -> Mesh {
     let mut rng = Rng::new(seed);
     let mut b = MeshBuilder::default();
+    let mut rig = PlantRig::default();
     let tuft = 0.06 * height / 0.45;
     for _ in 0..blades {
         let r = tuft * rng.float().sqrt();
@@ -560,9 +753,16 @@ pub fn grass_clump(seed: u32, blades: u32, height: f32) -> Mesh {
             })
             .collect();
         let side = lean.cross(Vec3::Y).normalize_or(Vec3::X);
+        // Each blade is a bone from its root to its tip, bending as an arc, out of step with
+        // the others; longer blades swing slower.
+        let tip = points[points.len() - 1].0;
+        let blade = rig.add(None, root, tip, BoneClass::Bend, 0.9 * stem_amplitude(root.distance(tip)), (0.5 / total).sqrt().clamp(0.75, 1.0), (rig.bones.len() as f32 * 0.618_034).fract());
+        b.set_bone(blade);
         add_strip(&mut b, &points, side, side.cross(dir).normalize_or(lean), 0.35);
     }
-    b.build()
+    let mut mesh = b.build();
+    mesh.bones = rig.bones;
+    mesh
 }
 
 /// A low bush: a few short branches carrying dense leaves.

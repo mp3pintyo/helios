@@ -5,6 +5,7 @@ use serde_json::{json, Value};
 
 use super::content::{self, MATERIALS};
 use super::doc::Trs;
+use super::actors::{world_light, Kind};
 use super::{light_def, materials, pcg, settings, Editor, Owner, World};
 
 fn kind_name(kind: MaterialKind) -> &'static str {
@@ -20,17 +21,19 @@ fn kind_name(kind: MaterialKind) -> &'static str {
     }
 }
 
-pub fn owner_value(owner: Owner) -> Value {
+pub fn owner_value(editor: &Editor, owner: Owner) -> Value {
     match owner {
-        Owner::Base(i) => json!({ "kind": "base", "id": i }),
-        Owner::Added(id) => json!({ "kind": "added", "id": id }),
+        Owner::Actor { actor, component } => {
+            let name = editor.actor(actor).and_then(|a| a.components.get(component as usize)).map(|c| c.name.clone());
+            json!({ "kind": "actor", "actor": actor, "component": name })
+        }
         Owner::Pcg(id) => json!({ "kind": "pcg", "id": id }),
         Owner::Spare => json!({ "kind": "deleted" }),
     }
 }
 
-/// Everything the UI lists: meshes, materials, instances (as parallel arrays: thousands of
-/// them), lights, PCG volumes, environment, render settings and the content browser.
+/// Everything the UI lists: meshes, materials, actors (as parallel arrays: thousands of them),
+/// lights, PCG volumes, environment, render settings and the content browser.
 pub fn state(editor: &Editor, world: &World) -> Value {
     let scene = &*world.scene;
     let materials: Vec<Value> = (0..scene.material_count() as u32)
@@ -62,37 +65,35 @@ pub fn state(editor: &Editor, world: &World) -> Value {
             })
         })
         .collect();
-    let count = scene.instance_count();
-    let (mut mesh, mut material, mut visible, mut owner, mut owner_id) =
-        (Vec::with_capacity(count), Vec::with_capacity(count), Vec::with_capacity(count), Vec::with_capacity(count), Vec::with_capacity(count));
-    for h in scene.instance_handles() {
-        mesh.push(scene.instance_mesh(h).index());
-        material.push(scene.instance_material(h).index());
-        // 0 hidden, 1 visible, 2 deleted.
-        let deleted = match editor.owner(h.index()) {
-            Owner::Base(i) => editor.doc.instances.get(&i).is_some_and(|e| e.deleted),
-            Owner::Spare => true,
-            _ => false,
-        };
-        visible.push(if deleted { 2 } else { scene.is_visible(h) as u8 });
-        let (kind, id) = match editor.owner(h.index()) {
-            Owner::Base(i) => (0, i),
-            Owner::Added(id) => (1, id),
-            Owner::Pcg(id) => (2, id),
-            Owner::Spare => (3, 0),
-        };
-        owner.push(kind);
-        owner_id.push(id);
+    // Actors: id, name, parent id (-1: root), flags.
+    let count = editor.actors().count();
+    let (mut ids, mut names, mut parents, mut flags) = (Vec::with_capacity(count), Vec::with_capacity(count), Vec::with_capacity(count), Vec::with_capacity(count));
+    for (id, a) in editor.actors() {
+        ids.push(id);
+        names.push(a.name.as_str());
+        parents.push(a.parent.map_or(-1, |p| p as i64));
+        let mut f = (a.visible as u32) | (a.shown as u32) << 1 | (a.added as u32) << 2 | (a.folder as u32) << 3;
+        for c in &a.components {
+            f |= match c.kind {
+                Kind::Mesh { .. } => 32,
+                Kind::Light { .. } => 16,
+                Kind::Volume { .. } | Kind::Particles { .. } => 64,
+            };
+        }
+        if a.components.is_empty() {
+            f |= 128;
+        }
+        flags.push(f);
     }
-    let mut lights: Vec<Value> = (0..editor.base_light_count().min(scene.lights().len()))
-        .map(|i| {
-            let def = editor.doc.lights.get(&(i as u32)).cloned().unwrap_or_else(|| light_def(&scene.lights()[i]));
-            json!({ "index": i, "added": false, "def": def })
-        })
-        .collect();
-    for added in &editor.doc.added_lights {
-        if let Some(index) = editor.added_light_index(added.id) {
-            lights.push(json!({ "index": index, "added": true, "def": added.light }));
+    // Light components with their world-space light (overlay icons).
+    let mut lights: Vec<Value> = Vec::new();
+    for (id, a) in editor.actors() {
+        for c in &a.components {
+            if let Kind::Light { slot: Some(i), .. } = c.kind {
+                if let Some(light) = scene.lights().get(i).filter(|_| a.shown && c.visible) {
+                    lights.push(json!({ "index": i, "actor": id, "component": c.name, "def": light_def(light) }));
+                }
+            }
         }
     }
     let volumes: Vec<Value> = editor
@@ -114,11 +115,14 @@ pub fn state(editor: &Editor, world: &World) -> Value {
         "can_undo": editor.can_undo(),
         "can_redo": editor.can_redo(),
         "base": editor.doc.base,
-        "base_instances": editor.base_instance_count(),
         "meshes": meshes,
         "materials": materials,
         "graphs": materials::graphs_value(scene),
-        "instances": { "mesh": mesh, "material": material, "visible": visible, "owner": owner, "owner_id": owner_id },
+        "actors": { "id": ids, "name": names, "parent": parents, "flags": flags },
+        "instance_count": scene.instance_count(),
+        "free_slots": editor.free_slots(),
+        "compactions": editor.compactions,
+        "moving": editor.moving_count(),
         "lights": lights,
         "pcg": volumes,
         "environment": Editor::current_environment(world),
@@ -136,18 +140,65 @@ pub fn state(editor: &Editor, world: &World) -> Value {
 pub fn instance(editor: &Editor, scene: &Scene, index: u32) -> Value {
     let Some(h) = scene.instance_handle(index) else { return Value::Null };
     let (lo, hi) = scene.instance_bounds(h);
-    let transform = editor.effective_transform(scene, index).unwrap_or_else(|| scene.transform(h));
     let mesh = scene.instance_mesh(h);
     json!({
         "index": index,
         "mesh": scene.mesh_name(mesh),
         "material": scene.material_name(scene.instance_material(h)),
-        "transform": Trs::from_mat4(&transform),
+        "transform": Trs::from_mat4(&scene.transform(h)),
         "visible": scene.is_visible(h),
         "cast_shadow": scene.casts_shadow(h),
         "bounds": [lo.to_array(), hi.to_array()],
         "local_bounds": [scene.mesh_bounds(mesh).min.to_array(), scene.mesh_bounds(mesh).max.to_array()],
         "triangles": scene.mesh(mesh).triangle_count(),
-        "owner": owner_value(editor.owner(index)),
+        "owner": owner_value(editor, editor.owner(index)),
+    })
+}
+
+/// One actor for the Details panel and the gizmo: its transforms, bounds and components.
+pub fn actor(editor: &Editor, scene: &Scene, id: u32) -> Value {
+    let Some(a) = editor.actor(id) else { return Value::Null };
+    let bounds = editor.actor_bounds(scene, id).map(|(lo, hi)| [lo.to_array(), hi.to_array()]);
+    let components: Vec<Value> = a
+        .components
+        .iter()
+        .map(|c| {
+            let world = a.world * c.local;
+            let mut v = json!({ "name": c.name, "kind": c.kind.name(), "visible": c.visible, "local": Trs::from_mat4(&c.local), "world": Trs::from_mat4(&world) });
+            match &c.kind {
+                Kind::Mesh { mesh, material, cast_shadow, slot } => {
+                    let b = scene.mesh_bounds(*mesh);
+                    v["mesh"] = json!(scene.mesh_name(*mesh));
+                    v["material"] = json!(scene.material_name(*material));
+                    v["cast_shadow"] = json!(cast_shadow);
+                    v["instance"] = json!(slot.map(|h| h.index()));
+                    v["local_bounds"] = json!([b.min.to_array(), b.max.to_array()]);
+                    v["triangles"] = json!(scene.mesh(*mesh).triangle_count());
+                }
+                Kind::Light { def, slot } => {
+                    v["light"] = json!(world_light(a.world, def, true));
+                    v["index"] = json!(slot);
+                }
+                Kind::Volume { index } | Kind::Particles { index } => v["index"] = json!(index),
+            }
+            v
+        })
+        .collect();
+    json!({
+        "id": id,
+        "key": a.key,
+        "name": a.name,
+        "parent": a.parent,
+        "parent_name": a.parent.and_then(|p| editor.actor(p)).map(|p| p.name.clone()),
+        "added": a.added,
+        "folder": a.folder,
+        "visible": a.visible,
+        "shown": a.shown,
+        "local": Trs::from_mat4(&a.local),
+        "world": Trs::from_mat4(&a.world),
+        "bounds": bounds,
+        "children": a.children.len(),
+        "descendants": editor.subtree(id).len() - 1,
+        "components": components,
     })
 }

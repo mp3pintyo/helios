@@ -56,6 +56,7 @@ use crate::shader::{compose_variant, create_module_from};
 use crate::substrate_gpu::ExtendedMaterials;
 use crate::textures::TextureLibrary;
 use crate::util::{bind, bind_group, bind_group_layout, compute_pipeline_with, storage_buffer, Lazy, storage_buffer_init};
+use crate::pipelines::{in_group, Group};
 
 /// Card slots per mesh / instance: directions × layers (`CARD_SLOTS` in lumen_cards.wgsl).
 const CARD_SLOTS: usize = CARD_AXES * MAX_CARD_LAYERS;
@@ -811,6 +812,23 @@ impl CardCache {
         // Graphs the resolve runs (the parameter block holds their values): others are captured
         // with their material's own shading model, as the resolve renders them then.
         let active: HashSet<u64> = inputs.extended.slots.iter().filter_map(|s| s.graph.as_ref().map(|g| g.0)).collect();
+        // In the browser the capture pipelines of the pending pairs are queued and compile in the
+        // background (a new scene's five took 5 s compiled one by one inside a frame); the
+        // captures wait for them, their cards lit without albedo meanwhile.
+        if crate::pipelines::deferring() {
+            let device = rec.device;
+            let capture = self.capture_pipelines.get_or_insert_with(|| CapturePipelines::new(device));
+            let mut compiling = false;
+            for &p in &self.pending {
+                if let Some((kind, graph)) = self.pairs[p].pipeline.filter(|_| !self.pairs[p].origins.is_empty()) {
+                    let key = capture.pipeline(device, kind, if active.contains(&graph) { graph } else { 0 }, &self.graph_code);
+                    compiling |= !capture.pipelines[&key].is_made();
+                }
+            }
+            if compiling {
+                return;
+            }
+        }
         let mut groups: BTreeMap<(u32, u64), Vec<[u32; 4]>> = BTreeMap::new();
         let mut attributes: Vec<[u32; 4]> = Vec::new();
         let record_base = self.uniform.counts[1] as usize;
@@ -943,7 +961,8 @@ impl CapturePipelines {
         if !self.pipelines.contains_key(&(kind, graph)) {
             let module = self.modules.entry(graph).or_insert_with(|| create_module_from(device, "lumen card capture", capture_shader(graph_code.get(&graph).map(String::as_str))));
             let layouts = [&self.layout, &self.graph_layout];
-            let pipeline = compute_pipeline_with(device, "lumen card capture", module, "capture_albedo", &layouts, &[("MATERIAL_KIND", kind as f64)]);
+            let constants = [("MATERIAL_KIND", kind as f64)];
+            let pipeline = in_group(Group::GlobalIllumination, || compute_pipeline_with(device, "lumen card capture", module, "capture_albedo", &layouts, &constants));
             self.pipelines.insert((kind, graph), pipeline);
         }
         (kind, graph)

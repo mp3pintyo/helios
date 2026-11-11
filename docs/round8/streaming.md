@@ -69,13 +69,15 @@ y's, …), decided by the encoder per page from exact costs. Tables are ~2 % of 
 (`+ − × ÷`, `abs`, `round`) only — no fused or transcendental functions — so native and wasm decoders compute the same
 predictions bit for bit; the encoder uses `log2` only to choose table levels, which are then stored.
 
-**`.hvm` version 7.** The version-5 header, followed by `pages + 1` byte offsets of the stored pages, then the stored
-pages. `VirtualMesh::to_coded_bytes()` writes it (coding pages on all cores), `to_bytes()` still writes version 5 (the
+**`.hvm` version 7.** The version-6 header (round 8's dynamic wind added a seventh section count and the plant
+bones; `PREFIX_BYTES` is 32), followed by `pages + 1` byte offsets of the stored pages, then the stored
+pages. `VirtualMesh::to_coded_bytes()` writes it (coding pages on all cores), `to_bytes()` writes raw version 6 (the
 bake workers' transfer format, and `--hvm-raw`); `from_bytes`, `from_header_bytes`, `header_len`, `page_byte_range`
-and `tail_byte_range` read both (versions 4 and 5 as before), `set_tail_payload` decodes the root pages, and
-`VirtualMesh::is_coded` tells the streamer to decode what it reads. (The wind/bones agent may bump the raw version to
-6 in parallel; version 7 is "the current raw layout + coded pages", so at merge it becomes the next number after
-theirs, or stays 7.)
+and `tail_byte_range` read all of them (versions 4, 5 and 6 raw, 7 coded), `set_tail_payload` decodes the root pages, and
+`VirtualMesh::is_coded` tells the streamer to decode what it reads. Version 7 is "the current raw layout + coded pages": since the merge with the dynamic-wind work it is version 6
+plus page offsets. Plant pages carry what that work added — bone indices in the skin attribute of plant clusters
+(coded like skin weights, from a neighbour) and a bone word per voxel brick after the voxel words (coded with the
+voxel attribute words) — and stay bit-exact through the codec.
 
 **Decoding while streaming.** A completed read of coded pages becomes one decode job; its pages are `Decoding`
 (a new state between `Requested` and `Arrived`) until the payload words are back, then they are staged and uploaded
@@ -152,6 +154,24 @@ on some of the ~50 parallel range requests: `serve.py`'s listen backlog was Pyth
 
 **Memory.** The pool and the staged pages hold the GPU format as before; reads keep their (smaller) stored bytes
 until decoded; `page_stored` adds 4 bytes per page to the resident header.
+
+**After the merge with dynamic wind and terrain/water (main 4e391e7: plant bones in the header, bone indices in
+plant clusters, bone words in voxel bricks; the valley gained the river and more meshes)** — re-baked, raw version 6
+vs coded version 7, every file identical after decoding:
+
+| Scene | Page payload, GPU format → coded | Pages stored raw | `.hvm` files v6 → v7 |
+|---|---|---|---|
+| forest, medium | 13.5 → 6.36 MiB (47.0 %) | 6 of 415 (3 KiB, tiny pages) | 16.2 → 9.0 MiB |
+| forest, high | 37.2 → 15.7 MiB (42.1 %) | 8 of 807 (5 KiB) | 42.2 → 20.6 MiB |
+| valley, medium | 17.8 → 7.99 MiB (44.8 %) | 1 of 467 | 20.6 → 10.8 MiB |
+| valley, high | 54.3 → 24.3 MiB (44.7 %) | 2 of 1110 | 60.0 → 30.0 MiB |
+
+`--stream-from` (1600×900): forest high from the SSD 0.49 → 0.56 s until every wanted page is resident; at
+100 Mbit/s + 20 ms 2.04 → 1.38 s (idle 3.24 → 1.43 s). Valley high: SSD 0.64 → 0.71 s; 100 Mbit/s 2.14 → 1.71 s
+(idle 4.60 → 2.20 s). Plant bones load from the coded header and the plant simulation and gusts (`Numpad1`) run on
+streamed forests. In Chromium (`?stream=`, decoding on the workers) forest high and valley high stream completely
+with no console errors (`streaming/forest-high-v7-chromium.jpg`); throttled to 100 Mbit/s the forest finishes in
+9.3 instead of 11.2 s; the editor (Tab) opens over a streamed forest without errors.
 
 ## Remaining limits
 

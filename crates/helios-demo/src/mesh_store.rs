@@ -3,7 +3,7 @@
 //! `helios --bake-hvm DIR` bakes a scene and writes each virtual mesh as a `.hvm` file plus a
 //! [`Manifest`] — with entropy-coded pages (`.hvm` version 7, `helios_geometry::page_codec`: page
 //! payloads 2.2–2.7 times smaller on disk and over the wire, decoded on load), or with
-//! `--hvm-raw` as the GPU format (version 5). `helios --stream-from DIR` (native) and `?stream=URL` (browser) then build the
+//! `--hvm-raw` as the GPU format (version 6). `helios --stream-from DIR` (native) and `?stream=URL` (browser) then build the
 //! *same* scene — materials, instances, lights, camera all come from the procedural builder — but
 //! substitute every baked mesh with its pre-baked counterpart, keeping only its header (records,
 //! dependencies, bounds, distance field) and root pages in memory. All other page payloads are

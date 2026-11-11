@@ -146,6 +146,9 @@ struct Instance {
     max_scale: f32,
     flags: u32,
     wind: vec4<f32>,  // wind response (wind.wgsl): bend, sway, flutter, frequency; 0 = static
+    // Plants with bones (plant_wind.wgsl): header texel + 1 (0: procedural wind), bone table,
+    // simulation slot + 1, unused.
+    plant: vec4<u32>,
 }
 
 // Mesh UV set -> texture coordinates (glTF texCoord, KHR_texture_transform, sampler wrap):

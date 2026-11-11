@@ -6,9 +6,11 @@ pub mod cathedral;
 pub mod forest;
 pub mod gallery;
 pub mod model;
+pub mod outline;
 pub mod skeletal;
 pub mod stone_path;
 pub mod valley;
+pub mod valley_terrain;
 
 use helios_geometry::{build_virtual_mesh, BuildConfig, Mesh, VirtualMesh};
 use helios_render::{Camera, MeshHandle, Scene};
@@ -82,10 +84,15 @@ pub struct SceneSetup {
     pub sun: (f32, f32, f32),
     /// Lowest allowed camera height at (x, z).
     pub floor: fn(f32, f32) -> f32,
+    /// Lowest allowed camera height under a point, where the ground has overhangs (the floor
+    /// under an arch rather than its top); `floor` where `None`.
+    pub floor_below: Option<fn(glam::Vec3) -> f32>,
     /// Skeletal animation of an imported model's skinned meshes.
     pub animation: Option<skeletal::SkeletalAnimation>,
     /// Props that move every frame.
     pub motion: crate::motion::DemoMotion,
+    /// The builder's actors and folders (filled in by [`build_with`]).
+    pub outline: outline::Outline,
 }
 
 /// Builds a scene. `SceneKind::Model` needs `model`; without one it falls back to the valley.
@@ -99,18 +106,21 @@ pub fn build(kind: SceneKind, detail: Detail, model: Option<&model::Model>) -> S
 pub fn build_with(kind: SceneKind, detail: Detail, model: Option<&model::Model>, store: MeshStore) -> (SceneSetup, MeshStore) {
     let start = Instant::now();
     let shard = matches!(store, MeshStore::Shard(_));
-    let (setup, store) = mesh_store::scoped(store, || match (kind, model) {
-        (SceneKind::Valley, _) => valley::build(detail),
-        (SceneKind::Cathedral, _) => cathedral::build(detail),
-        (SceneKind::Forest, _) => forest::build(detail),
-        (SceneKind::Gallery, _) => gallery::build(detail),
-        (SceneKind::Model, Some(m)) => model::build(m),
-        (SceneKind::Model, None) => {
-            log::warn!("no model loaded (use --gltf FILE or ?gltf=URL); showing the valley");
-            valley::build(detail)
-        }
+    let ((setup, store), outline) = outline::scoped(|| {
+        mesh_store::scoped(store, || match (kind, model) {
+            (SceneKind::Valley, _) => valley::build(detail),
+            (SceneKind::Cathedral, _) => cathedral::build(detail),
+            (SceneKind::Forest, _) => forest::build(detail),
+            (SceneKind::Gallery, _) => gallery::build(detail),
+            (SceneKind::Model, Some(m)) => model::build(m),
+            (SceneKind::Model, None) => {
+                log::warn!("no model loaded (use --gltf FILE or ?gltf=URL); showing the valley");
+                valley::build(detail)
+            }
+        })
     });
     let mut setup = setup;
+    setup.outline = outline;
     name_materials(&mut setup.scene);
     if shard {
         // A scene-bake worker's scene holds stand-ins for the other workers' meshes.

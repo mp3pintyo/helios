@@ -1,10 +1,10 @@
-//! Editor tools in the native window (Tab): click to select an instance (picked through the
-//! visibility buffer, outlined in the viewport), Delete / Ctrl+D, F to focus, Ctrl+Z / Ctrl+Y,
+//! Editor tools in the native window (Tab): click to select an actor (picked through the
+//! visibility buffer, outlined in the viewport with its children), Delete / Ctrl+D (the actor
+//! with everything below it), F to focus, Ctrl+Z / Ctrl+Y,
 //! Ctrl+S to save the scene file. The full editor UI is the browser's (`web/editor.html`); this
 //! is the same editor core without panels, for checking scene files and picking natively.
 
 use glam::Vec3;
-use helios_render::InstanceHandle;
 use serde_json::json;
 
 use crate::app::DemoApp;
@@ -13,7 +13,7 @@ use crate::editor::ops::EditOp;
 
 #[derive(Default)]
 pub struct NativeEditor {
-    /// The selected instance.
+    /// The selected actor.
     pub selected: Option<u32>,
     pick: Option<(u32, (Vec3, Vec3))>,
     next_pick: u32,
@@ -36,10 +36,9 @@ impl NativeEditor {
         format!("editor tools {} (click selects · Del deletes · Ctrl+D duplicates · F focuses · Ctrl+Z/Y undo/redo · Ctrl+S saves)", if app.editing { "on" } else { "off" })
     }
 
-    fn select(&mut self, app: &mut DemoApp, instance: Option<u32>) {
-        self.selected = instance;
-        let handles: Vec<InstanceHandle> = instance.and_then(|i| app.scene.instance_handle(i)).into_iter().collect();
-        app.renderer.set_selection(&handles);
+    fn select(&mut self, app: &mut DemoApp, actor: Option<u32>) {
+        self.selected = actor;
+        app.select(actor.into_iter().collect(), Vec::new());
     }
 
     /// A left click at output pixel (x, y) of a `size` output.
@@ -59,10 +58,13 @@ impl NativeEditor {
         }
         self.pick = None;
         let result = app.resolve_pick(&pick, ray);
-        let instance = result["instance"].as_u64().map(|i| i as u32);
-        self.select(app, instance);
-        Some(match instance {
-            Some(i) => format!("selected {}", crate::editor::describe::instance(&app.editor, &app.scene, i)),
+        let actor = result["owner"]["actor"].as_u64().map(|i| i as u32);
+        self.select(app, actor);
+        Some(match actor {
+            Some(a) => {
+                let info = crate::editor::describe::actor(&app.editor, &app.scene, a);
+                format!("selected actor {a} '{}' ({}, {} components)", info["name"].as_str().unwrap_or(""), info["key"].as_str().unwrap_or(""), info["components"].as_array().map_or(0, Vec::len))
+            }
             None => "nothing selected".into(),
         })
     }
@@ -82,23 +84,22 @@ impl NativeEditor {
                 }
             }
             ("KeyD", true) if !selected.is_empty() => {
-                let created = app.edit(|e, w| e.apply(op(json!({ "op": "duplicate", "instances": selected, "offset": [1.0, 0.0, 0.0] })), w));
+                let created = app.edit(|e, w| e.apply(op(json!({ "op": "duplicate", "actors": selected, "offset": [1.0, 0.0, 0.0] })), w));
                 match created {
                     Ok(c) => {
-                        self.select(app, c.instances.first().copied());
-                        format!("duplicated into {:?}", c.instances)
+                        self.select(app, c.actors.first().copied());
+                        format!("duplicated into actor(s) {:?}", c.actors)
                     }
                     Err(e) => e,
                 }
             }
             ("Delete", false) if !selected.is_empty() => {
-                let result = app.edit(|e, w| e.apply(op(json!({ "op": "delete", "instances": selected })), w));
+                let result = app.edit(|e, w| e.apply(op(json!({ "op": "delete", "actors": selected })), w));
                 self.select(app, None);
                 result.map_or_else(|e| e, |_| "deleted".into())
             }
             ("KeyF", false) => {
-                let handle = self.selected.and_then(|i| app.scene.instance_handle(i))?;
-                let (lo, hi) = app.scene.instance_bounds(handle);
+                let (lo, hi) = self.selected.and_then(|a| app.editor.actor_bounds(&app.scene, a))?;
                 app.focus(lo, hi);
                 "focused".into()
             }

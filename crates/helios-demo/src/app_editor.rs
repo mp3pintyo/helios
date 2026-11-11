@@ -32,15 +32,73 @@ pub fn procedural_base(base: &BaseScene) -> Option<(SceneKind, Detail)> {
 }
 
 impl DemoApp {
-    /// Runs `f` with the editor and what it edits.
+    /// Runs `f` with the editor and what it edits (the selection outline follows the edit).
     pub fn edit<R>(&mut self, f: impl FnOnce(&mut Editor, &mut World) -> R) -> R {
+        let revision = self.editor.revision;
         let mut world = World {
             scene: &mut self.scene,
             settings: &mut self.renderer.settings,
             sun: [&mut self.sun_azimuth, &mut self.sun_elevation, &mut self.sun_intensity],
             floor: self.floor,
         };
-        f(&mut self.editor, &mut world)
+        let result = f(&mut self.editor, &mut world);
+        if self.editor.revision != revision {
+            self.renderer.set_selection(&self.editor.selection_handles());
+        }
+        result
+    }
+
+    /// Selects actors (with their children) and components; outlines their instances.
+    pub fn select(&mut self, actors: Vec<u32>, components: Vec<(u32, String)>) {
+        self.editor.set_selection(actors, components);
+        self.renderer.set_selection(&self.editor.selection_handles());
+    }
+
+    /// Per frame: dragged instances settle back to their mobility; free slots are compacted
+    /// once the editor has been idle for a while.
+    pub fn maintain_editor(&mut self) {
+        self.editor.tick(&mut self.scene);
+        self.compact_editor(false);
+    }
+
+    /// Measurement path (`--drag-actor NAME`, `--drag-static`): drags the actor called `name`
+    /// nearest the camera through the editor's preview, one metre around where it stands, one
+    /// turn every two seconds at 60 fps — as a gizmo drag does (its instances movable), or with
+    /// `as_static` the way edits moved before actors (static instances: the shadow pages under
+    /// them re-rendered in full every frame).
+    pub fn drag_actor(&mut self, name: &str, frame: u32, as_static: bool) {
+        let eye = self.camera.position;
+        let nearest = self
+            .editor
+            .actors()
+            .filter(|(_, a)| a.name == name && !a.components.is_empty())
+            .min_by(|a, b| a.1.world.w_axis.truncate().distance(eye).total_cmp(&b.1.world.w_axis.truncate().distance(eye)))
+            .map(|(id, a)| (id, a.world));
+        let Some((id, start)) = nearest else {
+            if frame == 0 {
+                log::warn!("--drag-actor: no actor called '{name}'");
+            }
+            return;
+        };
+        let angle = frame as f32 * std::f32::consts::TAU / 120.0;
+        let to = Mat4::from_translation(Vec3::new(angle.cos() - 1.0, 0.0, angle.sin())) * start;
+        self.editor.static_drags = as_static;
+        self.edit(|editor, world| editor.preview_actors(world, &[(id, to)]));
+        if frame == 0 {
+            log::info!("dragging actor {id} '{name}' ({} instances, {})", self.editor.subtree_instances(id).len(), if as_static { "static" } else { "movable while dragged" });
+        }
+    }
+
+    /// Removes the editor's free instance and light slots from the scene (when due, or now with
+    /// `force`); returns how many instances and lights went.
+    pub fn compact_editor(&mut self, force: bool) -> (usize, usize) {
+        let Some((instances, lights)) = self.editor.compaction(&self.scene, force) else { return (0, 0) };
+        let map = self.scene.compact(&instances, &lights);
+        self.editor.compacted(&mut self.scene, &map);
+        self.motion.remap(&map);
+        self.renderer.set_selection(&self.editor.selection_handles());
+        log::info!("editor: compacted {} free instance and {} light slots ({} instances now)", instances.len(), lights.len(), self.scene.instance_count());
+        (instances.len(), lights.len())
     }
 
     pub fn camera_def(&self) -> CameraDef {
@@ -84,7 +142,10 @@ impl DemoApp {
         if let Some(camera) = doc.camera {
             self.set_camera_def(&camera);
         }
+        let (edits, added) = (doc.actors.len() + doc.instances.len() + doc.lights.len(), doc.added_actors.len() + doc.added.len() + doc.added_lights.len());
+        let start = web_time::Instant::now();
         self.edit(|editor, world| editor.load(doc, world));
+        log::info!("scene file applied in {:.1} ms ({edits} actor edits, {added} added actors, {} actors)", start.elapsed().as_secs_f64() * 1000.0, self.editor.actors().count());
     }
 
     /// Adds an imported model's meshes and materials (named `NAME/…`) and makes it a content
@@ -139,7 +200,7 @@ impl DemoApp {
         json!({
             "id": pick.id,
             "instance": instance.map(InstanceHandle::index),
-            "owner": instance.map(|h| crate::editor::describe::owner_value(self.editor.owner(h.index()))),
+            "owner": instance.map(|h| crate::editor::describe::owner_value(&self.editor, self.editor.owner(h.index()))),
             "position": position.to_array(),
             "normal": normal.to_array(),
             "ground": ground.map(|p| p.to_array()),

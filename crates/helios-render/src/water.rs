@@ -51,6 +51,13 @@ impl WaterBody {
     pub fn contains(&self, p: Vec3) -> bool {
         p.y < self.level && p.x >= self.min.x && p.x <= self.max.x && p.z >= self.min.y && p.z <= self.max.y
     }
+
+    /// Whether `p` is within `margin` of the water below the surface (the camera may dive soon).
+    pub fn near(&self, p: Vec3, margin: f32) -> bool {
+        let m = Vec2::splat(margin);
+        let xz = Vec2::new(p.x, p.z);
+        p.y < self.level + margin && xz.cmpge(self.min - m).all() && xz.cmple(self.max + m).all()
+    }
 }
 
 /// The water bodies of the scene's water instances (at most [`MAX_WATER_BODIES`], the first ones).
@@ -58,7 +65,11 @@ pub(crate) fn water_bodies(scene: &Scene) -> Vec<WaterBody> {
     let bodies: Vec<WaterBody> = scene
         .instances
         .iter()
-        .filter(|i| i.visible && scene.materials.get(i.material.0 as usize).is_some_and(|m| m.kind == MaterialKind::Water))
+        .enumerate()
+        .filter(|(_, i)| i.visible && scene.materials.get(i.material.0 as usize).is_some_and(|m| m.kind == MaterialKind::Water))
+        // A river's surface is simulated, not a flat body.
+        .filter(|(index, _)| !scene.rivers.iter().any(|r| r.surface.is_some_and(|s| s.0 as usize == *index)))
+        .map(|(_, i)| i)
         .map(|i| WaterBody::from_bounds(&scene.meshes[i.mesh.0 as usize].aabb, &i.transform))
         .collect();
     if bodies.len() > MAX_WATER_BODIES {
@@ -77,6 +88,9 @@ pub(crate) struct WaterUniform {
     misc: Vec4,
     bodies: [Vec4; MAX_WATER_BODIES],
     levels: Vec4,
+    /// The simulated river's grid for the shores (`river.rs`): corner (x, z), 1 / cell size,
+    /// 1 if there is one.
+    river: Vec4,
 }
 
 impl WaterUniform {
@@ -101,7 +115,16 @@ impl WaterUniform {
             ),
             bodies: rects,
             levels: Vec4::from(levels),
+            river: Vec4::ZERO,
         }
+    }
+
+    /// The river whose surface the shores follow.
+    pub fn with_river(mut self, river: Option<&crate::river::River>) -> Self {
+        if let Some(r) = river.filter(|r| r.cell > 0.0) {
+            self.river = Vec4::new(r.origin.x, r.origin.y, 1.0 / r.cell, 1.0);
+        }
+        self
     }
 }
 
@@ -116,6 +139,9 @@ mod tests {
         let body = WaterBody::from_bounds(&sheet, &transform);
         assert_eq!(body, WaterBody { min: Vec2::new(-15.0, -9.0), max: Vec2::new(25.0, 11.0), level: -2.2 });
         assert!(body.contains(Vec3::new(0.0, -3.0, 0.0)));
+        // Within diving distance: above the surface or beside it, not far above or away.
+        assert!(body.near(Vec3::new(0.0, 5.0, 0.0), 10.0) && body.near(Vec3::new(30.0, -3.0, 0.0), 10.0));
+        assert!(!body.near(Vec3::new(0.0, 9.0, 0.0), 10.0) && !body.near(Vec3::new(40.0, -3.0, 0.0), 10.0));
         assert!(!body.contains(Vec3::new(0.0, -2.0, 0.0)), "above the surface");
         assert!(!body.contains(Vec3::new(30.0, -3.0, 0.0)), "beside the surface");
     }

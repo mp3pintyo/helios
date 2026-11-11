@@ -85,7 +85,7 @@ pub fn build(model: &Model) -> SceneSetup {
     }
     scene.ground_albedo = Vec3::splat(0.25);
     scene.clouds = helios_render::CloudLayer::cumulus(0.35);
-    SceneSetup { scene, camera: frame_camera(size), sun: SUN, floor: |_, _| 0.0, animation: added.animation, motion: Default::default() }
+    SceneSetup { scene, camera: frame_camera(size), sun: SUN, floor: |_, _| 0.0, floor_below: None, animation: added.animation, motion: Default::default(), outline: Default::default() }
 }
 
 /// One node instance of a model.

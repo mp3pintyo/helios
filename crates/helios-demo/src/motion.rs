@@ -123,6 +123,14 @@ impl DemoMotion {
         }
     }
 
+    /// Follows a scene compaction: handles move to their new indices, removed ones are dropped.
+    pub fn remap(&mut self, map: &helios_render::Compaction) {
+        for group in &mut self.groups {
+            group.instances = group.instances.iter().filter_map(|&(h, rest)| Some((map.instance(h)?, rest))).collect();
+            group.lights = group.lights.iter().filter_map(|&(l, rest)| Some((map.light(l)?, rest))).collect();
+        }
+    }
+
     /// Instances it moves.
     pub fn instance_count(&self) -> usize {
         self.groups.iter().map(|g| g.instances.len()).sum()

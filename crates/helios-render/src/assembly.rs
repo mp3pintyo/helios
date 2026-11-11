@@ -26,7 +26,7 @@ use crate::util::{bind, bind_group, bind_group_layout, compute_pipeline, storage
 use crate::pipelines::Lazy;
 
 /// Part instances a frame may expand (instance records after the scene's and the assembly
-/// instances' culling records: 240 bytes each).
+/// instances' culling records: 256 bytes each).
 pub const PART_CAPACITY: u32 = 1 << 15;
 
 /// `struct AssemblyParams` in assembly.wgsl.
@@ -65,7 +65,9 @@ struct GpuPart {
     cluster_offset: u32,
     cluster_count: u32,
     visibility: u32,
-    _pad: [u32; 3],
+    /// First texel of the part's plant bone table (`plant_wind.rs`; 0: none).
+    bones: u32,
+    _pad: [u32; 2],
 }
 
 /// `struct AssemblyInstance` in assembly.wgsl.
@@ -162,18 +164,18 @@ impl Assemblies {
     }
 
     /// Uploads the assemblies' part tables (with the meshes' global ranges).
-    pub fn upload_geometry(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, scene: &Scene, meshes: &[MeshRange]) {
+    pub fn upload_geometry(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, scene: &Scene, meshes: &[MeshRange], bone_tables: &[Vec<u32>]) {
         self.assembly_of_mesh = vec![None; scene.meshes.len()];
         self.visibility_bits.clear();
         self.batches.clear();
         let mut assemblies = Vec::new();
         let mut parts = Vec::new();
-        for (base, list) in &scene.assemblies {
+        for (a, (base, list)) in scene.assemblies.iter().enumerate() {
             let mut visibility = 0;
             let first_part = parts.len() as u32;
             let mut page_stride = 1;
             let mut part_scale = 0.0f32;
-            for part in list {
+            for (p, part) in list.iter().enumerate() {
                 let range = meshes[part.mesh.0 as usize];
                 page_stride = page_stride.max(range.page_count);
                 part_scale = part_scale.max(helios_geometry::assembly::max_scale(&part.transform));
@@ -184,7 +186,8 @@ impl Assemblies {
                     cluster_offset: range.cluster_offset,
                     cluster_count: range.cluster_count,
                     visibility,
-                    _pad: [0; 3],
+                    bones: bone_tables.get(a).and_then(|t| t.get(p)).copied().unwrap_or(0),
+                    _pad: [0; 2],
                 });
                 visibility += range.cluster_count;
             }

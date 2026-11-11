@@ -4,7 +4,7 @@
 //   emit   : one workgroup per software cluster, one thread per triangle of a tessellated
 //            cluster: its level-0 patch is culled and routed (diced or split, tess_queue.wgsl)
 //   split  : the split passes (tess_queue.wgsl)
-//   dice   : per grid level F = 2^LEVEL, the diced patches' micro-triangles are displaced and
+//   dice   : grid levels F = 2^level two per dispatch, the diced patches' micro-triangles are displaced and
 //            rasterised, PASS 0 the depth, PASS 1 the payload (sw_raster.wgsl). Patches with F <= 2
 //            are diced by one thread each; F = 4 and 8 by 16 and 64 threads (4 patches or one per
 //            workgroup): the grid's vertices are displaced and projected into shared memory, then
@@ -28,7 +28,8 @@
 
 override PASS: u32 = 0u;
 override LATE: bool = false;
-override LEVEL: u32 = 0u;
+// The dicing path: false for grid levels 0 and 1 (a thread per patch), true for 2 and 3 (shared memory).
+override GRID: bool = false;
 
 @group(0) @binding(0) var<uniform> view: CullView;
 @group(0) @binding(1) var<storage, read> visible_clusters: array<vec4<u32>>;
@@ -204,35 +205,42 @@ fn tess_rasterize(p0: vec4<f32>, p1: vec4<f32>, p2: vec4<f32>, l0: vec2<f32>, l1
     }
 }
 
-// Patches with F <= 2 (at most 6 vertices, 4 micro-triangles): one thread each.
-fn dice_patch(index: u32) {
-    let record = patches[tess_dice_offset(LEVEL) + index];
+// Patches with F <= 2 (at most 6 vertices, 4 micro-triangles): one thread each. The loops run to F = 2's
+// bounds, skipping what F = 1 lacks: unrolled, the grid stays in registers.
+fn dice_patch(level: u32, index: u32) {
+    let record = patches[tess_dice_offset(level) + index];
     let b = tess_base(record.x);
     let instance = instances[b.instance];
     let strength = wind_strength(instance);
     let p = tess_patch(record.x, b, instance, record.yzw);
     let d = tess_dice(p);
-    let f = 1u << LEVEL;
+    let f = 1u << level;
     let vertices = ((f + 1u) * (f + 2u)) / 2u;
     var own: array<vec3<f32>, 6>;
-    for (var v = 0u; v < vertices; v++) {
-        let ij = tess_grid_vertex(v, f);
-        own[v] = tess_displaced(instance, tess_grid_point(b, p, d, ij.x, ij.y));
+    for (var v = 0u; v < 6u; v++) {
+        if v < vertices {
+            let ij = tess_grid_vertex(v, f);
+            own[v] = tess_displaced(instance, tess_grid_point(b, p, d, ij.x, ij.y));
+        }
     }
     var screen: array<vec4<f32>, 6>;
     var lambda: array<vec2<f32>, 6>;
-    for (var v = 0u; v < vertices; v++) {
-        let ij = tess_grid_vertex(v, f);
-        let m = tess_grid_morph(p, d, ij.x, ij.y);
-        let position = tess_morphed(own[v], own[tess_grid_index(m.a.x, m.a.y, f)], own[tess_grid_index(m.c.x, m.c.y, f)], m.weight);
-        screen[v] = tess_project(instance, strength, position);
-        if PASS == 1u {
-            lambda[v] = tess_grid_lambda(p, d, ij.x, ij.y).yz;
+    for (var v = 0u; v < 6u; v++) {
+        if v < vertices {
+            let ij = tess_grid_vertex(v, f);
+            let m = tess_grid_morph(p, d, ij.x, ij.y);
+            let position = tess_morphed(own[v], own[tess_grid_index(m.a.x, m.a.y, f)], own[tess_grid_index(m.c.x, m.c.y, f)], m.weight);
+            screen[v] = tess_project(instance, strength, position);
+            if PASS == 1u {
+                lambda[v] = tess_grid_lambda(p, d, ij.x, ij.y).yz;
+            }
         }
     }
-    for (var t = 0u; t < f * f; t++) {
-        let tri = tess_grid_triangle(t, f);
-        tess_rasterize(screen[tri.x], screen[tri.y], screen[tri.z], lambda[tri.x], lambda[tri.y], lambda[tri.z], record.x);
+    for (var t = 0u; t < 4u; t++) {
+        if t < f * f {
+            let tri = tess_grid_triangle(t, f);
+            tess_rasterize(screen[tri.x], screen[tri.y], screen[tri.z], lambda[tri.x], lambda[tri.y], lambda[tri.z], record.x);
+        }
     }
 }
 
@@ -245,24 +253,34 @@ var<workgroup> wg_item: array<u32, MAX_PATCHES>;
 var<workgroup> wg_displaced: array<vec3<f32>, 64>;
 var<workgroup> wg_screen: array<vec4<f32>, 64>;
 var<workgroup> wg_lambda: array<vec2<f32>, 64>;
+var<workgroup> wg_level: vec2<u32>;
 
+// Two grid levels per dispatch (tess_queue.wgsl's tess_dice_level), one pipeline per path and pass instead of
+// one per level and pass (the browser compiles each). The paths stay apart: merged, the thread path's
+// registers (a whole grid per thread) cost the shared-memory path its occupancy (+0.6 ms on a graph-
+// displaced view).
 @compute @workgroup_size(64)
 fn dice(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) groups: vec3<u32>, @builtin(local_invocation_index) lid: u32) {
-    let group = wid.x + (wid.y * groups.x);
-    let count = min(atomicLoad(&state[STATE_DICE + LEVEL]), DICE_CAPACITY);
-    if LEVEL <= 1u {
+    if lid == 0u {
+        wg_level = tess_dice_level(wid.x + (wid.y * groups.x), select(0u, 2u, GRID));
+    }
+    let located = workgroupUniformLoad(&wg_level);
+    let level = located.x;
+    let group = located.y;
+    let count = min(atomicLoad(&state[STATE_DICE + level]), DICE_CAPACITY);
+    if !GRID {
         let index = (group * 64u) + lid;
         if index < count {
-            dice_patch(index);
+            dice_patch(level, index);
         }
         return;
     }
-    let f = 1u << LEVEL;
-    let patches_per_group = 64u >> (2u * LEVEL);
+    let f = 1u << level;
+    let patches_per_group = 64u >> (2u * level);
     let vertices = ((f + 1u) * (f + 2u)) / 2u;
     let first = group * patches_per_group;
     if lid < patches_per_group && first + lid < count {
-        let record = patches[tess_dice_offset(LEVEL) + first + lid];
+        let record = patches[tess_dice_offset(level) + first + lid];
         let b = tess_base(record.x);
         let p = tess_patch(record.x, b, instances[b.instance], record.yzw);
         wg_base[lid] = b;

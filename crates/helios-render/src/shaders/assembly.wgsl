@@ -47,7 +47,7 @@ struct AssemblyPart {
     cluster_offset: u32,
     cluster_count: u32,
     visibility: u32,        // first visibility bit within the assembly's
-    _pad0: u32,
+    bones: u32,             // first texel of its plant bone table (plant_wind.wgsl; 0: none)
     _pad1: u32,
     _pad2: u32,
 }
@@ -154,6 +154,12 @@ fn expand(
         record.visibility_offset = a.visibility_base + part.visibility;
         record.max_scale = scale;
         record.flags = part_flags;
+        // A plant's part bends with the bone it hangs from (its own table, in its space).
+        if part.bones != 0u {
+            record.plant.y = part.bones;
+        } else {
+            record.plant.x = 0u;
+        }
         instances[part_base + first_slot + p] = record;
         part_owners[1u + first_slot + p] = a.instance;
     }

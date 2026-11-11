@@ -348,21 +348,22 @@ Each subsystem is described in its own page under [`docs/architecture/`](docs/ar
 | [Materials](docs/architecture/materials.md) | GPU-synthesised and glTF materials, Substrate-lite slabs, subsurface, material graphs and instances |
 | [Virtual textures](docs/architecture/virtual-textures.md) | Runtime virtual texture for the landscape, streaming virtual textures, BC-compressed tiles |
 | [Virtual shadow maps](docs/architecture/shadows.md) | The sun's 16k² clipmap, page cache, static / dynamic caster layers |
-| [Motion](docs/architecture/motion.md) | Wind (World Position Offset), skeletal meshes, the dynamic world (moving instances, caches, motion vectors) |
+| [Motion](docs/architecture/motion.md) | Wind (World Position Offset; dynamic wind: plant bones, simulated push and gusts), skeletal meshes, the dynamic world (moving instances, caches, motion vectors) |
 | [Nanite Foliage](docs/architecture/foliage.md) | Voxel LODs and assemblies |
 | [Nanite Tessellation](docs/architecture/tessellation.md) | Texture and graph displacement, patch splitting, dicing, animated displacement |
 | [Lumen](docs/architecture/lumen.md) | Global distance field, surface cache, radiance cache, final gather, reflections, displaced surfaces, Lumen Lite |
 | [Local lights](docs/architecture/lights.md) | Froxel light culling, local light virtual shadow maps (cached, moving lights), MegaLights |
 | [Atmosphere](docs/architecture/atmosphere.md) | Volumetric clouds, volumetric fog, time of day |
 | [Translucency and water](docs/architecture/translucency.md) | Depth-peeled forward translucency, coloured light through glass, water bodies |
+| [Terrain and rivers](docs/architecture/terrain.md) | Mesh terrain (modifier stack, surface nets chunks, landscape seam, collision, PCG), shallow-water rivers |
 | [Volumes and particles](docs/architecture/volumes-particles.md) | Heterogeneous volumes (fluid simulation), GPU particles, order-independent transparency |
 | [Post-processing](docs/architecture/post.md) | Temporal stability, TSR and dynamic resolution, camera, local exposure, profiling |
-| [Browser platform](docs/architecture/browser.md) | Start-up order, scene bake on Web Workers, device limits, f16 shaders, browser measurement hooks |
+| [Browser platform](docs/architecture/browser.md) | Start-up order, scene bake on Web Workers, frames held for new pipelines, fewer pipelines, device limits, f16 shaders, browser measurement hooks |
 
 ### 3. Editor, scene files and PCG — `helios-demo`, `helios-pcg`, `web/editor`
 
-The browser level editor (outliner, details, gizmos, content browser), `.helios.json` scene files, PCG volumes and the
-material graph editor: [`docs/architecture/editor.md`](docs/architecture/editor.md).
+The browser level editor (actors with components and a hierarchy, outliner, details, gizmos, content browser),
+`.helios.json` scene files, PCG volumes and the material graph editor: [`docs/architecture/editor.md`](docs/architecture/editor.md).
 
 ### WebGPU constraints that shaped the design
 

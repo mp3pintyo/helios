@@ -14,8 +14,8 @@
 // pass that split, [5, 9) diced patches per level, then frame totals (cleared once per frame): [12]
 // patches routed, [13] micro-triangles diced, [14] patches lost, [15] deepest splitting pass.
 // dispatch (indirect arguments; only the one-thread passes bind it, as a buffer cannot be storage
-// and indirect in one dispatch): [0, 3) the split pass, [4 + 4 level, 7 + 4 level) the dicing of
-// grid level `level`.
+// and indirect in one dispatch): [0, 3) the split pass, [4, 7) the dicing of grid levels 0 and 1, [8, 11)
+// of levels 2 and 3.
 
 @group(0) @binding(8) var<storage, read_write> patches: array<vec4<u32>>;
 @group(0) @binding(9) var<storage, read_write> state: array<atomic<u32>>;
@@ -138,18 +138,35 @@ fn tess_split(wid: vec3<u32>, groups: vec3<u32>, lid: u32) {
     tess_append(route, lid, pass_index & 1u);
 }
 
-// After the last split pass (one thread): the dice dispatches (patches per workgroup: 64 / F² for F <= 2 one
-// patch per thread, then 4 and 1) and the frame's statistics.
+// Workgroups dicing grid level `level` (patches per workgroup: 64 for F <= 2, one per thread, then 4 and
+// 1). Two dispatches dice them: levels 0 and 1 (a thread per patch), then 2 and 3 (a workgroup per patch
+// group), each level after level (tess_dice_level).
+fn tess_dice_groups(level: u32) -> u32 {
+    let count = min(atomicLoad(&state[STATE_DICE + level]), DICE_CAPACITY);
+    let per_group = select(64u, 64u >> (2u * level), level >= 2u);
+    return (count + per_group - 1u) / per_group;
+}
+
+// The grid level a workgroup of the dispatch dicing levels `first` and `first + 1` works on, and its index
+// among that level's workgroups.
+fn tess_dice_level(group: u32, first: u32) -> vec2<u32> {
+    let n = tess_dice_groups(first);
+    return select(vec2<u32>(first + 1u, group - n), vec2<u32>(first, group), group < n);
+}
+
+// After the last split pass (one thread): the two dice dispatches (levels 0 and 1, then 2 and 3) and the
+// frame's statistics.
 fn tess_prepare_dice() {
     for (var level = 0u; level <= TESS_MAX_LEVEL; level++) {
         let count = min(atomicLoad(&state[STATE_DICE + level]), DICE_CAPACITY);
-        let per_group = select(64u, 64u >> (2u * level), level >= 2u);
-        let groups = (count + per_group - 1u) / per_group;
-        let args = DISPATCH_DICE + (level * 4u);
+        atomicAdd(&state[STATE_TOTAL_MICRO], count << (2u * level));
+    }
+    for (var path = 0u; path < 2u; path++) {
+        let groups = tess_dice_groups(2u * path) + tess_dice_groups((2u * path) + 1u);
+        let args = DISPATCH_DICE + (path * 4u);
         dispatch[args] = min(groups, MAX_DISPATCH);
         dispatch[args + 1u] = (groups + MAX_DISPATCH - 1u) / MAX_DISPATCH;
         dispatch[args + 2u] = 1u;
-        atomicAdd(&state[STATE_TOTAL_MICRO], count << (2u * level));
     }
     atomicAdd(&state[STATE_TOTAL_OVERFLOW], atomicLoad(&state[STATE_OVERFLOW]));
     atomicMax(&state[STATE_TOTAL_DEEPEST], atomicLoad(&state[STATE_DEEPEST]));

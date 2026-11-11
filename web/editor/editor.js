@@ -26,6 +26,7 @@ class Editor {
     this.gizmo = new Gizmo();
     this.snapping = { grid: 0.5, angle: 15, scale: 0.1, gridOn: true, angleOn: true, scaleOn: false };
     this.instanceCache = new Map();
+    this.actorCache = new Map();
     this.mounted = false;
     this.visible = false;
     this.pending = new Map();
@@ -68,6 +69,8 @@ class Editor {
     this.revision = revision;
     this.state = JSON.parse(engine.heliosEditorState());
     this.instanceCache.clear();
+    this.actorCache.clear();
+    this.indexActors();
     // Drop selected things that no longer exist (undo of an add, deletes).
     this.selection = this.selection.filter((ref) => this.exists(ref));
     this.outliner.update();
@@ -75,15 +78,62 @@ class Editor {
     this.content.update();
     this.graphEditor.update();
     this.toolbarState();
-    engine.heliosEditorSetSelection(new Uint32Array(this.selectedIds("i")));
+    this.sendSelection();
     for (const w of this.state.warnings || []) this.status(w, "warn");
+  }
+
+  // Actor lookups from the state's parallel arrays: index by id, children by parent.
+  indexActors() {
+    const a = this.state.actors;
+    this.actorIndex = new Map();
+    this.actorChildren = new Map();
+    for (let k = 0; k < a.id.length; k++) {
+      this.actorIndex.set(a.id[k], k);
+      const p = a.parent[k];
+      if (!this.actorChildren.has(p)) this.actorChildren.set(p, []);
+      this.actorChildren.get(p).push(a.id[k]);
+    }
+  }
+
+  actorName(id) {
+    const k = this.actorIndex?.get(id);
+    return k === undefined ? "?" : this.state.actors.name[k];
+  }
+
+  actorParent(id) {
+    const k = this.actorIndex?.get(id);
+    return k === undefined ? -1 : this.state.actors.parent[k];
+  }
+
+  // Details of one actor (transforms, bounds, components), cached until the next refresh.
+  actor(id) {
+    if (!this.actorCache.has(id)) this.actorCache.set(id, JSON.parse(engine.heliosEditorActor(id) || "null"));
+    return this.actorCache.get(id);
+  }
+
+  component(ref) {
+    const { actor, component } = parseComponent(ref);
+    return this.actor(actor)?.components.find((c) => c.name === component) || null;
+  }
+
+  // Outlines the selected actors (with their children) and components in the viewport.
+  sendSelection() {
+    const components = this.selection.filter((r) => r.startsWith("c:")).map((r) => {
+      const c = parseComponent(r);
+      return [c.actor, c.component];
+    });
+    engine.heliosEditorSelect(JSON.stringify({ actors: this.selectedIds("a"), components }));
+  }
+
+  selectedComponents() {
+    return this.selection.filter((r) => r.startsWith("c:")).map(parseComponent);
   }
 
   exists(ref) {
     const [kind, id] = splitRef(ref);
     const s = this.state;
-    if (kind === "i") return id < s.instances.mesh.length && s.instances.visible[id] !== 2 && s.instances.owner[id] !== 2;
-    if (kind === "l") return s.lights.some((l) => l.index === id && l.def.enabled);
+    if (kind === "a") return this.actorIndex.has(id);
+    if (kind === "c") return !!this.component(ref);
     if (kind === "p") return s.pcg.some((v) => v.def.id === id);
     if (kind === "m") return s.materials.some((m) => m.name === id) || s.content.materials.includes(id);
     return true;
@@ -94,16 +144,8 @@ class Editor {
     return this.instanceCache.get(i);
   }
 
-  light(index) {
-    return this.state.lights.find((l) => l.index === index);
-  }
-
   volume(id) {
     return this.state.pcg.find((v) => v.def.id === id);
-  }
-
-  meshName(i) {
-    return this.state.meshes[this.state.instances.mesh[i]]?.name || "mesh";
   }
 
   // ---- Selection --------------------------------------------------------------------------
@@ -114,7 +156,7 @@ class Editor {
     if (mode === "set") this.selection = [...new Set(refs)];
     else if (mode === "add") this.selection = [...new Set([...this.selection.filter((r) => !refs.includes(r)), ...refs])];
     else for (const r of refs) this.selection = this.selection.includes(r) ? this.selection.filter((x) => x !== r) : [...this.selection, r];
-    engine.heliosEditorSetSelection(new Uint32Array(this.selectedIds("i")));
+    this.sendSelection();
     this.outliner.update();
     this.details.render();
     this.footerSelection();
@@ -133,12 +175,12 @@ class Editor {
     const out = [];
     for (const ref of this.selection) {
       const [kind, id] = splitRef(ref);
-      if (kind === "i") {
-        const info = this.instance(id);
-        if (info) out.push({ ref, ...info.transform });
-      } else if (kind === "l") {
-        const l = this.light(id);
-        if (l) out.push({ ref, t: l.def.position, r: quatIdentity(), s: [1, 1, 1] });
+      if (kind === "a") {
+        const info = this.actor(id);
+        if (info) out.push({ ref, ...info.world });
+      } else if (kind === "c") {
+        const c = this.component(ref);
+        if (c) out.push({ ref, ...c.world });
       } else if (kind === "p") {
         const v = this.volume(id);
         if (v) {
@@ -157,7 +199,7 @@ class Editor {
     if (!targets.length) return false;
     const primary = targets[targets.length - 1];
     this.gizmo.begin(handle, this.view, primary.t, primary.r, mouse);
-    this.drag = { targets, pivot: primary.t, rotation: primary.r, key: `drag-${++this.dragCounter}`, lightsApplied: false, result: null };
+    this.drag = { targets, pivot: primary.t, rotation: primary.r, key: `drag-${++this.dragCounter}`, result: null };
     return true;
   }
 
@@ -185,25 +227,27 @@ class Editor {
     this.previewDrag();
   }
 
+  // Moves the dragged actors (children follow) and components in the engine, without an undo
+  // step; their instances are movable until the drag settles.
   previewDrag() {
     const results = this.drag.result || [];
-    const instances = results.filter((r) => r.ref.startsWith("i:"));
-    if (instances.length) {
-      const flat = new Float32Array(instances.length * 10);
-      instances.forEach((r, k) => flat.set([...r.t, ...r.r, ...r.s], k * 10));
-      engine.heliosEditorPreview(new Uint32Array(instances.map((r) => splitRef(r.ref)[1])), flat);
-      for (const r of instances) {
-        const info = this.instance(splitRef(r.ref)[1]);
+    const actors = results.filter((r) => r.ref.startsWith("a:"));
+    if (actors.length) {
+      const flat = new Float32Array(actors.length * 10);
+      actors.forEach((r, k) => flat.set([...r.t, ...r.r, ...r.s], k * 10));
+      engine.heliosEditorPreviewActors(new Uint32Array(actors.map((r) => splitRef(r.ref)[1])), flat);
+      for (const r of actors) {
+        const info = this.actor(splitRef(r.ref)[1]);
         if (info) info.preview = r;
       }
     }
-    for (const r of results.filter((r) => r.ref.startsWith("l:"))) {
-      const l = this.light(splitRef(r.ref)[1]);
-      if (!l) continue;
-      const def = { ...l.def, position: r.t };
-      if (def.shape === "spot" && this.gizmo.mode === "rotate") def.direction = quatRotate(r.r, l.def.direction);
-      this.apply({ op: "light", light: l.index, def }, { merge: this.drag.key, quiet: true });
-      this.drag.lightsApplied = true;
+    const components = results.filter((r) => r.ref.startsWith("c:"));
+    if (components.length) {
+      engine.heliosEditorPreviewComponents(JSON.stringify(components.map((r) => ({ ...parseComponent(r.ref), t: r.t, r: r.r, s: r.s }))));
+      for (const r of components) {
+        const c = this.component(r.ref);
+        if (c) c.preview = r;
+      }
     }
   }
 
@@ -213,17 +257,17 @@ class Editor {
     this.gizmo.end();
     if (!d) return;
     const results = d.result || [];
-    const instances = results.filter((r) => r.ref.startsWith("i:"));
+    const actors = results.filter((r) => r.ref.startsWith("a:"));
+    const components = results.filter((r) => r.ref.startsWith("c:"));
     if (cancel) {
-      if (instances.length) engine.heliosEditorRevertPreview(new Uint32Array(instances.map((r) => splitRef(r.ref)[1])));
-      if (d.lightsApplied) engine.heliosEditorUndo();
-      this.instanceCache.clear();
+      engine.heliosEditorRevertPreview(new Uint32Array(0));
+      this.actorCache.clear();
       this.refresh();
       return;
     }
-    if (instances.length) {
-      this.apply({ op: "transform", instances: instances.map((r) => splitRef(r.ref)[1]), transforms: instances.map((r) => ({ t: r.t, r: r.r, s: r.s })) }, { merge: d.key, quiet: true });
-    }
+    const trs = (r) => ({ t: r.t, r: r.r, s: r.s });
+    if (actors.length) this.apply({ op: "actor_transform", actors: actors.map((r) => splitRef(r.ref)[1]), transforms: actors.map(trs) }, { merge: d.key, quiet: true });
+    if (components.length) this.apply({ op: "component_transform", components: components.map((r) => parseComponent(r.ref)), transforms: components.map(trs) }, { merge: d.key, quiet: true });
     for (const r of results.filter((r) => r.ref.startsWith("p:"))) {
       const v = this.volume(splitRef(r.ref)[1]);
       if (!v) continue;
@@ -241,40 +285,73 @@ class Editor {
   deleteSelection() {
     if (!this.selection.length) return;
     const n = this.selection.length;
-    this.apply({ op: "delete", instances: this.selectedIds("i"), lights: this.selectedIds("l"), pcg: this.selectedIds("p") });
+    this.apply({ op: "delete", actors: this.selectedIds("a"), components: this.selectedComponents(), pcg: this.selectedIds("p") });
     this.select([]);
     this.status(`Deleted ${n} object${n > 1 ? "s" : ""}`);
   }
 
   duplicateSelection() {
-    const instances = this.selectedIds("i"), lights = this.selectedIds("l"), pcg = this.selectedIds("p");
-    if (!instances.length && !lights.length && !pcg.length) return;
+    // A selected component duplicates its actor.
+    const actors = [...new Set([...this.selectedIds("a"), ...this.selectedComponents().map((c) => c.actor)])], pcg = this.selectedIds("p");
+    if (!actors.length && !pcg.length) return;
     const step = this.snapping.gridOn ? Math.max(this.snapping.grid, 0.5) : 1;
-    const created = this.apply({ op: "duplicate", instances, lights, pcg, offset: [step, 0, 0] });
-    if (created) this.select([...created.instances.map((i) => "i:" + i), ...created.lights.map((l) => "l:" + l), ...created.pcg.map((p) => "p:" + p)]);
+    const created = this.apply({ op: "duplicate", actors, pcg, offset: [step, 0, 0] });
+    if (created) this.select([...created.actors.map((a) => "a:" + a), ...created.pcg.map((p) => "p:" + p)]);
+  }
+
+  // Ctrl+G: a new actor at the selection's centre with the selected actors as children.
+  groupSelection() {
+    const actors = this.selectedIds("a");
+    if (!actors.length) return;
+    const created = this.apply({ op: "group", actors });
+    if (created) {
+      this.select(created.actors.map((a) => "a:" + a));
+      this.status(`Grouped ${actors.length} actor${actors.length > 1 ? "s" : ""}`);
+    }
+  }
+
+  // Shift+G: the children of the selected actors move up a level; empty groups go.
+  ungroupSelection() {
+    const actors = this.selectedIds("a");
+    if (!actors.length) return;
+    const children = actors.flatMap((a) => this.actorChildren.get(a) || []);
+    if (this.apply({ op: "ungroup", actors })) this.select(children.map((c) => "a:" + c));
+  }
+
+  // Attaches actors to `parent` (null: the world root), keeping where they are.
+  reparent(actors, parent) {
+    if (!actors.length) return;
+    if (this.apply({ op: "reparent", actors, parent })) this.status(parent === null ? "Detached" : `Attached to ${this.actorName(parent)}`);
+  }
+
+  rename(actor, name) {
+    if (name && name !== this.actorName(actor)) this.apply({ op: "rename", actor, name });
   }
 
   undo() {
     if (engine.heliosEditorUndo()) this.status("Undo");
     this.instanceCache.clear();
+    this.actorCache.clear();
     this.refresh();
   }
 
   redo() {
     if (engine.heliosEditorRedo()) this.status("Redo");
     this.instanceCache.clear();
+    this.actorCache.clear();
     this.refresh();
   }
 
   // World bounds of a reference ([lo, hi]).
   bounds(ref) {
     const [kind, id] = splitRef(ref);
-    if (kind === "i") return this.instance(id)?.bounds;
-    if (kind === "l") {
-      const l = this.light(id);
-      if (!l) return null;
-      const r = Math.max(1, l.def.range * 0.3);
-      return [sub(l.def.position, [r, r, r]), add(l.def.position, [r, r, r])];
+    if (kind === "a") return this.actor(id)?.bounds;
+    if (kind === "c") {
+      const c = this.component(ref);
+      if (!c) return null;
+      if (c.instance !== undefined && c.instance !== null) return this.instance(c.instance)?.bounds;
+      const r = c.light ? Math.max(1, c.light.range * 0.3) : 0.5;
+      return [sub(c.world.t, [r, r, r]), add(c.world.t, [r, r, r])];
     }
     if (kind === "p") {
       const v = this.volume(id)?.def.volume;
@@ -317,7 +394,7 @@ class Editor {
   place(item, at) {
     const created = this.apply({ op: "place", item, transform: { t: at, r: [0, 0, 0, 1], s: [1, 1, 1] } });
     if (created) {
-      this.select(created.instances.map((i) => "i:" + i));
+      this.select(created.actors.map((a) => "a:" + a));
       this.status(`Placed ${item}`);
     }
   }
@@ -325,7 +402,7 @@ class Editor {
   addLight(shape, at) {
     const def = { ...DEFAULT_LIGHT, shape, position: add(at, [0, shape === "spot" ? 4 : 2.5, 0]) };
     const created = this.apply({ op: "add_light", def });
-    if (created) this.select(created.lights.map((l) => "l:" + l));
+    if (created) this.select(created.actors.map((a) => "a:" + a));
   }
 
   addPcg(preset, at) {
@@ -385,7 +462,7 @@ class Editor {
 
   async newScene(sceneName) {
     const base = sceneName ? { kind: "procedural", scene: sceneName, detail: this.state?.base?.detail || "medium" } : this.state.base;
-    await this.load(JSON.stringify({ format: "helios-scene", version: 1, base }), sceneName || "new scene");
+    await this.load(JSON.stringify({ format: "helios-scene", version: 2, base }), sceneName || "new scene");
   }
 
   async importModel(url, bytes, at) {
@@ -499,7 +576,7 @@ class Editor {
     this.viewportStats = h("div", { class: "ed-viewport-stats" });
     this.busyEl = h("div", { class: "ed-busy" });
     this.viewport = h("main", { class: "ed-viewport", tabindex: "-1" }, this.overlay, this.viewportStats, this.busyEl,
-      h("div", { class: "ed-viewport-hint" }, "LMB select · RMB + WASD/QE fly · wheel dolly · W/E/R move/rotate/scale · F focus · Del delete · Ctrl+D duplicate · Tab play"));
+      h("div", { class: "ed-viewport-hint" }, "LMB select actor · Alt+LMB component · RMB + WASD/QE fly · wheel dolly · W/E/R move/rotate/scale · F focus · Del delete · Ctrl+D duplicate · Ctrl+G / Shift+G group / ungroup · F2 rename · Tab play"));
     this.statusEl = h("span", { class: "ed-status-message" });
     this.selectionEl = h("span", { class: "ed-status-selection" });
     this.gpuEl = h("span", { class: "ed-status-gpu" });
@@ -559,7 +636,7 @@ class Editor {
         c.setPointerCapture(e.pointerId);
         return;
       }
-      this.click = { m, shift: e.shiftKey, ctrl: e.ctrlKey || e.metaKey };
+      this.click = { m, shift: e.shiftKey, ctrl: e.ctrlKey || e.metaKey, alt: e.altKey };
     });
     c.addEventListener("pointermove", (e) => {
       if (!this.visible || !this.view) return;
@@ -592,7 +669,7 @@ class Editor {
         this.select([icon], mode);
         return;
       }
-      this.picks.add({ id: engine.heliosEditorPick(m[0], m[1]), mode });
+      this.picks.add({ id: engine.heliosEditorPick(m[0], m[1]), mode, component: click.alt });
     });
     // Drag and drop: content items and .glb files.
     this.viewport.addEventListener("dragover", (e) => {
@@ -639,6 +716,7 @@ class Editor {
         else if (e.code === "KeyS") this.save();
         else if (e.code === "KeyO") this.openFile();
         else if (e.code === "KeyD") this.duplicateSelection();
+        else if (e.code === "KeyG") this.groupSelection();
         else if (e.code === "Backquote") {
           this.gizmo.space = this.gizmo.space === "world" ? "local" : "world";
           this.toolbarState();
@@ -651,6 +729,8 @@ class Editor {
         case "KeyR": this.setMode("scale"); break;
         case "Space": this.setMode({ translate: "rotate", rotate: "scale", scale: "translate" }[this.gizmo.mode]); break;
         case "KeyF": this.focusSelection(); break;
+        case "KeyG": if (e.shiftKey) this.ungroupSelection(); else return; break;
+        case "F2": if (this.primary?.startsWith("a:")) this.outliner.rename(splitRef(this.primary)[1]); else return; break;
         case "Delete": case "Backspace": this.deleteSelection(); break;
         case "Escape":
           if (this.drag) this.endDrag(true);
@@ -713,8 +793,8 @@ class Editor {
       return;
     }
     if (request.assign) {
-      if (result.instance !== null && result.owner?.kind !== "pcg") {
-        this.apply({ op: "assign_material", instances: [result.instance], material: request.assign });
+      if (result.owner?.kind === "actor") {
+        this.apply({ op: "assign_material", components: [{ actor: result.owner.actor, component: result.owner.component }], material: request.assign });
         this.status(`Assigned ${request.assign}`);
       }
       return;
@@ -723,7 +803,10 @@ class Editor {
       if (request.mode === "set") this.select([]);
       return;
     }
-    const ref = result.owner?.kind === "pcg" ? "p:" + result.owner.id : "i:" + result.instance;
+    const o = result.owner;
+    if (!o || o.kind === "deleted") return;
+    // A click selects the actor; Alt+click the component under the cursor.
+    const ref = o.kind === "pcg" ? "p:" + o.id : request.component ? componentRef(o.actor, o.component) : "a:" + o.actor;
     this.select([ref], request.mode);
   }
 
@@ -749,22 +832,30 @@ class Editor {
         this.iconHits.push({ p: label, r: 14, ref });
       }
     }
-    // Selected instances: oriented bounds (shows translucent and occluded selections too).
+    // Selected actors: their bounds with everything below them (moved with a drag's preview);
+    // selected mesh components: oriented bounds. Shows translucent and occluded selections too.
     let boxes = 0;
     for (const ref of this.selection) {
-      if (!ref.startsWith("i:") || boxes++ > 200) continue;
-      const info = this.instance(splitRef(ref)[1]);
-      if (!info) continue;
-      const tr = info.preview || info.transform;
-      drawBox(ctx, view, mat4Compose(tr.t, tr.r, tr.s), info.local_bounds[0], info.local_bounds[1], "rgba(255, 170, 60, 0.55)", 1, []);
+      if (boxes++ > 200) break;
+      if (ref.startsWith("a:")) {
+        const info = this.actor(splitRef(ref)[1]);
+        if (!info?.bounds) continue;
+        const shift = info.preview ? sub(info.preview.t, info.world.t) : [0, 0, 0];
+        drawBox(ctx, view, mat4Compose(shift, quatIdentity(), [1, 1, 1]), info.bounds[0], info.bounds[1], "rgba(255, 170, 60, 0.55)", 1, []);
+      } else if (ref.startsWith("c:")) {
+        const c = this.component(ref);
+        if (!c?.local_bounds) continue;
+        const tr = c.preview || c.world;
+        drawBox(ctx, view, mat4Compose(tr.t, tr.r, tr.s), c.local_bounds[0], c.local_bounds[1], "rgba(255, 170, 60, 0.75)", 1.4, [4, 3]);
+      }
     }
-    // Lights: icons (and the cone of a selected spot light).
+    // Lights: icons (and the cone of a selected spot light); a click selects the light's actor.
     for (const l of s.lights) {
       if (!l.def.enabled) continue;
-      const ref = "l:" + l.index;
+      const ref = "a:" + l.actor;
       const p = view.project(l.def.position);
       if (!p) continue;
-      const on = selected.has(ref);
+      const on = selected.has(ref) || selected.has(componentRef(l.actor, l.component));
       drawLightIcon(ctx, p, l.def, on);
       this.iconHits.push({ p, r: 13, ref });
       if (on) {
@@ -786,7 +877,18 @@ function splitRef(ref) {
   const i = ref.indexOf(":");
   if (i < 0) return [ref, null];
   const kind = ref.slice(0, i), id = ref.slice(i + 1);
-  return [kind, kind === "m" ? id : Number(id)];
+  return [kind, kind === "m" || kind === "c" ? id : Number(id)];
+}
+
+// A component's reference: `c:ACTOR/NAME`.
+function componentRef(actor, name) {
+  return `c:${actor}/${name}`;
+}
+
+function parseComponent(ref) {
+  const id = ref.slice(2);
+  const slash = id.indexOf("/");
+  return { actor: Number(id.slice(0, slash)), component: id.slice(slash + 1) };
 }
 
 function drawBox(ctx, view, m, lo, hi, color, width, dash) {
@@ -949,4 +1051,4 @@ export function toggleEditor() {
   if (hint) hint.classList.toggle("on", !editor.visible);
 }
 
-export { splitRef };
+export { splitRef, componentRef, parseComponent };

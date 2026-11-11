@@ -36,6 +36,49 @@ Scene switches (`heliosLoadScene`, async since round 8; the embedded page's `N`)
 current scene keeps running, and resolve once the new scene is in. Imported glTF models bake on the page (their
 meshes would have to cross to the workers first). Lumen's displaced variants use the same workers (round 6).
 
+## Frames that wait for pipelines (round 8, `webperf`)
+
+A frame's scene sync is where new content asks for pipelines: a new scene's shading models, graph materials,
+texture patterns, its tessellator's dicing permutations, Substrate's slab lighting, an editor change. If the sync
+queued a **core** pipeline, or one of a group whose feature this frame renders with (the groups ready at the
+frame's start are recorded: `Renderer::render_frame`), the frame **stops after the sync** — at any frame, not only
+before the first image — and the page keeps its last image while the queue compiles in the background (Chromium
+in parallel; Firefox the core ones at once, the rest in batches). The next frame chooses its features again: the
+new tessellator's group is not ready, so it renders undisplaced until the dicing arrives, as the first image does.
+The held frame's scene changes are applied once more by the next one (marked structural), so shadow pages, Lumen
+and translucency still see the switch. The status line shows "Compiling GPU shaders… N s" with the time held;
+the engine logs `frames held T s`. Before (round 6), such a pipeline was created in the frame that needed it:
+Chromium compiled those one at a time in the GPU process (wgpu's synchronous call), and the switch from the valley
+to the gallery held the canvas 18–26 s for its 34 new pipelines (Firefox 33 s); now 2.7–4.1 s (Firefox 12–16 s).
+
+Pipelines created while recording wait too: Lumen's card capture of a new material (the captures stay pending,
+the cards lit without albedo meanwhile) and Lumen's displaced-variant pipeline. Lumen Lite is created before the
+hold (when asked for, or chosen by the frame as its fallback); MegaLights' slab variant only once MegaLights is
+asked for; Firefox's background batch restarts at one pipeline after a hold (a batch grown to 32 on the last
+scene's small pipelines held the canvas 18 s on the gallery's).
+
+## Fewer pipelines (round 8, `webperf`)
+
+Firefox compiles one pipeline at a time, each a WGSL → HLSL → DXC compile of 0.1–2.7 s. The valley's set went
+from 214 to 200 pipelines and its background compile from 44.8 to 38.5 s of compiling, full quality 60 → 51 s in
+one interleaved pair (62 → 47 s in a busier one; `docs/round8/webperf.md`):
+
+* **The material resolve's `TESSELLATION` permutation from the start**: where tessellation is asked for and the
+  scene has displacing materials, the browser uses the displaced permutation for the first image too (it renders
+  undisplaced pixels as the plain one does) instead of compiling the plain one for the frames before the
+  tessellator is in and then the displaced one: 5 resolve pipelines fewer on the valley, 10 on the gallery.
+* **Tessellation dicing**: two grid levels per dispatch (`GRID` override: levels 0 and 1 a thread per patch, 2 and
+  3 a workgroup per patch group; `tess_dice_level`) instead of a `LEVEL` override per level: 4 + 2 pipelines
+  instead of 8 + 4 per displacing-graph permutation, the same GPU time (merging all four levels into one pipeline
+  cost the graph-displaced terrace 0.57 ms: the thread path's registers took the shared-memory path's occupancy).
+* **Translucency with AVBOIT**: only refracting surfaces (water, textured / rough / bumped glass) are drawn by the
+  classic pass, so only their classic models (and peel variants) are queued; the others compile once AVBOIT is
+  switched off.
+* **The underwater view** (`Group::OnDemand`): queued when the camera comes within 10 m of a water body, compiled
+  last, gating no feature (a frame under water before it is in skips the underwater fog). The valley's default
+  view is that close to its lake, so it still compiles there; views away from water (and scenes whose water the
+  camera never approaches) skip it.
+
 ## The bake workers
 
 `bake_worker.js` is both ends: imported by the engine's glue it is the page's pool, started as a module worker it

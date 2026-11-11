@@ -1,0 +1,52 @@
+[
+  {
+    "id": "scene-switch-compile-stall",
+    "title": "Jelenetváltás a képkockán belüli shaderfordítás nélkül: a völgy → galéria váltás 22–26 s helyett 4–6 s-ig áll Chromiumban",
+    "area": "Böngésző és platform",
+    "kind": "fix",
+    "status": "done",
+    "phase": "8. kör – 3. hullám",
+    "summary": "Chromiumban a völgyről a galériára váltva a vászon fél percig állt ('Compiling GPU shaders… 35 s'): az új jelenet 34 új pipeline-ját (a gráfos anyagok feloldása, a tesszelláció dice-permutációi, a Lumen kártyarögzítése, a Substrate réteg-megvilágítása) az a képkocka hozta létre, amelyik használta, a wgpu szinkron hívásával, amit a Chromium GPU-folyamata egyenként fordít. Mostantól az a képkocka, amelynek jelenetszinkronja új pipeline-t kér – egy alapvetőt, vagy olyan funkcióét, amellyel a képkocka renderelne –, a szinkron után megáll: a vászon a régi képet mutatja, amíg a háttérben (Chromiumban párhuzamosan) lefordulnak, a következő képkocka pedig azokkal a funkciókkal renderel, amelyek már készen vannak – ahogy az első kép. A vászon völgy → galéria váltáskor Chromiumban 18–26 s helyett 2,7–4,1 s-ig, Firefoxban 33,5 s helyett 12–16 s-ig áll.",
+    "details": "renderer.rs render_frame: a képkocka elején feljegyzi, mely pipeline-csoportok voltak készen (ready_before); a jelenetszinkron (anyagok, textúrák, kiterjesztett anyagok, tesszellátor, Substrate-megvilágítás) után megáll, ha alapvető pipeline vár vagy egy addig kész csoport már nem kész – bármelyik képkockán, nem csak az első kép előtt (eddig ott a képkocka szinkron fordított). A megállított képkocka jelenetváltozásait a következő strukturálisként alkalmazza újra (held), így az árnyéklapok, a Lumen és az áttetszőség is látja a váltást. A felvétel közben készülő pipeline-ok is várnak: cards.rs record_capture – az új anyagok kártyarögzítése függőben marad, amíg a pipeline-jai (most a GI-csoportban) lefordulnak; lumen_displaced.rs – az eltolt változatok pipeline-ja Lazy, a változatok várnak rá. A Lumen Lite a megállás előtt jön létre (akkor is, ha a képkocka maga választotta tartaléknak); a MegaLights réteges változata csak ha a MegaLights-ot kérik. web.rs: held_text – az állapotsor a tartás idejét mutatja, a napló 'frames held T s'; tartás után a Firefox háttérkötege egy pipeline-ról indul újra (a völgy kis pipeline-jain 32-re nőtt köteg a galériánál 18 s-ig tartotta a vásznat). Elvetve: az új jelenet pipeline-jainak fordítása az előfeldolgozás alatt (a helyettes jelenet szinkronja ugyanazon a GPU-jeleneten futna, amelyből a régi jelenet renderel: az a következő képkockán teljesen újraszinkronizálna; a mellékhatás nélküli 'mely pipeline-ok kellenek' elemzés hat alrendszer szinkronját duplikálná – a galériánál legfeljebb az előfeldolgozás 0,6–1 s-át nyerné), a hiányzó pipeline-ú rajzolások kihagyása (a 6. körben elvetve: a félkész képkockák a temporális állapotot rontják).",
+    "metrics": "Fej nélküli Chromium 1248 és Firefox 155 (headed), RTX 3090 megosztva; heliosLoadScene lánc völgy → galéria → erdő → katedrális a völgy teljes minősége után; a vászon leghosszabb állása a váltás alatt. Chromium: galéria 26,5 / 22,8 / 18,2 s → 4,1 / 3,4 / 2,7 s (csak a tartással 5,7 s), erdő 3,7 / 2,1 → 1,0 / 2,6 s, katedrális 2,8 / 1,9 → 1,2 / 2,1 s (ezeknél az előfeldolgozás dominál, zajon belül); a hívástól az új jelenet első képkockájáig galéria 18,9–27,1 → 3,3–6,4 s. Firefox: galéria 33,5 s (megjelenés 35,0 s) → 12,0–16,2 s (megjelenés 13,0 s; a köteg újraindítása előtt a 16 s-os tartás után még 18 s-ot állt), erdő 2,8 → 4,8–5,1 s (a sima feloldási permutáció most itt fordul, lásd 230), katedrális 3,0 → 2,3 s. A lap leghosszabb blokkja a váltás alatt továbbra is az építő (0,3–0,9 s). A régi úton a képkockában szinkron fordított pipeline-ok: 34 (galéria), 6 (erdő), 7 (katedrális).",
+    "showcase": "A site jelenetváltója vagy web/index.html?scene=valley után a konzolból heliosLoadScene('gallery'): a régi kép marad, az állapotsor 'Compiling GPU shaders… N s', majd a galéria tesszelláció nélkül jelenik meg, és a tesszelláció, GI néhány másodperc múlva csatlakozik; a konzolon 'frames held T s'. Kép: docs/round8/webperf/1-switch-gallery-chromium.jpg.",
+    "modules": [
+      "crates/helios-render/src/renderer.rs",
+      "crates/helios-render/src/cards.rs",
+      "crates/helios-render/src/lumen_displaced.rs",
+      "crates/helios-demo/src/web.rs",
+      "docs/architecture/browser.md",
+      "docs/round8/webperf.md"
+    ],
+    "order": 231,
+    "updated": "2026-11-11"
+  },
+  {
+    "id": "firefox-pipeline-permutations",
+    "title": "Kevesebb pipeline a Firefoxnak: a völgy készlete 214 helyett 200 pipeline, a dice-szintek két-két szintenként egy pipeline-ban",
+    "area": "Böngésző és platform",
+    "kind": "performance",
+    "status": "done",
+    "phase": "8. kör – 3. hullám",
+    "summary": "A Firefox egyenként fordítja a pipeline-okat (WGSL → HLSL → DXC, 0,1–2,7 s darabja), így a völgy teljes minősége ~45–90 s-ig tartott. Négy változtatás csökkenti a készletet GPU-idő nélkül: a böngésző a tesszellációt kérő jelenetben az első képtől a feloldás TESSELLATION permutációját használja (nem fordít előbb egy sima permutációt is), a tesszelláció darabolása (dice) két rácsszintet fut egy dispatch-ben (6 pipeline nézetenként 12 helyett), AVBOIT mellett csak a fénytörő felületek klasszikus árnyalása fordul, a víz alatti nézet pedig csak akkor, ha a kamera 10 m-re megközelít egy víztestet (a völgy alapnézete ilyen közel van a tóhoz, ott tehát továbbra is lefordul). A völgy háttérfordítása egy váltakozó párban 44,8 helyett 38,5 s, a teljes minőség 60,1 helyett 51,2 s-nál jön (egy terheltebb párban 62,0 → 47,4 s, 88,7 → 65,1 s); a galéria jelenetváltásánál is 10 feloldási pipeline-nal kevesebb fordul.",
+    "details": "renderer.rs: a feloldás permutációja tessellation = has_displacement() || (deferring && tessellation_wanted) – a TESSELLATION permutáció a nem eltolt pixeleket ugyanúgy rendereli (a displaced példányonként dől el). tess.wgsl, vsm_tess.wgsl: a LEVEL override helyett GRID override (0–1. szint: szálanként egy patch, a ciklusok F = 2 határáig futnak és kihagyják, ami F = 1-nél nincs – kibontva regiszterben marad; 2–3. szint: munkacsoportonként, osztott memóriában), a munkacsoport a listák darabszámaiból találja meg a szintjét (tess_queue.wgsl tess_dice_level, workgroupUniformLoad-dal, hogy a barrierek egységes vezérlésben maradjanak); tess_prepare_dice két dispatch-et ír (0+1, 2+3). tessellation.rs: DicePipelines = Vec<[Lazy; 2]>. Előbb kipróbálva: mind a négy szint egy pipeline-ban – a gráfos teraszon a szoftveres raszter 2,00 → 2,57 ms (a szálas út regiszterei elvitték az osztott memóriás út kihasználtságát), ezért a két út külön maradt. translucency.rs prefetch: AVBOIT mellett csak a fénytörő felületek (víz, textúrás/érdes/bump üveg) klasszikus modellje és peel-változata kerül sorra (a prefetch kulcsa tartalmazza az AVBOIT-ot); pipelines.rs Group::OnDemand – a víz alatti nézet ide tartozik, utolsóként fordul, egyetlen funkciót sem tart vissza (water.rs WaterBody::near, UNDERWATER_MARGIN 10 m), amíg nincs kész, a víz alatti köd kimarad. Nem készült el: az AVBOIT első/hátsó vödör-változatainak összevonása (a völgy Firefox-fordításának ≈ 10 s-a, a legnagyobb maradék tétel) – a hátsó menetnek is kötnie kellene a mozgásvektor-célt és egy új uniform kötést a közös áttetszőségi layoutban; az üveg és a keverés árnyalásának megosztása futásidejű SHADING-gel (mindkét modell regiszterei). Mellékhatás: eltolás nélküli jelenetre váltva (galéria → erdő) a sima feloldási permutáció most a váltáskor fordul (Firefoxban +5 pipeline, ≈ +2 s), amit eddig a völgy első képe fordított le.",
+    "metrics": "Firefox 155, ?compile-batch=1&compile-log=1, váltakozó base/new párok: völgy (2. pár, végleges) 214 → 200 pipeline, háttérfordítás 152 köteg 44,8 s → 141 köteg 38,5 s, első kép 11,6 → 9,9 s, teljes minőség 60,1 → 51,2 s; tételenként: a feloldás tesszellációs permutációja 5 pipeline 4,6 s → 0, dice 8 + 4 pipeline 5,4 + 2,4 s → 4 + 2 pipeline 3,3 + 1,2 s, klasszikus áttetszőség 4 pipeline 5,5 s → 2 pipeline 2,7 s; 1. pár (még egyetlen dice-pipeline-nal) 62,0 → 47,4 s, teljes 88,7 → 65,1 s; katedrális (nincs tesszelláció és víz: a készlet nem változik, 197 pipeline) első kép 15,7 → 13,9 s, teljes 54,5 → 44,2 s (zaj). GPU (1600×900, minimumok, váltakozó futások): natív Vulkan gráfos terasz szoftveres raszter + merge 2,002 → 1,998 ms, késői menet 0,099 → 0,084 ms, árnyéklapok tesszellációja 0,052 → 0,045 ms; völgyi ösvény 1,071 → 1,053 / 0,091 → 0,076 / 0,048 → 0,040 ms; képek 62,9 / 60,9 dB, 0 % pixel > 24/255. Chromium (heliosGpuPasses, sp=100) terasz raszter 4,79 → 4,87 ms, késői 0,43 → 0,34 ms, árnyéklap-tesszelláció 0,257 → 0,211 ms (összesen egyenlő).",
+    "showcase": "web/index.html?scene=valley&compile-batch=1&compile-log=1 Firefoxban: a konzol pipeline-onként listázza a fordítási időt – nincs több 'material resolve' a háttérben, 'tessellation dice' 4 helyett 2 sor. Kép: docs/round8/webperf/2-terrace-dicing.jpg (a gráfos terasz, változatlan kép).",
+    "modules": [
+      "crates/helios-render/src/renderer.rs",
+      "crates/helios-render/src/tessellation.rs",
+      "crates/helios-render/src/shaders/tess.wgsl",
+      "crates/helios-render/src/shaders/vsm_tess.wgsl",
+      "crates/helios-render/src/shaders/tess_queue.wgsl",
+      "crates/helios-render/src/translucency.rs",
+      "crates/helios-render/src/water.rs",
+      "crates/helios-render/src/pipelines.rs",
+      "docs/architecture/browser.md",
+      "docs/architecture/tessellation.md",
+      "docs/architecture/translucency.md",
+      "docs/round8/webperf.md"
+    ],
+    "order": 230,
+    "updated": "2026-11-11"
+  }
+]

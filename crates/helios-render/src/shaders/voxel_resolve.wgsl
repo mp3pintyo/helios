@@ -34,6 +34,17 @@ fn resolve_voxel(pixel: vec2<u32>, id: u32) {
     // inverse times max_scale.
     let inverse_scale = 1.0 / max(instance.max_scale, 1e-6);
     let strength = wind_strength(instance);
+    // A plant's brick moves rigidly with its bone (plant_wind.wgsl): one offset for the brick,
+    // this frame's and the previous frame's.
+    let bone = plant_voxel_bone(v.header, v.attributes, b);
+    let planted = plant_animated(instance, strength) && bone != 0xffffffffu;
+    var brick_offset = vec3<f32>(0.0);
+    var brick_previous = vec3<f32>(0.0);
+    if planted {
+        let brick_center = v.origin + ((voxel_cell(brick, 0u) + 2.0) * v.size);
+        brick_offset = plant_brick_offset(instance, plant_air(instance, strength, wind_origin(instance), wind.time.x), bone, brick_center, instance.world);
+        brick_previous = plant_brick_offset(instance, plant_air_previous(instance, strength), bone, brick_center, instance.prev_world);
+    }
     let eye = frame.camera_position.xyz;
     let uv = (vec2<f32>(pixel) + 0.5) * frame.viewport.zw;
     let world_position = world_from_depth(uv, textureLoad(scene_depth, pixel, 0).r, frame.inv_view_proj);
@@ -41,7 +52,10 @@ fn resolve_voxel(pixel: vec2<u32>, id: u32) {
     // The hit in voxels from the cluster origin, the wind moved back by its offset there; the
     // voxel is the nearest set cell around it (Chebyshev distance to its displaced centre: ½ on
     // its own cube).
-    let rest_estimate = world_position - (wind_world_position(instance, strength, (to_object * (world_position - instance.world[3].xyz)) * inverse_scale, 1.0) -(instance.world * vec4<f32>((to_object * (world_position - instance.world[3].xyz)) * inverse_scale, 1.0)).xyz);
+    var rest_estimate = world_position - brick_offset;
+    if !planted {
+        rest_estimate = world_position - (wind_world_position(instance, strength, (to_object * (world_position - instance.world[3].xyz)) * inverse_scale, 1.0) -(instance.world * vec4<f32>((to_object * (world_position - instance.world[3].xyz)) * inverse_scale, 1.0)).xyz);
+    }
     let estimate = (((to_object * (rest_estimate - instance.world[3].xyz)) * inverse_scale) - v.origin) / v.size;
     let brick_cell = voxel_cell(brick, 0u);
     let mask = vec2<u32>(brick.x, brick.y);
@@ -61,7 +75,10 @@ fn resolve_voxel(pixel: vec2<u32>, id: u32) {
                     continue;
                 }
                 let object = v.origin + ((brick_cell + vec3<f32>(local) + 0.5) * v.size);
-                let offset = wind_world_position(instance, strength, object, 1.0) -(instance.world * vec4<f32>(object, 1.0)).xyz;
+                var offset = brick_offset;
+                if !planted {
+                    offset = wind_world_position(instance, strength, object, 1.0) -(instance.world * vec4<f32>(object, 1.0)).xyz;
+                }
                 let d = abs((((to_object * (world_position - offset - instance.world[3].xyz)) * inverse_scale) - object) / v.size);
                 let distance = max(d.x, max(d.y, d.z));
                 if distance < best_distance {
@@ -75,7 +92,10 @@ fn resolve_voxel(pixel: vec2<u32>, id: u32) {
         }
     }
     let attributes = geometry[v.attributes + best];
-    let center_world = wind_world_position(instance, strength, best_center, 1.0);
+    var center_world = (instance.world * vec4<f32>(best_center, 1.0)).xyz + brick_offset;
+    if !planted {
+        center_world = wind_world_position(instance, strength, best_center, 1.0);
+    }
     // The cube moves rigidly with the wind at its centre, with weight 1: voxels carry no plant
     // data (they stand in where a blade's held base moves less than a voxel anyway).
     let rest = world_position - (center_world - (instance.world * vec4<f32>(best_center, 1.0)).xyz);
@@ -134,7 +154,10 @@ fn resolve_voxel(pixel: vec2<u32>, id: u32) {
         }
     }
 
-    let previous = wind_previous_world_position(instance, strength, best_center, 1.0) + ((instance.prev_world * vec4<f32>(object_position - best_center, 0.0)).xyz);
+    var previous = wind_previous_world_position(instance, strength, best_center, 1.0) + ((instance.prev_world * vec4<f32>(object_position - best_center, 0.0)).xyz);
+    if planted {
+        previous = (instance.prev_world * vec4<f32>(object_position, 1.0)).xyz + brick_previous;
+    }
     let motion = clip_to_uv(frame.unjittered_view_proj * vec4<f32>(world_position, 1.0)) - clip_to_uv(frame.prev_unjittered_view_proj * vec4<f32>(previous, 1.0));
     textureStore(gbuffer_albedo, pixel, vec4<f32>(sqrt(saturate(surface.albedo)), surface.metallic));
     textureStore(gbuffer_normal, pixel, vec4<f32>(surface.normal, surface.roughness));

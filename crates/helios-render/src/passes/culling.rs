@@ -13,6 +13,8 @@ use crate::targets::{FrameTargets, DEPTH_FORMAT, VISIBILITY_FORMAT};
 use crate::textures::TextureLibrary;
 use crate::pipelines::{in_group, Group};
 use crate::util::{self, bind, bind_group, bind_group_layout, compute_pipeline, lazy_compute_pipeline, storage_buffer, uniform_buffer, Lazy};
+use crate::plant_sim::{sim_entry, sim_resource};
+use crate::plant_wind::{plant_entry, plant_resource};
 use crate::skin::{skin_entry, skin_resource};
 use crate::tessellation::{tessellation_entry, tessellation_resource, Tessellation};
 use crate::wind::{wind_entry, wind_resource};
@@ -201,6 +203,8 @@ impl Culling {
         raster_entries.extend(alpha_mask_entries());
         raster_entries.push(wind_entry());
         raster_entries.push(skin_entry());
+        raster_entries.push(plant_entry());
+        raster_entries.push(sim_entry());
         let raster_layout = bind_group_layout(device, "raster", ShaderStages::VERTEX_FRAGMENT, &raster_entries);
         let mut sw_entries = raster_entries.clone();
         sw_entries.push((7, bind::storage(false)));
@@ -417,6 +421,8 @@ impl Culling {
         entries.extend(alpha_mask_resources(scene));
         entries.push(wind_resource(scene));
         entries.push(skin_resource(scene));
+        entries.push(plant_resource(scene));
+        entries.push(sim_resource(scene));
         entries
     }
 

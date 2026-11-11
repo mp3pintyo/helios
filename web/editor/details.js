@@ -5,7 +5,7 @@
 
 import { h, icon, section, row, numberField, vectorField, slider, checkbox, select, colorField, button } from "./ui.js";
 import { quatFromEuler, quatToEuler } from "./math.js";
-import { splitRef } from "./editor.js";
+import { splitRef, componentRef, parseComponent } from "./editor.js";
 import { materialParams } from "./graph.js";
 
 export function createDetails(ed) {
@@ -23,8 +23,8 @@ export function createDetails(ed) {
       return;
     }
     const [kind, id] = splitRef(ref);
-    if (kind === "i") instanceDetails(id);
-    else if (kind === "l") lightDetails(id);
+    if (kind === "a") actorDetails(id);
+    else if (kind === "c") componentDetails(ref);
     else if (kind === "p") pcgDetails(id);
     else if (kind === "m") body.append(...materialSections(id));
     else if (ref === "env") environmentDetails();
@@ -42,7 +42,7 @@ export function createDetails(ed) {
   ];
 
   // Location / rotation / scale rows for a transform {t, r, s}; `commit(trs, merge, done)`.
-  function transformSection(trs, commit, { scaleLabel = "Scale", rotation = true, uniformScale = true } = {}) {
+  function transformSection(trs, commit, { scaleLabel = "Scale", rotation = true, uniformScale = true, title = "Transform" } = {}) {
     const state = { t: [...trs.t], euler: quatToEuler(trs.r), s: [...trs.s] };
     let lock = uniformScale && Math.abs(trs.s[0] - trs.s[1]) < 1e-4 && Math.abs(trs.s[1] - trs.s[2]) < 1e-4;
     const key = `xf-${Math.random()}`;
@@ -65,31 +65,93 @@ export function createDetails(ed) {
     scaleField = vectorField(state.s, { step: 0.01, precision: 3, min: 0.001, onInput: (i, v) => setScale(i, v, false), onCommit: (i, v) => setScale(i, v, true) });
     const lockBox = uniformScale ? h("label", { class: "ed-lock", title: "Uniform scale" }, checkbox(lock, (v) => (lock = v)), "🔒") : null;
     rows.push(row(scaleLabel, scaleField, lockBox));
-    return section("Transform", rows);
+    return section(title, rows);
   }
 
-  // ---- Instance --------------------------------------------------------------------------
+  // ---- Actors ----------------------------------------------------------------------------
 
-  function instanceDetails(i) {
-    const info = ed.instance(i);
+  const KIND_ICON = { mesh: "cube", light: "light", volume: "volume", particles: "volume" };
+
+  function actorDetails(id) {
+    const info = ed.actor(id);
     if (!info) return;
-    const owner = info.owner.kind === "added" ? "Added instance" : info.owner.kind === "pcg" ? "Spawned by PCG" : "Scene instance";
-    header("cube", `${info.mesh} #${i}`, owner, commonActions());
-    const ids = ed.selectedIds("i");
-    // With several selected, typed values move the primary only (the gizmo moves them all).
-    body.append(transformSection(info.transform, (trs, merge, done) => ed.apply({ op: "transform", instances: [i], transforms: [trs] }, { merge, quiet: !done })));
-    const materials = [...new Set([...ed.state.materials.map((m) => m.name).filter(Boolean), ...ed.state.content.materials])];
-    body.append(section("Static mesh", [
-      row("Mesh", h("span", { class: "ed-value-text" }, info.mesh)),
-      row("Triangles", h("span", { class: "ed-value-text" }, info.triangles.toLocaleString())),
-      row("Material", select(materials.map((m) => [m, m]), info.material, (m) => {
-        ed.apply({ op: "assign_material", instances: ids.length ? ids : [i], material: m });
-      })),
+    const what = info.folder ? "Folder" : info.added ? "Added actor" : "Scene actor";
+    const counts = [`${info.components.length} component${info.components.length === 1 ? "" : "s"}`];
+    if (info.descendants) counts.push(`${info.descendants} below`);
+    header(info.components.length ? KIND_ICON[info.components[0].kind] || "cube" : "folder", info.name, `${what} · ${counts.join(" · ")}`, [
+      button("", () => ed.groupSelection(), { iconName: "folder", title: "Group (Ctrl+G)" }),
+      ...commonActions(),
+    ]);
+    const parentRow = info.parent === null
+      ? h("span", { class: "ed-value-text" }, "World")
+      : h("span", { class: "ed-value-text" }, info.parent_name, " ", button("", () => ed.reparent([id], null), { iconName: "close", title: "Detach (keep where it is)" }));
+    body.append(section("Actor", [
+      row("Name", textField(info.name, (t) => ed.rename(id, t.trim()))),
+      row("Parent", parentRow),
+      row("Visible", checkbox(info.visible, (v) => ed.apply({ op: "actor_visibility", actors: ed.selectedIds("a").includes(id) ? ed.selectedIds("a") : [id], visible: v }))),
+      row("Key", h("span", { class: "ed-value-text ed-key", title: "How scene files address this actor" }, info.key)),
     ]));
-    body.append(...materialSections(info.material, true));
-    const rendering = [row("Visible", checkbox(info.visible, (v) => ed.apply({ op: "visibility", instances: ids.length ? ids : [i], visible: v })))];
-    if (info.owner.kind === "added") rendering.push(row("Cast shadows", checkbox(info.cast_shadow, (v) => ed.apply({ op: "cast_shadow", instances: [i], cast_shadow: v }))));
-    body.append(section("Rendering", rendering));
+    // Relative to the parent, as UE's Details; the gizmo works in world space.
+    if (!info.folder) {
+      body.append(transformSection(info.local, (trs, merge, done) => ed.apply({ op: "actor_local", actors: [id], transforms: [trs] }, { merge, quiet: !done }), { title: info.parent === null ? "Transform" : "Transform (relative to parent)" }));
+    }
+    if (info.components.length) {
+      body.append(section(`Components · ${info.components.length}`, info.components.map((c) => componentRow(id, c))));
+    }
+    // An actor of one mesh (or one light) shows it directly.
+    const meshes = info.components.filter((c) => c.kind === "mesh");
+    const lights = info.components.filter((c) => c.kind === "light");
+    if (meshes.length) body.append(meshSection(id, meshes, true));
+    if (meshes.length === 1) body.append(...materialSections(meshes[0].material, true));
+    if (lights.length === 1) lightSection(id, lights[0]);
+  }
+
+  function componentRow(actor, c) {
+    const ref = componentRef(actor, c.name);
+    const label = c.kind === "mesh" ? `${c.mesh} · ${c.material}` : c.kind;
+    const eye = icon(c.visible ? "eye" : "eyeOff", "ed-eye");
+    eye.addEventListener("click", (e) => {
+      e.stopPropagation();
+      ed.apply({ op: "component_visibility", components: [{ actor, component: c.name }], visible: !c.visible });
+    });
+    const el = h("div", { class: "ed-component" + (ed.selection.includes(ref) ? " selected" : "") + (c.visible ? "" : " dim"), title: "Select the component" },
+      icon(KIND_ICON[c.kind] || "cube", "ed-row-icon"), h("span", { class: "ed-component-name" }, c.name), h("span", { class: "ed-tree-sub" }, label), eye);
+    el.addEventListener("click", () => ed.select([ref]));
+    return el;
+  }
+
+  // Mesh and material of mesh components (all of an actor's, or one).
+  function meshSection(actor, meshes, many) {
+    const materials = [...new Set([...ed.state.materials.map((m) => m.name).filter(Boolean), ...ed.state.content.materials])];
+    const first = meshes[0];
+    const targets = many ? { actors: [actor] } : { components: [{ actor, component: first.name }] };
+    const rows = [
+      row("Mesh", h("span", { class: "ed-value-text" }, meshes.length > 1 ? `${meshes.length} meshes` : first.mesh)),
+      row("Triangles", h("span", { class: "ed-value-text" }, meshes.reduce((n, c) => n + c.triangles, 0).toLocaleString())),
+      row("Material", select(materials.map((m) => [m, m]), first.material, (m) => ed.apply({ op: "assign_material", ...targets, material: m }))),
+    ];
+    if (!many) rows.push(row("Cast shadows", checkbox(first.cast_shadow, (v) => ed.apply({ op: "cast_shadow", components: [{ actor, component: first.name }], cast_shadow: v }))));
+    return section(many && meshes.length > 1 ? "Static meshes" : "Static mesh", rows);
+  }
+
+  function componentDetails(ref) {
+    const { actor, component } = parseComponent(ref);
+    const info = ed.actor(actor);
+    const c = info?.components.find((x) => x.name === component);
+    if (!c) return;
+    header(KIND_ICON[c.kind] || "cube", c.name, `Component of ${info.name}`, [
+      button("", () => ed.select(["a:" + actor]), { iconName: "folder", title: "Select the actor" }),
+      ...commonActions(),
+    ]);
+    if (c.kind !== "light") {
+      body.append(transformSection(c.local, (trs, merge, done) => ed.apply({ op: "component_local", components: [{ actor, component }], transforms: [trs] }, { merge, quiet: !done }), { title: "Transform (relative to the actor)" }));
+    }
+    body.append(section("Rendering", [row("Visible", checkbox(c.visible, (v) => ed.apply({ op: "component_visibility", components: [{ actor, component }], visible: v })))]));
+    if (c.kind === "mesh") {
+      body.append(meshSection(actor, [c], false));
+      body.append(...materialSections(c.material, true));
+    } else if (c.kind === "light") lightSection(actor, c);
+    else body.append(section("Emitter", [h("div", { class: "ed-note" }, `A ${c.kind} emitter of the base scene: it moves with its actor and hides with it.`)]));
   }
 
   // ---- Materials ---------------------------------------------------------------------------
@@ -199,30 +261,23 @@ export function createDetails(ed) {
 
   // ---- Lights ------------------------------------------------------------------------------
 
-  function lightDetails(index) {
-    const light = ed.light(index);
-    if (!light) return;
-    const def = structuredClone(light.def);
-    header(def.shape === "spot" ? "spot" : "light", `${def.shape === "spot" ? "Spot" : "Point"} light ${index}`, light.added ? "Added light" : "Scene light", commonActions());
-    const key = `light-${index}-${Math.random()}`;
-    const send = (done) => ed.apply({ op: "light", light: index, def }, { merge: key, quiet: !done });
+  function lightSection(actor, c) {
+    const def = structuredClone(c.light);
+    const key = `light-${actor}-${c.name}-${Math.random()}`;
+    const send = (done) => ed.apply({ op: "component_light", component: { actor, component: c.name }, def }, { merge: key, quiet: !done });
     const field = (label, prop, opts) => row(label, slider(def[prop], { ...opts, onInput: (v) => ((def[prop] = v), send(false)), onCommit: (v) => ((def[prop] = v), send(true)) }));
-    body.append(section("Transform", [row("Location", vectorField(def.position, { step: 0.05, onInput: (i, v) => ((def.position[i] = v), send(false)), onCommit: (i, v) => ((def.position[i] = v), send(true)) }))]));
     const rows = [
+      row("Location", vectorField(def.position, { step: 0.05, onInput: (i, v) => ((def.position[i] = v), send(false)), onCommit: (i, v) => ((def.position[i] = v), send(true)) })),
       row("Type", select([["point", "Point"], ["spot", "Spot"]], def.shape, (v) => ((def.shape = v), send(true), render()))),
-      row("Colour", colorField(def.color, (c) => ((def.color = c), send(false)), (c) => ((def.color = c), send(true)))),
+      row("Colour", colorField(def.color, (x) => ((def.color = x), send(false)), (x) => ((def.color = x), send(true)))),
       field("Intensity", "intensity", { min: 0, max: 100, step: 0.1, precision: 1 }),
       field("Attenuation radius", "range", { min: 0.5, max: 100, step: 0.1, precision: 1 }),
       field("Source radius", "source_radius", { min: 0, max: 2, step: 0.01 }),
       row("Cast shadows", checkbox(def.cast_shadows, (v) => ((def.cast_shadows = v), send(true)))),
     ];
     if (def.shape === "spot") {
-      const yawPitch = () => {
-        const d = def.direction;
-        return [Math.asin(Math.max(-1, Math.min(1, d[1]))) * 57.2958, Math.atan2(d[0], d[2]) * 57.2958];
-      };
-      const [pitch, yaw] = yawPitch();
-      const aim = { pitch, yaw };
+      const d = def.direction;
+      const aim = { pitch: Math.asin(Math.max(-1, Math.min(1, d[1]))) * 57.2958, yaw: Math.atan2(d[0], d[2]) * 57.2958 };
       const setAim = (done) => {
         const p = (aim.pitch * Math.PI) / 180, y = (aim.yaw * Math.PI) / 180;
         def.direction = [Math.cos(p) * Math.sin(y), Math.sin(p), Math.cos(p) * Math.cos(y)];
@@ -235,7 +290,7 @@ export function createDetails(ed) {
         field("Outer cone", "outer_deg", { min: 1, max: 89, step: 0.5, precision: 1 }),
       );
     }
-    body.append(section("Light", rows));
+    body.append(section(`Light · ${c.name}`, rows));
   }
 
   // ---- PCG volumes -------------------------------------------------------------------------
@@ -265,17 +320,21 @@ export function createDetails(ed) {
       row("Center", vectorField(vol.center, { step: 0.1, onInput: (i, x) => ((vol.center[i] = x), send(false)), onCommit: (i, x) => ((vol.center[i] = x), send(true)) })),
       row("Size", vectorField(vol.half_extents.map((x) => x * 2), { step: 0.1, min: 1, onInput: (i, x) => ((vol.half_extents[i] = x / 2), send(false)), onCommit: (i, x) => ((vol.half_extents[i] = x / 2), send(true)) })),
       row("Yaw", slider(vol.yaw_deg || 0, { min: -180, max: 180, step: 1, precision: 0, onInput: (x) => ((vol.yaw_deg = x), send(false)), onCommit: (x) => ((vol.yaw_deg = x), send(true)) })),
-      row("Surface", select([["landscape", "Landscape"], ["instance", "Selected mesh instance"]], def.surface.kind, (k) => {
-        const instance = ed.selectedIds("i")[0];
-        if (k === "instance" && instance === undefined) {
-          ed.status("Select a mesh instance too (Ctrl+click), then choose it as the surface", "warn");
+      row("Surface", select([["landscape", "Landscape"], ["component", "Selected mesh"]], def.surface.kind === "landscape" ? "landscape" : "component", (k) => {
+        // The selected mesh component, or the first mesh of a selected actor.
+        const c = ed.selectedComponents()[0];
+        const a = ed.selectedIds("a")[0];
+        const actor = c ? ed.actor(c.actor) : a !== undefined ? ed.actor(a) : null;
+        const mesh = c ? actor?.components.find((x) => x.name === c.component && x.kind === "mesh") : actor?.components.find((x) => x.kind === "mesh");
+        if (k === "component" && !mesh) {
+          ed.status("Select a mesh actor or component too (Ctrl+click), then choose it as the surface", "warn");
           render();
           return;
         }
-        def.surface = k === "landscape" ? { kind: "landscape" } : { kind: "instance", instance };
+        def.surface = k === "landscape" ? { kind: "landscape" } : { kind: "component", actor: actor.key, component: mesh.name };
         send(true);
       })),
-      def.surface.kind === "instance" ? row("Surface instance", h("span", { class: "ed-value-text" }, `#${def.surface.instance}`)) : null,
+      def.surface.kind !== "landscape" ? row("Surface mesh", h("span", { class: "ed-value-text" }, def.surface.kind === "component" ? `${def.surface.actor} · ${def.surface.component}` : `#${def.surface.instance}`)) : null,
       row("Seed", numberField(def.graph.seed, { step: 1, precision: 0, min: 0, onCommit: (x) => ((def.graph.seed = Math.round(x) >>> 0), send(true)) }), button("", regenerate, { iconName: "dice", title: "Random seed" })),
     ]));
     body.append(section(`Graph · ${def.graph.nodes.length} nodes`, def.graph.nodes.map((node, k) => nodeCard(node, k, def, send))));

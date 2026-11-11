@@ -37,6 +37,7 @@ pub struct DemoApp {
     pub(crate) model: Option<Model>,
     initial_camera: Camera,
     pub(crate) floor: fn(f32, f32) -> f32,
+    pub(crate) floor_below: Option<fn(Vec3) -> f32>,
     /// The scene's moving props (`Digit0` pauses them).
     pub motion: DemoMotion,
     pub(crate) sun_intensity: f32,
@@ -71,7 +72,7 @@ pub const PHOTO_SAMPLES: u32 = 128;
 const SCREEN_PERCENTAGES: [f32; 4] = [50.0, 67.0, 75.0, 100.0];
 
 pub const HELP: &str = "WASD/QE fly · drag to look · wheel speed · Shift fast\n\
-N next scene · 0 demo motion · V debug view · Insert voxel LODs · PageDown tessellation · G GI · ; GI method (Lumen / Lumen Lite) · H shadows · 1 local light shadow maps · [ ] screen percentage (50/67/75/100 %) · \\ dynamic resolution · T TAA · O occlusion · K software raster · I texture streaming · - animation clip / pause · F fog · C clouds · U translucency · End coloured light through glass · Home fog scattering · 2 shadow refresh budget · 7 prefiltered distant shadows / volume shadows (cycles) · / translucency layers · ' volumes + particles · L wind · M motion blur · B depth of field · Enter photo (accumulated still) · ` local exposure · = MegaLights · 3 MegaLights fog + translucency · 4 OIT (AVBOIT / weighted blended) · 5 Lumen world cache (off / behind cards / replaces cards) · 6 Lumen Lite reflections (screen traces / traced) · 9 short-range AO · Z/X zoom · , . LOD error · PageUp Substrate materials · ←→↑↓ sun · P animate sun · J day/night cycle · Y camera tour · R reset · Tab editor tools (native)";
+N next scene · 0 demo motion · V debug view · Insert voxel LODs · PageDown tessellation · G GI · ; GI method (Lumen / Lumen Lite) · H shadows · 1 local light shadow maps · [ ] screen percentage (50/67/75/100 %) · \\ dynamic resolution · T TAA · O occlusion · K software raster · I texture streaming · - animation clip / pause · F fog · C clouds · U translucency · End coloured light through glass · Home fog scattering · 2 shadow refresh budget · 7 prefiltered distant shadows / volume shadows (cycles) · / translucency layers · ' volumes + particles · L wind · M motion blur · B depth of field · Enter photo (accumulated still) · ` local exposure · = MegaLights · 3 MegaLights fog + translucency · 4 OIT (AVBOIT / weighted blended) · 5 Lumen world cache (off / behind cards / replaces cards) · 6 Lumen Lite reflections (screen traces / traced) · 9 short-range AO · Numpad1 gust (dynamic wind) · Numpad2 river simulation · Z/X zoom · , . LOD error · PageUp Substrate materials · ←→↑↓ sun · P animate sun · J day/night cycle · Y camera tour · R reset · Tab editor tools (native)";
 
 impl DemoApp {
     pub fn new(
@@ -129,7 +130,7 @@ impl DemoApp {
 
     /// The app for a scene built beforehand (the browser bakes it in workers).
     pub(crate) fn from_setup(renderer: Renderer, setup: SceneSetup, kind: SceneKind, detail: Detail, model: Option<Model>) -> Self {
-        let editor = Editor::new(&setup.scene, crate::app_editor::base_scene(kind, detail, model.as_ref()));
+        let editor = Editor::new(&setup.scene, crate::app_editor::base_scene(kind, detail, model.as_ref()), &setup.outline);
         Self {
             renderer,
             camera: setup.camera,
@@ -138,6 +139,7 @@ impl DemoApp {
             detail,
             model,
             floor: setup.floor,
+            floor_below: setup.floor_below,
             motion: setup.motion,
             sun_intensity: setup.sun.2,
             speed: 8.0,
@@ -167,10 +169,12 @@ impl DemoApp {
     /// Replaces the scene with one built beforehand.
     pub(crate) fn set_scene(&mut self, kind: SceneKind, setup: SceneSetup) {
         self.kind = kind;
+        self.editor = Editor::new(&setup.scene, crate::app_editor::base_scene(kind, self.detail, self.model.as_ref()), &setup.outline);
         self.scene = setup.scene;
         self.camera = setup.camera;
         self.initial_camera = setup.camera;
         self.floor = setup.floor;
+        self.floor_below = setup.floor_below;
         self.animation = setup.animation;
         // A new scene's props start moving or paused as the previous ones were.
         let enabled = self.motion.enabled;
@@ -180,7 +184,6 @@ impl DemoApp {
         self.sun_elevation = setup.sun.1;
         self.sun_intensity = setup.sun.2;
         self.tour = None;
-        self.editor = Editor::new(&self.scene, crate::app_editor::base_scene(kind, self.detail, self.model.as_ref()));
         self.renderer.set_selection(&[]);
         self.renderer.reset_history();
     }
@@ -284,6 +287,15 @@ impl DemoApp {
             },
             // Short-range ambient occlusion (grounded foliage, rock and log contact) on / off.
             "Digit9" => s.short_range_ao = !s.short_range_ao,
+            // Shallow-water river simulation running / paused.
+            "Numpad2" => s.river_simulation = !s.river_simulation,
+            // A gust burst in front of the camera (the dynamic wind's simulated tier): a ring
+            // that bends the grass, ferns and bushes it passes.
+            "Numpad1" => {
+                let forward = self.camera.forward();
+                let ahead = Vec3::new(forward.x, 0.0, forward.z).normalize_or(Vec3::X) * 5.0;
+                self.renderer.wind_gust(self.camera.position + ahead);
+            }
             "KeyL" => s.wind = !s.wind,
             "Quote" => {
                 let on = !(s.volumes || s.particles);
@@ -390,7 +402,10 @@ impl DemoApp {
         }
         let boost = if input.down("ShiftLeft") || input.down("ShiftRight") { 5.0 } else { 1.0 };
         self.camera.position += direction.normalize_or_zero() * self.speed * boost * dt;
-        let floor = (self.floor)(self.camera.position.x, self.camera.position.z) + 0.4;
+        let floor = match self.floor_below {
+            Some(below) => below(self.camera.position),
+            None => (self.floor)(self.camera.position.x, self.camera.position.z),
+        } + 0.4;
         self.camera.position.y = self.camera.position.y.max(floor);
         if let Some((tour, time)) = &mut self.tour {
             *time += dt;
@@ -435,6 +450,7 @@ impl DemoApp {
         }
         self.scene.set_time_of_day(self.sun_azimuth, self.sun_elevation, self.sun_intensity);
         self.motion.update(&mut self.scene, dt);
+        self.maintain_editor();
         // Night stays dark: exposure adapts, but not all the way to daylight brightness.
         self.renderer.settings.exposure_compensation = self.day_exposure - 1.6 * Scene::night_factor(self.sun_elevation);
     }

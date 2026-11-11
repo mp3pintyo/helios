@@ -405,6 +405,16 @@ pub struct RenderSettings {
     /// importance-sampled from a world-space light grid, shadowed and accumulated over frames,
     /// instead of every light in range (`lumen_light_grid.rs`).
     pub lumen_light_sampling: bool,
+    /// Rivers run their shallow-water simulation (`river.rs`); off, they hold still.
+    pub river_simulation: bool,
+    /// Dynamic wind (`plant_wind.rs`, UE 5.9's Dynamic Wind): plants with bones bend them —
+    /// blades and branches curve, leaves turn about their stems, normals follow. Off: the same
+    /// plants move by the procedural wind (`wind.wgsl`).
+    pub wind_bones: bool,
+    /// The dynamic wind's simulated tier (`plant_sim.rs`): the small plants nearest the camera
+    /// get spring states, pushed by a capsule following the camera and by gust bursts
+    /// ([`Renderer::wind_gust`]).
+    pub wind_simulation: bool,
 }
 
 impl Default for RenderSettings {
@@ -476,6 +486,9 @@ impl Default for RenderSettings {
             lumen_reflection_fog: true,
             lumen_lite_adaptive_rate: true,
             lumen_light_sampling: true,
+            river_simulation: true,
+            wind_bones: true,
+            wind_simulation: true,
         }
     }
 }
@@ -522,9 +535,12 @@ pub struct Renderer {
     requested: RenderSettings,
     /// Scene versions whose content pipelines were queued, and whether the scene has displaced
     /// surfaces (browser only, see `prefetch_content`).
-    prefetched: Option<(u64, u64, u64)>,
+    prefetched: Option<(u64, u64, u64, bool)>,
     /// The frame stops after its scene sync ([`Renderer::prefetch_scene`]).
     sync_only: bool,
+    /// The last frame stopped after its scene sync because the sync queued pipelines it needs
+    /// (browser): its scene changes are applied again by the next frame.
+    held: bool,
     /// The device samples the 17 textures AVBOIT's translucent surfaces need.
     avboit_supported: bool,
     displaceable: bool,
@@ -558,6 +574,7 @@ pub struct Renderer {
     /// MegaLights for volumetric fog and translucent surfaces.
     megalights_volume: MegaLightsVolume,
     translucency: Translucency,
+    river: crate::river::RiverSim,
     effects: Effects,
     tsr: TsrPass,
     fog_scattering: FogScatteringPass,
@@ -602,6 +619,12 @@ pub struct Renderer {
 }
 
 impl Renderer {
+    /// A gust burst for the dynamic wind's simulation (`plant_sim.rs`): a ring travelling out
+    /// from `center` (world) bends the plants it passes, which are promoted to simulation slots.
+    pub fn wind_gust(&mut self, center: glam::Vec3) {
+        self.scene.plant_sim.gust(center, self.time);
+    }
+
     pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, output_format: wgpu::TextureFormat, width: u32, height: u32) -> Self {
         Self::with_config(device, queue, output_format, width, height, RendererConfig::default())
     }
@@ -623,6 +646,7 @@ impl Renderer {
             requested: RenderSettings::default(),
             prefetched: None,
             sync_only: false,
+            held: false,
             avboit_supported: device.limits().max_sampled_textures_per_shader_stage >= crate::translucency::AVBOIT_SAMPLED_TEXTURES,
             displaceable: false,
             frame_uniform: uniform_buffer(device, "frame", std::mem::size_of::<FrameUniform>() as u64),
@@ -664,6 +688,7 @@ impl Renderer {
             megalights: MegaLights::new(device, queue),
             megalights_volume: MegaLightsVolume::new(device),
             translucency: in_group(Group::Translucency, || Translucency::new(device, queue)),
+            river: in_group(Group::Translucency, || crate::river::RiverSim::new(device)),
             effects: in_group(Group::Effects, || Effects::new(device)),
             tsr: TsrPass::new(device),
             fog_scattering: in_group(Group::Fog, || FogScatteringPass::new(device)),
@@ -979,12 +1004,13 @@ impl Renderer {
     /// not come on with pipelines still to compile. (Content the core set needs is queued during
     /// the frame: see the wait in `render_frame`.)
     fn prefetch_content(&mut self, scene: &Scene) {
-        let versions = (scene.geometry_version, scene.material_version, scene.instance_version);
+        // (AVBOIT switched off needs the classic models of the surfaces it drew.)
+        let avboit = self.settings.avboit && self.avboit_supported;
+        let versions = (scene.geometry_version, scene.material_version, scene.instance_version, avboit);
         if self.prefetched == Some(versions) {
             return;
         }
         self.prefetched = Some(versions);
-        let avboit = self.settings.avboit && self.avboit_supported;
         self.translucency.prefetch(scene, avboit);
         self.effects.prefetch(scene, avboit);
         self.displaceable = crate::gpu_scene::displaceable(scene);
@@ -1019,10 +1045,19 @@ impl Renderer {
     fn render_frame(&mut self, scene: &Scene, camera: &Camera, output: &wgpu::TextureView, delta_time: f32) {
         self.update_resolution();
         let frame = self.frame_index + 1;
+        // The groups this frame's settings were chosen with (see the hold after the scene sync).
+        let ready_before = Group::ALL.map(pipelines::ready);
         self.motion.incremental = self.settings.per_instance_invalidation;
         self.motion.update(scene);
+        if std::mem::take(&mut self.held) {
+            // The held frame's sync took this scene's changes: everything that reads them (the
+            // shadow pages, Lumen, translucency) rebuilds now instead.
+            self.motion.changes.structural = true;
+        }
         let changes = &self.motion.changes;
         self.scene.tessellation_enabled = self.settings.tessellation;
+        self.scene.wind_bones_enabled = self.settings.wind_bones;
+        self.scene.plant_sim.enabled = self.settings.wind_simulation && self.settings.wind_bones;
         let sync = self.scene.sync(&self.device, &self.queue, scene, changes, self.motion.previous(), frame);
         if sync.geometry_changed {
             self.history_valid = false;
@@ -1058,18 +1093,44 @@ impl Renderer {
             self.scene_changed = true;
         }
         self.displacement_cached = displacement;
-        let tessellation = self.scene.has_displacement();
+        // The resolve's `TESSELLATION` permutation shades displaced pixels and, where no instance
+        // is displaced, renders what the plain one does (its registers cost 0.05–0.1 ms). In the
+        // browser a scene with tessellation asked for uses it from the first image on, while the
+        // tessellator compiles, instead of compiling the plain permutation for those frames and
+        // then the displaced one (5–10 resolve pipelines of 0.6–1.2 s each in Firefox). Natively
+        // the plain one is used whenever nothing is displaced.
+        let tessellation = self.scene.has_displacement() || (pipelines::deferring() && tessellation_wanted);
         let debug_views = self.settings.debug_view != DebugView::Lit;
         let (uv_extensions, skinning, kinds) = (self.scene.uv_extensions, self.scene.skins.skinned_instances, self.scene.resolve_kinds);
         self.material.sync(&self.device, uv_extensions, skinning, tessellation, tessellation_wanted, debug_views, kinds, &self.extended, substrate);
         let slab_lighting = self.extended.lighting.then_some(&self.extended.lighting_layout);
         self.lighting.sync_substrate(&self.device, slab_lighting);
-        self.megalights.sync_substrate(&self.device, self.extended.lighting.then_some(&self.extended.megalights_layout));
-        // Before the first image the browser waits for every core pipeline the frame needs (the
-        // scene's material permutations, say) instead of compiling one inside the frame, which
-        // would hold the frame (Firefox) or compile on the page's GPU thread (Chromium). Later a
-        // newly needed one (an editor change) is compiled in the frame, as natively.
-        if self.frame_index == 0 && (self.sync_only || !pipelines::ready(Group::Core)) {
+        // MegaLights' slab variant only once MegaLights is asked for (a scene switch to the
+        // gallery waited for it in Firefox while the classic loop shades).
+        let r = &self.requested;
+        let megalights_wanted = r.mega_lights || matches!(r.debug_view, DebugView::MegaLightsSamples | DebugView::MegaLightsDenoising);
+        self.megalights.sync_substrate(&self.device, self.extended.lighting.then_some(&self.extended.megalights_layout).filter(|_| megalights_wanted));
+        // Lumen Lite is created as soon as it is asked for (or the frame chose it as its
+        // fallback), so the browser compiles it before it is used.
+        let r = &self.requested;
+        let lite = self.settings.global_illumination && self.settings.gi_method == GiMethod::LumenLite;
+        if lite || (r.global_illumination && (r.gi_method == GiMethod::LumenLite || r.debug_view == DebugView::LumenLiteProbes)) {
+            let device = &self.device;
+            self.lumen_lite.get_or_insert_with(|| in_group(Group::GlobalIllumination, || LumenLite::new(device)));
+        }
+        if self.frame_index == 0 && self.sync_only {
+            return;
+        }
+        // The browser waits for every core pipeline the frame needs (the scene's material
+        // permutations, say) instead of compiling one inside the frame, which would hold the
+        // queue behind a synchronous compile (Firefox) or compile one pipeline at a time in the
+        // GPU process (Chromium: a scene switch waited 25 s for its 34 new pipelines). So a frame
+        // whose sync queued pipelines — a core one, or one of a feature this frame renders with
+        // (the new scene's tessellation dicing, say) — stops here: the page keeps its last image
+        // while they compile in the background, and the next frame renders with the features
+        // whose pipelines are in. Natively nothing is queued and this never stops.
+        if pipelines::deferring() && (!pipelines::ready(Group::Core) || Group::ALL.iter().zip(ready_before).any(|(&g, before)| before && !pipelines::ready(g))) {
+            self.held = true;
             return;
         }
         self.rvt.sync(&self.device, &self.queue, scene, self.settings.virtual_texturing, frame);
@@ -1086,12 +1147,6 @@ impl Renderer {
         };
         self.lumen.set_world_cache(if self.settings.global_illumination { world_cache } else { WorldCacheMode::Off });
         self.lumen.update(&self.device, &self.queue, scene, &self.motion.changes, camera.position, frame, &self.targets, self.settings.tessellation);
-        // Created as soon as it is asked for, so the browser compiles it before GI comes on.
-        let r = &self.requested;
-        if r.global_illumination && (r.gi_method == GiMethod::LumenLite || r.debug_view == DebugView::LumenLiteProbes) {
-            let device = &self.device;
-            self.lumen_lite.get_or_insert_with(|| in_group(Group::GlobalIllumination, || LumenLite::new(device)));
-        }
         if self.uses_lumen_lite() {
             if let Some(lite) = self.lumen_lite.as_mut() {
                 lite.update(&self.device, &self.queue, scene, camera.position, frame, &self.settings, capacity);
@@ -1152,6 +1207,8 @@ impl Renderer {
         let glass_shadows = self.settings.glass_shadows && self.settings.shadows;
         let avboit = self.settings.avboit && self.avboit_supported;
         self.translucency.update(&self.device, &self.queue, scene, changes, camera.position, &unjittered_view_proj, capacity, translucency, layers, glass_shadows, avboit);
+        let river_vertices = scene.rivers.first().and_then(|r| r.surface).and_then(|i| self.translucency.instance_vertices(scene, i));
+        self.river.update(&self.device, &self.queue, scene, river_vertices, delta_time, self.settings.river_simulation);
         // Volumes and particles are drawn over lit radiance and in their own debug view.
         let effects = matches!(self.settings.debug_view, DebugView::Lit | DebugView::VolumesParticles);
         self.effects.update(
@@ -1178,10 +1235,13 @@ impl Renderer {
         self.sky.record(&mut rec, &self.frame_uniform, &self.samplers.linear, scene.ground_albedo);
         self.effects.record_lights(&mut rec, &self.lights);
         self.lights.record(&mut rec, &self.frame_uniform, &self.exposure.buffer);
+        self.river.record(&mut rec, self.translucency.vertex_buffer(), river_vertices.map_or(0, |v| v.1));
 
         // Virtual geometry: assemblies the main view needs as parts get part instances (for
         // every view), then two-pass occlusion culling into the visibility buffer.
         self.scene.assemblies.record(&mut rec, &self.main_view, &self.scene.instances);
+        // Promoted plants' springs (the dynamic wind's simulated tier) before anything draws them.
+        self.scene.plant_sim.record(&mut rec, &self.scene.instances, &self.scene.wind, &self.scene.plants.view);
         let (culling, view, gpu_scene, targets) = (&self.culling, &self.main_view, &self.scene, &self.targets);
         if self.settings.occlusion_culling {
             culling.cull(&mut rec, view, gpu_scene, CullMode::Early, Some(&targets.hzb));
@@ -1206,6 +1266,7 @@ impl Renderer {
             &self.rvt,
             &self.svt,
             self.translucency.water_uniform(),
+            self.river.surface_view(),
             &self.samplers,
             resolve_group.as_ref(),
         );
@@ -1542,6 +1603,7 @@ impl Renderer {
         let pixel_angle = 1.0 / camera.lod_scale(output_h);
         let wind = WindUniform::new(&scene.wind, if s.wind { 1.0 } else { 0.0 }, self.time, self.time - delta_time, camera.position, pixel_angle);
         self.scene.write_wind(&self.queue, &wind);
+        self.scene.update_plant_sim(&self.queue, scene, camera.position, self.time, delta_time);
         // Starting or stopping the wind moves vegetation between the shadow pages' static and
         // dynamic layers: the VSM re-renders the pages under it (per instance).
         // Animated skeletal meshes are dynamic casters too (see skin.rs).

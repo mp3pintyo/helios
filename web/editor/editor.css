@@ -120,6 +120,22 @@ body.ed-active #hud, body.ed-active #help, body.ed-active .title { display: none
 .ed-eye:hover { color: #fff; }
 .ed-badge { font-size: 10px; padding: 0 5px; border-radius: 8px; background: #3a3a40; color: #c8f0d5; font-weight: 700; }
 .ed-badge.error { background: #6b2522; color: #ffc9c5; }
+.ed-tree-row .ed-chevron-gap { width: 12px; flex: none; }
+.ed-tree-row .ed-toggle { cursor: pointer; }
+.ed-tree-row .ed-toggle:hover { color: #fff; }
+.ed-tree-row[draggable="true"] { cursor: grab; }
+.ed-tree-row.drop { background: rgba(245, 165, 36, 0.22); box-shadow: inset 0 0 0 1px var(--ed-orange); }
+.ed-tree-row .ed-eye { margin-left: auto; flex: none; }
+.ed-tree-row .ed-tree-count + .ed-eye, .ed-tree-row .ed-tree-sub + .ed-eye { margin-left: 6px; }
+.ed-rename { flex: 1; min-width: 60px; height: 18px; padding: 0 4px; background: var(--ed-input); color: var(--ed-text-strong); border: 1px solid var(--ed-accent); border-radius: 3px; font: inherit; outline: none; }
+.ed-component { display: flex; align-items: center; gap: 6px; height: 24px; padding: 0 6px; border-radius: 4px; cursor: pointer; white-space: nowrap; }
+.ed-component:hover { background: #2a2a2e; }
+.ed-component.selected { background: var(--ed-select); color: #fff; }
+.ed-component.dim .ed-component-name { opacity: 0.45; }
+.ed-component .ed-row-icon { color: var(--ed-dim); }
+.ed-component-name { flex: none; }
+.ed-component .ed-eye { flex: none; }
+.ed-key { font-family: Consolas, "Cascadia Mono", monospace; font-size: 10.5px; color: var(--ed-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* Details */
 .ed-details-body { flex: 1; overflow: auto; min-height: 0; padding-bottom: 20px; }

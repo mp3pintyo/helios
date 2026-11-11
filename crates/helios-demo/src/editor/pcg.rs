@@ -3,7 +3,7 @@
 
 use glam::{Mat4, Vec3};
 use helios_pcg::{evaluate, Graph, Heightfield, Node, Op, SpawnEntry, SpawnPart, TransformParams, TriangleSurface, Volume};
-use helios_render::Scene;
+use helios_render::{InstanceHandle, Scene};
 
 use super::doc::{PcgOutputDef, PcgVolumeDef, SurfaceDef, Trs};
 
@@ -98,12 +98,12 @@ pub fn definition_hash(def: &PcgVolumeDef) -> String {
     format!("{hash:016x}")
 }
 
-/// Runs a volume's graph on its surface.
-pub fn generate(def: &PcgVolumeDef, scene: &Scene, floor: fn(f32, f32) -> f32) -> Result<PcgOutputDef, String> {
+/// Runs a volume's graph on its surface (`surface`: the instance a mesh surface resolved to).
+pub fn generate(def: &PcgVolumeDef, scene: &Scene, floor: fn(f32, f32) -> f32, surface: Option<InstanceHandle>) -> Result<PcgOutputDef, String> {
     let output = match &def.surface {
         SurfaceDef::Landscape => evaluate(&def.graph, &def.volume, &Heightfield { height: floor })?,
-        SurfaceDef::Instance { instance } => {
-            let handle = scene.instance_handle(*instance).ok_or_else(|| format!("surface instance {instance} does not exist"))?;
+        SurfaceDef::Instance { .. } | SurfaceDef::Component { .. } => {
+            let handle = surface.ok_or_else(|| format!("the surface {:?} does not exist", def.surface))?;
             let triangles = scene.mesh_triangles(scene.instance_mesh(handle), &scene.transform(handle));
             evaluate(&def.graph, &def.volume, &TriangleSurface { triangles })?
         }
@@ -153,8 +153,8 @@ mod tests {
         let scene = Scene::new();
         for (id, _) in PRESETS {
             let def = new_volume(3, id, Vec3::new(10.0, 0.0, -20.0), hills).unwrap();
-            let a = generate(&def, &scene, hills).unwrap();
-            let b = generate(&def, &scene, hills).unwrap();
+            let a = generate(&def, &scene, hills, None).unwrap();
+            let b = generate(&def, &scene, hills, None).unwrap();
             assert!(!a.instances.is_empty(), "{id}");
             assert_eq!(a, b, "{id}");
             assert_eq!(a.hash, definition_hash(&def));
