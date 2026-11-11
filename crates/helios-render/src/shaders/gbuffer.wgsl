@@ -82,6 +82,8 @@ const TILE_LISTS: u32 = 120u;
 @group(0) @binding(65) var<uniform> wind: Wind;
 @group(0) @binding(66) var skin_palette: texture_2d<f32>;
 @group(0) @binding(90) var<uniform> water: Water;
+// The simulated river's water surface per cell (river.rs; shore.wgsl).
+@group(0) @binding(150) var river_surface: texture_2d<f32>;
 
 fn tile_capacity() -> u32 {
     let size = vec2<u32>(frame.viewport.xy);

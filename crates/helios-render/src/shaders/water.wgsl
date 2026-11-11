@@ -16,6 +16,7 @@ struct Water {
     // Water bodies (flat surfaces): xy = min corner (x, z), zw = max corner of the surface.
     bodies: array<vec4<f32>, 4>,
     levels: vec4<f32>,      // surface height of each body
+    river: vec4<f32>,       // simulated river (river.rs): xy grid corner (x, z), z 1 / cell, w 1 if any
 }
 
 const WATER_WAVES: u32 = 16u;

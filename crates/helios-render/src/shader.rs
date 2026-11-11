@@ -76,6 +76,7 @@ const SOURCES: &[(&str, &str)] = &[
     ("raster.wgsl", include_str!("shaders/raster.wgsl")),
     ("resolve_extended.wgsl", include_str!("shaders/resolve_extended.wgsl")),
     ("resolve_extended_off.wgsl", include_str!("shaders/resolve_extended_off.wgsl")),
+    ("river_sim.wgsl", include_str!("shaders/river_sim.wgsl")),
     ("rvt.wgsl", include_str!("shaders/rvt.wgsl")),
     ("rvt_render.wgsl", include_str!("shaders/rvt_render.wgsl")),
     ("selection.wgsl", include_str!("shaders/selection.wgsl")),

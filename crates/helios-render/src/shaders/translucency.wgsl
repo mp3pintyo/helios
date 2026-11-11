@@ -71,6 +71,9 @@ const GLASS_BLUR: f32 = 3.0;
 const GLASS_PROBE_OFFSET: f32 = 2.5;
 const WATER_F0: f32 = 0.02;
 const GLASS_F0: f32 = 0.04;
+// Period (seconds) of the river's two-phase flow map: how far the waves drift before a phase
+// restarts.
+const RIVER_FLOW_PERIOD: f32 = 1.6;
 // Glass reflectance above which reflection rays trace the distance field (grazing angles).
 const GLASS_TRACED_REFLECTANCE: f32 = 0.1;
 // fp16 render targets saturate at 65504; sun glints stay well below that.
@@ -725,11 +728,34 @@ fn shade_water(in: VertexOutput, input: SurfaceInput, m: Material, px: Pixel) ->
     let p = in.world_position;
     let v = -px.view_dir;
     let footprint = max(length(input.dpdx.xz), length(input.dpdy.xz));
-    let waves = water_surface(p.xz, frame.time, footprint);
-    // Flat geometry: the wave normal lives in the surface's frame.
     let up = input.normal;
-    let n_waves = normalize(waves.normal.x * input.tangent - waves.normal.z * input.bitangent + waves.normal.y * up);
-    var n = select(waves.normal, n_waves, abs(up.y) < 0.99);
+    var waves: WaterSurface;
+    var n: vec3<f32>;
+    // A simulated river (river.rs) marks its vertices with alpha 0 and carries its velocity in
+    // the second UV set and its foam in red.
+    let simulated = in.color.a < 0.5;
+    let flow = select(vec2<f32>(0.0), in.uv1, simulated);
+    let flow_phase = fract(frame.time / RIVER_FLOW_PERIOD);
+    // Weight of the second phase: 0 where it restarts, 1 where the first does.
+    let flow_blend = abs(2.0 * flow_phase - 1.0);
+    if simulated {
+        // Two-phase flow map: the waves drift with the current, each phase restarting from
+        // the undisplaced pattern while the other carries the look; ripples grow choppier with
+        // the speed and calm down in pools.
+        let w0 = water_surface(p.xz - flow * (flow_phase * RIVER_FLOW_PERIOD), frame.time, footprint);
+        let w1 = water_surface(p.xz - flow * (fract(flow_phase + 0.5) * RIVER_FLOW_PERIOD), frame.time, footprint);
+        let wn = normalize(mix(w0.normal, w1.normal, flow_blend));
+        let chop = clamp(0.35 + 0.5 * length(flow), 0.35, 1.4);
+        waves.normal = normalize(vec3<f32>(wn.x * chop, wn.y, wn.z * chop));
+        waves.slope_variance = mix(w0.slope_variance, w1.slope_variance, flow_blend) * chop * chop;
+        // The surface slopes downstream: tilt its normal by the waves.
+        n = normalize(up * waves.normal.y + vec3<f32>(waves.normal.x, 0.0, waves.normal.z));
+    } else {
+        waves = water_surface(p.xz, frame.time, footprint);
+        // Flat geometry: the wave normal lives in the surface's frame.
+        let n_waves = normalize(waves.normal.x * input.tangent - waves.normal.z * input.bitangent + waves.normal.y * up);
+        n = select(waves.normal, n_waves, abs(up.y) < 0.99);
+    }
     // Never let a wave face away from the viewer (grazing views).
     n = normalize(n + v * max(0.0, 0.02 - dot(n, v)));
     let roughness = sqrt(m.roughness * m.roughness + waves.slope_variance * 2.0);
@@ -761,7 +787,16 @@ fn shade_water(in: VertexOutput, input: SurfaceInput, m: Material, px: Pixel) ->
     }
 
     // Shore foam: a white, rough layer floating on top.
-    let foam = water_foam(p.xz, depth0, frame.time, footprint);
+    var foam = water_foam(p.xz, depth0, frame.time, footprint);
+    if simulated && in.color.r > 0.01 {
+        // The simulation's foam, as streaks and patches drifting with the current.
+        let s0 = fbm(vec3<f32>((p.xz - flow * (flow_phase * RIVER_FLOW_PERIOD)) * 2.2, 5.1), 3u, footprint * 2.2);
+        let s1 = fbm(vec3<f32>((p.xz - flow * (fract(flow_phase + 0.5) * RIVER_FLOW_PERIOD)) * 2.2, 9.7), 3u, footprint * 2.2);
+        let pattern = mix(s0, s1, flow_blend) + 0.5;
+        let amount = saturate(in.color.r);
+        let streaks = smoothstep(0.62 - 0.4 * amount, 0.8 - 0.3 * amount, pattern) * min(amount * 3.0, 1.0);
+        foam = max(foam, streaks * 0.85);
+    }
     let foam_light = light / PI * 0.8;
 
     let fresnel = f_schlick(vec3<f32>(WATER_F0), n_dot_v).x;

@@ -82,6 +82,7 @@ pub mod pipelines;
 mod profiler;
 mod renderer;
 mod resolution;
+pub mod river;
 mod rvt;
 mod scene;
 mod scene_edit;
@@ -125,6 +126,7 @@ pub use scene::{
 };
 pub use page_source::{PageLocation, PageRead, PageSource, ReadCompletion};
 pub use particles::{Burst, Collision, ParticleEmitter, ParticleRender, SpawnShape, Sprite};
+pub use river::{River, RiverSource};
 pub use volumes::{FluidSimulation, ProceduralVolume, VolumeEmitter, VolumeSource};
 pub use material_graphs::{MaterialGraphHandle, ParameterValue};
 pub use substrate::{features as slab_features, Slab};

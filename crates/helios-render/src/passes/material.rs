@@ -47,6 +47,7 @@ use crate::svt::StreamingVirtualTexture;
 use crate::targets::FrameTargets;
 use crate::textures::TextureLibrary;
 use crate::util::{bind, bind_group, bind_group_layout, compute_pipeline, compute_pipeline_with, workgroups};
+use crate::river::BINDING_RIVER_SURFACE;
 use crate::water::BINDING_WATER;
 use crate::skin::{skin_entry, skin_resource};
 use crate::tessellation::{tessellation_entry, tessellation_resource};
@@ -138,6 +139,7 @@ impl MaterialPass {
                 wind_entry(),
                 skin_entry(),
                 (BINDING_WATER, bind::uniform()),
+                (BINDING_RIVER_SURFACE, bind::texture(false)),
                 (BINDING_DEPTH, bind::texture(false)),
                 tessellation_entry(),
                 (BINDING_TESS_LAMBDA, bind::texture_uint()),
@@ -225,6 +227,7 @@ impl MaterialPass {
         rvt: &RuntimeVirtualTexture,
         svt: &StreamingVirtualTexture,
         water: &wgpu::Buffer,
+        river_surface: &wgpu::TextureView,
         samplers: &Samplers,
         extended: Option<&wgpu::BindGroup>,
     ) {
@@ -263,6 +266,7 @@ impl MaterialPass {
                 wind_resource(scene),
                 skin_resource(scene),
                 (BINDING_WATER, water.as_entire_binding()),
+                (BINDING_RIVER_SURFACE, TextureView(river_surface)),
                 (BINDING_DEPTH, TextureView(&targets.depth)),
                 tessellation_resource(scene),
                 (BINDING_TESS_LAMBDA, TextureView(targets.tess_lambda())),

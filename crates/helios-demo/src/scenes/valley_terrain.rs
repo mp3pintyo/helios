@@ -35,11 +35,11 @@ const ARCH_YAW: f32 = -0.828;
 pub const RIVER_PATH: [Vec3; 8] = [
     Vec3::new(-11.0, 0.4, -48.0),
     Vec3::new(-12.0, 0.0, -42.5),
-    Vec3::new(-12.5, -0.5, -34.0),
-    Vec3::new(-11.5, -0.9, -24.0),
-    Vec3::new(-13.0, -1.35, -14.0),
-    Vec3::new(-13.5, -1.8, -4.0),
-    Vec3::new(-11.0, -2.3, 5.0),
+    Vec3::new(-10.0, -0.9, -34.0),
+    Vec3::new(-8.0, -1.7, -24.0),
+    Vec3::new(-7.5, -1.95, -14.0),
+    Vec3::new(-8.5, -2.3, -4.0),
+    Vec3::new(-9.5, -2.45, 4.0),
     Vec3::new(-8.5, -2.9, 12.0),
 ];
 pub const RIVER_WIDTH: f32 = 3.0;
@@ -292,4 +292,75 @@ pub fn displaces(terrain: &MeshTerrain, x: f32, z: f32, footprint: f32) -> bool 
     let p = Vec3::new(x, (terrain.base)(x, z), z);
     terrain.volume_bounds().iter().any(|b| p.x > b.min.x - footprint && p.x < b.max.x + footprint && p.z > b.min.z - footprint && p.z < b.max.z + footprint)
         || river_distance(Vec2::new(x, z)).0 < RIVER_WIDTH * 0.5 + RIVER_BANK + footprint
+}
+
+/// The river's simulation grid: from inside the cave to the lake.
+const RIVER_ORIGIN: Vec2 = Vec2::new(-19.5, -51.0);
+const RIVER_CELL: f32 = 0.25;
+const RIVER_CELLS: [u32; 2] = [72, 264];
+/// The lake the river runs into (valley.rs): its level and its sheet's rectangle.
+const LAKE_LEVEL: f32 = -2.2;
+const LAKE_RECT: (Vec2, Vec2) = (Vec2::new(-23.2, 3.8), Vec2::new(13.2, 40.2));
+/// Boulders standing in the stream: (x, z, size).
+const STREAM_BOULDERS: [(f32, f32, f32); 4] = [(-8.9, -28.0, 0.75), (-7.2, -17.5, 0.6), (-8.4, -7.0, 0.8), (-9.4, 1.5, 0.55)];
+
+/// The river: a shallow-water simulation over the channel the mesh terrain carved, its bed
+/// read from the terrain's density field (the cave's floor under its roof, rock walls as high
+/// cells), boulders in the stream raising the bed, a spring in the cave and the lake as outlet.
+pub fn add_river(scene: &mut Scene, terrain: &MeshTerrain, ground: fn(f32, f32) -> f32, rocks: &[MeshHandle], rock_materials: &[MaterialHandle]) {
+    if std::env::var("HELIOS_NO_RIVER").is_ok() { return; }
+    let start = web_time::Instant::now();
+    let volumes = terrain.volume_bounds();
+    let bed_at = |p: Vec2| {
+        let h = terrain.height(p.x, p.y);
+        if !volumes.iter().any(|b| p.x > b.min.x && p.x < b.max.x && p.y > b.min.z && p.y < b.max.z) {
+            return h;
+        }
+        // Under rock: the floor below the lowest of a few points above the heightfield's ground
+        // that lies in the open (the cave's floor under its roof, the ground under the arch), or
+        // a wall where all of them are inside the rock.
+        [1.0, 2.0, 3.0, 4.0].into_iter().find_map(|above| terrain.surface_below(Vec3::new(p.x, h + above, p.y), above + 3.0, 0.1)).unwrap_or(h + 20.0)
+    };
+    let mut river = helios_render::River::new(RIVER_ORIGIN, RIVER_CELL, RIVER_CELLS, bed_at);
+    // Under walls the dry surface hides at the heightfield's ground, inside the rock.
+    river.hide = (0..river.bed.len()).map(|i| {
+        let c = river.center(i);
+        terrain.height(c.x, c.y)
+    }).collect();
+    // Boulders in the stream: instances, and their tops in the bed.
+    for (i, &(x, z, size)) in STREAM_BOULDERS.iter().enumerate() {
+        let (_, path_bed) = river_distance(Vec2::new(x, z));
+        let radii = Vec3::new(1.2, 0.9, 1.0) * size;
+        let center = Vec3::new(x, path_bed + radii.y * 0.45, z);
+        let rotation = glam::Quat::from_rotation_y(i as f32 * 2.3);
+        scene.add_instance(rocks[i % rocks.len()], rock_materials[i % rock_materials.len()], Mat4::from_scale_rotation_translation(radii, rotation, center));
+        for (cell, bed) in river.bed.iter_mut().enumerate() {
+            let c = RIVER_ORIGIN + (Vec2::new((cell as u32 % RIVER_CELLS[0]) as f32, (cell as u32 / RIVER_CELLS[0]) as f32) + 0.5) * RIVER_CELL;
+            let local = rotation.inverse() * Vec3::new(c.x - x, 0.0, c.y - z);
+            let r = (local.x / (radii.x * 0.85)).powi(2) + (local.z / (radii.z * 0.85)).powi(2);
+            if r < 1.0 {
+                *bed = bed.max(center.y + radii.y * 0.8 * (1.0 - r).sqrt());
+            }
+        }
+    }
+    // Start full: the channel's design water surface (half a metre over its bed), and the lake.
+    for i in 0..river.bed.len() {
+        let c = river.center(i);
+        let in_lake = c.x > LAKE_RECT.0.x && c.x < LAKE_RECT.1.x && c.y > LAKE_RECT.0.y && c.y < LAKE_RECT.1.y && ground(c.x, c.y) < LAKE_LEVEL;
+        river.outlet[i] = in_lake;
+        let (d, path_bed) = river_distance(c);
+        let target = if in_lake { LAKE_LEVEL } else if d < RIVER_WIDTH * 0.5 + 0.5 { path_bed + 0.45 } else { f32::MIN };
+        river.depth[i] = (target - river.bed[i]).max(0.0);
+    }
+    river.outlet_level = LAKE_LEVEL;
+    river.sources.push(helios_render::RiverSource { position: Vec2::new(RIVER_PATH[0].x, RIVER_PATH[0].z), radius: 1.0, rate: 0.9 });
+    let surface = river.surface_mesh();
+    let mesh = add_baked_with(scene, "river surface", &surface, BuildConfig { sdf: SdfMode::None, ..Default::default() });
+    let water = scene.add_material(Material { kind: MaterialKind::Water, base_color: Vec3::ONE, roughness: 0.03, ..Default::default() });
+    scene.set_material_name(water, "river water");
+    let instance = scene.add_instance(mesh, water, Mat4::IDENTITY);
+    scene.set_cast_shadow(instance, false);
+    river.surface = Some(instance);
+    scene.rivers.push(river);
+    log::info!("river: bed and surface made in {:.0} ms", start.elapsed().as_secs_f64() * 1e3);
 }

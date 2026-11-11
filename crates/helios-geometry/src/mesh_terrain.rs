@@ -18,9 +18,10 @@
 //! an ordinary virtual mesh); neighbouring chunks of the same resolution share their border cells
 //! and are watertight by construction. Resolution is **adaptive**: chunks near points of interest
 //! (the volume modifiers) use the fine cell size, the rest a coarser one; where the two meet, the
-//! chunks stop half a cell short and hang a *skirt* down from their border (the standard crack
-//! filler of chunked voxel terrain), which works because fine zones reach a chunk beyond every
-//! overhang, so transitions only cross heightfield-like ground.
+//! chunks stop half a cell short and each hangs a *skirt* from its border across the gap,
+//! sinking a little (the crack filler of chunked voxel terrain; the two strips overlap under each
+//! other), which works because fine zones reach a margin beyond every volume modifier, so
+//! transitions only cross heightfield-like ground.
 //!
 //! The terrain can replace a rectangle of a heightfield *landscape* ([`LandscapeSeam`]): the
 //! landscape mesh leaves out its cells in the rectangle, and the mesh terrain follows the
@@ -545,19 +546,23 @@ impl MeshTerrain {
             }
             *idx = remap[v];
         }
-        let skirt = if short.iter().any(|&s| s) { hang_skirts(&mut kept, &mut indices, &kept_cells, n, short, 2.0 * config.coarse) } else { 0 };
+        // The gap to a neighbour of the other resolution is half a cell of each.
+        let reach = 0.5 * (config.fine + config.coarse) + 0.1;
+        let skirt = if short.iter().any(|&s| s) { hang_skirts(&mut kept, &mut indices, &kept_cells, n, short, reach, 0.12) } else { 0 };
         Some(TerrainChunk { mesh: Mesh::new(kept, indices), coords: (cx, cz), cell, skirt_triangles: skirt })
     }
 }
 
-/// Hangs a skirt `depth` metres down from the open edges along the short sides; returns the
-/// triangles added.
-fn hang_skirts(vertices: &mut Vec<Vertex>, indices: &mut Vec<u32>, cells: &[(usize, usize)], n: [usize; 2], short: [bool; 4], depth: f32) -> usize {
-    use std::collections::HashMap;
-    let mut edges: HashMap<(u32, u32), u32> = HashMap::new();
+/// Hangs a skirt from the open edges along the short sides: a strip reaching `reach` metres
+/// outwards (across the gap to the neighbouring chunk of the other resolution, which hangs its
+/// own towards this one) while sinking `drop` metres, so the two strips overlap under each other
+/// and close the gap from above and from the side. Returns the triangles added.
+fn hang_skirts(vertices: &mut Vec<Vertex>, indices: &mut Vec<u32>, cells: &[(usize, usize)], n: [usize; 2], short: [bool; 4], reach: f32, drop: f32) -> usize {
+    use std::collections::{HashMap, HashSet};
+    let mut edges: HashSet<(u32, u32)> = HashSet::new();
     for t in indices.chunks_exact(3) {
         for (a, b) in [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
-            *edges.entry((a, b)).or_default() += 1;
+            edges.insert((a, b));
         }
     }
     // A short side's outermost ring of cells (the chunk's own first or last).
@@ -570,17 +575,18 @@ fn hang_skirts(vertices: &mut Vec<Vertex>, indices: &mut Vec<u32>, cells: &[(usi
             _ => k + 1 == n[1],
         }
     };
-    let mut lowered: HashMap<u32, u32> = HashMap::new();
+    const OUTWARD: [Vec3; 4] = [Vec3::NEG_X, Vec3::X, Vec3::NEG_Z, Vec3::Z];
+    let mut open: Vec<(u32, u32)> = edges.iter().copied().filter(|&(a, b)| !edges.contains(&(b, a))).collect();
+    open.sort_unstable();
+    let mut lowered: HashMap<(u32, usize), u32> = HashMap::new();
     let mut added = 0;
-    let open: Vec<(u32, u32)> = edges.keys().copied().filter(|&(a, b)| !edges.contains_key(&(b, a))).collect();
     for (a, b) in open {
-        if !(0..4).any(|s| short[s] && on_side(a, s) && on_side(b, s)) {
-            continue;
-        }
+        let Some(side) = (0..4).find(|&s| short[s] && on_side(a, s) && on_side(b, s)) else { continue };
         let mut low = |v: u32| {
-            *lowered.entry(v).or_insert_with(|| {
+            *lowered.entry((v, side)).or_insert_with(|| {
                 let mut copy = vertices[v as usize];
-                copy.position[1] -= depth;
+                let p = copy.position() + OUTWARD[side] * reach - Vec3::Y * drop;
+                copy.position = p.into();
                 vertices.push(copy);
                 vertices.len() as u32 - 1
             })

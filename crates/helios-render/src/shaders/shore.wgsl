@@ -95,16 +95,29 @@ fn pebbles(xz: vec2<f32>, cell: f32, density: f32, seed: u32, footprint: f32) ->
     return p;
 }
 
+// Water surface of the simulated river over `xz` (its banks a few cells from the water too), or
+// very low (river.rs: `surface_step`). Needs `river_surface`.
+fn river_level_at(xz: vec2<f32>) -> f32 {
+    if water.river.w <= 0.0 {
+        return -1.0e9;
+    }
+    let c = vec2<i32>(floor((xz - water.river.xy) * water.river.z));
+    if any(c < vec2<i32>(0)) || any(c >= vec2<i32>(textureDimensions(river_surface))) {
+        return -1.0e9;
+    }
+    return textureLoad(river_surface, c, 0).x;
+}
+
 // Wet albedo of a porous surface: water fills its pores and darkens it (Lagarde's wet surfaces).
 fn wet_albedo(albedo: vec3<f32>, wetness: f32) -> vec3<f32> {
     return albedo * mix(1.0, 0.55, wetness);
 }
 
 fn shore_surface(landscape: Surface, p: vec3<f32>, macro_normal: vec3<f32>, footprint: f32) -> Surface {
-    if water.misc.z <= 0.0 {
+    if water.misc.z <= 0.0 && water.river.w <= 0.0 {
         return landscape;
     }
-    let level = water_level_at(p.xz);
+    let level = max(water_level_at(p.xz), river_level_at(p.xz));
     let height = p.y - level;
     if height > SHORE_HEIGHT + 0.15 {
         return landscape;

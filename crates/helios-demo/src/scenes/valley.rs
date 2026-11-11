@@ -200,6 +200,8 @@ fn build_scene(detail: Detail) -> (Scene, DemoMotion) {
     // The mesh terrain: cliff, shelf, cave, arch and the river's channel.
     let mesh_terrain_material = valley_terrain::material(&mut scene, &landscape_material);
     valley_terrain::add(&mut scene, &mesh_terrain, mesh_terrain_material, &rocks, &rock_materials);
+    // The river running from the cave into the lake: a shallow-water simulation.
+    valley_terrain::add_river(&mut scene, &mesh_terrain, ground_height, &rocks, &rock_materials);
     (scene, motion)
 }
 

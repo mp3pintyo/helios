@@ -712,6 +712,8 @@ pub struct Scene {
     pub volumes: Vec<crate::volumes::VolumeEmitter>,
     /// GPU particle emitters (`particles.rs`).
     pub particles: Vec<crate::particles::ParticleEmitter>,
+    /// Simulated shallow-water rivers (`river.rs`; the first one runs).
+    pub rivers: Vec<crate::river::River>,
     /// Material graphs and material instances' parameters (`material_graphs.rs`).
     pub(crate) graphs: crate::material_graphs::GraphStore,
     pub(crate) geometry_version: u64,
