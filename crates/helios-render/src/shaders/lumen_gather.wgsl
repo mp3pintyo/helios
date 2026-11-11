@@ -18,7 +18,8 @@
 //
 // Probe indices: the uniform grid (gx x gy) first, then the adaptive probes, so probe i's
 // atlas tile is (i % gx, i / gx) for both - adaptive probes fill extra tile rows below the grid.
-//   reflect      : half-resolution GGX reflection rays (screen, then distance field)
+//   reflect      : half-resolution GGX reflection rays (screen, then distance field; height fog
+//                  on world hits, lumen_reflect.wgsl)
 //   reflect_temporal : reprojected accumulation with neighbourhood clamping
 
 #include "common.wgsl"
@@ -28,6 +29,8 @@
 #include "lumen_mesh_sdf.wgsl"
 #include "lumen_cards.wgsl"
 #include "lumen_trace.wgsl"
+#include "fog_common.wgsl"
+#include "lumen_reflect.wgsl"
 
 const PROBE_TILE: u32 = 16u;
 const PROBE_TEXELS: u32 = 8u;
@@ -78,6 +81,19 @@ const ADAPTIVE_MATCH_THRESHOLD: f32 = 0.1;
 // read through `adaptive_cells` (the same buffer).
 @group(0) @binding(85) var<storage, read_write> adaptive_alloc: array<atomic<u32>>;
 @group(0) @binding(86) var<storage, read> adaptive_cells: array<u32>;
+// Height fog on reflection hits (lumen_reflect.wgsl) and the gather options.
+@group(0) @binding(160) var<uniform> fog: Fog;
+@group(0) @binding(161) var transmittance_lut: texture_2d<f32>;
+@group(0) @binding(162) var<uniform> gather_options: GatherOptions;
+
+struct GatherOptions {
+    // Non-zero: screen traces pass hits on unlit pixels (UE 5.8's SkipUnlitHits).
+    skip_unlit_hits: u32,
+    // Non-zero: height fog between a reflecting surface and its world-traced hit (r.Lumen.HeightFog).
+    reflection_fog: u32,
+    _pad0: u32,
+    _pad1: u32,
+}
 
 // Maximum exposed luminance of a single ray (exposure maps mid grey to 0.18), as Lumen's
 // MaxRayIntensity. Tiny, very bright emitters - candle flames, lamp bulbs - are hit by a
@@ -133,7 +149,8 @@ fn trace_screen(origin: vec3<f32>, dir: vec3<f32>, max_distance: f32, steps: u32
         }
         let scene = linear_depth_at(vec2<u32>(uv * size));
         let thickness = max(0.2, t * 0.25);
-        if clip.w > scene && clip.w - scene < thickness {
+        // SkipUnlitHits: a hit on a pixel last frame did not light is passed, the march goes on.
+        if clip.w > scene && clip.w - scene < thickness && (gather_options.skip_unlit_hits == 0u || screen_hit_radiance(uv).x >= 0.0) {
             hit.found = true;
             hit.uv = uv;
             hit.t = t;
@@ -143,21 +160,31 @@ fn trace_screen(origin: vec3<f32>, dir: vec3<f32>, max_distance: f32, steps: u32
     return hit;
 }
 
-// Screen trace, then the world (lumen_trace.wgsl): near field, global distance field, sky.
-fn trace_radiance(origin: vec3<f32>, dir: vec3<f32>, screen_distance: f32, jitter: f32) -> Radiance {
-    let s = trace_screen(origin, dir, screen_distance, 12u, jitter);
-    if s.found {
-        var r: Radiance;
-        let motion = textureLoad(gbuffer_motion, vec2<u32>(s.uv * frame.viewport.xy), 0).xy;
-        r.color = textureSampleLevel(previous_radiance, lumen_sampler, s.uv - motion, 0.0).rgb;
-        r.sky = 0.0;
-        r.t = s.t;
-        return r;
-    }
+// Last frame's radiance where a screen trace hit.
+fn screen_radiance(s: ScreenHit) -> Radiance {
+    var r: Radiance;
+    let motion = textureLoad(gbuffer_motion, vec2<u32>(s.uv * frame.viewport.xy), 0).xy;
+    r.color = textureSampleLevel(previous_radiance, lumen_sampler, s.uv - motion, 0.0).rgb;
+    r.sky = 0.0;
+    r.t = s.t;
+    return r;
+}
+
+// The world beyond a screen trace that missed (lumen_trace.wgsl).
+fn world_radiance(origin: vec3<f32>, dir: vec3<f32>, screen_distance: f32) -> Radiance {
     // Without a near field, start beyond the origin surface's own distance band (Lumen
     // continues the ray where the screen trace left off).
     let level = min(sdf_finest_level(origin), lumen.level_count - 1u);
     return trace_world_radiance(origin, dir, max(screen_distance * 0.35, lumen.sdf_levels[level].w * 2.5));
+}
+
+// Screen trace, then the world (lumen_trace.wgsl): near field, global distance field, sky.
+fn trace_radiance(origin: vec3<f32>, dir: vec3<f32>, screen_distance: f32, jitter: f32) -> Radiance {
+    let s = trace_screen(origin, dir, screen_distance, 12u, jitter);
+    if s.found {
+        return screen_radiance(s);
+    }
+    return world_radiance(origin, dir, screen_distance);
 }
 
 // ---- Screen probes ---------------------------------------------------------------------------------
@@ -603,21 +630,7 @@ fn integrate(@builtin(global_invocation_id) gid: vec3<u32>) {
 
 // ---- Reflections ---------------------------------------------------------------------------------------
 
-// Visible-normal GGX sampling (Heitz 2018), in the local frame where n = +Z.
-fn sample_ggx_vndf(v: vec3<f32>, alpha: f32, u: vec2<f32>) -> vec3<f32> {
-    let vh = normalize(vec3<f32>(alpha * v.x, alpha * v.y, v.z));
-    let len2 = vh.x * vh.x + vh.y * vh.y;
-    let t1 = select(vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(-vh.y, vh.x, 0.0) / sqrt(len2), len2 > 0.0);
-    let t2 = cross(vh, t1);
-    let r = sqrt(u.x);
-    let phi = 2.0 * PI * u.y;
-    let p1 = r * cos(phi);
-    var p2 = r * sin(phi);
-    let s = 0.5 * (1.0 + vh.z);
-    p2 = (1.0 - s) * sqrt(max(0.0, 1.0 - p1 * p1)) + s * p2;
-    let nh = p1 * t1 + p2 * t2 + sqrt(max(0.0, 1.0 - p1 * p1 - p2 * p2)) * vh;
-    return normalize(vec3<f32>(alpha * nh.x, alpha * nh.y, max(0.0, nh.z)));
-}
+// sample_ggx_vndf: lumen_reflect.wgsl.
 
 const MAX_REFLECTION_ROUGHNESS: f32 = 0.55;
 
@@ -651,7 +664,18 @@ fn reflect_trace(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
     let linear_depth = frame.camera_position.w / depth;
     let origin = world + n * (0.02 + 0.002 * linear_depth);
-    let r = trace_radiance(origin, dir, 8.0 + linear_depth * 0.2, u.x);
+    let screen_distance = 8.0 + linear_depth * 0.2;
+    let s = trace_screen(origin, dir, screen_distance, 12u, u.x);
+    var r: Radiance;
+    if s.found {
+        // Last frame's image already holds the fog in front of the hit.
+        r = screen_radiance(s);
+    } else {
+        r = world_radiance(origin, dir, screen_distance);
+        if gather_options.reflection_fog != 0u {
+            r.color = reflection_height_fog(r.color, origin, dir, r.t);
+        }
+    }
     let color = select(r.color, vec3<f32>(0.0), any(r.color != r.color));
     textureStore(reflection_out, gid.xy, vec4<f32>(clamp_ray(color, MAX_REFLECTION_RAY_INTENSITY), 1.0));
 }
@@ -673,7 +697,9 @@ fn reflect_temporal(@builtin(global_invocation_id) gid: vec3<u32>) {
         for (var x = -1; x <= 1; x++) {
             let tap = clamp(vec2<i32>(gid.xy) + vec2<i32>(x, y), vec2<i32>(0), vec2<i32>(half_size) - 1);
             let value = textureLoad(reflection_raw, tap, 0);
-            let w = 1.0 / (1.0 + luminance(value.rgb));
+            // Karis weight of the colour as displayed (exposed): in absolute radiance units the
+            // weights made the filter a harmonic mean, dark samples (misses) swamping the hits.
+            let w = 1.0 / (1.0 + luminance(value.rgb) * exposure[0]);
             sum += value * w;
             weight_sum += w;
             let compressed = value.rgb * w;
@@ -693,9 +719,9 @@ fn reflect_temporal(@builtin(global_invocation_id) gid: vec3<u32>) {
         let history_uv = viewport_uv(previous_uv, frame.prev_viewport.xy * 0.5, textureDimensions(reflection_history));
         let history = textureSampleLevel(reflection_history, lumen_sampler, history_uv, 0.0);
         // Clip in the tone-compressed space the moments were taken in, then expand again.
-        let h = history.rgb / (1.0 + luminance(history.rgb));
+        let h = history.rgb / (1.0 + luminance(history.rgb) * exposure[0]);
         let clipped = clamp(h, mean - 1.5 * sigma, mean + 1.5 * sigma);
-        let restored = clipped / max(1.0 - luminance(clipped), 0.02);
+        let restored = clipped / max(1.0 - luminance(clipped) * exposure[0], 0.02);
         result = vec4<f32>(mix(restored, current.rgb, 0.1), mix(history.a, current.a, 0.1));
     }
     textureStore(reflection_out, gid.xy, select(result, current, any(result != result)));

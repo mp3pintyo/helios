@@ -1,8 +1,10 @@
 // Lumen surface lighting.
 //
 //   update_voxels : lights the surface inside every voxel of the voxel-lighting clipmap —
-//                   sun (with distance-field soft shadows), sky (with distance-field occlusion),
-//                   one bounce of indirect light from the radiance cache, and emission.
+//                   sun (with distance-field soft shadows), local lights (every one in range, or a
+//                   few importance-sampled from the light grid: lumen_light_sample.wgsl), sky (with
+//                   distance-field occlusion), one bounce of indirect light from the radiance
+//                   cache, and emission.
 //                   A quarter of the voxels is refreshed per frame (ping-pong copies the rest).
 //   update_probes : refreshes a fraction of the radiance-cache probes per frame by tracing
 //                   rays through the distance field into the surface caches (mesh cards, voxel
@@ -16,6 +18,8 @@
 #include "lumen_cards.wgsl"
 #include "lumen_world_cache_common.wgsl"
 #include "lights.wgsl"
+#include "lumen_light_grid_common.wgsl"
+#include "lumen_light_sample.wgsl"
 
 @group(0) @binding(0) var<uniform> frame: Frame;
 @group(0) @binding(1) var<uniform> lumen: Lumen;
@@ -34,6 +38,8 @@
 @group(0) @binding(72) var card_capture: texture_2d<u32>;
 @group(0) @binding(73) var card_lighting: texture_2d<f32>;
 @group(0) @binding(74) var sdf_instance_ids: texture_3d<u32>;
+@group(0) @binding(163) var<uniform> light_grid: LightGrid;
+@group(0) @binding(164) var<storage, read> light_grid_words: array<u32>;
 
 const VOXEL_PHASES: u32 = 4u;
 // Fraction of outside light a stained-glass window passes (GLASS_TRANSMISSION in
@@ -102,23 +108,9 @@ fn update_voxels(@builtin(global_invocation_id) gid: vec3<u32>) {
             let shadow = sdf_soft_shadow(origin, sun, lumen.max_trace_distance, 0.05);
             direct = frame.sun_illuminance.rgb * transmittance * n_dot_l * shadow;
         }
-        for (var i = 0u; i < frame.light_count; i++) {
-            let light = lights[i];
-            let to_light = light.position_range.xyz - surface;
-            if dot(to_light, to_light) > light.position_range.w * light.position_range.w {
-                continue;
-            }
-            let ls = sample_light(light, surface);
-            let nl = saturate(dot(n, ls.l));
-            if nl <= 0.0 {
-                continue;
-            }
-            var visibility = 1.0;
-            if light.params.z > 0.5 {
-                visibility = sdf_soft_shadow(origin, ls.l, light_shadow_distance(light.position_range.xyz, ls.distance, light.color.w), 0.1);
-            }
-            direct += ls.radiance * nl * visibility;
-        }
+        // Sampled lights accumulate through the blend with the previous value below.
+        let random = f32(pcg_hash((gid.x * 73856093u) ^ (gid.y * 19349663u) ^ (gid.z * 83492791u) ^ (lumen.frame * 2654435761u)) >> 8u) * (1.0 / 16777216.0);
+        direct += local_lights(surface, n, origin, random).irradiance;
         let occlusion = sdf_occlusion(surface, n, level);
         let sky = sky_irradiance(n) * occlusion;
         let bounce = radiance_cache_irradiance(origin, n, sky);

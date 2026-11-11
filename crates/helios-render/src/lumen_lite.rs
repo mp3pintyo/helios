@@ -18,7 +18,11 @@
 //!   entered first (finest levels first), then by age, four times as often on screen, an eighth
 //!   as often where the distance field finds no surface around them (no pixel interpolates them,
 //!   but foliage is not in the global field) and rarely when buried. A score histogram finds
-//!   the threshold that fills the budget, so no CPU readback is involved.
+//!   the threshold that fills the budget, so no CPU readback is involved. With
+//!   [`crate::RenderSettings::lumen_lite_adaptive_rate`] the score also follows each probe's
+//!   *variability* (how much its refreshes change it): settled probes at half the rate, changing
+//!   ones up to four times, and none before a minimum weighted age ([`MIN_SCORE`]), so a steady
+//!   scene refreshes fewer probes than the budget.
 //! * **Tracing** — [`RAYS_PER_PROBE`] rays per probe through Lumen's own tracing (near-field
 //!   mesh SDFs, global distance field, mesh-card and voxel surface caches, sky; the WGSL is
 //!   shared through lumen_trace.wgsl), blended into the probe with hysteresis. Before tracing, the
@@ -28,8 +32,13 @@
 //!   into the next level at a window's edge and into Lumen's radiance cache beyond the last; the
 //!   result replaces the screen-probe gather in `gi_raw` (same format), so GI denoising, sky
 //!   visibility (specular occlusion), material AO and rough reflections — which reuse the
-//!   gathered irradiance in the lighting pass — work unchanged. Glossy reflections keep Lumen's
-//!   traced reflections: a probe's 6×6 irradiance cannot show a reflected image.
+//!   gathered irradiance in the lighting pass — work unchanged.
+//! * **Reflections** (UE 5.8's Lumen Lite: reflections fall back to SSR) — glossy reflections
+//!   are traced in screen space over the closest-depth HZB (`hzb_trace.wgsl`), skipping pixels
+//!   last frame did not light; where they miss, the irradiance field at the surface looked up in
+//!   the reflected direction (its sky part sharpened to the sky itself), with height fog. They
+//!   replace Lumen's per-pixel world traces in its reflection buffer, whose temporal filter and
+//!   the lighting pass use them unchanged ([`crate::RenderSettings::lumen_lite_ssr`]).
 
 use bytemuck::{Pod, Zeroable};
 use glam::{IVec3, IVec4, Vec3, Vec4};
@@ -37,6 +46,7 @@ use wgpu::BindingResource::{Sampler, TextureView};
 use wgpu::{BindingType, TextureFormat as F};
 
 use crate::lumen::{Lumen, Stage, TraceResources};
+use crate::passes::hzb::{ClosestHzb, Hzb};
 use crate::passes::sky::Sky;
 use crate::passes::Samplers;
 use crate::profiler::Recorder;
@@ -60,6 +70,11 @@ pub const PROBES_PER_FRAME: u32 = 512;
 /// refreshed every few dozen frames, not every frame as in DDGI, so the hysteresis is lower
 /// than DDGI's 0.97 (large changes halve it, see `update_field`).
 const HYSTERESIS: f32 = 0.85;
+/// With the variability-driven rate, the weighted age (frames × on-screen, kind and variability
+/// factors) a probe must reach before it is refreshed again (`min_score`): a settled probe on
+/// screen waits 12 frames, off screen 48; a steady scene then refreshes ~300 probes a frame
+/// instead of the whole budget (cathedral: 295–496, 0.28 → 0.24 ms), with the same stability.
+const MIN_SCORE: f32 = 24.0;
 const IRRADIANCE_TEXELS: u32 = 6;
 const MOMENT_TEXELS: u32 = 14;
 const PROBES: u32 = GRID * GRID * GRID * LEVELS as u32;
@@ -147,6 +162,10 @@ struct LiteUniform {
     budget: u32,
     reset: u32,
     hysteresis: f32,
+    skip_unlit_hits: u32,
+    reflection_fog: u32,
+    adaptive_rate: u32,
+    min_score: f32,
 }
 
 /// Renderer resources besides Lumen's that the irradiance field reads.
@@ -156,6 +175,16 @@ pub struct LiteInputs<'a> {
     pub sky: &'a Sky,
     pub samplers: &'a Samplers,
     pub exposure: &'a wgpu::Buffer,
+    /// Builds the closest-depth HZB of the reflections' screen traces.
+    pub hzb: &'a Hzb,
+    /// Last frame's lit image (the TSR history), which screen-trace hits read.
+    pub previous_radiance: &'a wgpu::TextureView,
+    /// The volumetric fog's uniform (height fog on reflection hits).
+    pub fog: &'a wgpu::Buffer,
+    /// Frame parity (Lumen's reflection history).
+    pub current: usize,
+    /// Screen-space reflections into Lumen's reflection buffer (Lumen traces none).
+    pub reflections: bool,
 }
 
 pub struct LumenLite {
@@ -180,7 +209,11 @@ pub struct LumenLite {
     update_probes: Stage,
     store: Stage,
     integrate: Stage,
+    reflect: Stage,
     debug: Stage,
+    /// Closest-depth pyramid of the reflections' screen traces and the targets' capacity it
+    /// was made for.
+    hzb: Option<((u32, u32), ClosestHzb)>,
 }
 
 fn atlas(device: &wgpu::Device, label: &str, texels: u32) -> wgpu::TextureView {
@@ -275,16 +308,47 @@ impl LumenLite {
                 "integrate_field",
                 &[&[(0, u()), (1, u()), (2, u()), (3, tex(false)), (4, tex(false)), (9, ro()), (13, ro()), (20, rw()), (29, out())], &sampled_atlases[..]].concat(),
             ),
+            reflect: stage(
+                "reflect_field",
+                &[
+                    &[
+                        (0, u()),
+                        (1, u()),
+                        (2, u()),
+                        (3, tex(false)),
+                        (4, tex(false)),
+                        (5, tex(true)),
+                        (6, tex3(true)),
+                        (9, ro()),
+                        (10, ro()),
+                        (13, ro()),
+                        (20, rw()),
+                        (32, tex(false)),
+                        (33, tex(true)),
+                        (34, tex(false)),
+                        (35, out()),
+                        (36, tex(true)),
+                        (37, u()),
+                    ],
+                    &sampled_atlases[..],
+                ]
+                .concat(),
+            ),
             debug: stage(
                 "debug_field",
                 &[&[(0, u()), (2, u()), (3, tex(false)), (10, ro()), (20, rw()), (30, tex(false)), (31, out())], &sampled_atlases[..]].concat(),
             ),
+            hzb: None,
         }
     }
 
     /// Moves the clipmap windows with the camera and writes the uniform. A scene with new
     /// geometry forgets every probe.
-    pub fn update(&mut self, queue: &wgpu::Queue, scene: &Scene, camera_position: Vec3, frame: u32) {
+    #[allow(clippy::too_many_arguments)]
+    pub fn update(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, scene: &Scene, camera_position: Vec3, frame: u32, settings: &crate::RenderSettings, capacity: (u32, u32)) {
+        if settings.lumen_lite_ssr && self.hzb.as_ref().is_none_or(|h| h.0 != capacity) {
+            self.hzb = Some((capacity, ClosestHzb::new(device, capacity)));
+        }
         let reset = self.geometry_version != Some(scene.geometry_version);
         self.geometry_version = Some(scene.geometry_version);
         let mut levels = [Vec4::ZERO; LEVELS];
@@ -296,15 +360,27 @@ impl LumenLite {
             levels[level] = (first.as_vec3() * spacing).extend(spacing);
             cells[level] = first.extend(0);
         }
-        let uniform = LiteUniform { levels, cells, frame, budget: PROBES_PER_FRAME, reset: reset as u32, hysteresis: HYSTERESIS };
+        let uniform = LiteUniform {
+            levels,
+            cells,
+            frame,
+            budget: PROBES_PER_FRAME,
+            reset: reset as u32,
+            hysteresis: HYSTERESIS,
+            skip_unlit_hits: settings.lumen_skip_unlit_hits as u32,
+            reflection_fog: settings.lumen_reflection_fog as u32,
+            adaptive_rate: settings.lumen_lite_adaptive_rate as u32,
+            min_score: MIN_SCORE,
+        };
         queue.write_buffer(&self.uniform, 0, bytemuck::bytes_of(&uniform));
     }
 
     /// Updates this frame's probes and gathers the field into `targets.gi_raw` (after Lumen's
-    /// surface caches are lit, in place of its screen probes).
-    pub fn record(&self, rec: &mut Recorder, inputs: &LiteInputs, lumen: &Lumen) {
+    /// surface caches are lit, in place of its screen probes); with `inputs.reflections`, traces
+    /// the reflections into Lumen's reflection buffer and runs its temporal filter.
+    pub fn record(&self, rec: &mut Recorder, inputs: &LiteInputs, lumen_ref: &Lumen) {
         let device = rec.device;
-        let lumen: TraceResources = lumen.trace_resources();
+        let lumen: TraceResources = lumen_ref.trace_resources();
         let lumen_uniform = lumen.uniform;
         let frame = || (0, inputs.frame.as_entire_binding());
         let lite = || (2, self.uniform.as_entire_binding());
@@ -401,6 +477,42 @@ impl LumenLite {
         pass.set_pipeline(&self.integrate.pipeline);
         pass.set_bind_group(0, &integrate_group, &[]);
         pass.dispatch_workgroups(workgroups(half.0, 8), workgroups(half.1, 8), 1);
+        drop(pass);
+
+        let (Some(hzb), Some(reflection_raw)) = (self.hzb.as_ref().map(|h| &h.1).filter(|_| inputs.reflections), lumen_ref.reflection_raw()) else { return };
+        inputs.hzb.record_closest(rec, targets, hzb);
+        let [irradiance, moments] = atlases();
+        let reflect_group = self.reflect.group(
+            device,
+            &[
+                frame(),
+                (1, lumen_uniform.as_entire_binding()),
+                lite(),
+                (3, TextureView(&targets.depth)),
+                (4, TextureView(&targets.gbuffer_normal)),
+                (5, TextureView(&inputs.sky.sky_view)),
+                (6, TextureView(lumen.global_sdf)),
+                sampler(),
+                (9, lumen.radiance_probes.as_entire_binding()),
+                (10, inputs.exposure.as_entire_binding()),
+                (13, inputs.sky.sh.as_entire_binding()),
+                state(),
+                (32, TextureView(&targets.gbuffer_motion)),
+                (33, TextureView(inputs.previous_radiance)),
+                (34, TextureView(&hzb.view)),
+                (35, TextureView(reflection_raw)),
+                (36, TextureView(&inputs.sky.transmittance)),
+                (37, inputs.fog.as_entire_binding()),
+                irradiance,
+                moments,
+            ],
+        );
+        let mut pass = rec.compute_pass("lumen lite reflections");
+        pass.set_pipeline(&self.reflect.pipeline);
+        pass.set_bind_group(0, &reflect_group, &[]);
+        pass.dispatch_workgroups(workgroups(half.0, 8), workgroups(half.1, 8), 1);
+        drop(pass);
+        lumen_ref.record_reflection_temporal(rec, inputs.frame, targets, inputs.samplers, inputs.current, inputs.exposure);
     }
 
     /// Draws the probes into `targets.hdr` over the gathered irradiance (`gi`: the denoised GI
@@ -495,3 +607,4 @@ mod tests {
         assert_eq!(GiMethod::ScreenProbes.toggled().toggled(), GiMethod::ScreenProbes);
     }
 }
+

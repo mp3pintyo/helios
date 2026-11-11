@@ -66,6 +66,10 @@ const ATLAS_PAGES: u32 = 256;
 const PAGE_COUNT: usize = (ATLAS_PAGES * ATLAS_PAGES) as usize;
 /// Pages lit per frame: new allocations take up to three quarters, refreshes the rest.
 const UPDATE_BUDGET: usize = 1024;
+/// Flag in an update record's third word (`FRESH_PAGE` in lumen_card_light.wgsl): the page was
+/// just (re)allocated, so the local light accumulated for its texels (lumen_light_grid.rs)
+/// belongs to another surface.
+const FRESH_PAGE: u32 = 1 << 31;
 /// Target capture texel size (world metres) and the card side limit.
 pub(crate) const CARD_TEXEL: f32 = 0.1;
 const MAX_CARD_RESOLUTION: u32 = 256;
@@ -1106,7 +1110,7 @@ impl Allocator {
                     self.owners[page as usize] = record;
                     self.scheduled[page as usize] = self.frame;
                     self.instances[i].pages.push(page);
-                    updates.push(record);
+                    updates.push([page, i as u32, record[2] | FRESH_PAGE, record[3]]);
                 }
             }
         }

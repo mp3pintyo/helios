@@ -56,6 +56,22 @@ Part of the `helios-render` GPU pipeline; the pipeline diagram and the index of 
   field recomposes once captures finish. Card lighting is filtered **depth-aware**: every lit texel stores the depth
   of the surface it was lit at, and a hit's bilinear taps keep only texels on its tangent plane, so a mushroom cap's
   light no longer tints the ground beside it (nor a wall's the floor at its foot).
+  **Local lights in the surface caches** (round 8, `lumen_light_grid.rs`, `lumen_light_grid.wgsl`,
+  `lumen_light_sample.wgsl`; `docs/round8/lumen-lite.md`): the voxel and card lighting used to loop over every light
+  of the scene and shadow each one in range with a global-field cone, so with hundreds of candles it became the
+  largest light-count-dependent GI cost. Now a camera-centred **light grid** (4 levels of 8³ cells over the global
+  field's extents: 4, 8, 16, 32 m cells; one workgroup per cell, every frame) lists per cell the lights whose range
+  reaches it — all of them when at most 32 do, else 32 drawn by systematic resampling in proportion to an upper bound
+  of their contribution to the cell, each weighted by 1 / (32 × its probability), with a new offset every frame, so
+  the list is an unbiased estimate of the full set. A texel or voxel evaluates its cell's candidates unshadowed,
+  picks two in proportion to that contribution (shadowing them all where at most two contribute) and traces only
+  their cones; the estimate is the candidates' total times the picks' visibility. Voxels accumulate it through
+  their usual half-and-half blend; card texels keep their local light in an rgb9e5 word per atlas texel (16 MiB,
+  behind the grid) and blend half of each refresh into it, starting afresh when their page is reallocated.
+  `RenderSettings::lumen_light_sampling` (default on), `--lumen-exhaustive-lights`, editor toggle.
+  Cathedral at night, 1000 candles: cards 0.29 → 0.063 ms, surface + radiance cache 1.20 → 0.37 ms (grid 0.045 ms),
+  frame 9.2 → 8.2 ms; 300 candles 0.12 → 0.063 and 0.72 → 0.36 ms; 33 unchanged; the lit frame 49.5 dB from the
+  exhaustive path's.
   **Radiance cache refresh** (`update_probes` in `lumen_light.wgsl`): it ran one thread per probe tracing its 32 rays
   in turn — ~3500 long serial threads, most of the GPU idle; it now runs a workgroup per probe, a thread per ray,
   with a shared-memory reduction of the SH: the "lumen surface + radiance cache" pass went from 1.42–1.49 to
@@ -153,14 +169,46 @@ Part of the `helios-render` GPU pipeline; the pipeline diagram and the index of 
   the last level. The result replaces the screen-probe gather in `gi_raw` (same format), so the GI denoiser, sky
   visibility (specular occlusion), material AO and the lighting pass are unchanged. **Reflections**: rough ones come
   from the irradiance field — the lighting pass already blends specular towards the gathered irradiance between
-  roughness 0.2 and 0.5 and fades the traced reflection out between 0.35 and 0.55; glossy ones keep Lumen's traced
-  reflections (one GGX ray per half-resolution pixel), since a probe's 6×6 irradiance cannot show a reflected image.
+  roughness 0.2 and 0.5 and fades the reflection buffer out between 0.35 and 0.55; glossy ones are traced in screen
+  space (below).
   **Selection**: `--gi lumen|lite|auto` natively, `?gi=lumen|lite` in the browser (page config `gi`), `;` toggles. By
   default (`auto`) integrated and software adapters start in Lumen Lite, and `RenderSettings::gi_lite_fallback`
   switches to it when dynamic resolution has sat at its minimum percentage for 180 frames (the screen-probe gather is
   the largest GI cost that does not shrink with the resolution) — browsers do not report the adapter type, so there
   the fallback decides. Debug view 20 shows the probes as spheres shaded with their irradiance (sleeping: blue tint,
   buried: red, not yet traced: magenta) over the irradiance each pixel gets.
+  **Reflections in Lumen Lite** (round 8, `reflect_field` in `lumen_lite.wgsl`; UE 5.8's Lumen Lite: "reflections
+  fall back to SSR"): Lite no longer traces glossy reflections through the world. Per half-resolution pixel (the
+  pixels and GGX samples of Lumen's `reflect_trace`, so `reflect_temporal` and the lighting pass are shared) one ray
+  is traced in screen space over the closest-depth HZB of the final depth buffer (`hzb_trace.wgsl`, 32 iterations,
+  30 m + the view depth, a 15 cm shell growing 5 %/m; Lite builds its own pyramid, 0.03 ms); a hit reads last
+  frame's lit image, faded out over the screen's outer 8 %. Where the ray misses or leaves the screen, the
+  irradiance field at the surface is looked up *in the reflected direction* (the probes' cosine-weighted radiance
+  around it) with its sky part — sky visibility × the blurred sky — replaced by the sharp sky, then height fog.
+  `RenderSettings::lumen_lite_ssr` (default on), `--lite-traced-reflections`, editor toggle, **6**.
+  **Screen traces skip unlit hits** (UE 5.8's `ScreenTraces.HZBTraversal.SkipUnlitHits`;
+  `RenderSettings::lumen_skip_unlit_hits`, `--lumen-no-skip-unlit`): a screen-trace hit whose pixel has no lit
+  history — the reprojection leaves the screen, the history is invalid (first frame, camera cut) or the pixel was
+  black — is passed and the ray goes on (behind it, then into the world trace) instead of returning black or the
+  clamped colour of the screen's edge; in Lumen's linear screen traces (screen probes, reflections) and in Lite's
+  HZB traces. **Height fog on reflection hits** (UE 5.8's `r.Lumen.HeightFog`, both modes;
+  `RenderSettings::lumen_reflection_fog`, `--lumen-no-reflection-fog`; `lumen_reflect.wgsl`): reflections that come
+  from the world trace, the radiance cache, the irradiance field or the sky get the volumetric fog's exponential
+  height density integrated analytically along the reflected ray (to the hit, the fog's depth for the sky, 10 m for
+  the field) and the light it scatters towards the reflecting surface: the sun shadowed by one wide global-field cone
+  from the segment's middle, ambient light from the radiance cache above and below it. Screen hits already carry the fog
+  in front of them in last frame's image.
+  **Variability-driven refresh** (`RenderSettings::lumen_lite_adaptive_rate`, `--lite-fixed-rate`): every refresh
+  measures how much the new rays changed the probe (mean absolute luminance change of its texels over their mean)
+  into a smoothed variability; the schedule's score is scaled by 0.5 for probes changing by ≤ 25 % (a settled probe's
+  refresh noise) up to 4 for ≥ 60 % (swinging chandeliers, a moving sun, switched lights; new probes start at the
+  maximum), and no probe is refreshed before a weighted age of 24 (a settled probe on screen waits 12 frames, off
+  screen 48). The budget stays 512, but a steady cathedral refreshes ~300 probes a frame (probe update 0.28 → 0.24 ms)
+  with the same stability (indirect light changing by > 4/255 on a static camera: 0.61 % either way).
+  **Cost** (round 8, ms; reflections = HZB + Lite reflections + temporal, before: traced): cathedral 0.215 → 0.157,
+  gallery 0.238 → 0.130, valley 0.099 → 0.106, forest 0.037 → 0.064 (the pyramid's fixed 0.027 ms where few pixels
+  are glossy); all of Lite's GI 0.96 → 0.91, 0.84 → 0.76, 0.68 → 0.65, 0.72 → 0.71 ms. The height fog costs
+  0.01–0.025 ms; the lit frames differ from before by 40–48 dB (`docs/round8/lumen-lite.md`).
   **Cost** (shared GPU, interleaved runs, sum of per-pass minimums of 3–6 runs; "GI" = mesh cards + surface /
   radiance cache + final gather + reflections + GI temporal): the final gather drops from 0.77–1.07 ms to
   0.36–0.40 ms (probe update 0.28–0.35 ms, independent of the resolution, + per-pixel gather 0.05–0.08 ms), all of GI

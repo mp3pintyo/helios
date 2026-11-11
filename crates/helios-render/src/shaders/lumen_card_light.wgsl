@@ -3,7 +3,9 @@
 //   light_cards : lights the card pages scheduled this frame (one workgroup per 8x8 page): each
 //                 texel's captured surface gets direct sunlight (virtual shadow map where the
 //                 texel's shadow page is resident, distance-field soft shadows otherwise), local
-//                 lights with global distance-field shadows, sky light with distance-field occlusion,
+//                 lights with global distance-field shadows (every one in range, or a few
+//                 importance-sampled from the light grid and accumulated over refreshes in the
+//                 grid buffer: lumen_light_sample.wgsl), sky light with distance-field occlusion,
 //                 one bounce from the radiance cache (which is fed by the surface caches, so
 //                 bounces accumulate) and emission, reflected with the texel's captured albedo
 //                 (lumen_card_capture.wgsl; the material's average until it is captured).
@@ -20,6 +22,8 @@
 #include "lumen_cards.wgsl"
 #include "lumen_material.wgsl"
 #include "lights.wgsl"
+#include "lumen_light_grid_common.wgsl"
+#include "lumen_light_sample.wgsl"
 
 @group(0) @binding(0) var<uniform> frame: Frame;
 @group(0) @binding(1) var<uniform> lumen: Lumen;
@@ -53,12 +57,20 @@
 // Captured materials (cards.rs): rgb = sqrt(albedo), a = emission e / (1 + e) as a multiple of
 // the albedo; a card record's texels.z is its origin (0xffffffff: not captured).
 @group(0) @binding(28) var card_albedo: texture_2d<f32>;
+// The light grid and, behind it, the cards' accumulated local light (lumen_light_grid.rs).
+@group(0) @binding(163) var<uniform> light_grid: LightGrid;
+@group(0) @binding(164) var<storage, read_write> light_grid_words: array<u32>;
 #include "glass_shadow.wgsl"
 
 // Fraction of outside light a stained-glass window passes (as in lumen_light.wgsl).
 const GLASS_TRANSMISSION: f32 = 0.5;
 // Sun penumbra cone of distance-field shadows (the voxel cache's softness).
 const SUN_SOFTNESS: f32 = 0.05;
+// A card update record's flag (cards.rs `FRESH_PAGE`): the page was just (re)allocated, so its
+// accumulated local light belongs to another surface.
+const FRESH_PAGE: u32 = 0x80000000u;
+// Weight of a refresh's sampled local light in a texel's accumulation.
+const CARD_LIGHT_BLEND: f32 = 0.5;
 
 fn sky_irradiance(n: vec3<f32>) -> vec3<f32> {
     return sh_irradiance(sky_sh, n) * frame.sun_illuminance.rgb * lumen.sky_intensity;
@@ -155,8 +167,9 @@ fn average_texel_material(material: u32) -> TexelMaterial {
     return t;
 }
 
-// Radiance leaving a card texel's surface at world position `p` with normal `n`.
-fn card_texel_radiance(p: vec3<f32>, n: vec3<f32>, material: u32, surface: TexelMaterial) -> vec3<f32> {
+// Radiance leaving a card texel's surface at world position `p` with normal `n`; `texel` is its
+// atlas texel (local light accumulation), `fresh` whether that holds another surface's light.
+fn card_texel_radiance(p: vec3<f32>, n: vec3<f32>, material: u32, surface: TexelMaterial, texel: vec2<u32>, fresh: bool) -> vec3<f32> {
     let albedo = surface.albedo;
     let m = materials[material];
     if m.kind == MATERIAL_GLASS {
@@ -173,26 +186,20 @@ fn card_texel_radiance(p: vec3<f32>, n: vec3<f32>, material: u32, surface: Texel
         let glass = glass_transmission(p, lumen_sampler);
         direct = frame.sun_illuminance.rgb * transmittance * glass * n_dot_l * sun_visibility(p, field, n, sun);
     }
-    for (var i = 0u; i < frame.light_count; i++) {
-        let light = lights[i];
-        let to_light = light.position_range.xyz - p;
-        if dot(to_light, to_light) > light.position_range.w * light.position_range.w {
-            continue;
+    // Local lights: global-field shadows only (as the voxel cache): mesh-SDF traces for every
+    // light in range would cost more than the rest of the texel's lighting together. Sampled
+    // estimates are accumulated per atlas texel over the page's refreshes.
+    let random = f32(pcg_hash((texel.x * 73856093u) ^ (texel.y * 19349663u) ^ (lumen.frame * 2654435761u)) >> 8u) * (1.0 / 16777216.0);
+    let local = local_lights(p, n, field, random);
+    var local_irradiance = local.irradiance;
+    if light_grid.sampling != 0u {
+        let word = light_grid.card_words + texel.y * lumen.cards.z * CARD_PAGE_TEXELS + texel.x;
+        if !(local.exact || fresh) {
+            local_irradiance = mix(unpack_rgb9e5(light_grid_words[word]), local_irradiance, CARD_LIGHT_BLEND);
         }
-        let ls = sample_light(light, p);
-        let nl = saturate(dot(n, ls.l));
-        if nl <= 0.0 {
-            continue;
-        }
-        // Global-field shadows only (as the voxel cache): mesh-SDF traces for every light in
-        // range would cost more than the rest of the texel's lighting together.
-        var visibility = 1.0;
-        if light.params.z > 0.5 {
-            let distance = light_shadow_distance(light.position_range.xyz, ls.distance, light.color.w);
-            visibility = sdf_soft_shadow(field, ls.l, distance, 0.1);
-        }
-        direct += ls.radiance * nl * visibility;
+        light_grid_words[word] = pack_rgb9e5(local_irradiance);
     }
+    direct += local_irradiance;
     let sky = sky_irradiance(n) * sdf_occlusion(field, n);
     let bounce = radiance_cache_irradiance(field + n * 0.1, n, sky);
     return albedo / PI * (direct + mix(sky, bounce, 0.85)) + surface.emitted;
@@ -204,7 +211,7 @@ fn light_cards(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_
     let out_texel = vec2<u32>(update.x % lumen.cards.z, update.x / lumen.cards.z) * CARD_PAGE_TEXELS + lid.xy;
     let inst = card_instance_load(update.y);
     let slot = update.z & 0xffu;
-    let mip = update.z >> 8u;
+    let mip = (update.z >> 8u) & 0xffu;
     let direction = slot / CARD_LAYERS;
     let card = card_load(inst.info.x + slot);
     let resolution = card_unpack(card.texels.x);
@@ -252,7 +259,7 @@ fn light_cards(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_
     let q = card_texel_position(card, direction, vec2<f32>(source) + 0.5, captured);
     let p = card_point(q, inst.to_world);
     let n = card_normal(card_texel_normal(captured >> 16u), inst.to_local);
-    let radiance = card_texel_radiance(p, n, inst.info.y, surface);
+    let radiance = card_texel_radiance(p, n, inst.info.y, surface, out_texel, (update.z & FRESH_PAGE) != 0u);
     // Alpha: the lit surface's depth, which card_sample checks its taps against.
     let lit = vec4<f32>(radiance, 1.0 + f32(captured & 0xffffu) / CARD_DEPTH_STEPS);
     textureStore(card_lighting_out, out_texel, select(lit, vec4<f32>(0.0), any(radiance != radiance)));

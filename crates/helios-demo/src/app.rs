@@ -71,7 +71,7 @@ pub const PHOTO_SAMPLES: u32 = 128;
 const SCREEN_PERCENTAGES: [f32; 4] = [50.0, 67.0, 75.0, 100.0];
 
 pub const HELP: &str = "WASD/QE fly · drag to look · wheel speed · Shift fast\n\
-N next scene · 0 demo motion · V debug view · Insert voxel LODs · PageDown tessellation · G GI · ; GI method (Lumen / Lumen Lite) · H shadows · 1 local light shadow maps · [ ] screen percentage (50/67/75/100 %) · \\ dynamic resolution · T TAA · O occlusion · K software raster · I texture streaming · - animation clip / pause · F fog · C clouds · U translucency · End coloured light through glass · Home fog scattering · 2 shadow refresh budget · 7 prefiltered distant shadows / volume shadows (cycles) · / translucency layers · ' volumes + particles · L wind · M motion blur · B depth of field · Enter photo (accumulated still) · ` local exposure · = MegaLights · 3 MegaLights fog + translucency · 4 OIT (AVBOIT / weighted blended) · 5 Lumen world cache (off / behind cards / replaces cards) · 9 short-range AO · Z/X zoom · , . LOD error · PageUp Substrate materials · ←→↑↓ sun · P animate sun · J day/night cycle · Y camera tour · R reset · Tab editor tools (native)";
+N next scene · 0 demo motion · V debug view · Insert voxel LODs · PageDown tessellation · G GI · ; GI method (Lumen / Lumen Lite) · H shadows · 1 local light shadow maps · [ ] screen percentage (50/67/75/100 %) · \\ dynamic resolution · T TAA · O occlusion · K software raster · I texture streaming · - animation clip / pause · F fog · C clouds · U translucency · End coloured light through glass · Home fog scattering · 2 shadow refresh budget · 7 prefiltered distant shadows / volume shadows (cycles) · / translucency layers · ' volumes + particles · L wind · M motion blur · B depth of field · Enter photo (accumulated still) · ` local exposure · = MegaLights · 3 MegaLights fog + translucency · 4 OIT (AVBOIT / weighted blended) · 5 Lumen world cache (off / behind cards / replaces cards) · 6 Lumen Lite reflections (screen traces / traced) · 9 short-range AO · Z/X zoom · , . LOD error · PageUp Substrate materials · ←→↑↓ sun · P animate sun · J day/night cycle · Y camera tour · R reset · Tab editor tools (native)";
 
 impl DemoApp {
     pub fn new(
@@ -349,6 +349,9 @@ impl DemoApp {
             "Digit3" => s.mega_lights_volume = !s.mega_lights_volume,
             // Lumen world cache: off -> behind the mesh cards -> in place of the cards -> off.
             "Digit5" => s.world_cache = s.world_cache.next(),
+            // Lumen Lite's reflections: screen traces with the irradiance field behind them vs
+            // Lumen's per-pixel world traces.
+            "Digit6" => s.lumen_lite_ssr = !s.lumen_lite_ssr,
             // Substrate slabs on / off (extended materials A/B against their plain base).
             "PageUp" => s.substrate = !s.substrate,
             code if code.starts_with("Digit") => {

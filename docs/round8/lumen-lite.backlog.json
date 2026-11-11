@@ -1,0 +1,52 @@
+[
+  {
+    "id": "lumen-lite-58",
+    "title": "Lumen Lite 5.8: képernyőtérbeli tükröződés a besugárzási mezővel tartalékként, SkipUnlitHits, magassági köd a tükröződésekben, változékonyság szerinti szondafrissítés",
+    "area": "Globális megvilágítás",
+    "kind": "feature",
+    "status": "done",
+    "phase": "8. kör – 2. hullám",
+    "summary": "Az UE 5.8 Lumen Medium/Lite-jához igazodva a Lumen Lite fényes tükröződései már nem követnek sugarat a világban (közeli mező, globális távolságmező): képernyőtérben, a legközelebbi mélység HZB-jén haladnak, és ahol nem találnak (képen kívül, takarásban), a besugárzási mező adja a fényt a tükrözött irányban, az égrészt éles éggel cserélve. A katedrálisban a tükröződés 0,215 → 0,157 ms, a galériában 0,238 → 0,130 ms. A standard Lumenben is új az UE 5.8 két apró újítása: a képernyő-követés átlépi azokat a találatokat, ahol az előző képkocka nem világított (képen kívüli visszavetítés, érvénytelen előzmény, fekete pixel), és megy tovább; a világból jövő tükröződésekre (és az égre) a tükröző felület és a találat közti magassági köd rákerül. A Lite szondái változékonyságot tartanak: ami egy frissítéskor alig változik, ritkábban frissül, ami változik (lengő csillárok, mozgó nap), akár négyszer gyakrabban; nyugalmi jelenetben így a 512-es keretnél kevesebb szonda frissül.",
+    "details": "lumen_lite.wgsl: reflect_field (Lumen reflect_trace pixelei és GGX-mintái; hzb_trace 32 lépés, 30 m + nézeti mélység, 15 cm-es héj 5 %/m növekedéssel; a találat az előző képkocka képe, a képszél 8 %-án a tartalékba halványul; tartalék: field_irradiance a tükrözött irányban – a mezőlekérés új lookup paramétere –, égrész cserélve, magassági köddel), hzb_trace_accept (SkipUnlitHits), saját ClosestHzb (0,027 ms). lumen.rs: LumenOptions (skip_unlit_hits, reflection_fog, traced_reflections, light_sampling) a CardInputs-ban, GatherOptions uniform, reflection_raw() és record_reflection_temporal() (a Lite tölti a Lumen tükröződési pufferét, a temporális szűrő közös). lumen_reflect.wgsl (új): sample_ggx_vndf (áthelyezve), screen_hit_radiance (UNLIT_EXPOSED_LUMINANCE 1e-4), reflection_height_fog (analitikus exponenciális magassági sűrűség a szakaszon, nap a transzmittancia-LUT-tal és HG fázissal, árnyék egy széles, 16 lépéses kúppal két mezőszinttel durvábban, környezeti fény a sugárzási gyorsítótárból fel/le). lumen_gather.wgsl: trace_screen átlépi a megvilágítatlan találatot, trace_radiance két részre bontva (screen_radiance, world_radiance), reflect_trace köde, reflect_temporal Karis-súlyai az exponált fénysűrűséggel (abszolút egységben harmonikus közép lett, a sötét mintákat túlsúlyozta); kötések 150 köd, 151 transzmittancia, 152 opciók, a temporálisban 18 expozíció. Változékonyság: a szonda állapotának felső bájtja, update_field munkacsoport-redukcióval méri (36 besugárzási texel átlagos abszolút fénysűrűség-változása / átlag, simítva), új szonda maximumról indul; priority_bucket szorzója 0,5 (≤ 0,25) … 4 (≥ 0,6), min_score 24. Beállítások: lumen_lite_ssr, lumen_skip_unlit_hits, lumen_reflection_fog, lumen_lite_adaptive_rate; --lite-traced-reflections, --lumen-no-skip-unlit, --lumen-no-reflection-fog, --lite-fixed-rate; szerkesztő-kapcsolók; 6 billentyű. Elvetett: 64 lépéses HZB-követés és a felületi gyorsítótár 48 lépéses árnyékkúpja a ködben (0,176 ms a katedrálisban, nem gyorsabb a világkövetésnél), félfelbontású, 2×2-es cellákon megálló követés (súrlódó szögben magát a padlót találta el).",
+    "metrics": "RTX 3090, 1600×900, alapnézetek, 2 váltakozó futás minimuma, előtte → utána (tükröződés = HZB + Lite tükröződés + temporális; előtte követett, köd nélkül): katedrális 0,215 → 0,157 ms (köd nélkül 0,131), galéria 0,238 → 0,130, völgy 0,099 → 0,106, erdő 0,037 → 0,064 ms (kevés fényes pixelnél a piramis fix 0,027 ms-a dominál); a Lite teljes GI-ja 0,964 → 0,909, 0,838 → 0,762, 0,683 → 0,654, 0,720 → 0,709 ms. Szondafrissítés nyugalmi katedrálisban 300 képkocka után 512 helyett 295–496 szonda, 0,28 → 0,24 ms; a közvetett fény stabilitása (> 4/255 változó pixelek) 0,610 → 0,611 %, betöltés utáni konvergencia +0,4…+1,2 dB. Képek előtte/utána: katedrális 45,1 dB, völgy 47,8, erdő 41,1, galéria 39,8 dB; a köd maga 0,01–0,025 ms. Böngésző (headless Chromium, WebGPU): mind a 202 pipeline lefordul a Tintben, konzolhiba nincs, a 6 kapcsol.",
+    "showcase": "Galéria, alacsony nézet a pocsolyák felett (--gi lite --eye 0,0.6,6 --at 0,0.5,0): a talapzatok, a gyertya és az ólomüveg tükörképe a pocsolyákban; 6-tal a régi, követett tükröződés – docs/round8/lumen-lite/gallery-puddles-traced-vs-ssr.jpg, cathedral-lite-before-after.jpg, browser-lite-300-lights.jpg.",
+    "modules": [
+      "crates/helios-render/src/lumen_lite.rs",
+      "crates/helios-render/src/shaders/lumen_lite.wgsl",
+      "crates/helios-render/src/shaders/lumen_reflect.wgsl",
+      "crates/helios-render/src/shaders/lumen_gather.wgsl",
+      "crates/helios-render/src/lumen.rs",
+      "crates/helios-render/src/renderer.rs",
+      "crates/helios-demo/src/main.rs",
+      "crates/helios-demo/src/app.rs",
+      "crates/helios-demo/src/editor/settings.rs"
+    ],
+    "order": 215,
+    "updated": "2026-11-11"
+  },
+  {
+    "id": "lumen-card-light-sampling",
+    "title": "Lumen felületi gyorsítótár: a helyi fények mintavételezése világtérbeli fényrácsból (MegaLights-szerűen), a fényszámtól független költséggel",
+    "area": "Globális megvilágítás",
+    "kind": "feature",
+    "status": "done",
+    "phase": "8. kör – 2. hullám",
+    "summary": "A Lumen felületi gyorsítótára (a kártyák texelei és a voxelek) eddig a jelenet minden fényén végigment, és minden hatótávon belüli fényre árnyékkúpot követett a globális távolságmezőben: a gyertyafényes katedrálisban 1000 fénynél ez lett a GI legnagyobb, a fényszámmal nővő költsége. Mostantól egy kamera körüli világtérbeli fényrács (4 szint × 8³ cella, 4–32 m-es cellák) cellánként legfeljebb 32 jelöltet ad – ha ennél több fény ér el egy cellát, hozzájárulásuk felső becslésével arányos, torzítatlan súlyozott újramintavételezéssel –, a texel vagy voxel ezek közül kettőt választ a valódi hozzájárulásuk arányában, és csak azokra követ árnyékkúpot; az eredmény képkockákon át gyűlik. 1000 fénynél a kártyák 0,29 → 0,063 ms, a felületi + sugárzási gyorsítótár 1,20 → 0,37 ms, a képkocka 1 ms-mal gyorsabb; a kép 49,5 dB-re van a kimerítő úttól.",
+    "details": "Új: lumen_light_grid.rs (LumenLightGrid: uniform + egy tárolópuffer: a rács 2048 × 66 szava, mögötte a kártyák felhalmozott helyi fénye texelenként egy rgb9e5 szóban, 16 MiB), lumen_light_grid.wgsl (build: cellánként egy 64 szálas munkacsoport; két menet a fényeken 64-es darabokban, munkacsoport-prefixösszeg, szisztematikus újramintavételezés véletlen eltolással képkockánként, bejegyzés-súly 1 / (32 × valószínűség); ≤ 32 fénynél pontos lista), lumen_light_grid_common.wgsl (elrendezés, light_grid_cell, rgb9e5 pakolás), lumen_light_sample.wgsl (local_lights: két menet a jelölteken – a privát tömb helyett újraszámolás –, 2 árnyékminta, ismételt választás közös kúppal; local_lights_exhaustive a régi út). lumen_light.wgsl update_voxels és lumen_card_light.wgsl light_cards ezt hívja (153: rács uniform, 154: rács + kártyaszavak; a light_cards így pont a WebGPU 8 tárolópufferes korlátján van). cards.rs: FRESH_PAGE (az update rekord 3. szavának 31. bitje) az újonnan kiosztott lapokon – ott nincs keverés az előzménnyel; a shader a mip-et & 0xff-fel olvassa. Beállítás: RenderSettings::lumen_light_sampling (alap be), --lumen-exhaustive-lights, szerkesztő-kapcsoló. Elvetett: a MegaLights kamerafrusztum-rácsa (nem fedi a képen kívüli voxeleket, kártyákat), csonkolt pontos cellalisták (torzítás), láthatósági arány felhalmozása (a jelöltválasztás zaját nem simítja), ping-pong kártyaatlasz (+32 MiB).",
+    "metrics": "RTX 3090, 1600×900, katedrális éjjel (--detail medium --sun 200,-30), 2 váltakozó futás minimuma, minden fény → mintavételezett: 33 fény: kártyák 0,035 → 0,037, felület + sugárzási gyorsítótár 0,300 → 0,281 ms, rács 0,008 ms; 300 fény: 0,123 → 0,063 és 0,717 → 0,364 ms, rács 0,018 ms, képkocka 7,83 → 7,42 ms; 1000 fény: 0,290 → 0,063 és 1,201 → 0,371 ms, rács 0,045 ms, képkocka 9,21 → 8,21 ms. MegaLights-szal ugyanez (a gyorsítótárak nem használják): 300 fény 0,124 → 0,066 és 0,719 → 0,364 ms, képkocka 8,01 → 7,66 ms; 1000 fény 0,292 → 0,063 és 1,204 → 0,371 ms, képkocka 8,88 → 7,75 ms. Kép 1000 fénynél: 49,5 dB, átlagos fényesség +0,4 %; a gyorsítótárak maguk (300 képkocka): kártyák 36,8 dB, voxelek 42,4 dB. Statikus kamera stabilitása 1000 fénnyel (>4/255): 26,46 → 26,37 % (a demómozgás, por és köd dominál).",
+    "showcase": "Katedrális éjjel 1000 gyertyával (--lights 1000 --sun 200,-30 --detail medium), alapnézet: a mellékhajók fogadalmi gyertyaállványainak visszavert fénye a pilléreken; --lumen-exhaustive-lights vagy a szerkesztő 'Lumen: sampled surface-cache lights' kapcsolója a régi úthoz – docs/round8/lumen-lite/lights-1000-exhaustive-vs-sampled.jpg.",
+    "modules": [
+      "crates/helios-render/src/lumen_light_grid.rs",
+      "crates/helios-render/src/shaders/lumen_light_grid.wgsl",
+      "crates/helios-render/src/shaders/lumen_light_grid_common.wgsl",
+      "crates/helios-render/src/shaders/lumen_light_sample.wgsl",
+      "crates/helios-render/src/shaders/lumen_light.wgsl",
+      "crates/helios-render/src/shaders/lumen_card_light.wgsl",
+      "crates/helios-render/src/lumen.rs",
+      "crates/helios-render/src/cards.rs",
+      "crates/helios-render/src/renderer.rs"
+    ],
+    "order": 216,
+    "updated": "2026-11-11"
+  }
+]
