@@ -88,6 +88,15 @@ non-destructive modifiers. Helios' version:
   * *Weathering*: dirt (the dirt layer's mean colour) settles where the cavity is high and the
     surface faces up or sideways; moss and lichen (the boulders' moss colour) on up-facing rock,
     more in hollows and on soft beds; undersides and steep faces stay bare.
+  * *Ground* (round 8, `river-cave-artifacts`; the landscape's and every scene's dirt layer,
+    `TexturePattern::Dirt`, texgen.wgsl `dirt`): lumpy soil with two populations of stones — gravel
+    (60 cells per tile) and stones (23) — that gather in patches (a low-frequency density field,
+    sparse elsewhere), vary in size (a few large, many small), shape and turn (`stone_dome`) and in
+    hue (warm to cool greys), and lie partly buried: each sinks by its own share into the soil's
+    mean level, so its outline is wherever it rises out of the clods, not a circle, and it is
+    dusted with the soil and coated where it disappears under it. The old pattern — one pebble size
+    in 30 % of a 40 × 40 Voronoi grid, a dome with a step at its rim — read as an evenly spaced
+    polka-dot of dark-ringed discs.
 * **Collision and placement** (`TerrainCollider`). The chunks' triangles go into a 2 m grid of
   buckets: `raycast` walks the cells a ray's ground projection crosses (2D DDA), `ground_below(p)`
   returns the highest surface at or under a point (the floor under the arch, the arch's top above
@@ -112,8 +121,11 @@ UE 5.9's rivers are simulation driven (shallow water with paintable water input)
   (position, radius, m³/s), Manning's roughness, and the water instance drawing the surface. The
   valley builds it from the mesh terrain: the bed is the channel's heightfield, under rock the floor
   below the lowest point above the ground that lies in the open (the cave's floor under its roof),
-  walls where all of them are inside the rock; boulders standing in the stream are instances whose
-  tops are rasterised into the bed, so the current parts around them. The river starts filled with
+  walls where all of them are inside the rock; a dry cell's surface hides just under its bed, and
+  only under a wall at the heightfield's ground inside the rock (round 8: hiding every cell at the
+  heightfield ground, far below the cave's floor, made dry corners plunge through the floor and
+  stand as sheets in front of the step at the cave's mouth); boulders standing in the stream are
+  instances whose tops are rasterised into the bed, so the current parts around them. The river starts filled with
   the channel's design depth and runs 1800 steps (15 s) on its first frame, so a scene opens on a
   settled river. 72 × 264 cells of 0.25 m (18 × 66 m).
 * **Simulation**: the virtual-pipes model (O'Brien & Hodgins, Mei et al.): per cell a depth and the
@@ -134,9 +146,13 @@ UE 5.9's rivers are simulation driven (shallow water with paintable water input)
   mesh; a vertex's UV names its quad and corner). `vertex_step` rewrites its vertices every frame in
   that buffer (now created with `STORAGE`): a quad with no water at any corner collapses to a point
   (most of the rectangle is dry; rasterising it under the ground and the full wave set cost
-  another 0.3 ms in the initial view); otherwise the height (the water where wet; under the
-  bed where dry or an outlet, so the shoreline is the surface's intersection with the ground and the
-  lake's own sheet shows where the river ends), the normal of the water surface, the velocity in the
+  another 0.3 ms in the initial view); otherwise the height (the water where wet; a dry corner
+  carries the highest neighbouring water surface on, level, unless its ground is lower than that —
+  then 12 cm under the ground — so the bank cuts a level sheet exactly at the water line; outlet
+  corners hide under the bed so the lake's own sheet shows where the river ends; round 8,
+  `river-cave-artifacts`: dry corners used to dip under their bed, tilting the shore's triangles
+  into the bank, and where one rose out of the ground at a grazing view its back face showed as a
+  blue sliver), the normal of the water surface, the velocity in the
   second UV set and foam, depth and speed in the vertex colour, alpha 0 marking simulated water. The
   forward water shading (`shade_water`) then advects its waves along the velocity with a two-phase
   flow map (period 1.6 s; the lake's waves from the fifth, 1 m and shorter — no swell on a stream;
@@ -145,14 +161,27 @@ UE 5.9's rivers are simulation driven (shallow water with paintable water input)
   an advected noise, thickening with the amount; patches only where the foam is thick);
   refraction, absorption, caustics, reflections and shore foam are the lake's, except that running
   water is rougher than its resolved waves (roughness² + 0.03 · speed², so a fast stretch blurs
-  its sky reflection while a pool stays a mirror) and only the shore foam's thin line shows on it. The river's surface counts as a single layer for
-  depth peeling and is not a flat water body (no lake-bed rectangle, no underwater view).
+  its sky reflection while a pool stays a mirror) and only the shore foam's thin line shows on it.
+  Steep water (the chute over the cave's step: the vertex normal's y under 0.85) is aerated white
+  water whatever the simulated foam. The river's surface counts as a single layer for
+  depth peeling and is not a flat water body (no lake-bed rectangle, no underwater view: a back
+  face of its sheet — a fold at a bank — is shaded as the water seen from above, not by
+  `shade_water_below`, whose deep-water colour drew it as a saturated blue line).
 * **Shores**: `surface_step` writes the water surface height per cell — on dry cells within three
-  cells of water the highest neighbouring water surface — to an `R32Float` texture the G-buffer
-  resolve reads (binding 150, `Water::river` gives the grid); `shore_surface` takes the higher of
-  the lake's and the river's level, so the river's bed and banks get the lake's sediment, pebbles and
-  wet band along the simulated water line (not its sand ripples, which the lake's waves draw: where
-  the river's level is the higher, its bed is gravel).
+  cells of water the highest neighbouring water surface *that lies below the cell's ground* (ground
+  below a pool's level, under the cave's step, is not that pool's bank; taking the pool's level there
+  dressed the step's face as submerged bed in blocks of whole cells) — to an `R32Float` texture the
+  G-buffer resolve reads (binding 150, `Water::river` gives the grid); `shore_surface` takes the
+  higher of the lake's and the river's level, so the river's bed and banks get the lake's wet band
+  along the simulated water line. Sediment settles on level ground only (fading out between normal
+  y 0.65 and 0.35): steep faces stay the rock they are, wet. Pebbles (`pebbles`) vary in size and
+  sink into the sediment by their own share plus a buried-ness that varies over the ground, so they
+  gather in patches with irregular outlines. Where the river's level is the higher its bed is a
+  stream bed rather than the lake's sand: a coarse gravel matrix packed with gravel and cobbles (an
+  armoured bed, no sand ripples), an olive-brown film of algae and silt (periphyton) that thickens
+  with depth and in patches — so the bed darkens and greens the deeper the water — and wet stones
+  that deepen in colour as well as darken. Under the lake's clear water this reads as clear shallow
+  water over a visible bed; the old pale sand under it read as a milky grey sheet.
 * **Settings**: `RenderSettings::river_simulation` (default on; `--no-river-sim`, `Numpad2`, editor
   toggle under Atmosphere) pauses the simulation; the surface keeps its last state.
 
