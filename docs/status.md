@@ -179,8 +179,11 @@ Honest differences that remain:
    gust burst; no directional / swirl / cone forces or velocity volumes, no CPU-side API to add them), simulates only
    plants of up to 512 bones (grass, ferns, bushes — not trees), keeps leaves parametric, and integrates a spring per
    bone (as UE: no constraint solver); assembly parts hang rigidly on their bone's frame apart from their own leaves;
-   voxels move rigidly per brick with its branch bone (no flutter); bones cost per vertex in every pass that positions
-   geometry (UE evaluates bones once per instance and skins). Shadow pages cache static casters separately (as
+   voxels move rigidly per brick with its branch bone (no flutter). Branches are posed once per instance and frame
+   (a pose pass, as UE), but leaves, blades, fronds and trunks are still evaluated per vertex in closed form (one arc
+   each; UE skins every vertex from per-instance bone transforms); the rasterisers carry the plant code for every
+   cluster of a scene with plant bones (the resolve only for the plants' shading models; UE splits per instance), and
+   the pose pool is a fixed 65 536 entries. Shadow pages cache static casters separately (as
    UE's static cache); the wind, `Mobility::Movable` and animated skins make a caster dynamic. Refreshes are decided
    per instance and redraw every dynamic caster in the
    page, so in the forest — where trees, bushes, ferns and grass all sway and only terrain, rocks and logs are

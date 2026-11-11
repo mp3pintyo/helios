@@ -52,9 +52,9 @@ use crate::profiler::Recorder;
 use crate::shader::create_module;
 use crate::targets::FrameTargets;
 use crate::tessellation::{tessellation_entry, tessellation_resource, ShadowInputs};
-use crate::util::{bind, bind_group, bind_group_layout, compute_pipeline, pipeline_layout, storage_buffer, uniform_buffer, workgroups};
+use crate::util::{bind, bind_group, bind_group_layout, compute_pipeline, lazy_compute_pipeline, pipeline_layout, storage_buffer, uniform_buffer, workgroups};
 use crate::vsm_local::{self, LocalCull, LocalFrame, LocalShadows};
-use crate::plant_sim::{sim_entry, sim_resource};
+use crate::plant_pose::{motion_entry, motion_resource};
 use crate::plant_wind::{plant_entry, plant_resource};
 use crate::skin::{skin_entry, skin_resource};
 use crate::vsm_motion::{self, MoveFootprints, ShadowMove};
@@ -279,14 +279,18 @@ pub struct VirtualShadowMap {
     pub local: LocalShadows,
     draw_args: Lazy<wgpu::ComputePipeline>,
     raster_sw: Lazy<wgpu::ComputePipeline>,
+    /// The software page rasterisers (opaque, alpha-masked) for scenes with plant bones
+    /// (`PLANTS` in plant_wind.wgsl; the ones above compile without the plant code).
+    raster_sw_plants: [Lazy<wgpu::ComputePipeline>; 2],
     /// The software rasteriser specialised for alpha-masked clusters.
     raster_sw_masked: Lazy<wgpu::ComputePipeline>,
     /// Voxel clusters' page items (vsm_voxel_raster.wgsl).
     raster_voxels: Lazy<wgpu::ComputePipeline>,
     resolve: Lazy<wgpu::RenderPipeline>,
     /// Hardware page raster without and with skinning (`SKINNING` in vsm_page.wgsl): scenes
-    /// without skinned instances use the leaner one.
-    raster: [Lazy<wgpu::RenderPipeline>; 2],
+    /// without skinned instances use the leaner one; then both with plant bones (`PLANTS`, made
+    /// when a scene first has them).
+    raster: [Lazy<wgpu::RenderPipeline>; 4],
     static_layout: wgpu::BindGroupLayout,
     clear_static: Lazy<wgpu::ComputePipeline>,
     capture_static: Lazy<wgpu::ComputePipeline>,
@@ -316,6 +320,23 @@ pub struct VirtualShadowMap {
 }
 
 impl VirtualShadowMap {
+    /// Queues the page rasterisers the scene needs for the browser: with the plant code where
+    /// plants have bones (`PLANTS` in plant_wind.wgsl), with skinning where instances are skinned.
+    pub fn prefetch(&self, plants: bool, skinning: bool, masked: bool) {
+        self.raster[skinning as usize + 2 * plants as usize].prefetch();
+        if plants {
+            self.raster_sw_plants[0].prefetch();
+            if masked {
+                self.raster_sw_plants[1].prefetch();
+            }
+        } else {
+            self.raster_sw.prefetch();
+            if masked {
+                self.raster_sw_masked.prefetch();
+            }
+        }
+    }
+
     pub fn new(device: &wgpu::Device, queue: &wgpu::Queue) -> Self {
         let physical = PHYSICAL_PAGES;
         // Clipmap levels, then the local lights' pages.
@@ -382,7 +403,7 @@ impl VirtualShadowMap {
         draw_entries.push(wind_entry());
         draw_entries.push(skin_entry());
         draw_entries.push(plant_entry());
-        draw_entries.push(sim_entry());
+        draw_entries.push(motion_entry());
         draw_entries.push((60, bind::uniform()));
         let draw_layout = bind_group_layout(device, "vsm draw", ShaderStages::VERTEX_FRAGMENT, &draw_entries);
         let mut sw_entries = draw_entries[..6].to_vec();
@@ -391,7 +412,7 @@ impl VirtualShadowMap {
         sw_entries.push(wind_entry());
         sw_entries.push(skin_entry());
         sw_entries.push(plant_entry());
-        sw_entries.push(sim_entry());
+        sw_entries.push(motion_entry());
         sw_entries.push((60, bind::uniform()));
         let sw_layout = bind_group_layout(device, "vsm raster sw", c, &sw_entries);
         // Page quads are placed in the vertex stage; only the fragment stage may write storage.
@@ -439,9 +460,10 @@ impl VirtualShadowMap {
                       (vs, constants): (&'static str, &[(&'static str, f64)]),
                       fs: &'static str,
                       depth: wgpu::DepthStencilState,
-                      cull: Option<wgpu::Face>| {
+                      cull: Option<wgpu::Face>,
+                      background: bool| {
             let (device, layout, module, constants) = (device.clone(), layout.clone(), module.clone(), constants.to_vec());
-            Lazy::background(move || {
+            let make = move || {
                 device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                     label: Some(label),
                     layout: Some(&layout),
@@ -463,11 +485,15 @@ impl VirtualShadowMap {
                     multiview_mask: None,
                     cache: None,
                 })
-            })
+            };
+            if background { Lazy::background(make) } else { Lazy::new(make) }
         };
         // Reverse-Z: push stored depth away from the light by a slope-scaled amount against acne.
         let bias = wgpu::DepthBiasState { constant: 0, slope_scale: -SLOPE_BIAS, clamp: 0.0 };
         let raster_module = create_module(device, "vsm_raster.wgsl");
+        // The page rasterisers the first scene is expected to need compile in the background
+        // from the start (`expect_plant_bones`), the others when a scene needs them.
+        let expected = crate::plant_pose::plant_bones_expected();
         // COPY_SRC: the local lights' per-face page counts are read back (vsm_local.rs).
         let info = storage_buffer(device, "vsm info", INFO_WORDS * 4, wgpu::BufferUsages::INDIRECT | wgpu::BufferUsages::COPY_SRC);
         // No page has a static layer yet.
@@ -494,22 +520,25 @@ impl VirtualShadowMap {
             clear_static: static_pipeline("clear_static"),
             capture_static: static_pipeline("capture_static"),
             static_layout,
-            raster_sw: compute_pipeline(
+            raster_sw: (if expected { lazy_compute_pipeline } else { compute_pipeline })(
                 device,
                 "vsm raster sw",
                 &raster_module,
                 "rasterize",
                 &sw_layout,
-                &[("SLOPE_BIAS", SLOPE_BIAS as f64)],
+                &[("SLOPE_BIAS", SLOPE_BIAS as f64), ("PLANTS", 0.0)],
             ),
-            raster_sw_masked: compute_pipeline(
+            raster_sw_masked: lazy_compute_pipeline(
                 device,
                 "vsm raster sw (alpha-masked)",
                 &raster_module,
                 "rasterize",
                 &sw_layout,
-                &[("SLOPE_BIAS", SLOPE_BIAS as f64), ("MASKED", 1.0)],
+                &[("SLOPE_BIAS", SLOPE_BIAS as f64), ("MASKED", 1.0), ("PLANTS", 0.0)],
             ),
+            raster_sw_plants: [0.0, 1.0].map(|masked| {
+                (if expected && masked == 0.0 { compute_pipeline } else { lazy_compute_pipeline })(device, "vsm raster sw", &raster_module, "rasterize", &sw_layout, &[("SLOPE_BIAS", SLOPE_BIAS as f64), ("MASKED", masked), ("PLANTS", 1.0)])
+            }),
             raster_voxels: compute_pipeline(
                 device,
                 "vsm raster voxels",
@@ -526,16 +555,18 @@ impl VirtualShadowMap {
                 "fs_resolve",
                 depth_state(wgpu::CompareFunction::Always, Default::default()),
                 None,
+                true,
             ),
-            raster: [0.0, 1.0].map(|skinning| {
+            raster: [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)].map(|(skinning, plants)| {
                 render(
                     "vsm raster",
                     &layout,
                     clipped_module.as_ref().unwrap_or(&draw_module),
-                    (if clipped { "vs_raster_clipped" } else { "vs_raster" }, &[dirty_start[0], ("SKINNING", skinning)]),
+                    (if clipped { "vs_raster_clipped" } else { "vs_raster" }, &[dirty_start[0], ("SKINNING", skinning), ("PLANTS", plants)]),
                     "fs_raster",
                     depth_state(wgpu::CompareFunction::Greater, bias),
                     Some(wgpu::Face::Back),
+                    skinning == 0.0 && (plants == 1.0) == expected,
                 )
             }),
             uniform: uniform_buffer(device, "vsm", std::mem::size_of::<VsmUniform>() as u64),
@@ -853,7 +884,7 @@ impl VirtualShadowMap {
                 ]
                 .into_iter()
                 .chain(alpha_mask_resources(scene))
-                .chain([wind_resource(scene), skin_resource(scene), plant_resource(scene), sim_resource(scene)])
+                .chain([wind_resource(scene), skin_resource(scene), plant_resource(scene), motion_resource(scene)])
                 .collect::<Vec<_>>(),
             )
         };
@@ -943,16 +974,17 @@ impl VirtualShadowMap {
             ]
             .into_iter()
             .chain(alpha_mask_resources(scene))
-            .chain([wind_resource(scene), skin_resource(scene), plant_resource(scene), sim_resource(scene)])
+            .chain([wind_resource(scene), skin_resource(scene), plant_resource(scene), motion_resource(scene)])
             .collect::<Vec<_>>(),
         );
         {
             let mut pass = rec.compute_pass("vsm raster sw");
             pass.set_bind_group(0, &sw_group, &[]);
-            pass.set_pipeline(&self.raster_sw);
+            let plants = scene.plant_code();
+            pass.set_pipeline(if plants { &self.raster_sw_plants[0] } else { &self.raster_sw });
             pass.dispatch_workgroups_indirect(&self.draws, SW_DISPATCH_OFFSET);
             if scene.masks.any() {
-                pass.set_pipeline(&self.raster_sw_masked);
+                pass.set_pipeline(if plants { &self.raster_sw_plants[1] } else { &self.raster_sw_masked });
                 pass.dispatch_workgroups_indirect(&self.draws, SW_DISPATCH_OFFSET);
             }
             if scene.has_voxels() {
@@ -990,7 +1022,7 @@ impl VirtualShadowMap {
         }
         {
             let mut pass = self.atlas_pass(rec, "vsm raster");
-            pass.set_pipeline(&self.raster[scene.skins.skinned_instances as usize]);
+            pass.set_pipeline(&self.raster[scene.skins.skinned_instances as usize + 2 * scene.plant_code() as usize]);
             pass.set_bind_group(0, &draw_groups[0], &[]);
             pass.draw_indirect(&self.draws, 0);
         }
@@ -1002,7 +1034,7 @@ impl VirtualShadowMap {
         }
         {
             let mut pass = self.atlas_pass(rec, "vsm raster");
-            pass.set_pipeline(&self.raster[scene.skins.skinned_instances as usize]);
+            pass.set_pipeline(&self.raster[scene.skins.skinned_instances as usize + 2 * scene.plant_code() as usize]);
             pass.set_bind_group(0, &draw_groups[1], &[]);
             pass.draw_indirect(&self.draws, SPLIT_DRAWS_OFFSET);
         }

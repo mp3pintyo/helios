@@ -83,7 +83,7 @@ const TILE_LISTS: u32 = 120u;
 @group(0) @binding(65) var<uniform> wind: Wind;
 @group(0) @binding(66) var skin_palette: texture_2d<f32>;
 @group(0) @binding(170) var plant_bones: texture_2d<f32>;
-@group(0) @binding(171) var plant_sim: texture_2d<f32>;
+@group(0) @binding(171) var plant_motion: texture_2d<f32>;
 @group(0) @binding(90) var<uniform> water: Water;
 // The simulated river's water surface per cell (river.rs; shore.wgsl).
 @group(0) @binding(150) var river_surface: texture_2d<f32>;
@@ -337,8 +337,8 @@ fn resolve(
     var previous_worlds: array<vec3<f32>, 3>;
     let skinned = SKINNING && instance_skin(instance) != 0u;
     // A plant with bones (plant_wind.wgsl): corners and normals posed by their bones (the
-    // parents' frames once for the triangle when its corners share a bone), motion vectors from
-    // the previous pose at the pixel.
+    // carrier's pose entry once for the triangle when its corners share a bone), motion vectors
+    // from the previous pose at the pixel.
     let planted = plant_animated(instance, wind_force);
     var bones: array<u32, 3>;
     let extended = cluster_is_extended(cluster, base);

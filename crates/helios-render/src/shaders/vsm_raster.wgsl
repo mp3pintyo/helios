@@ -50,7 +50,7 @@ override MASKED: bool = false;
 @group(0) @binding(65) var<uniform> wind: Wind;
 @group(0) @binding(66) var skin_palette: texture_2d<f32>;
 @group(0) @binding(170) var plant_bones: texture_2d<f32>;
-@group(0) @binding(171) var plant_sim: texture_2d<f32>;
+@group(0) @binding(171) var plant_motion: texture_2d<f32>;
 @group(0) @binding(60) var<uniform> local_vsm: LocalVsm;
 
 var<workgroup> page_vertices: array<vec3<f32>, 128>; // page texel x, y, depth

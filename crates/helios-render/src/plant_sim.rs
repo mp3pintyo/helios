@@ -21,8 +21,6 @@ use crate::profiler::Recorder;
 use crate::shader::create_module;
 use crate::util::{bind, bind_group, bind_group_layout, lazy_compute_pipeline, storage_buffer, uniform_buffer};
 
-/// Binding of the simulation texture in every shader that positions geometry.
-pub const BINDING_PLANT_SIM: u32 = 171;
 /// Simulation slots (promoted instances) at a time: UE's default budget.
 pub const SIM_SLOTS: usize = 256;
 /// Bones a promoted plant may have (one texture row of two texels a bone per slot).
@@ -41,16 +39,6 @@ const GUST_SPEED: f32 = 7.0;
 const GUST_WIDTH: f32 = 1.6;
 const GUST_DURATION: f32 = 3.5;
 const GUST_STRENGTH: f32 = 2.5;
-
-/// Layout entry of the simulation texture.
-pub fn sim_entry() -> (u32, wgpu::BindingType) {
-    (BINDING_PLANT_SIM, bind::texture(false))
-}
-
-/// The scene's simulation texture for [`sim_entry`].
-pub fn sim_resource(scene: &crate::gpu_scene::GpuScene) -> (u32, wgpu::BindingResource<'_>) {
-    (BINDING_PLANT_SIM, wgpu::BindingResource::TextureView(&scene.plant_sim.view))
-}
 
 /// `struct SimParams` in plant_sim.wgsl.
 #[repr(C)]
@@ -87,8 +75,6 @@ pub struct PlantSim {
     params: wgpu::Buffer,
     slots_buffer: wgpu::Buffer,
     state: wgpu::Buffer,
-    _texture: wgpu::Texture,
-    pub view: wgpu::TextureView,
     candidates: Vec<Candidate>,
     /// Per slot: the promoted instance.
     slots: Vec<Option<Candidate>>,
@@ -113,30 +99,19 @@ impl PlantSim {
                 (1, bind::storage(true)),
                 (2, bind::storage(true)),
                 (3, bind::storage(false)),
-                (4, bind::storage_texture(wgpu::TextureFormat::Rgba16Float)),
+                (4, bind::storage_texture(wgpu::TextureFormat::Rgba32Float)),
                 crate::wind::wind_entry(),
                 crate::plant_wind::plant_entry(),
             ],
         );
         let module = create_module(device, "plant_sim.wgsl");
-        let texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("plant sim"),
-            size: wgpu::Extent3d { width: 2 * SIM_BONES, height: SIM_SLOTS as u32, depth_or_array_layers: 1 },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba16Float,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::STORAGE_BINDING,
-            view_formats: &[],
-        });
         Self {
             pipeline: lazy_compute_pipeline(device, "plant sim", &module, "simulate", &layout, &[]),
             layout,
             params: uniform_buffer(device, "plant sim params", std::mem::size_of::<Params>() as u64),
             slots_buffer: storage_buffer(device, "plant sim slots", (SIM_SLOTS * std::mem::size_of::<Slot>()) as u64, wgpu::BufferUsages::empty()),
-            state: storage_buffer(device, "plant sim state", SIM_SLOTS as u64 * SIM_BONES as u64 * 32, wgpu::BufferUsages::empty()),
-            view: texture.create_view(&Default::default()),
-            _texture: texture,
+            // Per (slot, bone): δ, its rate, the previous frame's δ (the pose pass reads them).
+            state: storage_buffer(device, "plant sim state", SIM_SLOTS as u64 * SIM_BONES as u64 * 48, wgpu::BufferUsages::empty()),
             candidates: Vec::new(),
             slots: vec![None; SIM_SLOTS],
             slot_of: HashMap::new(),
@@ -249,8 +224,14 @@ impl PlantSim {
         queue.write_buffer(&self.slots_buffer, 0, bytemuck::cast_slice(&slots));
     }
 
-    /// Simulates every slot (one workgroup each; empty slots return at once).
-    pub(crate) fn record(&self, rec: &mut Recorder, instances: &wgpu::Buffer, wind: &wgpu::Buffer, bones: &wgpu::TextureView) {
+    /// The spring states (per slot and bone: δ, its rate, the previous frame's δ).
+    pub(crate) fn state(&self) -> &wgpu::Buffer {
+        &self.state
+    }
+
+    /// Simulates every slot (one workgroup each; empty slots return at once) into the first
+    /// [`SIM_SLOTS`] rows of the plant motion texture (`motion`, [`crate::plant_pose`]).
+    pub(crate) fn record(&self, rec: &mut Recorder, instances: &wgpu::Buffer, wind: &wgpu::Buffer, bones: &wgpu::TextureView, motion: &wgpu::TextureView) {
         if !self.active() {
             return;
         }
@@ -264,7 +245,7 @@ impl PlantSim {
                 (1, self.slots_buffer.as_entire_binding()),
                 (2, instances.as_entire_binding()),
                 (3, self.state.as_entire_binding()),
-                (4, wgpu::BindingResource::TextureView(&self.view)),
+                (4, wgpu::BindingResource::TextureView(motion)),
                 (crate::wind::BINDING_WIND, wind.as_entire_binding()),
                 (crate::plant_wind::BINDING_PLANT_BONES, wgpu::BindingResource::TextureView(bones)),
             ],

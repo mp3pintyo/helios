@@ -520,5 +520,134 @@ mod bone_tests {
             }
         }
     }
-}
 
+    /// A bone's frame at `s` (rotation vector `omega`): its rotation and translation, and `q`
+    /// moved by it (`plant_frame`).
+    fn frame(bone: &PlantBone, omega: Vec3, s: f32, q: Vec3) -> (Quat, Vec3, Vec3) {
+        let w = omega.length();
+        let theta = w * s / bone.length;
+        if theta <= 1e-7 {
+            return (Quat::IDENTITY, Vec3::ZERO, q);
+        }
+        let k = omega / w;
+        let a_par = k * bone.axis.dot(k);
+        let a_perp = bone.axis - a_par;
+        let (sinc, cosc) = (theta.sin() / theta, 2.0 * (0.5 * theta).sin().powi(2) / theta);
+        let arc = bone.pivot + (a_par + a_perp * sinc + k.cross(a_perp) * cosc) * s;
+        let r = Quat::from_axis_angle(k, theta);
+        let on_axis = bone.pivot + bone.axis * s;
+        (r, arc - r * on_axis, arc + r * (q - on_axis))
+    }
+
+    /// A bone's rotation faded with distance by its class (`plant_bone_rotation`).
+    fn faded(a: &Air, b: &PlantBone, fades: (f32, f32)) -> Vec3 {
+        rotation(a, b)
+            * match b.class {
+                BoneClass::Bend => 1.0,
+                BoneClass::Sway => fades.1,
+                BoneClass::Flutter => fades.0,
+            }
+    }
+
+    /// The chain walk (the per-vertex pose before the pose pass) with the distance fades
+    /// (leaves, branches).
+    fn chain(bones: &[PlantBone], a: &Air, fades: (f32, f32), bone: u16, p: Vec3) -> Vec3 {
+        let mut q = p;
+        let mut b = bone as usize;
+        let mut s = bones[b].project(p);
+        loop {
+            q = frame(&bones[b], faded(a, &bones[b], fades), s, q).2;
+            match bones[b].parent {
+                Some(parent) => {
+                    s = bones[b].attach;
+                    b = parent as usize;
+                }
+                None => return q,
+            }
+        }
+    }
+
+    /// `pose_entry` (plant_pose.wgsl): the bone's rotation and its ancestors' composed frames.
+    fn entry(bones: &[PlantBone], a: &Air, fades: (f32, f32), b: usize) -> (Vec3, Quat, Vec3) {
+        let (mut r, mut t) = (Quat::IDENTITY, Vec3::ZERO);
+        let mut x = b;
+        while let Some(parent) = bones[x].parent {
+            let s = bones[x].attach;
+            x = parent as usize;
+            let (fr, ft, _) = frame(&bones[x], faded(a, &bones[x], fades), s, Vec3::ZERO);
+            t = fr * t + ft;
+            r = fr * r;
+        }
+        (faded(a, &bones[b], fades), r, t)
+    }
+
+    /// `plant_link` + `plant_link_point` (plant_wind.wgsl).
+    fn linked(bones: &[PlantBone], links: &[crate::plant_wind::BoneLink], entries: Option<&[(Vec3, Quat, Vec3)]>, a: &Air, fades: (f32, f32), bone: u16, p: Vec3) -> Vec3 {
+        let b = &bones[bone as usize];
+        if b.parent.is_none() {
+            return frame(b, faded(a, b, fades), b.project(p), p).2;
+        }
+        let link = links[bone as usize];
+        let mut q = p;
+        let mut c = bone as usize;
+        let mut s = None;
+        if link.leaf {
+            if fades.0 > 0.0 {
+                q = frame(b, faded(a, b, fades), b.project(p), q).2;
+            }
+            c = b.parent.unwrap() as usize;
+            s = Some(b.attach);
+        }
+        let carrier = &bones[c];
+        if carrier.parent.is_none() {
+            return frame(carrier, faded(a, carrier, fades), s.unwrap_or_else(|| carrier.project(p)), q).2;
+        }
+        match entries {
+            Some(e) => {
+                let (omega, r, t) = e[link.carrier_rank.unwrap() as usize];
+                let q = frame(carrier, omega, s.unwrap_or_else(|| carrier.project(p)), q).2;
+                r * q + t
+            }
+            None => {
+                let root = &bones[link.root as usize];
+                frame(root, faded(a, root, fades), link.root_attach, q).2
+            }
+        }
+    }
+
+    /// The pose pass and the per-vertex link put every vertex where walking its chain does,
+    /// with and without pose entries (an instance without them has its ranked bones at rest).
+    #[test]
+    fn pose_entries_match_the_chain_walk() {
+        let assembly = vegetation::conifer_assembly(5, 14.0, 0.3, 6, 8);
+        let placement = assembly.placements.len() / 2;
+        let mut part = assembly.sprays[assembly.placements[placement].0].clone();
+        part.bones = helios_geometry::plant_bones::part_bone_table(&part.bones, &assembly.wood.bones, Some(assembly.part_bones[placement]), &assembly.placements[placement].1);
+        let mut meshes: Vec<(Mesh, WindResponse)> = plants();
+        meshes.push((part, WindResponse::LEAVES));
+        let wind = Wind { turbulence: 0.7, strength: 1.3, ..Wind::breeze(1.0) };
+        let w = WindUniform::new(&wind, 1.0, 7.0, 7.0 - 1.0 / 60.0, Vec3::ZERO, 1e-6);
+        let mut checked = 0;
+        for (mesh, response) in meshes {
+            let bones = &mesh.bones;
+            let (links, ranked, classes) = crate::plant_wind::bone_links(bones);
+            let a = air(&w, &Mat4::IDENTITY, response.to_vec4(), 1.0, 7.0, 0.9);
+            let size = mesh.vertices.iter().map(|v| v.position().length()).fold(0.0, f32::max);
+            for fades in [(1.0, 1.0), (0.4, 1.0), (0.0, 0.6), (1.0, 0.0), (0.0, 0.0)] {
+                // Entries exist while a ranked bone moves (plant_pose.wgsl `allocate`).
+                let moving = classes & 1 != 0 || (classes & 2 != 0 && fades.1 > 0.0) || (classes & 4 != 0 && fades.0 > 0.0);
+                let entries: Vec<_> = ranked.iter().map(|&b| entry(bones, &a, fades, b as usize)).collect();
+                let entries = (moving && !ranked.is_empty()).then_some(&entries[..]);
+                for i in (0..mesh.vertices.len()).step_by(5) {
+                    let p = mesh.vertices[i].position();
+                    let bone = mesh.skin_of(i).dominant_joint();
+                    let want = chain(bones, &a, fades, bone, p);
+                    let got = linked(bones, &links, entries, &a, fades, bone, p);
+                    assert!(got.distance(want) <= 2e-5 * size.max(1.0), "{response:?} fades {fades:?} vertex {i}: {got} vs {want}");
+                    checked += 1;
+                }
+            }
+        }
+        assert!(checked > 10_000, "{checked}");
+    }
+}

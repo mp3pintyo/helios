@@ -612,9 +612,12 @@ fn prefers_software_raster(cluster: Cluster, bounds: vec4<f32>, planted: bool) -
     let triangle_px = 2.0 * radius_px / sqrt(f32(max(cluster_triangle_count(cluster), 1u)));
     // A plant with bones (plant_wind.wgsl) costs per vertex: in shadow pages the hardware path
     // poses every triangle corner of every (cluster, page) draw, the software one each vertex
-    // once — it takes larger triangles there.
-    let threshold = view.sw_raster_threshold * select(1.0, 2.5, planted && view.kind == VIEW_SHADOW);
-    return triangle_px < threshold && radius_px < select(48.0, 96.0, planted && view.kind == VIEW_SHADOW);
+    // once — it takes larger triangles there (4× and 128 texels: in the forest's fern and grass
+    // close-ups the page rasterisers went 0.59 → 0.35 and 0.41 → 0.24 ms against 2.5× and 96;
+    // the main view keeps the usual threshold, where larger triangles cost the software raster
+    // more than posing saves).
+    let threshold = view.sw_raster_threshold * select(1.0, 4.0, planted && view.kind == VIEW_SHADOW);
+    return triangle_px < threshold && radius_px < select(48.0, 128.0, planted && view.kind == VIEW_SHADOW);
 }
 
 var<workgroup> hw_local: atomic<u32>;

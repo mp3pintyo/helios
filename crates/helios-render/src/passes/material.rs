@@ -49,7 +49,7 @@ use crate::textures::TextureLibrary;
 use crate::util::{bind, bind_group, bind_group_layout, compute_pipeline, compute_pipeline_with, workgroups};
 use crate::river::BINDING_RIVER_SURFACE;
 use crate::water::BINDING_WATER;
-use crate::plant_sim::{sim_entry, sim_resource};
+use crate::plant_pose::{motion_entry, motion_resource};
 use crate::plant_wind::{plant_entry, plant_resource};
 use crate::skin::{skin_entry, skin_resource};
 use crate::tessellation::{tessellation_entry, tessellation_resource};
@@ -88,6 +88,8 @@ pub struct MaterialPass {
     resolve: HashMap<(usize, u32), Lazy<wgpu::ComputePipeline>>,
     /// The permutation in use.
     permutation: usize,
+    /// Shading models used by plants with bones (their pipelines get `PLANTS`), a bit each.
+    plant_kinds: u32,
     /// The shading models the scene's materials use (the sky's always), in [`KINDS`] order.
     kinds: Vec<u32>,
     /// Extended resolve modules by graph hash (0: slab materials without a graph) and pipelines.
@@ -98,7 +100,12 @@ pub struct MaterialPass {
 }
 
 /// Index of a resolve permutation: `UV_EXTENSIONS` in bit 0, `SKINNING` in bit 1, `TESSELLATION`
-/// in bit 2, `DEBUG_VIEWS` in bit 3.
+/// in bit 2, `DEBUG_VIEWS` in bit 3; `PLANTS` ([`PLANTS_BIT`]) is added per shading model.
+/// The `PLANTS` bit of a resolve permutation: set for the shading models of materials of plants
+/// with bones (posing corners and motion vectors by the plant's bones, `plant_wind.wgsl`); the
+/// others compile without that code and keep their registers.
+const PLANTS_BIT: usize = 1 << 4;
+
 fn permutation(uv_extensions: bool, skinning: bool, tessellation: bool, debug_views: bool) -> usize {
     uv_extensions as usize | ((skinning as usize) << 1) | ((tessellation as usize) << 2) | ((debug_views as usize) << 3)
 }
@@ -141,7 +148,7 @@ impl MaterialPass {
                 wind_entry(),
                 skin_entry(),
                 plant_entry(),
-                sim_entry(),
+                motion_entry(),
                 (BINDING_WATER, bind::uniform()),
                 (BINDING_RIVER_SURFACE, bind::texture(false)),
                 (BINDING_DEPTH, bind::texture(false)),
@@ -174,6 +181,7 @@ impl MaterialPass {
             layout,
             classify_layout,
             permutation: 0,
+            plant_kinds: 0,
             kinds: Vec::new(),
             extended_modules: HashMap::new(),
             extended_pipelines: HashMap::new(),
@@ -197,10 +205,12 @@ impl MaterialPass {
         tessellation_wanted: bool,
         debug_views: bool,
         kinds: u32,
+        plant_kinds: u32,
         extended: &ExtendedMaterials,
         substrate: bool,
     ) {
         self.permutation = permutation(uv_extensions, skinning, tessellation, debug_views);
+        self.plant_kinds = plant_kinds;
         self.kinds = KINDS.iter().copied().filter(|&k| k == SKY_SLOT || kinds & (1 << k) != 0).collect();
         let plain = self.kinds.clone();
         self.create_resolve(device, self.permutation, &plain);
@@ -271,7 +281,7 @@ impl MaterialPass {
                 wind_resource(scene),
                 skin_resource(scene),
                 plant_resource(scene),
-                sim_resource(scene),
+                motion_resource(scene),
                 (BINDING_WATER, water.as_entire_binding()),
                 (BINDING_RIVER_SURFACE, TextureView(river_surface)),
                 (BINDING_DEPTH, TextureView(&targets.depth)),
@@ -302,7 +312,7 @@ impl MaterialPass {
         pass.set_bind_group(0, &group, &[]);
         let args = |slot: u32| (TILE_ARGS + slot as u64 * 4) * 4;
         for &kind in &self.kinds {
-            pass.set_pipeline(&self.resolve[&(self.permutation, kind)]);
+            pass.set_pipeline(&self.resolve[&(self.kind_permutation(self.permutation, kind), kind)]);
             pass.dispatch_workgroups_indirect(&targets.material_tiles, args(kind));
         }
         if let Some(group) = extended {
@@ -316,8 +326,15 @@ impl MaterialPass {
 }
 
 impl MaterialPass {
+    /// The permutation of shading model `kind`: with `PLANTS` where plants with bones use it.
+    fn kind_permutation(&self, permutation: usize, kind: u32) -> usize {
+        permutation | if (self.plant_kinds >> kind.min(31)) & 1 != 0 { PLANTS_BIT } else { 0 }
+    }
+
     /// Creates the extended pipeline of slot `s` in `permutation` (if new); returns its key.
     fn create_extended(&mut self, device: &wgpu::Device, extended: &ExtendedMaterials, s: &ExtendedSlot, permutation: usize, substrate: bool) -> ExtendedKey {
+        // Extended slots carry the plant code where any plant has bones.
+        let permutation = permutation | if self.plant_kinds != 0 { PLANTS_BIT } else { 0 };
         let hash = s.graph.as_ref().map_or(0, |g| g.0);
         let key = (s.slot, s.kind, hash, permutation, substrate);
         if !self.extended_pipelines.contains_key(&key) {
@@ -333,6 +350,7 @@ impl MaterialPass {
                 ("SKINNING", flag(1)),
                 ("TESSELLATION", flag(2)),
                 ("DEBUG_VIEWS", flag(3)),
+                ("PLANTS", flag(4)),
                 ("SUBSTRATE", substrate as u32 as f64),
             ];
             let layouts = [&self.layout, &extended.resolve_layout];
@@ -369,9 +387,18 @@ impl MaterialPass {
     /// Creates the resolve pipelines of `permutation` for the shading models `kinds`.
     fn create_resolve(&mut self, device: &wgpu::Device, permutation: usize, kinds: &[u32]) {
         for &kind in kinds {
+            let permutation = self.kind_permutation(permutation, kind);
             self.resolve.entry((permutation, kind)).or_insert_with(|| {
                 let flag = |bit: usize| ((permutation >> bit) & 1) as f64;
-                let constants = [("MATERIAL_KIND", kind as f64), ("RESOLVE_SLOT", kind as f64), ("UV_EXTENSIONS", flag(0)), ("SKINNING", flag(1)), ("TESSELLATION", flag(2)), ("DEBUG_VIEWS", flag(3))];
+                let constants = [
+                    ("MATERIAL_KIND", kind as f64),
+                    ("RESOLVE_SLOT", kind as f64),
+                    ("UV_EXTENSIONS", flag(0)),
+                    ("SKINNING", flag(1)),
+                    ("TESSELLATION", flag(2)),
+                    ("DEBUG_VIEWS", flag(3)),
+                    ("PLANTS", flag(4)),
+                ];
                 compute_pipeline(device, "material resolve", &self.module, "resolve", &self.layout, &constants)
             });
         }
