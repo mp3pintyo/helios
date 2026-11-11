@@ -68,7 +68,7 @@
     "area": "Jelenetek és demó",
     "kind": "feature",
     "summary": "A `--lights N` / `?lights=N` kapcsolóval a katedrális minden gyertyalángja saját fényforrás, a mellékhajók falai mellett fogadalmi gyertyatartó-polcokkal. Alapértelmezésben a jelenet változatlan (33 fény).",
-    "details": "scenes/candles.rs: 60 gyertyatartó-, 88 csillár- és 2 oltárgyertya egyenként, plusz öblönként két háromszintes fogadalmi polc (3×13 mécses, összesen 858), legfeljebb 1008 fény; az első N ég (előbb a berendezés, aztán a polcok gyertyái minden polcon szétosztva). A polcok hálói minden más háló után jönnek, így a korábban sütött .hvm könyvtárak érvényesek maradnak. Böngészőben `heliosConfig.lights`; MegaLights: `--megalights`, `?megalights=1`, `heliosConfig.megaLights`.",
+    "details": "scenes/candles.rs: 60 gyertyatartó-, 88 csillár- és 2 oltárgyertya egyenként, plusz öblönként két háromszintes fogadalmi polc (3×13 mécses, összesen 858), legfeljebb 1008 fény; az első N ég (előbb a berendezés, aztán a polcok gyertyái minden polcon szétosztva). A polcok hálói minden más háló után jönnek, így a korábban előfeldolgozott .hvm könyvtárak érvényesek maradnak. Böngészőben `heliosConfig.lights`; MegaLights: `--megalights`, `?megalights=1`, `heliosConfig.megaLights`.",
     "metrics": "33 → 1008 fény; a jelenet felépítése ~6 s (közepes részletesség), a polcok 3 új hálót és 66 példányt adnak.",
     "showcase": "?scene=cathedral&lights=1000&megalights=1 éjjel (heliosSetSun(200, -30)); kamera a mellékhajóban a polcok felé (heliosLookAt(15, 1.7, 9, 35, 0.8, 12.5)).",
     "modules": [
