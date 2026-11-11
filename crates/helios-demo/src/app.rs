@@ -37,6 +37,7 @@ pub struct DemoApp {
     pub(crate) model: Option<Model>,
     initial_camera: Camera,
     pub(crate) floor: fn(f32, f32) -> f32,
+    pub(crate) floor_below: Option<fn(Vec3) -> f32>,
     /// The scene's moving props (`Digit0` pauses them).
     pub motion: DemoMotion,
     pub(crate) sun_intensity: f32,
@@ -137,6 +138,7 @@ impl DemoApp {
             detail,
             model,
             floor: setup.floor,
+            floor_below: setup.floor_below,
             motion: setup.motion,
             sun_intensity: setup.sun.2,
             speed: 8.0,
@@ -165,6 +167,7 @@ impl DemoApp {
         self.camera = setup.camera;
         self.initial_camera = setup.camera;
         self.floor = setup.floor;
+        self.floor_below = setup.floor_below;
         self.animation = setup.animation;
         // A new scene's props start moving or paused as the previous ones were.
         let enabled = self.motion.enabled;
@@ -379,7 +382,10 @@ impl DemoApp {
         }
         let boost = if input.down("ShiftLeft") || input.down("ShiftRight") { 5.0 } else { 1.0 };
         self.camera.position += direction.normalize_or_zero() * self.speed * boost * dt;
-        let floor = (self.floor)(self.camera.position.x, self.camera.position.z) + 0.4;
+        let floor = match self.floor_below {
+            Some(below) => below(self.camera.position),
+            None => (self.floor)(self.camera.position.x, self.camera.position.z),
+        } + 0.4;
         self.camera.position.y = self.camera.position.y.max(floor);
         if let Some((tour, time)) = &mut self.tour {
             *time += dt;

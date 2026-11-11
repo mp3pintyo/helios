@@ -1075,7 +1075,7 @@ fn initial_camera() -> Camera {
 
 pub fn build(detail: Detail) -> SceneSetup {
     let (scene, motion) = build_scene(detail);
-    SceneSetup { scene, camera: initial_camera(), sun: SUN, floor: floor_height, animation: None, motion }
+    SceneSetup { scene, camera: initial_camera(), sun: SUN, floor: floor_height, floor_below: None, animation: None, motion }
 }
 
 #[cfg(test)]

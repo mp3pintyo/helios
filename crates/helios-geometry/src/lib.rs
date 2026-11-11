@@ -34,6 +34,7 @@ mod dag;
 pub mod encoding;
 mod hash;
 mod mesh;
+pub mod mesh_terrain;
 pub mod modeling;
 mod morton;
 pub mod noise;

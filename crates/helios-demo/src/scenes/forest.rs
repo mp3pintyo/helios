@@ -434,7 +434,7 @@ fn floor_high(x: f32, z: f32) -> f32 {
 
 pub fn build(detail: Detail) -> SceneSetup {
     let floor: fn(f32, f32) -> f32 = detail.pick(floor_medium, floor_high);
-    SceneSetup { scene: build_scene(detail), camera: initial_camera(), sun: SUN, floor, animation: None, motion: Default::default() }
+    SceneSetup { scene: build_scene(detail), camera: initial_camera(), sun: SUN, floor, floor_below: None, animation: None, motion: Default::default() }
 }
 
 #[cfg(test)]

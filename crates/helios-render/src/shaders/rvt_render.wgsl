@@ -79,7 +79,7 @@ fn render_pages(
     let height = height_at(object_xz) * rvt.hf_scale + rvt.hf_translation.y;
     let world = vec3<f32>(world_xz.x, height, world_xz.y);
 
-    let s = terrain_layering(world, macro_normal, texel_world, rvt.layers);
+    let s = terrain_layering(world, macro_normal, texel_world, rvt.layers, false);
     let detail = transpose(rvt_frame(macro_normal)) * s.normal;
 
     let tile = vec2<u32>(physical % rvt.tiles_per_row, physical / rvt.tiles_per_row);

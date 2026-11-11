@@ -9,6 +9,7 @@ pub mod model;
 pub mod skeletal;
 pub mod stone_path;
 pub mod valley;
+pub mod valley_terrain;
 
 use helios_geometry::{build_virtual_mesh, BuildConfig, Mesh, VirtualMesh};
 use helios_render::{Camera, MeshHandle, Scene};
@@ -82,6 +83,9 @@ pub struct SceneSetup {
     pub sun: (f32, f32, f32),
     /// Lowest allowed camera height at (x, z).
     pub floor: fn(f32, f32) -> f32,
+    /// Lowest allowed camera height under a point, where the ground has overhangs (the floor
+    /// under an arch rather than its top); `floor` where `None`.
+    pub floor_below: Option<fn(glam::Vec3) -> f32>,
     /// Skeletal animation of an imported model's skinned meshes.
     pub animation: Option<skeletal::SkeletalAnimation>,
     /// Props that move every frame.
