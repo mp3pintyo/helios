@@ -154,6 +154,111 @@ export function createDetails(ed) {
     else body.append(section("Emitter", [h("div", { class: "ed-note" }, `A ${c.kind} emitter of the base scene: it moves with its actor and hides with it.`)]));
   }
 
+  // ---- Materials ---------------------------------------------------------------------------
+
+  function materialSections(name, nested = false) {
+    const m = ed.state.materials.find((x) => x.name === name);
+    if (!m) {
+      return [section("Material", [h("div", { class: "ed-note" }, `${name} is created the first time something uses it.`)])];
+    }
+    // An edit replaces the material's whole entry: send every field (graph, parameters and slab too).
+    const params = materialParams(m);
+    const key = `mat-${name}-${Math.random()}`;
+    const send = (done) => ed.apply({ op: "material", name, params }, { merge: key, quiet: !done });
+    const rows = [
+      row("Base colour", colorField(m.base_color, (c) => ((params.base_color = c), send(false)), (c) => ((params.base_color = c), send(true)))),
+      row("Roughness", slider(m.roughness, { min: 0, max: 1, step: 0.01, onInput: (v) => ((params.roughness = v), send(false)), onCommit: (v) => ((params.roughness = v), send(true)) })),
+      row("Metallic", slider(m.metallic, { min: 0, max: 1, step: 0.01, onInput: (v) => ((params.metallic = v), send(false)), onCommit: (v) => ((params.metallic = v), send(true)) })),
+      row("Emissive", slider(m.emissive, { min: 0, max: 50, step: 0.1, precision: 1, onInput: (v) => ((params.emissive = v), send(false)), onCommit: (v) => ((params.emissive = v), send(true)) })),
+    ];
+    if (["glass", "translucent"].includes(m.kind)) {
+      rows.push(row("Opacity", slider(m.opacity, { min: 0, max: 1, step: 0.01, onInput: (v) => ((params.opacity = v), send(false)), onCommit: (v) => ((params.opacity = v), send(true)) })));
+    }
+    if (!nested) header("material", name, `Material · ${m.kind}`);
+    const title = nested ? `Material · ${name}` : "Parameters";
+    const sections = [section(title, [h("div", { class: "ed-note" }, `${m.kind} shading model · shared by every instance using it`), ...rows])];
+    if (!["glass", "water", "translucent"].includes(m.kind)) sections.push(graphSection(m, params, send), slabSection(m, params, send), displacementSection(m, params, send));
+    return sections;
+  }
+
+  // The material graph and this material's values of its parameters (a material instance).
+  function graphSection(m, params, send) {
+    const names = (ed.state.graphs || []).map((g) => g.name);
+    const rows = [row("Graph", select([["", "None (shading model)"], ...names.map((n) => [n, n])], m.graph || "", (g) => ((params.graph = g), send(true))),
+      button("", () => ed.graphEditor.open(m.graph || names[0]), { iconName: "material", title: "Open the material graph editor" }))];
+    const graph = (ed.state.graphs || []).find((g) => g.name === m.graph);
+    if (graph?.errors?.length) rows.push(h("div", { class: "ed-error" }, `${graph.errors.length} compile error(s): the material renders without its graph`));
+    for (const p of m.parameters || []) {
+      if (p.kind === "scalar") {
+        const [min, max] = p.range[0] < p.range[1] ? p.range : [0, 1];
+        const set = (v, done) => ((params.parameters[p.name] = v), send(done));
+        rows.push(row(p.name, slider(p.value, { min, max, step: (max - min) / 200, precision: 3, onInput: (v) => set(v, false), onCommit: (v) => set(v, true) })));
+      } else if (p.kind === "vector") {
+        const set = (c, done) => ((params.parameters[p.name] = [...c, p.value[3] ?? 1]), send(done));
+        rows.push(row(p.name, colorField(p.value.slice(0, 3), (c) => set(c, false), (c) => set(c, true))));
+      } else rows.push(row(p.name, h("span", { class: "ed-value-text" }, p.value)));
+    }
+    return section("Material graph", rows, { open: !!m.graph });
+  }
+
+  // Substrate slab: clear coat, sheen, subsurface, transmission, anisotropy, IOR and specular.
+  function slabSection(m, params, send) {
+    const slab = params.slab;
+    const field = (label, prop, opts) => row(label, slider(slab[prop], { ...opts, onInput: (v) => ((slab[prop] = v), send(false)), onCommit: (v) => ((slab[prop] = v), send(true)) }));
+    const color = (label, prop) => row(label, colorField(slab[prop], (c) => ((slab[prop] = c), send(false)), (c) => ((slab[prop] = c), send(true))));
+    const on = Object.entries(slab).some(([k, v]) => (k === "clearcoat" || k === "subsurface" || k === "transmission") && v > 0) || slab.sheen_color.some((c) => c > 0) || slab.anisotropy !== 0 || slab.unlit;
+    return section("Substrate slab", [
+      h("div", { class: "ed-note" }, "PageUp toggles slabs; debug view 24 shows their features"),
+      field("Clear coat", "clearcoat", { min: 0, max: 1, step: 0.01 }),
+      field("Coat roughness", "clearcoat_roughness", { min: 0, max: 1, step: 0.01 }),
+      color("Sheen colour", "sheen_color"),
+      field("Sheen roughness", "sheen_roughness", { min: 0, max: 1, step: 0.01 }),
+      field("Subsurface", "subsurface", { min: 0, max: 1, step: 0.01 }),
+      color("Scatter colour", "subsurface_color"),
+      field("Scatter radius (m)", "subsurface_radius", { min: 0, max: 0.1, step: 0.001, precision: 3 }),
+      field("Transmission", "transmission", { min: 0, max: 1, step: 0.01 }),
+      field("Anisotropy", "anisotropy", { min: -1, max: 1, step: 0.01 }),
+      field("IOR", "ior", { min: 1, max: 3, step: 0.01 }),
+      field("Specular", "specular", { min: 0, max: 1, step: 0.01 }),
+      row("Unlit", checkbox(slab.unlit, (v) => ((slab.unlit = v), send(true)))),
+    ], { open: on });
+  }
+
+  // Displacement (Nanite tessellation): the surface moves at render time — along its normal by a
+  // height (a texture channel, or the material graph's Displacement output when it is connected),
+  // scaled by the magnitude around the centre, or by the graph's VectorDisplacement output, a
+  // vector in units of the magnitude (no centre: zero stays in place). A graph that reads the
+  // time animates it.
+  function displacementSection(m, params, send) {
+    const d = params.displacement;
+    const field = (label, prop, opts) => row(label, slider(d[prop], { ...opts, onInput: (v) => ((d[prop] = v), send(false)), onCommit: (v) => ((d[prop] = v), send(true)) }));
+    const vector = m.displacement_mode === "vector";
+    const what = vector ? "Vector" : "Height";
+    const pin = vector ? "VectorDisplacement" : "Displacement";
+    const driven = `Driven by graph · ${m.graph}` + (m.displacement_animated ? " · animated" : "");
+    const source = m.displacement_graph
+      ? row(what, button(driven, () => ed.graphEditor.open(m.graph), { iconName: "material", title: `The graph's ${pin} output gives the ${what.toLowerCase()}: open it` }))
+      : row("Height channel", select([["0", "R"], ["1", "G"], ["2", "B"], ["3", "A (procedural height)"]], String(d.channel), (v) => ((d.channel = Number(v)), send(true))));
+    const toggles = "PageDown toggles tessellation; debug view 25 shows it";
+    const note = m.displacement_graph && !(d.magnitude > 0)
+      ? `The graph drives the ${what.toLowerCase()}: set a magnitude to displace. ${toggles}`
+      : vector
+        ? `The graph's vector moves the surface by up to the magnitude in any direction (overhangs). ${toggles}`
+        : `Magnitude 0: none. ${toggles}`;
+    const rows = [h("div", { class: "ed-note" }, note), field("Magnitude (m)", "magnitude", { min: 0, max: 0.5, step: 0.005, precision: 3 })];
+    if (!vector) rows.push(field("Centre", "center", { min: 0, max: 1, step: 0.01 }));
+    rows.push(source);
+    if (m.displacement_graph && m.displacement_animated) {
+      // The material compiler's speed bound (m/s at unit instance scale) paces the shadow refreshes.
+      const speed = m.displacement_speed;
+      const pace = speed == null
+        ? "the graph's motion has no speed bound, so they refresh every frame"
+        : `they refresh once it may have moved two shadow texels (at most ${(speed * 100).toFixed(1)} cm/s)`;
+      rows.push(h("div", { class: "ed-note" }, `Animated: its instances' shadows are re-rendered as the surface moves; ${pace}`));
+    }
+    return section("Displacement", rows, { open: d.magnitude > 0 || m.displacement_graph });
+  }
+
   // ---- Lights ------------------------------------------------------------------------------
 
   function lightSection(actor, c) {

@@ -1,0 +1,36 @@
+[
+  {
+    "id": "editor-hierarchy",
+    "title": "Aktorok és hierarchia a szerkesztőben: komponensek, szülő–gyerek kapcsolat, stabil kulcsú jelenetfájlok, mozgatható húzás, lusta tömörítés",
+    "area": "Szerkesztő",
+    "kind": "feature",
+    "status": "done",
+    "phase": "8. kör – 3. hullám",
+    "summary": "A szerkesztő eddig példányokat és fényeket szerkesztett: egy fa törzse és lombja két külön kijelölhető példány volt, a tábortűz 18 példány, egy fény, egy tűztérfogat és két részecskekibocsátó, semmi sem fogta össze őket. Mostantól a jelenet UE-szerű aktorokból áll: egy aktor névvel, a szülőjéhez viszonyított transzformációval és komponensekkel (mesh-példányok anyaggal, fények, térfogatok, részecskekibocsátók) rendelkező csomópont; a világtranszformáció szülő ∘ saját, így egy aktor mozgatása viszi a komponenseit és a gyerekeit (a tűz a fényével együtt költözik és tovább vezérli). A jelenetépítők csoportosítanak: az erdőben minden fa egy aktor (törzs + lomb) a Trees mappában, a tábortűz egy aktor, a katedrálisban hajóboltszakaszok, pillérek, boltozatszakaszok, padok, oltár, gyertyatartók és csillárok a gyertyáik fényével, a völgyben a szobor a talapzatával, a galériában a próbatestek a talapzatukkal. Az Outliner fanézet (kibontás, kijelölés, átnevezés F2-vel, újraszülősítés húzással, láthatósági szem), a viewportban a kattintás az aktort jelöli ki, Alt+kattintás a komponenst, a Details az aktor transzformációját és komponenslistáját mutatja; a duplikálás és törlés a gyerekekkel együtt hat, Ctrl+G csoportosít, Shift+G bont. Húzás közben a mozgatott példányok Movable-ök (a gyorsítótárazott árnyéklapok maradnak, csak a dinamikus vetők rajzolódnak újra), elengedés után 30 képkockával visszaállnak Static-ra; a törölt helyek szabadlistára kerülnek és tétlenségben tömörítődnek, a visszavonás ezt túléli. A jelenetfájlok (2. verzió) az aktorokat stabil kulccsal címzik, nem építési sorrenddel, a régi fájlok betöltéskor átalakulnak.",
+    "details": "",
+    "metrics": "",
+    "showcase": "",
+    "modules": [
+      "crates/helios-demo/src/editor/actors.rs",
+      "crates/helios-demo/src/scenes/outline.rs",
+      "crates/helios-demo/src/editor/doc.rs",
+      "crates/helios-demo/src/editor/ops.rs",
+      "crates/helios-demo/src/editor/mod.rs",
+      "crates/helios-demo/src/editor/describe.rs",
+      "crates/helios-demo/src/web_editor.rs",
+      "crates/helios-demo/src/app_editor.rs",
+      "crates/helios-demo/src/native_editor.rs",
+      "crates/helios-demo/src/scenes/forest.rs",
+      "crates/helios-demo/src/scenes/cathedral.rs",
+      "crates/helios-demo/src/scenes/valley.rs",
+      "crates/helios-demo/src/scenes/gallery.rs",
+      "crates/helios-render/src/scene_edit.rs",
+      "crates/helios-render/src/motion.rs",
+      "web/editor/outliner.js",
+      "web/editor/details.js",
+      "web/editor/editor.js"
+    ],
+    "order": 224,
+    "updated": "2026-11-11"
+  }
+]
