@@ -334,6 +334,9 @@ fn resolve(
     var previous_worlds: array<vec3<f32>, 3>;
     let skinned = SKINNING && instance_skin(instance) != 0u;
     let extended = cluster_is_extended(cluster, base);
+    // The landscape needs no texture coordinates (its virtual texture and layers are mapped in
+    // world space); only the mesh terrain reads its vertex attributes from them.
+    let fetch_uvs = MATERIAL_KIND != MATERIAL_TERRAIN || materials[instance.material].mapping == MAPPING_WORLD;
     for (var i = 0u; i < 3u; i++) {
         let local = corners[i];
         // Object-space attributes stay those of the rest pose (object triplanar mapping sticks
@@ -352,7 +355,9 @@ fn resolve(
             previous_worlds[i] = wind_previous_world_position(instance, wind_force, v.previous, plants[i].x);
         }
         world_positions[i] = wind_world_position(instance, wind_force, posed, plants[i].x);
-        uvs[i] = vertex_uv(cluster, base, local);
+        if fetch_uvs {
+            uvs[i] = vertex_uv(cluster, base, local);
+        }
         // Optional attributes (imported meshes only).
         uv1s[i] = uvs[i];
         colors[i] = vec4<f32>(1.0);

@@ -136,7 +136,8 @@ const TRIPLANAR_MIN_WEIGHT: f32 = 0.02;
 
 // Triplanar sample with an isotropic footprint `d` (in projection units) that skips the
 // projections a surface barely faces: on walls and ledges this halves the texture fetches.
-fn triplanar_sparse(layer: u32, p: vec3<f32>, d: f32, n: vec3<f32>, strength: f32) -> TexSample {
+// Without `colour` only the data texels are fetched (albedo stays 0).
+fn triplanar_sparse(layer: u32, p: vec3<f32>, d: f32, n: vec3<f32>, strength: f32, colour: bool) -> TexSample {
     var w = pow(abs(n), vec3<f32>(4.0));
     w = select(vec3<f32>(0.0), w, w > vec3<f32>(TRIPLANAR_MIN_WEIGHT * (w.x + w.y + w.z)));
     w /= max(w.x + w.y + w.z, 1e-6);
@@ -149,28 +150,31 @@ fn triplanar_sparse(layer: u32, p: vec3<f32>, d: f32, n: vec3<f32>, strength: f3
     t.alpha = 1.0;
     var tilt = vec3<f32>(0.0);
     if w.x > 0.0 {
-        let a = textureSampleGrad(material_albedo, material_sampler, p.zy, layer, gx, gy);
+        if colour {
+            t.albedo += textureSampleGrad(material_albedo, material_sampler, p.zy, layer, gx, gy).rgb * w.x;
+        }
         let e = textureSampleGrad(material_data, material_sampler, p.zy, layer, gx, gy);
         let tn = (e.xy * 2.0 - 1.0) * strength;
-        t.albedo += a.rgb * w.x;
         t.roughness += e.z * w.x;
         t.height += e.w * w.x;
         tilt += vec3<f32>(0.0, tn.y, tn.x) * w.x;
     }
     if w.y > 0.0 {
-        let a = textureSampleGrad(material_albedo, material_sampler, p.xz, layer, gx, gy);
+        if colour {
+            t.albedo += textureSampleGrad(material_albedo, material_sampler, p.xz, layer, gx, gy).rgb * w.y;
+        }
         let e = textureSampleGrad(material_data, material_sampler, p.xz, layer, gx, gy);
         let tn = (e.xy * 2.0 - 1.0) * strength;
-        t.albedo += a.rgb * w.y;
         t.roughness += e.z * w.y;
         t.height += e.w * w.y;
         tilt += vec3<f32>(tn.x, 0.0, tn.y) * w.y;
     }
     if w.z > 0.0 {
-        let a = textureSampleGrad(material_albedo, material_sampler, p.xy, layer, gx, gy);
+        if colour {
+            t.albedo += textureSampleGrad(material_albedo, material_sampler, p.xy, layer, gx, gy).rgb * w.z;
+        }
         let e = textureSampleGrad(material_data, material_sampler, p.xy, layer, gx, gy);
         let tn = (e.xy * 2.0 - 1.0) * strength;
-        t.albedo += a.rgb * w.z;
         t.roughness += e.z * w.z;
         t.height += e.w * w.z;
         tilt += vec3<f32>(tn.x, tn.y, 0.0) * w.z;
@@ -200,18 +204,25 @@ struct RockAttributes {
 // (protruding) beds cleaner and smoother than the soft, recessed ones, a dark seam where beds meet
 // - with moss and lichen on up-facing ledges and in sheltered hollows and dirt in crevices.
 fn cliff_rock(layer: u32, dirt_layer: u32, p: vec3<f32>, n: vec3<f32>, texel: f32, a: RockAttributes, medium: f32) -> TexSample {
-    let coarse = triplanar_sparse(layer, p * CLIFF_TILING.x + vec3<f32>(0.37, 0.0, 0.61), texel * CLIFF_TILING.x, n, 1.3);
+    let coarse = triplanar_sparse(layer, p * CLIFF_TILING.x + vec3<f32>(0.37, 0.0, 0.61), texel * CLIFF_TILING.x, n, 1.3, true);
     // The detail is projected turned about the vertical (walls keep their bedding horizontal),
     // so on ledges and undersides its grain crosses the large scale's instead of doubling it.
     let turn = mat3x3<f32>(vec3<f32>(CLIFF_TURN.x, 0.0, CLIFF_TURN.y), vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(-CLIFF_TURN.y, 0.0, CLIFF_TURN.x));
-    var fine = triplanar_sparse(layer, (turn * p) * CLIFF_TILING.y + vec3<f32>(0.13, 0.5, 0.29), texel * CLIFF_TILING.y, turn * n, 1.1);
-    fine.normal = transpose(turn) * fine.normal;
-    let mean = max(layer_mean(layer), vec3<f32>(0.02));
+    // Only its data texels: its height (mean about 0.5; mip-filtered towards it where the
+    // detail is sub-pixel) modulates the large scale's colour.
+    // Skipped where a pixel covers more than 1/32 of its tile (16 texels: little is left of it).
+    var fine: TexSample;
+    fine.height = 0.5;
+    fine.normal = n;
+    if texel * CLIFF_TILING.y < 1.0 / 32.0 {
+        fine = triplanar_sparse(layer, (turn * p) * CLIFF_TILING.y + vec3<f32>(0.13, 0.5, 0.29), texel * CLIFF_TILING.y, turn * n, 1.1, false);
+        fine.normal = transpose(turn) * fine.normal;
+    }
+    let detail = 0.4 + 1.2 * fine.height;
     var t: TexSample;
-    // The detail modulates the large scale around the texture's mean (1 where it is sub-pixel).
-    t.albedo = coarse.albedo * clamp(fine.albedo / mean, vec3<f32>(0.5), vec3<f32>(1.7));
+    t.albedo = coarse.albedo * detail;
     t.normal = normalize(coarse.normal + fine.normal - n);
-    t.roughness = 0.5 * (coarse.roughness + fine.roughness);
+    t.roughness = select(coarse.roughness, 0.5 * (coarse.roughness + fine.roughness), fine.roughness > 0.0);
     t.height = 0.6 * coarse.height + 0.4 * fine.height;
     t.alpha = 1.0;
 
@@ -236,13 +247,13 @@ fn cliff_rock(layer: u32, dirt_layer: u32, p: vec3<f32>, n: vec3<f32>, texel: f3
     // Dirt washed into crevices and onto ledges.
     let dirt = smoothstep(0.25, 0.6, a.cavity + 0.15 * medium) * smoothstep(-0.4, 0.2, t.normal.y);
     if dirt > 0.0 && dirt_layer != NO_TEXTURE {
-        t.albedo = mix(t.albedo, layer_mean(dirt_layer) * (0.6 + 0.4 * t.albedo / mean), dirt);
+        t.albedo = mix(t.albedo, layer_mean(dirt_layer) * (0.6 + 0.4 * detail), dirt);
         t.roughness = mix(t.roughness, 0.95, dirt);
     }
     // Moss and lichen (as on the valley's boulders): up-facing rock, more in hollows and on the
     // soft beds; undersides and the clean faces stay bare.
     let moss = smoothstep(0.4, 0.8, t.normal.y + 0.25 * medium + 0.35 * a.cavity - 0.08 * hard) * smoothstep(-0.25, 0.2, medium);
-    t.albedo = mix(t.albedo, vec3<f32>(0.20, 0.21, 0.09) * (0.6 + 0.5 * t.albedo / mean), moss * 0.8);
+    t.albedo = mix(t.albedo, vec3<f32>(0.20, 0.21, 0.09) * (0.5 + 0.5 * detail), moss * 0.8);
     t.roughness = mix(t.roughness, 0.92, moss);
     t.height += 0.1 * moss;
     return t;
@@ -276,7 +287,7 @@ fn mesh_terrain_layering(p: vec3<f32>, macro_normal: vec3<f32>, texel: f32, laye
             samples[i] = cliff_rock(layer, texture_layer(layers, 1u), p, macro_normal, texel, a, medium);
         } else {
             let s = LAYER_TILING[i];
-            samples[i] = triplanar_sparse(layer, p * s, texel * s, macro_normal, 1.2);
+            samples[i] = triplanar_sparse(layer, p * s, texel * s, macro_normal, 1.2, true);
         }
         // Height blending: higher texels of a layer win at the transitions.
         height_weights[i] = weights[i] * (samples[i].height + 0.25);
