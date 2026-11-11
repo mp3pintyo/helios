@@ -339,7 +339,17 @@ impl Culling {
         if mode != CullMode::Late {
             rec.encoder.clear_buffer(&view.state, 0, None);
         }
-        let mut pass = rec.compute_pass(if mode == CullMode::Late { "cull (late)" } else { "cull" });
+        // Profiling aid (HELIOS_CULL_STAGES=1): every stage of every view its own timed pass,
+        // labelled by stage and view kind, instead of one `cull` / `cull (late)` pass per view.
+        let stages = cull_stages_profiled();
+        let kind = if std::ptr::eq(atomics, &scene.atomics) { "main" } else { "shadow" };
+        let stage_label = |stage: &str| format!("cull {stage} [{kind}]");
+        let mut pass = rec.compute_pass(&match (stages, mode) {
+            (true, CullMode::Late) => stage_label("clusters (late)"),
+            (true, _) => stage_label("instances"),
+            (false, CullMode::Late) => "cull (late)".to_owned(),
+            (false, _) => "cull".to_owned(),
+        });
         if mode != CullMode::Late {
             pass.set_bind_group(0, &cull_group, &[]);
             pass.set_pipeline(&passes.instances);
@@ -350,6 +360,10 @@ impl Culling {
             pass.set_bind_group(0, &args_group, &[]);
             pass.dispatch_workgroups(1, 1, 1);
 
+            if stages {
+                drop(pass);
+                pass = rec.compute_pass(&stage_label("pages"));
+            }
             pass.set_pipeline(&passes.pages);
             pass.set_bind_group(0, &cull_group, &[]);
             pass.dispatch_workgroups_indirect(&view.args, ARGS_PAGES);
@@ -357,6 +371,10 @@ impl Culling {
             pass.set_pipeline(&self.prepare_clusters);
             pass.set_bind_group(0, &args_group, &[]);
             pass.dispatch_workgroups(1, 1, 1);
+            if stages {
+                drop(pass);
+                pass = rec.compute_pass(&stage_label("clusters"));
+            }
         }
 
         pass.set_pipeline(&passes.clusters[mode as usize]);
@@ -522,6 +540,12 @@ impl Culling {
         pass.set_bind_group(0, &merge_group, &[]);
         pass.dispatch_workgroups(util::workgroups(targets.width, 8), util::workgroups(targets.height, 8), 1);
     }
+}
+
+/// Whether `HELIOS_CULL_STAGES` asks for every culling stage as its own timed pass.
+fn cull_stages_profiled() -> bool {
+    static STAGES: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *STAGES.get_or_init(|| std::env::var("HELIOS_CULL_STAGES").is_ok_and(|v| v != "0"))
 }
 
 fn raster_pipeline(
