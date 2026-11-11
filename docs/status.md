@@ -107,9 +107,17 @@ Honest differences that remain:
    0.30 ms at 1000 lights; up to 255 lights per froxel, 1024 per scene). The denoiser lags behind moving lights by up to
    24 frames where the variance clip does not catch the change, and its spatial filter softens lighting detail on
    fresh (disoccluded) pixels.
-5. **Translucency** is ordered per pixel up to 4 layers deep (depth peeling; deeper layers fall back to per-instance
-   order). The layer count comes from projected bounding boxes, so boxes that overlap on screen cost up to three extra
-   depth-only draws, scene-colour copies and shading passes even where the surfaces themselves don't. Refraction reads
+5. **Translucency** (round 8, `avboit`): non-refracting surfaces, particles and volumes are ordered by adaptive
+   voxel-based OIT — a 16-cell transmittance grid per 4×4 (8×8 above 2048 px) pixel column, so the order is
+   approximate within a cell (the medium counts as spread evenly in it; UE averages instead), the grid's low-resolution
+   transmittance blends over a few pixels at pane edges, and sub-column sparks may miss the low-resolution draw. UE's
+   AVBOIT also covers Nanite translucency and per-pixel lit volumetric fog; ours has no Nanite translucency at all
+   (forward meshes). It needs 17 sampled textures per stage (else the round-7 path below). Refracting surfaces composite
+   only their nearest layer (refracting glass behind it is seen unblurred through it, its own blur and refraction
+   dropped); only where water overlaps another refracting surface are they peeled — then up to 4 layers deep (deeper
+   layers fall back to per-instance order), the layer count from projected bounding boxes (overlapping boxes cost up
+   to three extra depth-only draws, scene-colour copies and shading passes even where the surfaces don't), and
+   anything order-independent between two refracting layers is composited behind both. Refraction reads
    the screen-space copy (what is off screen or hidden is not refracted; where a nearer layer covers the displaced
    lookup it falls back to the pixel behind); translucent surfaces don't request shadow pages (where the
    opaque scene didn't request theirs, they fall back to coarser resident levels) and are drawn without LOD. **Water**
@@ -188,11 +196,13 @@ Honest differences that remain:
     march samples it trilinearly at half the grid resolution; close up, a 4 cm campfire grid shows its resolution in
     the smoke's edges. Volumes don't cast shadows on the scene or into the virtual shadow map, don't feed Lumen (only
     the fire's driven light does) and are not seen by reflections or refraction outside the screen. Overlapping
-    volume boxes are composited box by box in entry order, not interleaved; particles go over the volume of their
-    bucket (sparks inside the smoke are not attenuated by the smoke in front of them). Particles: weighted blended OIT
-    approximates the order of layers at similar depths and saturates for very many opaque layers; one translucent
-    surface (the nearest) splits the order — particles between two glass layers are composited with the farther
-    bucket; collision only against the visible depth buffer (no off-screen or occluded collisions, no distance-field
+    volume boxes are composited box by box in entry order, not interleaved. With AVBOIT (round 8) particles, volume
+    steps and non-refracting surfaces are weighted by the transmittance in front of them (sparks inside smoke are
+    dimmed by the smoke in front, smoke behind a panel is tinted by it), at the grid's resolution: the volume enters
+    the grid with 4 samples per cell, the march picks one grid column per pixel at random (its temporal filter averages
+    it). Only the nearest refracting surface splits the order (what lies between two refracting layers is composited
+    behind both). The round-7 path (`--wboit`): weighted blended OIT approximates the order of layers at similar depths
+    and saturates for very many opaque layers, particles go over the volume of their bucket; collision only against the visible depth buffer (no off-screen or occluded collisions, no distance-field
     collision), no ribbons, meshes, sub-UV flipbooks, events or GPU sorting; lighting is per particle (no per-pixel
     normal-mapped lighting). Memory: 72 bytes per internal pixel while volumes and particles are on screen (volume
     march + history front/back, OIT targets, nearest translucent depth: 104 MiB at 1600×900).
@@ -266,5 +276,8 @@ Honest differences that remain:
     frame that needs them (the canvas holding its last frame), and the scene bake (3–6 s) runs on the main thread.
 16. **Coloured light through glass** (round 7, `glass-shadows`): the sun's map of the glass panes keeps one pane
     per texel (light through two panes in a row takes the nearer one's colour) and spans every visible pane (glass
-    spread over a large world gets coarse texels); Lumen's voxel surface cache, translucent surfaces and local
-    lights still see glass as clear (`docs/round7/glass-shadows.md`).
+    spread over a large world gets coarse texels); Lumen's voxel surface cache and the volumes' lighting cache still
+    see glass as clear for the sun (`docs/round7/glass-shadows.md`). Local lights (round 8): only the 8 nearest the
+    camera whose range reaches a pane get a glass map (one pane per texel as for the sun, 256² per cube face, a 2×2
+    box filter, no blur with the distance behind the pane); the rest, and the fog, particles, volumes and Lumen for
+    every local light, see glass as clear; spot lights render all six faces (`docs/round8/translucency.md`).
