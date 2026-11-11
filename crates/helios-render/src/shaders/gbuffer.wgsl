@@ -82,6 +82,8 @@ const TILE_LISTS: u32 = 120u;
 @group(0) @binding(65) var<uniform> wind: Wind;
 @group(0) @binding(66) var skin_palette: texture_2d<f32>;
 @group(0) @binding(90) var<uniform> water: Water;
+// The simulated river's water surface per cell (river.rs; shore.wgsl).
+@group(0) @binding(150) var river_surface: texture_2d<f32>;
 
 fn tile_capacity() -> u32 {
     let size = vec2<u32>(frame.viewport.xy);
@@ -151,8 +153,12 @@ fn evaluate_terrain(m: Material, input: SurfaceInput) -> Surface {
 
 fn evaluate_landscape(m: Material, input: SurfaceInput) -> Surface {
     var s = base_surface(m, input);
-    let footprint = max(length(input.dpdx.xz), length(input.dpdy.xz));
-    if rvt.enabled != 0u {
+    // A mesh terrain (world triplanar mapping) holds cliffs and overhangs the landscape's
+    // top-down virtual texture can't: it is always layered directly, its texel footprint
+    // measured in 3D (on a wall the horizontal one vanishes).
+    let volumetric = m.mapping == MAPPING_WORLD;
+    let footprint = select(max(length(input.dpdx.xz), length(input.dpdy.xz)), max(length(input.dpdx), length(input.dpdy)), volumetric);
+    if rvt.enabled != 0u && !volumetric {
         let uv = (input.world_position.xz - rvt.world_min) / rvt.world_size;
         let texel0 = rvt.world_size / f32(rvt.virtual_pages * rvt.page_texels);
         let level = clamp(log2(max(footprint / texel0, 1e-6)) + rvt.lod_bias, 0.0, f32(rvt.mips - 1u));
@@ -170,7 +176,7 @@ fn evaluate_landscape(m: Material, input: SurfaceInput) -> Surface {
         }
     }
     // No virtual texture (or nothing resident yet): evaluate the layers directly.
-    let t = terrain_layering(input.world_position, input.normal, footprint, m.layers);
+    let t = terrain_layering(input.world_position, input.normal, footprint, m.layers, volumetric);
     s.albedo = t.albedo * m.base_color.rgb;
     s.roughness = t.roughness;
     s.normal = t.normal;

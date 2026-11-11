@@ -5,7 +5,7 @@ pipeline diagram and an index of the pages below.
 
 | Where | What |
 |---|---|
-| [`architecture/`](architecture/) | One page per subsystem of the GPU pipeline (Nanite core, materials, virtual textures, shadows, motion, foliage, tessellation, Lumen, local lights and MegaLights, atmosphere, translucency and water, volumes and particles, post-processing, the browser platform) and the editor |
+| [`architecture/`](architecture/) | One page per subsystem of the GPU pipeline (Nanite core, materials, virtual textures, shadows, motion, foliage, tessellation, Lumen, local lights and MegaLights, atmosphere, translucency and water, terrain and rivers, volumes and particles, post-processing, the browser platform) and the editor |
 | [`performance.md`](performance.md) | How costs are measured and the default views' frame times, round by round |
 | [`status.md`](status.md) | What is still simpler than Unreal Engine 5 |
 | [`round4/`](round4/) … [`round7/`](round7/) | Design notes per feature: why it is built that way, the full measurement tables, before / after images |

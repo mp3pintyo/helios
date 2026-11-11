@@ -82,6 +82,7 @@ pub fn all() -> Vec<Setting> {
             s.local_exposure = b(v).then(LocalExposure::default)
         }),
         flag("short_range_ao", "Short-range AO", "Lighting", |s| json!(s.short_range_ao), |s, v| s.short_range_ao = b(v)),
+        flag("river_simulation", "River simulation", "Atmosphere", |s| json!(s.river_simulation), |s, v| s.river_simulation = b(v)),
         number("bloom_intensity", "Bloom", "Lighting", (0.0, 0.3, 0.005), |s| json!(s.bloom_intensity), |s, v| s.bloom_intensity = f(v)),
         flag("aerial_perspective", "Aerial perspective", "Atmosphere", |s| json!(s.aerial_perspective), |s, v| s.aerial_perspective = b(v)),
         number("aerial_perspective_scale", "Haze density", "Atmosphere", (0.0, 16.0, 0.25), |s| json!(s.aerial_perspective_scale), |s, v| {

@@ -82,6 +82,8 @@ mod native {
         pub world_cache: Option<helios_render::WorldCacheMode>,
         /// Fixed exposure in EV (`--exposure EV`: auto exposure off), for comparing images.
         pub exposure: Option<f32>,
+        /// Rivers simulate (`--no-river-sim`: they hold still).
+        pub river_simulation: bool,
         /// Stream image textures at native resolution (`--no-svt`: 512² texture arrays only).
         pub svt: bool,
         pub animate_sun: bool,
@@ -193,7 +195,7 @@ mod native {
 
     impl Options {
         pub fn parse(args: &[String]) -> Self {
-            let mut o = Options { screenshot: None, size: (1600, 900), frames: 90, view: None, detail: Detail::High, scene: SceneKind::Valley, camera: None, eye: None, at: None, occlusion: true, sw_raster: true, rvt: true, glass_shadows: true, svt: true, animate_sun: false, lod: None, fov: None, pool_mb: None, texture_pool_mb: None, texture_compression: true, switch_to: None, dump_dir: None, dump_count: 16, keys: Vec::new(), keys_at: None, hold: Vec::new(), gltf: None, ground: true, bake_hvm: None, stream_from: None, io_latency_ms: 0, sun: None, move_light: false, full_invalidation: false, moving_lights: Default::default(), moving_light_pages: None, movers: None, static_motion: false, screen_percentage: None, gpu_budget_ms: None, local_exposure: Some(Default::default()), scene_file: None, select: Vec::new(), no_skinning: false, gi: None, megalights: false, tessellation: true, displacement_speed_bound: true, dice_rate: None, speed: None, fog_scattering: None, tsr_depth_history: true, dof: None, photo: None, shadow_refresh_budget: None, shadow_max_staleness: None, shadow_distant: None, megalights_options: (None, true, true, true), avboit: true, shadow_prefiltered: true, shadow_distant_bias: None, volume_shadows: true, short_range_ao: true, world_cache: None, exposure: None, lumen_options: [true; 5] };
+            let mut o = Options { screenshot: None, size: (1600, 900), frames: 90, view: None, detail: Detail::High, scene: SceneKind::Valley, camera: None, eye: None, at: None, occlusion: true, sw_raster: true, rvt: true, glass_shadows: true, svt: true, animate_sun: false, lod: None, fov: None, pool_mb: None, texture_pool_mb: None, texture_compression: true, switch_to: None, dump_dir: None, dump_count: 16, keys: Vec::new(), keys_at: None, hold: Vec::new(), gltf: None, ground: true, bake_hvm: None, stream_from: None, io_latency_ms: 0, sun: None, move_light: false, full_invalidation: false, moving_lights: Default::default(), moving_light_pages: None, movers: None, static_motion: false, screen_percentage: None, gpu_budget_ms: None, local_exposure: Some(Default::default()), scene_file: None, select: Vec::new(), no_skinning: false, gi: None, megalights: false, tessellation: true, displacement_speed_bound: true, dice_rate: None, speed: None, fog_scattering: None, tsr_depth_history: true, dof: None, photo: None, shadow_refresh_budget: None, shadow_max_staleness: None, shadow_distant: None, megalights_options: (None, true, true, true), avboit: true, shadow_prefiltered: true, shadow_distant_bias: None, volume_shadows: true, short_range_ao: true, world_cache: None, exposure: None, lumen_options: [true; 5], river_simulation: true };
             let mut scene_given = false;
             let mut it = args.iter().skip(1);
             while let Some(arg) = it.next() {
@@ -236,6 +238,7 @@ mod native {
                             log::warn!("--world-cache {v}: expected off, on or replace");
                         }
                     }
+                    "--no-river-sim" => o.river_simulation = false,
                     "--no-svt" => o.svt = false,
                     "--no-texture-compression" => o.texture_compression = false,
                     "--animate-sun" => o.animate_sun = true,
@@ -415,6 +418,7 @@ mod native {
                 app.renderer.settings.auto_exposure = false;
                 app.renderer.settings.exposure_compensation = ev;
             }
+            app.renderer.settings.river_simulation = self.river_simulation;
             app.renderer.settings.texture_streaming = self.svt;
             if let Some(lod) = self.lod {
                 app.renderer.settings.lod_threshold = lod;

@@ -405,6 +405,8 @@ pub struct RenderSettings {
     /// importance-sampled from a world-space light grid, shadowed and accumulated over frames,
     /// instead of every light in range (`lumen_light_grid.rs`).
     pub lumen_light_sampling: bool,
+    /// Rivers run their shallow-water simulation (`river.rs`); off, they hold still.
+    pub river_simulation: bool,
 }
 
 impl Default for RenderSettings {
@@ -476,6 +478,7 @@ impl Default for RenderSettings {
             lumen_reflection_fog: true,
             lumen_lite_adaptive_rate: true,
             lumen_light_sampling: true,
+            river_simulation: true,
         }
     }
 }
@@ -561,6 +564,7 @@ pub struct Renderer {
     /// MegaLights for volumetric fog and translucent surfaces.
     megalights_volume: MegaLightsVolume,
     translucency: Translucency,
+    river: crate::river::RiverSim,
     effects: Effects,
     tsr: TsrPass,
     fog_scattering: FogScatteringPass,
@@ -668,6 +672,7 @@ impl Renderer {
             megalights: MegaLights::new(device, queue),
             megalights_volume: MegaLightsVolume::new(device),
             translucency: in_group(Group::Translucency, || Translucency::new(device, queue)),
+            river: in_group(Group::Translucency, || crate::river::RiverSim::new(device)),
             effects: in_group(Group::Effects, || Effects::new(device)),
             tsr: TsrPass::new(device),
             fog_scattering: in_group(Group::Fog, || FogScatteringPass::new(device)),
@@ -1184,6 +1189,8 @@ impl Renderer {
         let glass_shadows = self.settings.glass_shadows && self.settings.shadows;
         let avboit = self.settings.avboit && self.avboit_supported;
         self.translucency.update(&self.device, &self.queue, scene, changes, camera.position, &unjittered_view_proj, capacity, translucency, layers, glass_shadows, avboit);
+        let river_vertices = scene.rivers.first().and_then(|r| r.surface).and_then(|i| self.translucency.instance_vertices(scene, i));
+        self.river.update(&self.device, &self.queue, scene, river_vertices, delta_time, self.settings.river_simulation);
         // Volumes and particles are drawn over lit radiance and in their own debug view.
         let effects = matches!(self.settings.debug_view, DebugView::Lit | DebugView::VolumesParticles);
         self.effects.update(
@@ -1210,6 +1217,7 @@ impl Renderer {
         self.sky.record(&mut rec, &self.frame_uniform, &self.samplers.linear, scene.ground_albedo);
         self.effects.record_lights(&mut rec, &self.lights);
         self.lights.record(&mut rec, &self.frame_uniform, &self.exposure.buffer);
+        self.river.record(&mut rec, self.translucency.vertex_buffer(), river_vertices.map_or(0, |v| v.1));
 
         // Virtual geometry: assemblies the main view needs as parts get part instances (for
         // every view), then two-pass occlusion culling into the visibility buffer.
@@ -1238,6 +1246,7 @@ impl Renderer {
             &self.rvt,
             &self.svt,
             self.translucency.water_uniform(),
+            self.river.surface_view(),
             &self.samplers,
             resolve_group.as_ref(),
         );

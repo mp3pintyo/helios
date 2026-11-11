@@ -63,8 +63,10 @@ struct TerrainSample {
 
 const LAYER_TILING: vec4<f32> = vec4<f32>(0.33, 0.25, 0.12, 0.18); // repeats per metre
 
-// `texel`: world size of one output sample (selects the texture mip).
-fn terrain_layering(p: vec3<f32>, macro_normal: vec3<f32>, texel: f32, layers: u32) -> TerrainSample {
+// `texel`: world size of one output sample (selects the texture mip). `volumetric`: a mesh
+// terrain with cliffs and overhangs - every layer is projected triplanar (the top-down
+// projection of grass, dirt and snow would streak down its walls).
+fn terrain_layering(p: vec3<f32>, macro_normal: vec3<f32>, texel: f32, layers: u32, volumetric: bool) -> TerrainSample {
     let large = fbm(p * 0.015, 4u, texel * 0.015);
     let medium = fbm(p * 0.11 + 7.0, 3u, texel * 0.11);
     let slope = macro_normal.y + 0.06 * medium;
@@ -91,7 +93,7 @@ fn terrain_layering(p: vec3<f32>, macro_normal: vec3<f32>, texel: f32, layers: u
         let s = LAYER_TILING[i];
         let q = p * s;
         let d = texel * s;
-        if i == 2u {
+        if i == 2u || volumetric {
             samples[i] = sample_triplanar(layer, q, vec3<f32>(d, 0.0, 0.0), vec3<f32>(0.0, 0.0, d), macro_normal, 1.2);
         } else {
             let frame = rvt_frame(macro_normal);

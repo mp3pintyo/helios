@@ -65,7 +65,11 @@ pub(crate) fn water_bodies(scene: &Scene) -> Vec<WaterBody> {
     let bodies: Vec<WaterBody> = scene
         .instances
         .iter()
-        .filter(|i| i.visible && scene.materials.get(i.material.0 as usize).is_some_and(|m| m.kind == MaterialKind::Water))
+        .enumerate()
+        .filter(|(_, i)| i.visible && scene.materials.get(i.material.0 as usize).is_some_and(|m| m.kind == MaterialKind::Water))
+        // A river's surface is simulated, not a flat body.
+        .filter(|(index, _)| !scene.rivers.iter().any(|r| r.surface.is_some_and(|s| s.0 as usize == *index)))
+        .map(|(_, i)| i)
         .map(|i| WaterBody::from_bounds(&scene.meshes[i.mesh.0 as usize].aabb, &i.transform))
         .collect();
     if bodies.len() > MAX_WATER_BODIES {
@@ -84,6 +88,9 @@ pub(crate) struct WaterUniform {
     misc: Vec4,
     bodies: [Vec4; MAX_WATER_BODIES],
     levels: Vec4,
+    /// The simulated river's grid for the shores (`river.rs`): corner (x, z), 1 / cell size,
+    /// 1 if there is one.
+    river: Vec4,
 }
 
 impl WaterUniform {
@@ -108,7 +115,16 @@ impl WaterUniform {
             ),
             bodies: rects,
             levels: Vec4::from(levels),
+            river: Vec4::ZERO,
         }
+    }
+
+    /// The river whose surface the shores follow.
+    pub fn with_river(mut self, river: Option<&crate::river::River>) -> Self {
+        if let Some(r) = river.filter(|r| r.cell > 0.0) {
+            self.river = Vec4::new(r.origin.x, r.origin.y, 1.0 / r.cell, 1.0);
+        }
+        self
     }
 }
 

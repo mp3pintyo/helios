@@ -8,7 +8,7 @@ use helios_geometry::modeling::cuboid;
 use helios_geometry::{noise, primitives, BuildConfig, SdfMode};
 use helios_render::{Camera, Material, MaterialKind, Scene, Sun, TextureDesc, TextureMapping, TexturePattern, VolumeEmitter};
 
-use super::{add_baked, add_baked_with, smoothstep, Detail, Rng, SceneSetup};
+use super::{add_baked, add_baked_with, smoothstep, valley_terrain, Detail, Rng, SceneSetup};
 use crate::motion::{DemoMotion, Motion};
 
 pub const TERRAIN_SIZE: f32 = 900.0;
@@ -45,9 +45,15 @@ fn lake_basin(x: f32, z: f32) -> f32 {
 }
 
 /// The camera stays above the ground; it may dive into the lake (the renderer draws the
-/// underwater view).
+/// underwater view). Over the mesh terrain: its top surface.
 fn camera_floor(x: f32, z: f32) -> f32 {
-    ground_height(x, z)
+    valley_terrain::top(x, z, ground_height(x, z))
+}
+
+/// Under the mesh terrain's arch, shelf or in its cave the floor is the ground beneath the
+/// camera, not the rock above it.
+fn camera_floor_below(p: Vec3) -> f32 {
+    valley_terrain::ground_below(p, ground_height(p.x, p.z))
 }
 
 fn build_scene(detail: Detail) -> (Scene, DemoMotion) {
@@ -76,13 +82,14 @@ fn build_scene(detail: Detail) -> (Scene, DemoMotion) {
     let hammered = scene.add_texture(TextureDesc::new(TexturePattern::Hammered, Vec3::ONE, Vec3::ONE).roughness(0.18, 0.3).scale(1.5).bump(0.6).seed(15));
 
     // ---- Materials ----------------------------------------------------------------------------
-    let terrain_material = scene.add_material(Material {
+    let landscape_material = Material {
         kind: MaterialKind::Terrain,
         base_color: Vec3::ONE,
         roughness: 0.9,
         layers: [Some(grass), Some(dirt), Some(rock_tex), Some(snow)],
         ..Default::default()
-    });
+    };
+    let terrain_material = scene.add_material(landscape_material);
     let rock_materials = [Vec3::new(0.32, 0.29, 0.25), Vec3::new(0.26, 0.25, 0.24), Vec3::new(0.38, 0.33, 0.27)].map(|c| {
         scene.add_material(Material {
             kind: MaterialKind::Rock,
@@ -114,13 +121,10 @@ fn build_scene(detail: Detail) -> (Scene, DemoMotion) {
     }
 
     // ---- Meshes -------------------------------------------------------------------------------
-    let mut landscape = primitives::terrain(TERRAIN_SIZE, detail.pick(384, 768), TERRAIN_HEIGHT, TERRAIN_SEED);
-    for v in &mut landscape.vertices {
-        let [x, _, z] = v.position;
-        v.position[1] = ground_height(x, z);
-    }
-    landscape.compute_normals();
-    let terrain = add_baked_with(&mut scene, "terrain", &landscape, BuildConfig { sdf: SdfMode::Heightfield { resolution: 512 }, ..Default::default() });
+    // The landscape heightfield, with the rectangle the mesh terrain replaces left out.
+    let resolution = detail.pick(384, 768);
+    let mesh_terrain = valley_terrain::mesh_terrain(ground_height, TERRAIN_SIZE, resolution);
+    let terrain = valley_terrain::landscape(&mut scene, &mesh_terrain, TERRAIN_SIZE, resolution);
     let rocks: Vec<_> = (0..3)
         .map(|seed| add_baked(&mut scene, "rock", &primitives::rock(seed * 7 + 1, detail.pick(6, 7))))
         .collect();
@@ -177,7 +181,7 @@ fn build_scene(detail: Detail) -> (Scene, DemoMotion) {
         let footprint = stretch.x.max(stretch.z) * 0.8;
         let samples = [(0.0, 0.0), (footprint, 0.0), (-footprint, 0.0), (0.0, footprint), (0.0, -footprint)].map(|(dx, dz)| ground_height(x + dx, z + dz));
         let (low, high) = samples.iter().fold((f32::MAX, f32::MIN), |(lo, hi), &h| (lo.min(h), hi.max(h)));
-        if high - low > footprint * 1.1 {
+        if high - low > footprint * 1.1 || valley_terrain::displaces(&mesh_terrain, x, z, footprint) {
             continue;
         }
         let y = low + scale * 0.15;
@@ -193,6 +197,11 @@ fn build_scene(detail: Detail) -> (Scene, DemoMotion) {
     raft(&mut scene, &mut motion, detail);
     // Displaced (tessellated) cobblestones and boulders behind the initial view.
     super::stone_path::add(&mut scene, &mut motion, detail, ground_height);
+    // The mesh terrain: cliff, shelf, cave, arch and the river's channel.
+    let mesh_terrain_material = valley_terrain::material(&mut scene, &landscape_material);
+    valley_terrain::add(&mut scene, &mesh_terrain, mesh_terrain_material, &rocks, &rock_materials);
+    // The river running from the cave into the lake: a shallow-water simulation.
+    valley_terrain::add_river(&mut scene, &mesh_terrain, ground_height, &rocks, &rock_materials);
     (scene, motion)
 }
 
@@ -246,5 +255,5 @@ fn initial_camera() -> Camera {
 
 pub fn build(detail: Detail) -> SceneSetup {
     let (scene, motion) = build_scene(detail);
-    SceneSetup { scene, camera: initial_camera(), sun: SUN, floor: camera_floor, animation: None, motion }
+    SceneSetup { scene, camera: initial_camera(), sun: SUN, floor: camera_floor, floor_below: Some(camera_floor_below), animation: None, motion }
 }

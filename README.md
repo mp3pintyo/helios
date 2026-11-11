@@ -355,6 +355,7 @@ Each subsystem is described in its own page under [`docs/architecture/`](docs/ar
 | [Local lights](docs/architecture/lights.md) | Froxel light culling, local light virtual shadow maps (cached, moving lights), MegaLights |
 | [Atmosphere](docs/architecture/atmosphere.md) | Volumetric clouds, volumetric fog, time of day |
 | [Translucency and water](docs/architecture/translucency.md) | Depth-peeled forward translucency, coloured light through glass, water bodies |
+| [Terrain and rivers](docs/architecture/terrain.md) | Mesh terrain (modifier stack, surface nets chunks, landscape seam, collision, PCG), shallow-water rivers |
 | [Volumes and particles](docs/architecture/volumes-particles.md) | Heterogeneous volumes (fluid simulation), GPU particles, order-independent transparency |
 | [Post-processing](docs/architecture/post.md) | Temporal stability, TSR and dynamic resolution, camera, local exposure, profiling |
 | [Browser platform](docs/architecture/browser.md) | Start-up order, scene bake on Web Workers, frames held for new pipelines, fewer pipelines, device limits, f16 shaders, browser measurement hooks |

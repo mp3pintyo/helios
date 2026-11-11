@@ -152,6 +152,7 @@ struct MeshRange {
     first_index: u32,
     index_count: u32,
     base_vertex: i32,
+    vertex_count: u32,
 }
 
 /// How often a decoded mesh may cover a pixel.
@@ -238,11 +239,12 @@ impl Candidate {
             center: world.transform_point3(mesh.bounds.center),
             radius: mesh.bounds.radius * scale,
             aabb: Aabb::from_points(corners(&mesh.aabb).map(|p| world.transform_point3(p))),
-            // Water is drawn two-sided: a closed convex body would show twice.
+            // Water is drawn two-sided: a closed convex body would show twice. A river's surface
+            // is a height field: once.
             single_layer: match decoded.shape {
                 Shape::Flat => true,
                 Shape::Convex => shading != Shading::Water,
-                Shape::Concave => false,
+                Shape::Concave => scene.rivers.iter().any(|r| r.surface.is_some_and(|s| s.0 as usize == index)),
             },
             refracts: scene.materials.get(instance.material.0 as usize).is_some_and(refracts),
         }
@@ -628,6 +630,18 @@ impl Translucency {
         self.camera_body.is_some()
     }
 
+    /// The vertex buffer of the decoded translucent meshes (a river's simulation writes into it).
+    pub(crate) fn vertex_buffer(&self) -> Option<&wgpu::Buffer> {
+        self.vertices.as_ref()
+    }
+
+    /// First vertex and vertex count of `instance`'s decoded mesh in [`Self::vertex_buffer`].
+    pub(crate) fn instance_vertices(&self, scene: &Scene, instance: crate::scene::InstanceHandle) -> Option<(u32, u32)> {
+        let mesh = scene.instances.get(instance.0 as usize)?.mesh.0 as usize;
+        let decoded = (*self.decoded.get(mesh)?)?;
+        Some((decoded.range.base_vertex as u32, decoded.range.vertex_count))
+    }
+
     /// The water uniform ([`WaterUniform`], written by [`Translucency::update`]).
     pub fn water_uniform(&self) -> &wgpu::Buffer {
         &self.water
@@ -700,7 +714,7 @@ impl Translucency {
         if enabled && self.water_bodies.iter().any(|b| b.near(eye, UNDERWATER_MARGIN)) {
             self.pipelines[Shading::Underwater as usize].prefetch();
         }
-        let uniform = WaterUniform::new(&scene.water, &self.water_bodies, self.camera_body);
+        let uniform = WaterUniform::new(&scene.water, &self.water_bodies, self.camera_body).with_river(scene.rivers.first());
         queue.write_buffer(&self.water, 0, bytemuck::bytes_of(&uniform));
         // AVBOIT: this pass keeps the refracting surfaces, the rest is order independent.
         self.avboit = avboit;
@@ -793,6 +807,7 @@ impl Translucency {
                         first_index: self.cpu_indices.len() as u32,
                         index_count: indices.len() as u32,
                         base_vertex: self.cpu_vertices.len() as i32,
+                        vertex_count: vertices.len() as u32,
                     };
                     let decoded = DecodedMesh { range, shape: Shape::of(&vertices, &indices) };
                     self.cpu_vertices.extend(vertices);
@@ -813,7 +828,8 @@ impl Translucency {
             let buffer = |label, contents: &[u8], usage| {
                 device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some(label), contents, usage })
             };
-            self.vertices = Some(buffer("translucent vertices", bytemuck::cast_slice(&self.cpu_vertices), wgpu::BufferUsages::VERTEX));
+            // Storage too: a river's simulation rewrites its surface's vertices (`river.rs`).
+            self.vertices = Some(buffer("translucent vertices", bytemuck::cast_slice(&self.cpu_vertices), wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::STORAGE));
             self.indices = Some(buffer("translucent indices", bytemuck::cast_slice(&self.cpu_indices), wgpu::BufferUsages::INDEX));
             log::info!(
                 "translucency: {} instances, {} triangles decoded",
@@ -1500,7 +1516,7 @@ mod tests {
         Candidate {
             instance: 0,
             shading: Shading::Glass,
-            range: MeshRange { first_index: 0, index_count: 3, base_vertex: 0 },
+            range: MeshRange { first_index: 0, index_count: 3, base_vertex: 0, vertex_count: 3 },
             center,
             radius: r * 3f32.sqrt(),
             aabb: Aabb { min: center - r, max: center + r },

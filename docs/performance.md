@@ -27,3 +27,8 @@ Chromium and in Firefox (was 31–50 s), Firefox's full set ~33 s; the displaced
 Round 8 grounded foliage ([`foliage-grounding.md`](round8/foliage-grounding.md); 1600×900, shared GPU, per-pass minima):
 forest default view 8.87 → 9.72 ms (plant data and stalks +0.3–0.4 ms of shadow rasterisation and resolve,
 short-range AO +0.15 ms of lighting).
+Round 8 terrain and rivers ([`terrain-water.md`](round8/terrain-water.md); 1600×900, shared GPU, minima of 3 interleaved
+runs with and without the mesh terrain and river): valley initial view 4.94 → 5.49 ms (river surface +0.34 ms of
+translucency, mesh terrain's per-pixel triplanar layering +0.10 ms of resolve, simulation 0.04 ms), river close-up
+(`--eye -2,3,-6 --at -9,0,-20`) 4.31 → 5.70 ms (translucency 0.92 ms), arch view 3.88 → 3.85 ms. Building the
+mesh terrain: ~2 s natively, 2.8 s in Chromium (`--detail medium`, scene 7.4 s in all).
