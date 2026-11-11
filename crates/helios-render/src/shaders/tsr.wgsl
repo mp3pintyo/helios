@@ -10,7 +10,10 @@
 //     neighbourhood, clip it to the neighbourhood's YCoCg variance box (wide where the image is
 //     still so sub-pixel detail averages instead of flickering, tight under motion);
 //   * reject history where the surface moves differently from what the history pixel moved
-//     with (disocclusion; the motion each history pixel was written with is kept);
+//     with (disocclusion; the motion each history pixel was written with is kept), or where
+//     the history pixel showed another surface: each history pixel also keeps the view depth
+//     of the closest sample it was written with, and the surface point it stands for must lie
+//     on this pixel's surface plane (the depth history, below);
 //   * blend by accumulated sample weight: history alpha counts the samples (in frames at full
 //     density) it holds, capped by how much history may be trusted, and luminance (Karis)
 //     weights of the *exposed* colour keep lone bright samples from flickering (on raw scene
@@ -33,6 +36,8 @@
 
 struct Tsr {
     output: vec4<f32>,   // output width, height, 1 / width, 1 / height
+    prev_inv_view_proj: mat4x4<f32>,   // the previous frame's, unjittered
+    params: vec4<f32>,   // x: depth history on
 }
 
 @group(0) @binding(0) var<uniform> frame: Frame;
@@ -64,6 +69,11 @@ const MAX_WEIGHT_MOVING: f32 = 3.0;
 // Fully reactive pixels (particles, flames: FLAG_REACTIVE) keep at most this much history, with
 // the tight clip box of a moving image and no lock: their content changes without motion vectors.
 const MAX_WEIGHT_REACTIVE: f32 = 1.5;
+// Photo mode (photo.rs): output this frame's reconstruction with its sample weight, no history.
+// Where no sample lies near the pixel (low screen percentages), the wide filter fills in with
+// this small weight, which the samples of later frames soon outweigh.
+override PHOTO: bool = false;
+const PHOTO_FILL: f32 = 1e-3;
 
 fn rgb_to_ycocg(c: vec3<f32>) -> vec3<f32> {
     return vec3<f32>(
@@ -139,6 +149,82 @@ fn karis(color: vec3<f32>, lock: f32) -> f32 {
     return mix(1.0 / (1.0 + luminance(color) * exposure[0]), 1.0, lock);
 }
 
+// ---- Depth history ------------------------------------------------------------------------------
+// Motion vectors alone miss a disocclusion where the uncovered surface and the one that covered
+// it move by nearly the same amount per frame — a slow sideways camera move (the parallax between
+// a post and the wall behind it is a fraction of a pixel per frame), a branch swaying in front of
+// the sky — so the history keeps the occluder's colour inside the wide clip box of a nearly
+// still image and it fades over a dozen frames: a ghost. Each history pixel therefore keeps the
+// view depth of the closest sample it was written with (history_state.w; the sky is SKY_DEPTH).
+// That surface point, rebuilt through the history pixel with the previous camera, must lie on
+// the plane of this pixel's closest surface (its normal from the depth neighbours): the plane
+// distance, unlike a plain depth comparison, does not grow on surfaces seen at grazing angles,
+// where the history pixel's sub-pixel offset alone changes the depth a lot. The tolerance is
+// relative to the depth (DEPTH_TOLERANCE): wind and skinned meshes move surfaces a little.
+//
+// A thin feature (a twig, a wire) that this frame's jittered samples miss looks exactly like a
+// disocclusion: the history shows something nearer. Where the surface and the history moved
+// alike, that is what it is (a jitter miss on a still image, or a camera pan, which moves near
+// and far alike), so the depth test acts in proportion to the difference in motion: from
+// DEPTH_MOTION_START px, fully from DEPTH_MOTION_FULL px (the motion test alone needs 1–3 px).
+const SKY_DEPTH: f32 = 60000.0;
+const DEPTH_TOLERANCE: f32 = 0.02;
+const DEPTH_MOTION_START: f32 = 0.05;
+const DEPTH_MOTION_FULL: f32 = 0.5;
+
+// View depth of a reverse-Z depth value (SKY_DEPTH for the sky).
+fn view_depth(depth: f32) -> f32 {
+    return select(SKY_DEPTH, min(frame.camera_position.w / depth, SKY_DEPTH), depth > 0.0);
+}
+
+// World position of internal pixel `tap`'s (jittered) sample at reverse-Z depth `depth` > 0.
+fn tap_world(tap: vec2<i32>, depth: f32) -> vec3<f32> {
+    return world_from_depth((vec2<f32>(tap) + 0.5) * frame.viewport.zw, depth, frame.inv_view_proj);
+}
+
+// Normal of the surface at internal pixel `tap` from its depth neighbours: per axis the one
+// nearer in depth (the other may lie across a silhouette). Faces the camera where both are sky.
+fn depth_normal(tap: vec2<i32>, depth: f32, world: vec3<f32>, in_size: vec2<i32>) -> vec3<f32> {
+    let z = view_depth(depth);
+    var axes = array<vec3<f32>, 2>(vec3<f32>(0.0), vec3<f32>(0.0));
+    for (var a = 0; a < 2; a++) {
+        let offset = select(vec2<i32>(0, 1), vec2<i32>(1, 0), a == 0);
+        let pa = clamp(tap + offset, vec2<i32>(0), in_size - 1);
+        let pb = clamp(tap - offset, vec2<i32>(0), in_size - 1);
+        let da = textureLoad(depth_texture, pa, 0).r;
+        let db = textureLoad(depth_texture, pb, 0).r;
+        let use_a = da > 0.0 && (db <= 0.0 || abs(view_depth(da) - z) <= abs(view_depth(db) - z));
+        let d = select(db, da, use_a);
+        if d > 0.0 {
+            axes[a] = tap_world(select(pb, pa, use_a), d) - world;
+        }
+    }
+    let n = cross(axes[0], axes[1]);
+    let to_eye = normalize(frame.camera_position.xyz - world);
+    if dot(n, n) < 1e-20 {
+        return to_eye;
+    }
+    let normal = normalize(n);
+    return select(-normal, normal, dot(normal, to_eye) >= 0.0);
+}
+
+// How surely the history pixel `previous_pixel` (stored view depth `history_depth`) showed a
+// surface other than this pixel's closest one (internal pixel `closest` at reverse-Z `depth`):
+// 0 = the same surface, 1 = another.
+fn depth_mismatch(closest: vec2<i32>, depth: f32, previous_pixel: vec2<u32>, history_depth: f32, in_size: vec2<i32>) -> f32 {
+    let history_sky = history_depth >= SKY_DEPTH * 0.99;
+    if depth <= 0.0 || history_sky {
+        return select(1.0, 0.0, depth <= 0.0 && history_sky);
+    }
+    let world = tap_world(closest, depth);
+    let normal = depth_normal(closest, depth, world, in_size);
+    // The history pixel's surface point, through its centre from the previous camera.
+    let uv = (vec2<f32>(previous_pixel) + 0.5) * tsr.output.zw;
+    let history_world = world_from_depth(uv, frame.camera_position.w / max(history_depth, 1e-4), tsr.prev_inv_view_proj);
+    let plane_distance = abs(dot(normal, history_world - world));
+    return smoothstep(1.0, 2.0, plane_distance / (DEPTH_TOLERANCE * view_depth(depth)));
+}
+
 // Clips `history` towards the centre of the box [lo, hi] (Playdead / UE).
 fn clip_to_box(history: vec3<f32>, lo: vec3<f32>, hi: vec3<f32>) -> vec3<f32> {
     let center = 0.5 * (hi + lo);
@@ -165,7 +251,7 @@ fn resolve(@builtin(global_invocation_id) gid: vec3<u32>) {
     let jitter_uv = vec2<f32>(frame.jitter.x, -frame.jitter.y) * 0.5;
     let position = (uv + jitter_uv) * frame.viewport.xy - 0.5;
     let use_history = has_flag(frame.flags, FLAG_TAA) && has_flag(frame.flags, FLAG_HISTORY_VALID);
-    if !has_flag(frame.flags, FLAG_TAA) {
+    if !has_flag(frame.flags, FLAG_TAA) && !PHOTO {
         textureStore(out_color, pixel, vec4<f32>(upscale_spatial(position, in_size), 0.0));
         textureStore(out_state, pixel, vec4<f32>(0.0));
         return;
@@ -228,6 +314,15 @@ fn resolve(@builtin(global_invocation_id) gid: vec3<u32>) {
     let motion_pixels = motion * tsr.output.xy;
     let speed = length(motion_pixels);
     let previous_uv = uv - motion;
+    if PHOTO {
+        // Photo mode (photo.rs) sums frames itself: this frame's reconstruction and its sample
+        // weight alone, kept a valid one-frame history for when the photo ends.
+        let w = frame_weight + PHOTO_FILL;
+        let color = (current_sharp * frame_weight + current_wide * PHOTO_FILL) / w;
+        textureStore(out_color, pixel, vec4<f32>(select(color, current_wide, any(color != color)), w));
+        textureStore(out_state, pixel, vec4<f32>(motion_pixels, 0.0, view_depth(closest_depth)));
+        return;
+    }
     let max_weight = mix(mix(MAX_WEIGHT_STILL, MAX_WEIGHT_MOVING, saturate(speed / 8.0)), MAX_WEIGHT_REACTIVE, reactive);
 
     // Thin-feature lock: none at 100 % (every feature is sampled every frame), full from 75 %
@@ -256,7 +351,13 @@ fn resolve(@builtin(global_invocation_id) gid: vec3<u32>) {
         // so it showed something else (e.g. the background a foreground object uncovers).
         let previous_pixel = min(vec2<u32>(previous_uv * tsr.output.xy), out_size - 1u);
         let previous = textureLoad(history_state, previous_pixel, 0);
-        let disocclusion = saturate((length(motion_pixels - previous.xy) - 1.0) * 0.5);
+        let motion_difference = length(motion_pixels - previous.xy);
+        var disocclusion = saturate((motion_difference - 1.0) * 0.5);
+        // The depth history: another surface, while the motion differs only a little.
+        let depth_weight = saturate((motion_difference - DEPTH_MOTION_START) / (DEPTH_MOTION_FULL - DEPTH_MOTION_START));
+        if tsr.params.x > 0.0 && depth_weight > disocclusion {
+            disocclusion = max(disocclusion, depth_weight * depth_mismatch(closest, closest_depth, previous_pixel, previous.w, in_size));
+        }
         history_weight = min(h.a, max_weight) * (1.0 - disocclusion);
         lock = max(lock, (previous.z - lock_decay) * (1.0 - disocclusion) * still * (1.0 - reactive));
         history = mix(clipped, h.rgb, lock);
@@ -271,5 +372,5 @@ fn resolve(@builtin(global_invocation_id) gid: vec3<u32>) {
     result = select(result, current_wide, any(result != result));
     let weight = min(history_weight + frame_weight, max_weight);
     textureStore(out_color, pixel, vec4<f32>(result, weight));
-    textureStore(out_state, pixel, vec4<f32>(motion_pixels, max(lock, 0.0), 0.0));
+    textureStore(out_state, pixel, vec4<f32>(motion_pixels, max(lock, 0.0), view_depth(closest_depth)));
 }

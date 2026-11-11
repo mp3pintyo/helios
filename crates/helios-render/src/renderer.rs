@@ -30,9 +30,11 @@ use crate::passes::shading::{GiPass, LightingInputs, LightingPass};
 use crate::clouds::{CloudInputs, Clouds};
 use crate::effects::{Effects, EffectsFrame};
 use crate::fog::{FogInputs, VolumetricFog};
+use crate::fog_scattering::{FogScattering, FogScatteringPass};
 use crate::lights::{LightCulling, MAX_LIGHTS};
 use crate::lumen::{CardInputs, Lumen};
 use crate::lumen_displaced::DisplaceInputs;
+use crate::photo::{PhotoMode, PhotoProgress, PhotoSample};
 use crate::picking::{PickResult, Picker};
 use crate::pipelines::{self, in_group, Group};
 use crate::lumen_lite::{GiMethod, LiteFallback, LiteInputs, LumenLite};
@@ -306,6 +308,14 @@ pub struct RenderSettings {
     /// anisotropy, unlit). Off: every material renders as its plain metallic-roughness base;
     /// material graphs still run (`substrate.rs`).
     pub substrate: bool,
+    /// TSR also rejects history by depth: each history pixel keeps the depth it was written
+    /// with, and a history pixel whose surface does not lie on the current surface's plane is a
+    /// disocclusion (less ghosting where motion vectors barely differ). Off: motion vectors only.
+    pub tsr_depth_history: bool,
+    /// Fog screen space scattering (UE 5.8): light scattered out of each pixel's view ray by
+    /// the volumetric fog is spread over its neighbourhood, so lights and lit areas glow through
+    /// fog (`fog_scattering.rs`). `None` = off.
+    pub fog_scattering: Option<FogScattering>,
 }
 
 impl Default for RenderSettings {
@@ -356,6 +366,8 @@ impl Default for RenderSettings {
             dynamic_resolution: None,
             per_instance_invalidation: true,
             substrate: true,
+            tsr_depth_history: true,
+            fog_scattering: None,
         }
     }
 }
@@ -426,11 +438,16 @@ pub struct Renderer {
     translucency: Translucency,
     effects: Effects,
     tsr: TsrPass,
+    fog_scattering: FogScatteringPass,
     post_fx: PostFxPass,
     exposure: ExposurePass,
     local_exposure: LocalExposurePass,
     bloom: BloomPass,
     tonemap: TonemapPass,
+    /// Photo mode: a still accumulated from jittered frames and lens samples (`photo.rs`).
+    photo: PhotoMode,
+    /// This frame's photo sample (while a photo accumulates).
+    photo_sample: Option<PhotoSample>,
     /// Editor tools: instance picking and the selection outline (idle unless used).
     picker: Picker,
     selection: SelectionOutline,
@@ -523,7 +540,10 @@ impl Renderer {
             translucency: in_group(Group::Translucency, || Translucency::new(device, queue)),
             effects: in_group(Group::Effects, || Effects::new(device)),
             tsr: TsrPass::new(device),
+            fog_scattering: in_group(Group::Fog, || FogScatteringPass::new(device)),
             post_fx: in_group(Group::CameraEffects, || PostFxPass::new(device)),
+            photo: PhotoMode::new(device),
+            photo_sample: None,
             exposure: ExposurePass::new(device),
             local_exposure: in_group(Group::CameraEffects, || LocalExposurePass::new(device)),
             bloom: BloomPass::new(device),
@@ -747,6 +767,25 @@ impl Renderer {
         self.history_valid = false;
     }
 
+    /// Starts a photo (`photo.rs`): `samples` frames from the current camera, each with a new
+    /// sub-pixel jitter and, with depth of field on, a lens sample focused like the real-time
+    /// depth of field, summed into one still that stays on screen until the camera moves or
+    /// [`Renderer::stop_photo`]. The scene's clock stands still while it accumulates.
+    pub fn start_photo(&mut self, samples: u32) {
+        self.photo.start(samples, self.settings.depth_of_field.as_ref());
+    }
+
+    /// Ends photo mode (back to the real-time image).
+    pub fn stop_photo(&mut self) {
+        self.photo.stop();
+    }
+
+    /// The photo's progress (`None` without a photo); it stays on screen once
+    /// [`PhotoProgress::done`].
+    pub fn photo_progress(&self) -> Option<PhotoProgress> {
+        self.photo.progress()
+    }
+
     /// Frames rendered so far. A browser frame loop can tell from it that a frame before the
     /// first image was skipped because the pipelines it needs are still compiling.
     pub fn frame_count(&self) -> u32 {
@@ -767,7 +806,23 @@ impl Renderer {
             self.prefetch_content(scene);
         }
         self.settings = self.compiled_features(requested);
-        self.render_frame(scene, camera, output, delta_time);
+        // Photo mode: the frame renders its lens sample, without post-process depth of field or
+        // motion blur, with the scene's clock standing still.
+        let focus = self.post_fx.take_focus();
+        let aspect = self.targets.output.0 as f32 / self.targets.output.1.max(1) as f32;
+        self.photo_sample = self.photo.begin_frame(camera, requested.depth_of_field.as_ref(), focus, aspect);
+        if self.photo.progress().is_some_and(|p| p.focusing) {
+            self.post_fx.request_focus();
+        }
+        let (camera, delta_time) = match self.photo_sample {
+            Some(sample) => {
+                self.settings.depth_of_field = None;
+                self.settings.motion_blur = 0.0;
+                (sample.camera, 0.0)
+            }
+            None => (*camera, delta_time),
+        };
+        self.render_frame(scene, &camera, output, delta_time);
         // Keep the one choice a frame makes itself (the Lumen Lite fallback).
         self.settings = RenderSettings { gi_method: self.settings.gi_method, ..requested };
     }
@@ -908,9 +963,12 @@ impl Renderer {
         self.post_fx.update(&self.device, &self.queue, shutter, dof, camera.fov_y, self.targets.output);
         let local_exposure = self.settings.local_exposure.as_ref().filter(|_| lit);
         self.local_exposure.update(&self.device, &self.queue, local_exposure, self.settings.exposure_compensation, self.targets.output);
-        self.tsr.update(&self.queue, self.targets.output);
+        let prev_view_proj = self.previous_view_proj.filter(|_| self.history_valid).unwrap_or(view_proj);
+        self.tsr.update(&self.queue, self.targets.output, prev_view_proj, self.settings.tsr_depth_history);
         self.hzb.update(&self.queue, &self.targets);
         self.fog.update(&self.device, &self.queue, &scene.fog, self.settings.volumetric_fog, self.time + delta_time, capacity);
+        let fog_scattering = self.settings.fog_scattering.as_ref().filter(|_| lit);
+        self.fog_scattering.update(&self.device, &self.queue, fog_scattering, self.fog.enabled(), scene.fog.anisotropy, camera.fov_y, self.targets.output);
         // MegaLights' debug views sample even while the classic loop shades.
         let megalights_debug = matches!(self.settings.debug_view, DebugView::MegaLightsSamples | DebugView::MegaLightsDenoising);
         let megalights = (self.settings.mega_lights || megalights_debug) && self.lights.count > 0;
@@ -1096,9 +1154,17 @@ impl Renderer {
         self.effects.record_after_translucency(&mut rec, &lighting);
 
         // Post-processing, at output resolution from here on.
-        self.tsr.record(&mut rec, &self.frame_uniform, &self.targets, &self.samplers, &self.exposure.buffer, current);
-        // Camera effects read the TSR result (which stays untouched as next frame's history).
-        let resolved = self.post_fx.record(&mut rec, &self.frame_uniform, &self.targets, &self.samplers, &self.targets.history[current]);
+        let photo = self.photo_sample;
+        self.tsr.record(&mut rec, &self.frame_uniform, &self.targets, &self.samplers, &self.exposure.buffer, current, photo.is_some());
+        // Fog screen space scattering and the camera effects read the TSR result (which stays
+        // untouched as next frame's history).
+        let scattered = self.fog_scattering.record(&mut rec, &self.frame_uniform, &self.fog, &self.targets, &self.samplers, &self.targets.history[current]);
+        let resolved = self.post_fx.record(&mut rec, &self.frame_uniform, &self.targets, &self.samplers, scattered);
+        // A photo sums its frames; a finished one stays on screen.
+        let resolved = match photo {
+            Some(sample) => self.photo.accumulate(&device, &self.queue, &mut rec, resolved, self.targets.output, sample.first),
+            None => self.photo.mean().unwrap_or(resolved),
+        };
         self.exposure.record(&mut rec, &self.frame_uniform, resolved, &self.samplers);
         // Metering sees the scene as it is; bloom and tone mapping the locally exposed image (a
         // highlight brought down glows less).
@@ -1121,6 +1187,7 @@ impl Renderer {
         self.queue.submit([commands]);
         self.profiler.after_submit(map_profiler);
         self.picker.after_submit();
+        self.post_fx.after_submit();
         self.vsm.local.after_submit();
         if read_stats {
             self.stats.map();
@@ -1152,12 +1219,17 @@ impl Renderer {
         // (internal pixels may be a hair non-square from rounding).
         let ratio = Vec2::new(w / output_w, h / output_h);
         let view = camera.view_matrix();
-        let projection = camera.projection(output_w / output_h);
+        // A photo's lens sample shears the projection so the focus plane stays put (photo.rs);
+        // the frame treats that as its camera, only the sub-pixel offset is jitter.
+        let lens_shift = self.photo_sample.map_or(Vec2::ZERO, |p| p.lens_shift);
+        let projection = Mat4::from_translation(lens_shift.extend(0.0)) * camera.projection(output_w / output_h);
         let unjittered = projection * view;
 
         // Sub-pixel jitter (Halton 2, 3) gives TSR new sample positions every frame, over a
         // cycle long enough for every output pixel to be sampled (see `jitter_phase_count`).
-        let jitter = if s.taa && matches!(s.debug_view, DebugView::Lit | DebugView::IndirectLight | DebugView::Reflections) {
+        let jitter = if let Some(photo) = self.photo_sample {
+            photo.jitter * 2.0 / Vec2::new(w, h)
+        } else if s.taa && matches!(s.debug_view, DebugView::Lit | DebugView::IndirectLight | DebugView::Reflections) {
             resolution::jitter_offset(self.frame_index, ratio.x.min(ratio.y)) * 2.0 / Vec2::new(w, h)
         } else {
             Vec2::ZERO

@@ -2,7 +2,7 @@
 //! label, a group, a value kind and a getter / setter on [`RenderSettings`]. The panel is built
 //! from [`schema`], scene files store overrides by key, and a new setting is one entry here.
 
-use helios_render::{DebugView, DepthOfField, DynamicResolution, LocalExposure, RenderSettings};
+use helios_render::{DebugView, DepthOfField, DynamicResolution, FogScattering, LocalExposure, RenderSettings};
 use serde_json::{json, Value};
 
 pub enum Kind {
@@ -62,6 +62,9 @@ pub fn all() -> Vec<Setting> {
         }),
         flag("clouds", "Volumetric clouds", "Atmosphere", |s| json!(s.clouds), |s, v| s.clouds = b(v)),
         flag("volumetric_fog", "Volumetric fog", "Atmosphere", |s| json!(s.volumetric_fog), |s, v| s.volumetric_fog = b(v)),
+        number("fog_scattering", "Fog screen space scattering", "Atmosphere", (0.0, 4.0, 0.25), |s| json!(s.fog_scattering.map_or(0.0, |f| f.intensity)), |s, v| {
+            s.fog_scattering = (f(v) > 0.0).then(|| FogScattering { intensity: f(v), ..Default::default() })
+        }),
         flag("wind", "Wind animation", "Atmosphere", |s| json!(s.wind), |s, v| s.wind = b(v)),
         number("lod_threshold", "Nanite error (px)", "Geometry", (0.125, 16.0, 0.125), |s| json!(s.lod_threshold), |s, v| s.lod_threshold = f(v)),
         flag("tessellation", "Nanite tessellation (displacement)", "Geometry", |s| json!(s.tessellation), |s, v| s.tessellation = b(v)),
@@ -77,6 +80,7 @@ pub fn all() -> Vec<Setting> {
         flag("translucency_layers", "Translucency layers", "Materials", |s| json!(s.translucency_layers), |s, v| s.translucency_layers = b(v)),
         flag("glass_shadows", "Coloured light through glass", "Materials", |s| json!(s.glass_shadows), |s, v| s.glass_shadows = b(v)),
         flag("taa", "Temporal accumulation (TSR)", "Camera", |s| json!(s.taa), |s, v| s.taa = b(v)),
+        flag("tsr_depth_history", "TSR depth history (disocclusion)", "Camera", |s| json!(s.tsr_depth_history), |s, v| s.tsr_depth_history = b(v)),
         number("motion_blur", "Motion blur shutter", "Camera", (0.0, 1.0, 0.05), |s| json!(s.motion_blur), |s, v| s.motion_blur = f(v)),
         flag("depth_of_field", "Depth of field", "Camera", |s| json!(s.depth_of_field.is_some()), |s, v| {
             s.depth_of_field = b(v).then(DepthOfField::default)

@@ -6,6 +6,7 @@
 //!     [--size 1600x900] [--frames 90] [--view 1] [--detail medium|high]
 //!     [--camera x,y,z,yaw,pitch] [--screen-percentage N] [--gpu-budget-ms N]
 //!     [--no-local-exposure | --local-exposure HIGHLIGHT,SHADOW[,BLEND]] [--gi lumen|lite|auto]
+//!     [--dof F_STOP[,FOCUS_M]] [--photo SAMPLES] [--fog-scattering INTENSITY] [--no-tsr-depth-history]
 //! helios --gltf model.glb|model.gltf       a scene built from a glTF 2.0 file [--no-ground]
 //! helios --bake-hvm DIR                    write the scene's baked meshes as .hvm files
 //! helios --stream-from DIR                 build the scene from them, streaming pages from disk
@@ -145,11 +146,21 @@ mod native {
         pub displacement_speed_bound: bool,
         /// Micro-triangle edge length in pixels (`--dice-rate`).
         pub dice_rate: Option<f32>,
+        /// Fog screen space scattering at this intensity (`--fog-scattering 1`).
+        pub fog_scattering: Option<f32>,
+        /// TSR rejects history by depth too (`--no-tsr-depth-history`: motion vectors only).
+        pub tsr_depth_history: bool,
+        /// Depth of field: f-number and focus distance in metres (`--dof 2.8[,6.5]`; without a
+        /// distance, autofocus on the screen centre).
+        pub dof: Option<helios_render::DepthOfField>,
+        /// Headless: after `--frames`, accumulate a still from this many jittered frames
+        /// (sub-pixel jitter and, with `--dof`, lens samples) and save that (`--photo 256`).
+        pub photo: Option<u32>,
     }
 
     impl Options {
         pub fn parse(args: &[String]) -> Self {
-            let mut o = Options { screenshot: None, size: (1600, 900), frames: 90, view: None, detail: Detail::High, scene: SceneKind::Valley, camera: None, eye: None, at: None, occlusion: true, sw_raster: true, rvt: true, glass_shadows: true, svt: true, animate_sun: false, lod: None, fov: None, pool_mb: None, texture_pool_mb: None, texture_compression: true, switch_to: None, dump_dir: None, dump_count: 16, keys: Vec::new(), keys_at: None, hold: Vec::new(), gltf: None, ground: true, bake_hvm: None, stream_from: None, io_latency_ms: 0, sun: None, move_light: false, full_invalidation: false, moving_lights: Default::default(), moving_light_pages: None, movers: None, static_motion: false, screen_percentage: None, gpu_budget_ms: None, local_exposure: Some(Default::default()), scene_file: None, select: Vec::new(), no_skinning: false, gi: None, megalights: false, tessellation: true, displacement_speed_bound: true, dice_rate: None, speed: None };
+            let mut o = Options { screenshot: None, size: (1600, 900), frames: 90, view: None, detail: Detail::High, scene: SceneKind::Valley, camera: None, eye: None, at: None, occlusion: true, sw_raster: true, rvt: true, glass_shadows: true, svt: true, animate_sun: false, lod: None, fov: None, pool_mb: None, texture_pool_mb: None, texture_compression: true, switch_to: None, dump_dir: None, dump_count: 16, keys: Vec::new(), keys_at: None, hold: Vec::new(), gltf: None, ground: true, bake_hvm: None, stream_from: None, io_latency_ms: 0, sun: None, move_light: false, full_invalidation: false, moving_lights: Default::default(), moving_light_pages: None, movers: None, static_motion: false, screen_percentage: None, gpu_budget_ms: None, local_exposure: Some(Default::default()), scene_file: None, select: Vec::new(), no_skinning: false, gi: None, megalights: false, tessellation: true, displacement_speed_bound: true, dice_rate: None, speed: None, fog_scattering: None, tsr_depth_history: true, dof: None, photo: None };
             let mut scene_given = false;
             let mut it = args.iter().skip(1);
             while let Some(arg) = it.next() {
@@ -224,6 +235,13 @@ mod native {
                     "--no-tessellation" => o.tessellation = false,
                     "--no-displacement-speed-bound" => o.displacement_speed_bound = false,
                     "--dice-rate" => o.dice_rate = value().parse().ok(),
+                    "--fog-scattering" => o.fog_scattering = value().parse().ok(),
+                    "--no-tsr-depth-history" => o.tsr_depth_history = false,
+                    "--dof" => {
+                        let v: Vec<f32> = value().split(',').filter_map(|x| x.parse().ok()).collect();
+                        o.dof = v.first().map(|&f_stop| helios_render::DepthOfField { f_stop, focus_distance: v.get(1).copied(), ..Default::default() });
+                    }
+                    "--photo" => o.photo = value().parse().ok(),
                     "--lights" => helios_demo::scenes::candles::set_candle_lights(value().parse().unwrap_or(0)),
                     "--lantern" => helios_demo::scenes::cathedral::set_lantern(true),
                     // Highlight contrast, shadow contrast and optionally the blurred luminance blend.
@@ -355,6 +373,13 @@ mod native {
             }
             if let Some(rate) = self.dice_rate {
                 app.renderer.settings.dice_rate = rate;
+            }
+            if let Some(intensity) = self.fog_scattering {
+                app.renderer.settings.fog_scattering = (intensity > 0.0).then_some(helios_render::FogScattering { intensity, ..Default::default() });
+            }
+            app.renderer.settings.tsr_depth_history = self.tsr_depth_history;
+            if self.dof.is_some() {
+                app.renderer.settings.depth_of_field = self.dof;
             }
             if let Some(budget) = self.gpu_budget_ms {
                 app.gpu_budget_ms = budget;
@@ -509,6 +534,21 @@ mod native {
                 }
             }
         }
+        if let Some(samples) = options.photo {
+            // Photo mode: the still accumulated from `samples` frames (plus the frames that wait
+            // for the autofocus distance).
+            let photo_start = Instant::now();
+            app.renderer.start_photo(samples);
+            let mut frames = 0;
+            while !app.renderer.photo_progress().is_some_and(|p| p.done()) && frames < samples + 120 {
+                app.update(&mut input, 1.0 / 60.0);
+                app.render(&view, 1.0 / 60.0);
+                let _ = ctx.device.poll(wgpu::PollType::wait_indefinitely());
+                frames += 1;
+            }
+            let progress = app.renderer.photo_progress();
+            log::info!("photo: {progress:?} after {frames} frames, {:.2} s", photo_start.elapsed().as_secs_f64());
+        }
         let elapsed = start.elapsed().as_secs_f64() * 1000.0 / timed_frames.max(1) as f64;
         log::info!("rendered {} frames, {:.2} ms/frame (incl. sync)", options.frames, elapsed);
         if !shadow_work.is_empty() {
@@ -555,6 +595,8 @@ mod native {
             log::info!("local shadow slots (rank, light, resident/requested): {}", app.renderer.local_pool_report());
         }
 
+        let c = app.camera;
+        log::info!("final camera: --camera {},{},{},{},{}", c.position.x, c.position.y, c.position.z, c.yaw, c.pitch);
         let pixels = read_back(&ctx, &target, width, height);
         save_png(path, width, height, &pixels);
         log::info!("saved {path}");
