@@ -62,6 +62,7 @@ mod lights;
 mod lumen;
 mod lumen_displaced;
 mod lumen_dynamic;
+mod lumen_light_grid;
 mod lumen_lite;
 mod lumen_offload;
 mod material_graphs;

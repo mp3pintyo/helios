@@ -23,6 +23,9 @@
 //                   finest level that holds the pixel (trilinear x backface x Chebyshev weights,
 //                   a normal and view bias against self-occlusion), blending into the next level
 //                   at the window edge and into the radiance cache beyond the last
+//   reflect_field : screen-space reflections (UE 5.8's Lumen Lite: reflections fall back to SSR)
+//                   over the closest-depth HZB (hzb_trace.wgsl), the irradiance field and the sky
+//                   where they miss; replaces Lumen's traced reflections in `reflection_raw`
 //   debug_field   : probe visualisation (debug view 20)
 
 #include "common.wgsl"
@@ -32,6 +35,9 @@
 #include "lumen_mesh_sdf.wgsl"
 #include "lumen_cards.wgsl"
 #include "lumen_trace.wgsl"
+#include "fog_common.wgsl"
+#include "lumen_reflect.wgsl"
+#include "hzb_trace.wgsl"
 
 // Keep in sync with lumen_lite.rs.
 const LITE_LEVELS: u32 = 4u;
@@ -49,12 +55,24 @@ const SCHEDULE_HISTOGRAM: u32 = 8u;
 const SCHEDULE_LIST: u32 = 72u;
 
 // Probe kinds (low byte of ProbeState::status; the score bucket sits in the second byte, the
-// FIRST_UPDATE flag above).
+// FIRST_UPDATE flag above, the variability in the top byte).
 const PROBE_NEW: u32 = 0u;      // scrolled in, never traced: not interpolated
 const PROBE_ACTIVE: u32 = 1u;
 const PROBE_SLEEPING: u32 = 2u; // no surface in the cells around it: refreshed rarely
 const PROBE_BURIED: u32 = 3u;   // inside geometry, could not be moved out: not interpolated
 const FIRST_UPDATE: u32 = 0x10000u;
+// A probe's variability: how much its last refreshes changed its irradiance (the mean absolute
+// luminance change of its texels relative to their mean, smoothed over refreshes), stored in
+// the status's top byte in steps of 1/255 up to VARIABILITY_MAX.
+const VARIABILITY_SHIFT: u32 = 24u;
+const VARIABILITY_MAX: f32 = 1.0;
+// Refresh rate factors of the variability-driven schedule: a probe whose refreshes change it by
+// VARIABILITY_STEADY or less is refreshed at RATE_STEADY times the age-based rate, one changing
+// by VARIABILITY_CHANGING or more at RATE_CHANGING times.
+const VARIABILITY_STEADY: f32 = 0.25;
+const VARIABILITY_CHANGING: f32 = 0.6;
+const RATE_STEADY: f32 = 0.5;
+const RATE_CHANGING: f32 = 4.0;
 
 // Probes are kept at least this many spacings off surfaces (moved along the field's gradient,
 // by at most MAX_RELOCATION), so their rays don't start in the surface's own distance band.
@@ -86,6 +104,14 @@ struct Lite {
     reset: u32,
     // Weight of the previous value when a probe is refreshed.
     hysteresis: f32,
+    // Non-zero: screen traces pass hits on unlit pixels (SkipUnlitHits); height fog on
+    // reflection hits; refresh rates follow each probe's variability.
+    skip_unlit_hits: u32,
+    reflection_fog: u32,
+    adaptive_rate: u32,
+    // With the adaptive rate: a probe is not refreshed before its weighted age reaches this
+    // (steady scenes then refresh fewer probes than the budget allows).
+    min_score: f32,
 }
 
 struct ProbeState {
@@ -127,6 +153,13 @@ struct ProbeState {
 @group(0) @binding(29) var gi_out: texture_storage_2d<rgba16float, write>;
 @group(0) @binding(30) var gi_texture: texture_2d<f32>;
 @group(0) @binding(31) var debug_out: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(32) var gbuffer_motion: texture_2d<f32>;
+// Last frame's lit image (TSR history) and the closest-depth HZB of this frame's depth.
+@group(0) @binding(33) var previous_radiance: texture_2d<f32>;
+@group(0) @binding(34) var hzb_closest: texture_2d<f32>;
+@group(0) @binding(35) var reflection_out: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(36) var transmittance_lut: texture_2d<f32>;
+@group(0) @binding(37) var<uniform> fog: Fog;
 @group(0) @binding(70) var<storage, read> card_data: array<vec4<u32>>;
 @group(0) @binding(71) var<storage, read> card_pages: array<u32>;
 @group(0) @binding(72) var card_capture: texture_2d<u32>;
@@ -224,6 +257,10 @@ fn kind_of(state: ProbeState) -> u32 {
     return state.status & 0xffu;
 }
 
+fn probe_variability(state: ProbeState) -> f32 {
+    return f32(state.status >> VARIABILITY_SHIFT) * (VARIABILITY_MAX / 255.0);
+}
+
 // Update priority as a histogram bucket: new probes on top (finer levels first), then the
 // others by age, weighted up on screen and down for sleeping and buried probes, in quarter
 // octaves. Bucket 0 (refreshed less than a weighted frame ago) is never scheduled.
@@ -245,8 +282,11 @@ fn priority_bucket(index: u32, state: ProbeState) -> u32 {
     if clip.w > -spacing && all(abs(clip.xy) < vec2<f32>(clip.w + reach)) {
         weight *= 4.0;
     }
+    if lite.adaptive_rate != 0u {
+        weight *= mix(RATE_STEADY, RATE_CHANGING, smoothstep(VARIABILITY_STEADY, VARIABILITY_CHANGING, probe_variability(state)));
+    }
     let score = f32(lite.frame - state.updated) * weight;
-    if score < 1.0 {
+    if score < select(1.0, lite.min_score, lite.adaptive_rate != 0u) {
         return 0u;
     }
     return min(u32(log2(score) * 4.0) + 1u, BUCKETS - 1u - LITE_LEVELS);
@@ -267,7 +307,7 @@ fn schedule(@builtin(global_invocation_id) gid: vec3<u32>) {
         state.updated = lite.frame;
     }
     let bucket = priority_bucket(index, state);
-    state.status = (state.status & 0xff00ffu) | (bucket << 8u);
+    state.status = (state.status & 0xffff00ffu) | (bucket << 8u);
     probe_state[index] = state;
     atomicAdd(&schedule_words[SCHEDULE_HISTOGRAM + bucket], 1u);
 }
@@ -378,7 +418,7 @@ fn classify_probe(index: u32) -> vec4<f32> {
     }
     // Only these fields: the other threads read `updated` meanwhile.
     probe_state[index].offset = offset;
-    probe_state[index].status = (state.status & 0xffff00u) | kind;
+    probe_state[index].status = (state.status & 0xffffff00u) | kind;
     return vec4<f32>(base + offset, f32(kind));
 }
 
@@ -446,6 +486,8 @@ fn trace_field(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_
 var<workgroup> ray_directions: array<vec3<f32>, 128>;
 var<workgroup> ray_radiance: array<vec4<f32>, 128>;
 var<workgroup> ray_depth: array<f32, 128>;
+// Per thread: summed absolute luminance change of its irradiance texels and their luminance.
+var<workgroup> texel_change: array<vec2<f32>, 64>;
 
 @compute @workgroup_size(64)
 fn update_field(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) li: u32) {
@@ -458,16 +500,16 @@ fn update_field(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation
         ray_depth[ray] = bitcast<f32>(packed.z);
     }
     workgroupBarrier();
-    if kind_of(state) == PROBE_BURIED {
-        return;
-    }
+    // Buried probes keep their texels (no early return: the reduction below has barriers).
+    let buried = kind_of(state) == PROBE_BURIED;
     // Newly entered probes take their rays as they are; a large change (lights switched,
     // sun moved) is followed faster than the usual hysteresis.
     let first = (state.status & FIRST_UPDATE) != 0u;
     let irradiance_tile = probe_tile(index, IRRADIANCE_TEXELS) + 1u;
     let moment_tile = probe_tile(index, MOMENT_TEXELS) + 1u;
     let base = wid.x * SCRATCH_TEXELS;
-    for (var texel = li; texel < SCRATCH_TEXELS; texel += 64u) {
+    var change_sum = vec2<f32>(0.0);
+    for (var texel = li; texel < select(SCRATCH_TEXELS, 0u, buried); texel += 64u) {
         if texel < IRRADIANCE_TEXELS * IRRADIANCE_TEXELS {
             let t = vec2<u32>(texel % IRRADIANCE_TEXELS, texel / IRRADIANCE_TEXELS);
             let n = oct_decode((vec2<f32>(t) + 0.5) / f32(IRRADIANCE_TEXELS));
@@ -485,6 +527,7 @@ fn update_field(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation
             if change > 0.5 {
                 hysteresis *= 0.5;
             }
+            change_sum += vec2<f32>(abs(luminance(current.rgb) - luminance(previous.rgb)), luminance(previous.rgb));
             scratch[base + texel] = mix(current, previous, hysteresis);
         } else {
             let m = texel - IRRADIANCE_TEXELS * IRRADIANCE_TEXELS;
@@ -505,6 +548,27 @@ fn update_field(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation
             }
             scratch[base + texel] = vec4<f32>(current, 0.0, 0.0);
         }
+    }
+    // The probe's variability: this refresh's relative change, smoothed with the previous ones
+    // (a new probe starts at the maximum, so it is refreshed often until it settles).
+    texel_change[li] = change_sum;
+    workgroupBarrier();
+    for (var stride = 32u; stride > 0u; stride >>= 1u) {
+        if li < stride {
+            texel_change[li] += texel_change[li + stride];
+        }
+        workgroupBarrier();
+    }
+    if li == 0u && !buried {
+        let sums = texel_change[0];
+        var variability = min(sums.x / max(sums.y, 1e-6), VARIABILITY_MAX);
+        if first {
+            variability = VARIABILITY_MAX;
+        } else {
+            variability = mix(probe_variability(state), variability, 0.5);
+        }
+        let stored = u32(round(variability / VARIABILITY_MAX * 255.0));
+        probe_state[index].status = (state.status & 0x00ffffffu) | (stored << VARIABILITY_SHIFT);
     }
 }
 
@@ -549,7 +613,7 @@ struct FieldSample {
     weight: f32,
 }
 
-fn sample_level(level: u32, world: vec3<f32>, n: vec3<f32>, biased: vec3<f32>, g: vec3<f32>) -> FieldSample {
+fn sample_level(level: u32, world: vec3<f32>, n: vec3<f32>, biased: vec3<f32>, g: vec3<f32>, lookup: vec3<f32>) -> FieldSample {
     let spacing = lite.levels[level].w;
     let base = vec3<i32>(floor(g));
     let f = g - floor(g);
@@ -588,7 +652,7 @@ fn sample_level(level: u32, world: vec3<f32>, n: vec3<f32>, biased: vec3<f32>, g
         }
         let trilinear = select(1.0 - f, f, o == vec3<u32>(1u));
         w *= max(trilinear.x * trilinear.y * trilinear.z, 1e-3);
-        let irradiance = textureSampleLevel(irradiance_atlas, lumen_sampler, tile_uv(index, IRRADIANCE_TEXELS, n, irradiance_size), 0.0);
+        let irradiance = textureSampleLevel(irradiance_atlas, lumen_sampler, tile_uv(index, IRRADIANCE_TEXELS, lookup, irradiance_size), 0.0);
         sum += irradiance * w;
         weight_sum += w;
     }
@@ -607,9 +671,10 @@ fn window_coords(level: u32, p: vec3<f32>) -> vec4<f32> {
     return vec4<f32>(g, min(inside.x, min(inside.y, inside.z)));
 }
 
-// Irradiance field at a surface: the finest level that holds it, blended into the next coarser
-// level near its window's edge and into the radiance cache beyond the last one.
-fn field_irradiance(world: vec3<f32>, n: vec3<f32>, v: vec3<f32>) -> vec4<f32> {
+// Irradiance field at a surface (normal `n`, towards the eye `v`) in direction `lookup` (the
+// normal for diffuse light): the finest level that holds it, blended into the next coarser level
+// near its window's edge and into the radiance cache beyond the last one.
+fn field_irradiance(world: vec3<f32>, n: vec3<f32>, v: vec3<f32>, lookup: vec3<f32>) -> vec4<f32> {
     var result = vec4<f32>(0.0);
     var remaining = 1.0;
     for (var level = 0u; level < LITE_LEVELS && remaining > 1e-3; level++) {
@@ -618,7 +683,7 @@ fn field_irradiance(world: vec3<f32>, n: vec3<f32>, v: vec3<f32>) -> vec4<f32> {
         if g.w <= 0.0 {
             continue;
         }
-        let s = sample_level(level, world, n, biased, g.xyz);
+        let s = sample_level(level, world, n, biased, g.xyz, lookup);
         if s.weight <= 1e-5 {
             continue;
         }
@@ -629,8 +694,8 @@ fn field_irradiance(world: vec3<f32>, n: vec3<f32>, v: vec3<f32>) -> vec4<f32> {
     if remaining > 1e-3 {
         // Beyond the field: the radiance cache, whose sky visibility is unknown - estimated from
         // how much of the open sky's irradiance it receives.
-        let sky = sh_irradiance(sky_sh, n) * frame.sun_illuminance.rgb * lumen.sky_intensity;
-        let cache = radiance_cache_irradiance(world + n * 0.1, n, vec3<f32>(-1.0));
+        let sky = sh_irradiance(sky_sh, lookup) * frame.sun_illuminance.rgb * lumen.sky_intensity;
+        let cache = radiance_cache_irradiance(world + n * 0.1, lookup, vec3<f32>(-1.0));
         var fallback = vec4<f32>(sky / PI, 1.0);
         if cache.x >= 0.0 {
             fallback = vec4<f32>(cache / PI, saturate(luminance(cache) / max(luminance(sky), 1e-6)));
@@ -656,8 +721,102 @@ fn integrate_field(@builtin(global_invocation_id) gid: vec3<u32>) {
     let world = world_from_depth(uv, depth, frame.inv_view_proj);
     let n = normalize(textureLoad(gbuffer_normal, pixel, 0).xyz);
     let v = normalize(frame.camera_position.xyz - world);
-    let result = field_irradiance(world, n, v);
+    let result = field_irradiance(world, n, v, n);
     textureStore(gi_out, gid.xy, select(result, vec4<f32>(0.0, 0.0, 0.0, 1.0), any(result != result)));
+}
+
+// ---- Reflections ------------------------------------------------------------------------------------------
+
+// As lumen_gather.wgsl: rougher surfaces take their specular from the gathered irradiance.
+const MAX_REFLECTION_ROUGHNESS: f32 = 0.55;
+const MAX_REFLECTION_RAY_INTENSITY: f32 = 8.0;
+// Screen traces: segment length (plus the view depth), HZB iterations, the depth shell a hit
+// may lie in (metres at the camera, growing 5 % per metre) and the pixels skipped at the start.
+const SSR_DISTANCE: f32 = 30.0;
+const SSR_STEPS: u32 = 32u;
+const SSR_THICKNESS: vec2<f32> = vec2<f32>(0.15, 0.05);
+const SSR_START_PIXELS: f32 = 2.0;
+// A hit fades into the fallback over this fraction of the screen at its edges.
+const SSR_EDGE_FADE: f32 = 0.08;
+// Distance of what the irradiance field stands for, for the height fog (the sky: the trace
+// distance).
+const FALLBACK_DISTANCE: f32 = 10.0;
+
+// Last frame's radiance at the pixel an SSR trace accepted (hzb_trace_accept).
+var<private> ssr_hit_color: vec3<f32>;
+
+// Filter of hzb_trace.wgsl: with SkipUnlitHits, pixels last frame did not light are passed.
+fn hzb_trace_accept(pixel: vec2<u32>) -> bool {
+    let uv = (vec2<f32>(pixel) + 0.5) * frame.viewport.zw;
+    let color = screen_hit_radiance(uv);
+    if color.x >= 0.0 {
+        ssr_hit_color = color;
+        return true;
+    }
+    if lite.skip_unlit_hits != 0u {
+        return false;
+    }
+    let motion = textureLoad(gbuffer_motion, pixel, 0).xy;
+    ssr_hit_color = textureSampleLevel(previous_radiance, lumen_sampler, uv - motion, 0.0).rgb;
+    return true;
+}
+
+// Per half-resolution pixel (the pixels and GGX samples Lumen's reflect_trace uses, so
+// reflect_temporal filters both alike): one GGX ray traced in screen space over the closest-depth
+// HZB. Where it misses (or leaves the screen), the irradiance field at the surface looked up in
+// the reflected direction - its sky part (sky visibility x the blurred sky) replaced by the sharp
+// sky - with height fog; no world trace.
+@compute @workgroup_size(8, 8)
+fn reflect_field(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let half_size = viewport_extent(frame.viewport, 2u);
+    if any(gid.xy >= half_size) {
+        return;
+    }
+    let pixel = min(gid.xy * 2u + vec2<u32>(frame.frame_index & 1u, (frame.frame_index >> 1u) & 1u), vec2<u32>(frame.viewport.xy) - 1u);
+    let depth = textureLoad(depth_texture, pixel, 0).r;
+    let normal_rough = textureLoad(gbuffer_normal, pixel, 0);
+    if depth <= 0.0 || normal_rough.w > MAX_REFLECTION_ROUGHNESS {
+        textureStore(reflection_out, gid.xy, vec4<f32>(0.0));
+        return;
+    }
+    let uv = (vec2<f32>(pixel) + 0.5) * frame.viewport.zw;
+    let world = world_from_depth(uv, depth, frame.inv_view_proj);
+    let n = normalize(normal_rough.xyz);
+    let v = normalize(frame.camera_position.xyz - world);
+    let tbn = basis(n);
+    let alpha = max(normal_rough.w * normal_rough.w, 0.002);
+    let u = vec2<f32>(
+        interleaved_gradient_noise(vec2<f32>(gid.xy), frame.frame_index),
+        interleaved_gradient_noise(vec2<f32>(gid.xy) + vec2<f32>(59.0, 23.0), frame.frame_index),
+    );
+    let h = tbn * sample_ggx_vndf(transpose(tbn) * v, alpha, u);
+    var dir = reflect(-v, h);
+    if dot(dir, n) <= 0.0 {
+        dir = reflect(-v, n);
+    }
+    let linear_depth = frame.camera_position.w / depth;
+    let origin = world + n * (0.02 + 0.002 * linear_depth);
+    let trace = hzb_trace(origin, origin + dir * (SSR_DISTANCE + linear_depth), SSR_START_PIXELS, SSR_THICKNESS, 0.002, SSR_STEPS);
+    var hit_weight = 0.0;
+    if trace.hit {
+        let hit_uv = (vec2<f32>(trace.pixel) + 0.5) * frame.viewport.zw;
+        let edge = min(min(hit_uv.x, 1.0 - hit_uv.x), min(hit_uv.y, 1.0 - hit_uv.y));
+        hit_weight = saturate(edge / SSR_EDGE_FADE);
+    }
+    var color = ssr_hit_color;
+    if hit_weight < 1.0 {
+        let field = field_irradiance(world, n, v, dir);
+        let blurred_sky = sh_irradiance(sky_sh, dir) * frame.sun_illuminance.rgb * lumen.sky_intensity / PI;
+        var fallback = max(field.rgb + field.a * (sky_radiance(dir) - blurred_sky), vec3<f32>(0.0));
+        if lite.reflection_fog != 0u {
+            fallback = reflection_height_fog(fallback, origin, dir, mix(FALLBACK_DISTANCE, lumen.max_trace_distance, field.a));
+        }
+        color = mix(fallback, ssr_hit_color, hit_weight);
+    }
+    color = select(color, vec3<f32>(0.0), any(color != color));
+    let limit = MAX_REFLECTION_RAY_INTENSITY / max(exposure[0], 1e-8);
+    color *= min(1.0, limit / max(luminance(color), 1e-8));
+    textureStore(reflection_out, gid.xy, vec4<f32>(color, 1.0));
 }
 
 // ---- Debug view ------------------------------------------------------------------------------------------

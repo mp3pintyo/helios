@@ -32,7 +32,7 @@ use crate::effects::{Effects, EffectsFrame};
 use crate::fog::{FogInputs, VolumetricFog};
 use crate::fog_scattering::{FogScattering, FogScatteringPass};
 use crate::lights::{LightCulling, MAX_LIGHTS};
-use crate::lumen::{CardInputs, Lumen};
+use crate::lumen::{CardInputs, Lumen, LumenOptions};
 use crate::lumen_displaced::DisplaceInputs;
 use crate::photo::{PhotoMode, PhotoProgress, PhotoSample};
 use crate::picking::{PickResult, Picker};
@@ -361,6 +361,23 @@ pub struct RenderSettings {
     /// their nearest layer. Off: weighted blended OIT for particles and depth peeling for every
     /// translucent surface (round 7). Needs 19 sampled textures per shader stage (the shading layout's 18 + the grid).
     pub avboit: bool,
+    /// Lumen Lite's reflections: screen traces over the closest-depth HZB, falling back to the
+    /// irradiance field and the sky where they miss (UE 5.8's Lumen Lite). Off: Lumen's
+    /// per-pixel traced reflections (screen, near field, global field).
+    pub lumen_lite_ssr: bool,
+    /// Lumen's screen traces pass hits on pixels last frame did not light and go on (UE 5.8's
+    /// `ScreenTraces.HZBTraversal.SkipUnlitHits`).
+    pub lumen_skip_unlit_hits: bool,
+    /// Height fog between a reflecting surface and what it reflects when that comes from the
+    /// world trace, the irradiance field or the sky (UE 5.8's `r.Lumen.HeightFog`).
+    pub lumen_reflection_fog: bool,
+    /// Lumen Lite refreshes probes whose irradiance changed more often and steady ones less
+    /// often, within the same budget (off: by age, screen and kind only).
+    pub lumen_lite_adaptive_rate: bool,
+    /// Lumen's surface caches (mesh cards and voxels) light each texel with a few local lights
+    /// importance-sampled from a world-space light grid, shadowed and accumulated over frames,
+    /// instead of every light in range (`lumen_light_grid.rs`).
+    pub lumen_light_sampling: bool,
 }
 
 impl Default for RenderSettings {
@@ -422,6 +439,11 @@ impl Default for RenderSettings {
             mega_lights_hzb_traces: true,
             mega_lights_volume: true,
             avboit: true,
+            lumen_lite_ssr: true,
+            lumen_skip_unlit_hits: true,
+            lumen_reflection_fog: true,
+            lumen_lite_adaptive_rate: true,
+            lumen_light_sampling: true,
         }
     }
 }
@@ -1011,7 +1033,7 @@ impl Renderer {
         }
         if self.uses_lumen_lite() {
             if let Some(lite) = self.lumen_lite.as_mut() {
-                lite.update(&self.queue, scene, camera.position, frame);
+                lite.update(&self.device, &self.queue, scene, camera.position, frame, &self.settings, capacity);
             }
         }
         let view_proj = camera.projection(self.targets.output.0 as f32 / self.targets.output.1 as f32) * camera.view_matrix();
@@ -1141,7 +1163,25 @@ impl Renderer {
         };
         self.lumen.record_displacement(&mut rec, &self.queue, scene, &displace);
         self.lumen.record_distance_field(&mut rec, &self.textures, &self.scene.materials, &self.samplers);
-        let lite_inputs = LiteInputs { frame: &self.frame_uniform, targets: &self.targets, sky: &self.sky, samplers: &self.samplers, exposure: &self.exposure.buffer };
+        let lite_reflections = lumen_lite.is_some() && self.settings.lumen_lite_ssr;
+        let lite_inputs = LiteInputs {
+            frame: &self.frame_uniform,
+            targets: &self.targets,
+            sky: &self.sky,
+            samplers: &self.samplers,
+            exposure: &self.exposure.buffer,
+            hzb: &self.hzb,
+            previous_radiance: &self.targets.history[1 - current],
+            fog: &self.fog.uniform,
+            current,
+            reflections: lite_reflections,
+        };
+        let lumen_options = LumenOptions {
+            skip_unlit_hits: self.settings.lumen_skip_unlit_hits,
+            reflection_fog: self.settings.lumen_reflection_fog,
+            traced_reflections: !lite_reflections,
+            light_sampling: self.settings.lumen_light_sampling,
+        };
         if self.settings.global_illumination {
             let previous_radiance = &self.targets.history[1 - current];
             self.lumen.record(
@@ -1154,7 +1194,16 @@ impl Renderer {
                 current,
                 &self.lights,
                 &self.exposure.buffer,
-                &CardInputs { vsm: &self.vsm, glass, textures: &self.textures, materials: &self.scene.materials, extended: &self.extended, queue: &self.queue },
+                &CardInputs {
+                    vsm: &self.vsm,
+                    glass,
+                    textures: &self.textures,
+                    materials: &self.scene.materials,
+                    extended: &self.extended,
+                    queue: &self.queue,
+                    fog: &self.fog.uniform,
+                    options: lumen_options,
+                },
                 lumen_lite.is_none(),
             );
             if let Some(lite) = lumen_lite {

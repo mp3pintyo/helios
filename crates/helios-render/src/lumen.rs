@@ -35,6 +35,7 @@ use wgpu::{BindingType, ShaderStages, TextureFormat as F, TextureUsages as U};
 use crate::cards::{CaptureInputs, CardCache, CardUniform};
 use crate::lumen_displaced::{DisplaceInputs, DisplacedSurfaces, Surface};
 use crate::lumen_dynamic::{ComposeParams, DynamicField, DynamicFieldStats, FieldBindings, LevelPlacement, SdfInstance};
+use crate::lumen_light_grid::LumenLightGrid;
 use crate::motion::SceneChanges;
 use crate::near_field::{NearField, NearFieldUniform};
 use crate::profiler::Recorder;
@@ -116,6 +117,32 @@ pub struct CardInputs<'a> {
     pub materials: &'a wgpu::Buffer,
     pub extended: &'a crate::substrate_gpu::ExtendedMaterials,
     pub queue: &'a wgpu::Queue,
+    /// The volumetric fog's uniform (height fog on reflection hits).
+    pub fog: &'a wgpu::Buffer,
+    pub options: LumenOptions,
+}
+
+/// Lumen's switches from [`crate::RenderSettings`].
+#[derive(Clone, Copy, Debug)]
+pub struct LumenOptions {
+    /// Screen traces pass hits on pixels last frame did not light (UE 5.8's
+    /// `ScreenTraces.HZBTraversal.SkipUnlitHits`).
+    pub skip_unlit_hits: bool,
+    /// Height fog between a reflecting surface and its world-traced hit (`r.Lumen.HeightFog`).
+    pub reflection_fog: bool,
+    /// Trace reflections per pixel (off: Lumen Lite's screen-space reflections write them).
+    pub traced_reflections: bool,
+    /// The surface caches importance-sample local lights from the light grid (off: every
+    /// light in range; `lumen_light_grid.rs`).
+    pub light_sampling: bool,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+struct GatherOptions {
+    skip_unlit_hits: u32,
+    reflection_fog: u32,
+    _pad: [u32; 2],
 }
 
 /// Per-entry-point pipeline with its own (exact) bind group layout.
@@ -148,8 +175,14 @@ struct GatherTargets {
     reflection: [wgpu::TextureView; 2],
 }
 
+/// The bindings the screen traces and reflections read besides the tracing ones: the fog, the
+/// sun's transmittance and the gather options (lumen_gather.wgsl 150-152).
+const REFLECT_BINDINGS: [u32; 3] = [150, 151, 152];
+
 pub struct Lumen {
     uniform: wgpu::Buffer,
+    /// `GatherOptions` of lumen_gather.wgsl.
+    gather_options: wgpu::Buffer,
     pub global_sdf: wgpu::TextureView,
     global_sdf_storage: wgpu::TextureView,
     /// Closest instance per global-SDF voxel (16 bits, two voxels along x per texel).
@@ -162,6 +195,8 @@ pub struct Lumen {
     bricks: wgpu::Buffer,
     near_field: NearField,
     cards: CardCache,
+    /// Local-light candidates of the surface caches (stochastic light sampling).
+    light_grid: LumenLightGrid,
     /// Incremental updates for moved instances.
     dynamic: DynamicField,
     levels: Vec<Level>,
@@ -248,6 +283,7 @@ impl Lumen {
 
         Self {
             uniform: uniform_buffer(device, "lumen", std::mem::size_of::<LumenUniform>() as u64),
+            gather_options: uniform_buffer(device, "lumen gather options", std::mem::size_of::<GatherOptions>() as u64),
             global_sdf: sdf.create_view(&Default::default()),
             global_sdf_storage: sdf.create_view(&Default::default()),
             instance_ids: ids.create_view(&Default::default()),
@@ -259,6 +295,7 @@ impl Lumen {
             bricks: storage_buffer(device, "sdf bricks", 4096 * 64 * 4, wgpu::BufferUsages::empty()),
             near_field: NearField::new(device),
             cards: CardCache::new(device),
+            light_grid: LumenLightGrid::new(device),
             // The global distance field is built (and its shadows traced) whether GI is on or not:
             // compiled with the core set in the browser.
             dynamic: in_group(Group::Core, || DynamicField::new(device, &sdf_module, SDF_LEVELS)),
@@ -308,6 +345,8 @@ impl Lumen {
                     (8, tex(true)),
                     (10, bind::sampler()),
                     (11, ro()),
+                    (153, u()),
+                    (154, ro()),
                 ],
             ),
             update_probes: Stage::new(
@@ -340,6 +379,9 @@ impl Lumen {
                     (18, ro()),
                     (19, ro()),
                     (20, tex3(true)),
+                    (150, u()),
+                    (151, tex(true)),
+                    (152, u()),
                 ]),
             ),
             probe_sh: Stage::new(device, &gather_module, "probe_sh", &[(0, u()), (10, rw()), (13, tex(false)), (86, ro())]),
@@ -369,13 +411,16 @@ impl Lumen {
                     (18, ro()),
                     (19, ro()),
                     (20, tex3(true)),
+                    (150, u()),
+                    (151, tex(true)),
+                    (152, u()),
                 ]),
             ),
             reflect_temporal: Stage::new(
                 device,
                 &gather_module,
                 "reflect_temporal",
-                &[(0, u()), (4, tex(false)), (9, bind::sampler()), (15, hdr()), (16, tex(false)), (17, tex(true))],
+                &[(0, u()), (4, tex(false)), (9, bind::sampler()), (15, hdr()), (16, tex(false)), (17, tex(true)), (18, ro())],
             ),
             light_cards: Stage::new(
                 device,
@@ -406,6 +451,8 @@ impl Lumen {
                     (28, tex(false)),
                     (90, u()),
                     (91, tex(true)),
+                    (153, u()),
+                    (154, rw()),
                 ],
             ),
             debug_cards: Stage::new(
@@ -543,6 +590,7 @@ impl Lumen {
         self.dynamic.stats.levels = self.levels.iter().filter(|l| l.compose_now).count() as u32;
         self.dynamic.schedule(queue, device, &placements, &self.instance_bounds, &self.in_global_field);
 
+        self.light_grid.update(camera_position, frame);
         let mut probe_levels = [Vec4::ZERO; 2];
         for (i, spacing) in PROBE_SPACING.iter().enumerate() {
             let origin = (camera_position / *spacing).floor() * *spacing - Vec3::splat(spacing * (PROBE_RES / 2) as f32);
@@ -766,6 +814,14 @@ impl Lumen {
     ) {
         let device = rec.device;
         let Some(gather) = &self.gather else { return };
+        let options = surfaces.options;
+        let gather_options = GatherOptions { skip_unlit_hits: options.skip_unlit_hits as u32, reflection_fog: options.reflection_fog as u32, _pad: [0; 2] };
+        surfaces.queue.write_buffer(&self.gather_options, 0, bytemuck::bytes_of(&gather_options));
+
+        // ---- Local-light candidates of the surface caches ----------------------------------------
+        if self.has_sdf {
+            self.light_grid.record(rec, surfaces.queue, frame, lights, options.light_sampling);
+        }
 
         // ---- Mesh cards: capture pending materials, light this frame's pages ---------------------
         if self.has_sdf {
@@ -806,6 +862,8 @@ impl Lumen {
                     (28, TextureView(&self.cards.albedo)),
                     (90, surfaces.glass.uniform.as_entire_binding()),
                     (91, TextureView(surfaces.glass.view())),
+                    (153, self.light_grid.uniform.as_entire_binding()),
+                    (154, self.light_grid.words.as_entire_binding()),
                 ],
             );
             let mut pass = rec.compute_pass("lumen cards");
@@ -832,6 +890,8 @@ impl Lumen {
                     (8, TextureView(&sky.transmittance)),
                     (10, Sampler(&samplers.linear)),
                     (11, lights.lights.as_entire_binding()),
+                    (153, self.light_grid.uniform.as_entire_binding()),
+                    (154, self.light_grid.words.as_entire_binding()),
                 ],
             );
             let probes = self.update_probes.group(
@@ -907,6 +967,9 @@ impl Lumen {
                 (72, TextureView(&self.cards.capture)),
                 (73, TextureView(&self.cards.lighting)),
                 (74, TextureView(&self.instance_ids)),
+                (REFLECT_BINDINGS[0], surfaces.fog.as_entire_binding()),
+                (REFLECT_BINDINGS[1], TextureView(&sky.transmittance)),
+                (REFLECT_BINDINGS[2], self.gather_options.as_entire_binding()),
                 (out.0, TextureView(out.1)),
             ];
             if out.0 == 12 {
@@ -934,16 +997,6 @@ impl Lumen {
             ],
         );
         let reflect = tracing(&self.reflect_trace, (15, &gather.reflection_raw));
-        let temporal = common(
-            &self.reflect_temporal,
-            vec![
-                (4, TextureView(&targets.gbuffer_motion)),
-                (9, Sampler(&samplers.linear)),
-                (15, TextureView(&gather.reflection[current])),
-                (16, TextureView(&gather.reflection_raw)),
-                (17, TextureView(&gather.reflection[1 - current])),
-            ],
-        );
         let half = (targets.width.div_ceil(2), targets.height.div_ceil(2));
         if screen_probes {
             let mut pass = rec.compute_pass("lumen final gather");
@@ -972,12 +1025,51 @@ impl Lumen {
             pass.set_bind_group(0, &integrate, &[]);
             pass.dispatch_workgroups(workgroups(half.0, 8), workgroups(half.1, 8), 1);
         }
+        if options.traced_reflections {
+            let temporal = self.reflection_temporal_group(device, frame, targets, samplers, current, exposure);
+            let mut pass = rec.compute_pass("lumen reflections");
+            pass.set_pipeline(&self.reflect_trace.pipeline);
+            pass.set_bind_group(0, &reflect, &[]);
+            pass.dispatch_workgroups(workgroups(half.0, 8), workgroups(half.1, 8), 1);
+            pass.set_pipeline(&self.reflect_temporal.pipeline);
+            pass.set_bind_group(0, &temporal, &[]);
+            pass.dispatch_workgroups(workgroups(half.0, 8), workgroups(half.1, 8), 1);
+        }
+    }
+
+    fn reflection_temporal_group(&self, device: &wgpu::Device, frame: &wgpu::Buffer, targets: &FrameTargets, samplers: &crate::passes::Samplers, current: usize, exposure: &wgpu::Buffer) -> wgpu::BindGroup {
+        let gather = self.gather.as_ref().expect("gather targets");
+        self.reflect_temporal.group(
+            device,
+            &[
+                (0, frame.as_entire_binding()),
+                (4, TextureView(&targets.gbuffer_motion)),
+                (9, Sampler(&samplers.linear)),
+                (15, TextureView(&gather.reflection[current])),
+                (16, TextureView(&gather.reflection_raw)),
+                (17, TextureView(&gather.reflection[1 - current])),
+                (18, exposure.as_entire_binding()),
+            ],
+        )
+    }
+
+    /// This frame's raw reflections (half resolution), which Lumen Lite's screen-space
+    /// reflections write when Lumen does not trace them.
+    pub(crate) fn reflection_raw(&self) -> Option<&wgpu::TextureView> {
+        self.gather.as_ref().map(|g| &g.reflection_raw)
+    }
+
+    /// Spatial filter and temporal accumulation of the raw reflections into
+    /// [`Lumen::reflection`]`(current)` (after Lumen Lite wrote them).
+    pub(crate) fn record_reflection_temporal(&self, rec: &mut Recorder, frame: &wgpu::Buffer, targets: &FrameTargets, samplers: &crate::passes::Samplers, current: usize, exposure: &wgpu::Buffer) {
+        if self.gather.is_none() {
+            return;
+        }
+        let group = self.reflection_temporal_group(rec.device, frame, targets, samplers, current, exposure);
+        let half = (targets.width.div_ceil(2), targets.height.div_ceil(2));
         let mut pass = rec.compute_pass("lumen reflections");
-        pass.set_pipeline(&self.reflect_trace.pipeline);
-        pass.set_bind_group(0, &reflect, &[]);
-        pass.dispatch_workgroups(workgroups(half.0, 8), workgroups(half.1, 8), 1);
         pass.set_pipeline(&self.reflect_temporal.pipeline);
-        pass.set_bind_group(0, &temporal, &[]);
+        pass.set_bind_group(0, &group, &[]);
         pass.dispatch_workgroups(workgroups(half.0, 8), workgroups(half.1, 8), 1);
     }
 

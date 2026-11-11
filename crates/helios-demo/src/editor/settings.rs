@@ -64,6 +64,13 @@ pub fn all() -> Vec<Setting> {
         flag("mega_lights_shared_rays", "MegaLights shared rays", "Lighting", |s| json!(s.mega_lights_shared_rays), |s, v| s.mega_lights_shared_rays = b(v)),
         flag("mega_lights_hzb_traces", "MegaLights HZB screen traces", "Lighting", |s| json!(s.mega_lights_hzb_traces), |s, v| s.mega_lights_hzb_traces = b(v)),
         flag("mega_lights_volume", "MegaLights fog + translucency", "Lighting", |s| json!(s.mega_lights_volume), |s, v| s.mega_lights_volume = b(v)),
+        flag("lumen_lite_ssr", "Lumen Lite: screen-space reflections", "Lighting", |s| json!(s.lumen_lite_ssr), |s, v| s.lumen_lite_ssr = b(v)),
+        flag("lumen_skip_unlit_hits", "Lumen: screen traces skip unlit hits", "Lighting", |s| json!(s.lumen_skip_unlit_hits), |s, v| s.lumen_skip_unlit_hits = b(v)),
+        flag("lumen_reflection_fog", "Lumen: height fog on reflections", "Lighting", |s| json!(s.lumen_reflection_fog), |s, v| s.lumen_reflection_fog = b(v)),
+        flag("lumen_lite_adaptive_rate", "Lumen Lite: variability-driven probe updates", "Lighting", |s| json!(s.lumen_lite_adaptive_rate), |s, v| {
+            s.lumen_lite_adaptive_rate = b(v)
+        }),
+        flag("lumen_light_sampling", "Lumen: sampled surface-cache lights", "Lighting", |s| json!(s.lumen_light_sampling), |s, v| s.lumen_light_sampling = b(v)),
         flag("auto_exposure", "Auto exposure", "Lighting", |s| json!(s.auto_exposure), |s, v| s.auto_exposure = b(v)),
         flag("local_exposure", "Local exposure", "Lighting", |s| json!(s.local_exposure.is_some()), |s, v| {
             s.local_exposure = b(v).then(LocalExposure::default)
