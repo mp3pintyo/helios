@@ -1,0 +1,54 @@
+[
+  {
+    "id": "shader-f16",
+    "title": "Fél pontosságú (f16) shaderek: a shader-f16 képesség kérése és eszközönként egyetlen változat – mérve, egyik menet sem gyorsult",
+    "area": "Böngésző és platform",
+    "kind": "feature",
+    "status": "done",
+    "phase": "8. kör – 2. hullám",
+    "summary": "Az UE 5.8 célzott anyagokban és globális menetekben FP16-ot használ, az 5.8.1 óta a TSR NVIDIA-n alapból 16 bites. A Helios mostantól kéri a WebGPU shader-f16 képességét (natívan SHADER_F16), ha az adapter kínálja – a Chromium 156, a Firefox 155 és a natív Vulkan is kínálja az RTX 3090-en –, és egy menet a half.wgsl hf/hf2/hf3/hf4 típusaival írhat fél pontosságú számolást, amely f16-képes eszközön f16, máshol f32 lesz; eszközönként csak egy változat fordul, így a böngésző indulásakor nincs több pipeline. A TSR-t és a legdrágább teljes képernyős szűrőt (a MegaLights térbeli zajszűrőjét) átírtuk és megmértük: egyik sem lett gyorsabb sem natívan, sem Chromiumban, sem Firefoxban, a zajszűrő képe mérhetően el is mozdult, ezért a feladat szabálya szerint egyiket sem kapcsoltuk át – az átírás javítófoltként megmaradt más GPU-kon való újraméréshez.",
+    "details": "context.rs: a SHADER_F16 kérése az adapter képességei szerint (a GPU-sor naplója: 'f16 shaders'). shaders/half.wgsl (alias hf = f32 …, HF_MAX) és half_f16.wgsl (enable f16; alias hf = f16 …); shader.rs: compose_half (a half_f16.wgsl-t teszi a half.wgsl helyére, az enable sort a forrás elejére viszi), create_module eszközönként választ (half_precision(device)), allow_half_precision kapcsoló: --no-shader-f16, ?f16=0. Teszt: half_precision_variants_validate (mindkét változat naga-validálása). Kipróbált átírások: tsr.wgsl – a szomszédság YCoCg momentumai, a két szűrő összegei és a history-vágás hf-ben, exponált színeken (64-nél levágva, hogy kilenc négyzetes eltérés összege se csorduljon túl), a momentumok a középső mintához képest (nincs kioltás sík területen); megalights_denoise.wgsl spatial – a fénysűrűség-súlyok és a színösszegek hf-ben. Mindkettő visszaállítva, a folt: docs/round8/platform/f16-tsr-megalights.patch. A Tint és a Firefox naga→HLSL→DXC útja hiba nélkül fordította az f16 változatokat. Elvetve: override konstans a változatokhoz (a WGSL statikus használat miatt a deklarációknak is el kell tűnniük, és az enable direktíva nem függhet override-tól), két pipeline-változat eszközönként (több fordítás a böngészőben).",
+    "metrics": "RTX 3090, 1600×900, menetenkénti GPU-minimumok, váltakozó futások: TSR völgy natív f32 0,110 → f16 0,120 ms; TSR katedrális Chromium 0,110 → 0,107 ms, Firefox 0,122 → 0,143 ms; MegaLights spatial (katedrális, 300 fény) natív 2,34 → 2,89 ms, Chromium 0,48 → 0,50 ms, Firefox 2,06 → 2,19 ms. Kép f32 vs f16: TSR 52,5 dB (zaj 58,3 dB), zajszűrő 42,2 dB (zaj 58,9 dB). A post menetek (bloom, helyi expozíció, tónusleképezés, DOF) 0,02–0,1 ms-osak, a megosztott GPU zaján belül.",
+    "showcase": "Nincs látható különbség (a cél ez): a böngésző konzolján a 'GPU: … f16 shaders' sor mutatja, hogy az eszköz kérte; ?f16=0 vagy --no-shader-f16 kapcsolja ki. A mérések és a javítófolt: docs/round8/platform.md 2. rész.",
+    "modules": [
+      "crates/helios-render/src/shader.rs",
+      "crates/helios-render/src/shaders/half.wgsl",
+      "crates/helios-render/src/shaders/half_f16.wgsl",
+      "crates/helios-render/src/context.rs",
+      "crates/helios-demo/src/main.rs",
+      "crates/helios-demo/src/web.rs",
+      "docs/round8/platform/f16-tsr-megalights.patch"
+    ],
+    "order": 219,
+    "updated": "2026-11-11"
+  },
+  {
+    "id": "browser-bake-worker",
+    "title": "A jelenet sütése Web Workereken: a böngésző lapja nem fagy le induláskor, a tartalom shaderei a sütés alatt fordulnak",
+    "area": "Böngésző és platform",
+    "kind": "feature",
+    "status": "done",
+    "phase": "8. kör – 2. hullám",
+    "summary": "A böngészőben a jelenet sütése (minden háló klaszter-DAG-ja, lapjai és távolságmezője, 3–6 s) eddig a lap szálán futott az első kép előtt: a lap addig nem rajzolt és nem reagált, Chromiumban pedig ez volt az első kép kritikus útja. Mostantól a hálók a háttér-workereken sülnek, legfeljebb négyen osztoznak rajtuk, a lap csak összerakja a jelenetet a kész hálókból (≈ 0,3 s); közben a lap él, kiírja az állapotát, és a jelenet egy háló nélküli 'helyettese' már a sütés alatt elindítja a jelenet anyagaihoz kellő shaderek fordítását. A jelenetváltás (heliosLoadScene, a beágyazott oldal N billentyűje) is a workereken süt, a régi jelenet addig fut tovább. Chromiumban az első kép 1–3 s-mal korábban jön. Közben kiderült, hogy a 8. kör új kötései a megvilágítást 20 mintavételezett textúrára emelték: a böngészők 48-at (Chromium) és 64-et (Firefox) kínálnak, ennél kevesebbnél most érthető hibaüzenet jön összeomlás helyett.",
+    "details": "scene_bake.rs: Task (jelenet, részletesség, shard/shards, gyertyafények, lámpás) és a háló-eredmény kódolása (.hvm bájtok, VirtualMesh::to_bytes), run_task (worker), stand_in, build_baked, web::build (feladatok kiküldése, 8 ms-os aszinkron várakozás, közben a pipeline-sor pumpálása). mesh_store.rs: Shard tár – minden worker ugyanazt az építőt futtatja, a hálókat egyformán osztja ki a legkevésbé terhelt workernek (terhelés = forrásháromszögek, döntetlen a kisebb indexé), a többi helyére üres helyettes kerül; unit() – az egymásra épülő hálók (az erdő assembly-alapja a permetekből) egy workeren maradnak; Baked tár – név szerint ellenőrzött, a hiányzót helyben süti. forest.rs: add_assembly unit-ban. Renderer::prefetch_scene: a helyettes jelenet szinkronja renderelés nélkül (sync_only), így a textúraminták, az anyagfeloldás árnyalási modelljei és tesszellációs permutációja, az áttetsző modellek a sütés alatt kerülnek sorra. helios_geometry::progress: tick a DAG minden egyszerűsített csoportjánál és a távolságmező minden 1024 háromszögénél; bake_worker.js: bakeBeat szívverés (legfeljebb másodpercenként), a watchdog 10 s csendre old, nem 10 s futásra (a hosszú, de élő sütést nem futtatja újra a lapon). web_bake.rs: pool() a jelenetsütéshez, heliosBakeTask a feladat első szava szerint választ. heliosLoadScene async (a site/index.html megvárja). Mérőeszközök: ?compile-batch=N, ?compile-log=1 (Firefox pipeline-onkénti fordítási idő), heliosGpuPasses. Eszközkorlát: GpuContext::MIN_SAMPLED_TEXTURES = 20 (a megvilágítás kötései) ellenőrzése az eszköz előtt, az AVBOIT 19 textúrás layoutja csak ha belefér, a Substrate réteg-megvilágítás 21-től; --max-sampled-textures / ?max-sampled-textures teszteléshez. Elvetve: időszeletelt sütés a lapon, egyetlen worker az egész építővel (a sütés hossza megmarad), a teljes Scene sorosítása, SharedArrayBuffer-es munkalopás (a GitHub Pages nem ad cross-origin izolációt).",
+    "metrics": "Ryzen 5 7600X + RTX 3090, megosztva, 3 váltakozó pár/sor, friss profil. Chromium: első kép katedrális 9,1/9,4/10,1 → 6,8–7,4 s, völgy 11,3/11,4/13,2 → 9,1/9,3 (egy futás 12,1) s; a lap leghosszabb blokkja 4,1–5,6 → 0,4–1,7 s. Firefox 155: első kép a zajon belül változatlan (völgy 9,1–9,9 → 8,8–12,2 s, katedrális 10,5–22,6 → 9,8–11,7 s), a lap leghosszabb blokkja völgy 3,6–3,7 → 0,3 s, katedrális 4,8–13,1 → 0,6–1,0 s; a teljes készlet a gép terhelésével ingadozik (völgy 43–46 → 44,5–63 s). Sütés: völgy a lapon 3,6–5,4 s → workereken 1,8–2,2 s (Firefox) / 6,4–9,2 s (Chromium, a párhuzamos fordítással osztozva) + lapon 0,2–0,3 s. Jelenetváltás völgy → galéria 0,6–0,7 s, 150 ms feletti blokk nélkül. Natív kép változatlan (völgy 55,9 dB, zaj 56,0). Firefox háttérfordítás a völgyön: 147 pipeline, 42,8 s; a legdrágábbak az áttetszőség árnyalása (13,4 s), a feloldás tesszellációs permutációja (5,6 s), a tesszelláció dice-szintjei (7,3 s). Mintavételezett textúrák: Chromium 48, Firefox 64; a megvilágítás 20-at, az áttetszőség 18-at, az AVBOIT 19-et, a Substrate 21-et köt.",
+    "showcase": "web/index.html?scene=cathedral friss profillal: a lap a sütés alatt is él ('Building the cathedral…', docs/round8/platform/1-baking.jpg), az első kép Chromiumban ~7 s (2-cathedral-chromium.jpg); a konzolon 'scene bake: 42 meshes from 4 of 4 workers in … s'. A site-on a jelenetváltás alatt a régi jelenet fut tovább. ?bake-workers=0 a régi utat mutatja összehasonlításhoz.",
+    "modules": [
+      "crates/helios-demo/src/scene_bake.rs",
+      "crates/helios-demo/src/mesh_store.rs",
+      "crates/helios-demo/src/web.rs",
+      "crates/helios-demo/src/web_bake.rs",
+      "crates/helios-demo/src/bake_worker.js",
+      "crates/helios-demo/src/app.rs",
+      "crates/helios-demo/src/scenes/forest.rs",
+      "crates/helios-geometry/src/progress.rs",
+      "crates/helios-render/src/renderer.rs",
+      "crates/helios-render/src/context.rs",
+      "crates/helios-render/src/translucency.rs",
+      "crates/helios-render/src/substrate_gpu.rs",
+      "site/index.html"
+    ],
+    "order": 220,
+    "updated": "2026-11-11"
+  }
+]

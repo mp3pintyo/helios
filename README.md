@@ -65,7 +65,7 @@ cargo run -p helios-demo --release -- --gltf path/to/Fox.glb          # - (Minus
 #   browser: http://localhost:8080/?gltf=models/DamagedHelmet.glb (fetched relative to the page)
 #   browser resolution: dynamic resolution (14 ms GPU budget) is on by default; ?sp=67 fixes the screen
 #   percentage, ?budget=10 changes the budget, ?budget=0 turns it off
-#   ?bake-workers=0: Lumen's displaced variants bake on the render thread instead of Web Workers (comparisons)
+#   ?bake-workers=0: the scene and Lumen's displaced variants bake on the page instead of Web Workers; ?f16=0 (see docs/architecture/browser.md)
 
 # Streaming geometry from pre-baked .hvm files instead of baking at startup
 cargo run -p helios-demo --release -- --scene forest --bake-hvm hvm/forest      # bake once
@@ -357,6 +357,7 @@ Each subsystem is described in its own page under [`docs/architecture/`](docs/ar
 | [Translucency and water](docs/architecture/translucency.md) | Depth-peeled forward translucency, coloured light through glass, water bodies |
 | [Volumes and particles](docs/architecture/volumes-particles.md) | Heterogeneous volumes (fluid simulation), GPU particles, order-independent transparency |
 | [Post-processing](docs/architecture/post.md) | Temporal stability, TSR and dynamic resolution, camera, local exposure, profiling |
+| [Browser platform](docs/architecture/browser.md) | Start-up order, scene bake on Web Workers, device limits, f16 shaders, browser measurement hooks |
 
 ### 3. Editor, scene files and PCG — `helios-demo`, `helios-pcg`, `web/editor`
 
@@ -381,7 +382,7 @@ material graph editor: [`docs/architecture/editor.md`](docs/architecture/editor.
 | No hardware ray tracing | MegaLights' shadow rays march the depth buffer, the lights' virtual shadow maps and Lumen's distance fields |
 | No derivatives in compute shaders (the material resolve is compute over the visibility buffer) | Analytic barycentric UV derivatives; material graphs carry screen derivatives through their math by forward-mode differentiation |
 | Browsers compile every pipeline in their GPU process before running what follows it (Firefox one at a time, asynchronous or not, on every visit); wgpu calls only the synchronous `create*Pipeline` | Progressive start-up (`pipelines.rs`): every pipeline belongs to a feature group and is queued in the browser; the renderer turns a feature off until its group is compiled, so the first image needs only the core set. Chromium: each pipeline is warmed through `create*PipelineAsync` (Dawn compiles in parallel) and made when warm, a cache hit. Firefox: the core set compiles while the scene bakes, the rest one per frame. The frame loop renders into its own texture and presents only frames that queued no compile, so the page never stalls behind one; content pipelines (skinning, masks, a translucent model…) are made on first use or queued once the scene has the content (`Lazy`) |
-| No wasm threads without cross-origin isolation (`SharedArrayBuffer` needs COOP/COEP headers, which GitHub Pages cannot send) | Lumen's displaced-variant bakes run on Web Workers that each instantiate the page's compiled wasm module and exchange bytes with it (`bake_worker.js`); other start-up work (scene build, texture encoding) runs on the render thread |
+| No wasm threads without cross-origin isolation (`SharedArrayBuffer` needs COOP/COEP headers, which GitHub Pages cannot send) | The scene's mesh bakes and Lumen's displaced-variant bakes run on Web Workers that each instantiate the page's compiled wasm module and exchange bytes with it (`bake_worker.js`, `scene_bake.rs`); the rest of the scene build (≈ 0.3 s) and texture encoding run on the render thread |
 
 ## Status vs. Unreal Engine 5 — what is still simpler
 
