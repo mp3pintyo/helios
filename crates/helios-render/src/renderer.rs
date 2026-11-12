@@ -1548,6 +1548,7 @@ impl Renderer {
         self.previous_view_proj = Some(unjittered_view_proj);
         self.previous_viewport = viewport(size);
         self.frame_index = self.frame_index.wrapping_add(1);
+        crate::util::bind_group_cache_end_frame();
         self.history_valid = true;
     }
 

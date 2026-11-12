@@ -93,17 +93,122 @@ pub fn bind_group_layout(
     device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some(label), entries: &entries })
 }
 
+/// A bind group over `entries`. Passes ask for their bind groups every frame (≈ 150 a frame in
+/// the valley), almost always over the same resources, so the group is reused when the layout
+/// and every resource match one asked for within the last [`BIND_GROUP_KEEP_FRAMES`] frames.
+/// Firefox (D3D12) frees a dropped bind group's descriptors only once the page's garbage
+/// collector finalizes the JS object, and new groups every frame filled the 1 M-descriptor heap
+/// in ≈ 800 frames ("Not enough memory left", then a lost device).
 pub fn bind_group(
     device: &wgpu::Device,
     label: &str,
     layout: &wgpu::BindGroupLayout,
     entries: &[(u32, wgpu::BindingResource)],
 ) -> wgpu::BindGroup {
-    let entries: Vec<wgpu::BindGroupEntry> = entries
+    let key = bind_group_cache::key(layout, entries);
+    if let Some(group) = key.as_ref().and_then(bind_group_cache::get) {
+        return group;
+    }
+    let descriptor_entries: Vec<wgpu::BindGroupEntry> = entries
         .iter()
         .map(|(binding, resource)| wgpu::BindGroupEntry { binding: *binding, resource: resource.clone() })
         .collect();
-    device.create_bind_group(&wgpu::BindGroupDescriptor { label: Some(label), layout, entries: &entries })
+    let group = device.create_bind_group(&wgpu::BindGroupDescriptor { label: Some(label), layout, entries: &descriptor_entries });
+    if let Some(key) = key {
+        bind_group_cache::insert(key, group.clone());
+    }
+    group
+}
+
+/// Frames a cached bind group survives without being asked for (it keeps its resources alive).
+pub const BIND_GROUP_KEEP_FRAMES: u64 = 120;
+
+/// Ends a frame for the bind group cache: drops the groups no frame asked for lately.
+pub fn bind_group_cache_end_frame() {
+    bind_group_cache::end_frame();
+}
+
+mod bind_group_cache {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    use std::num::NonZeroU64;
+
+    #[derive(Clone, PartialEq, Eq, Hash)]
+    pub(super) enum Resource {
+        Buffer(wgpu::Buffer, u64, Option<NonZeroU64>),
+        Buffers(Vec<(wgpu::Buffer, u64, Option<NonZeroU64>)>),
+        Sampler(wgpu::Sampler),
+        Samplers(Vec<wgpu::Sampler>),
+        View(wgpu::TextureView),
+        Views(Vec<wgpu::TextureView>),
+    }
+
+    #[derive(Clone, PartialEq, Eq, Hash)]
+    pub(super) struct Key {
+        layout: wgpu::BindGroupLayout,
+        entries: Vec<(u32, Resource)>,
+    }
+
+    struct Cache {
+        frame: u64,
+        groups: HashMap<Key, (wgpu::BindGroup, u64)>,
+    }
+
+    thread_local! {
+        static CACHE: RefCell<Cache> = RefCell::new(Cache { frame: 0, groups: HashMap::new() });
+    }
+
+    fn buffer(b: &wgpu::BufferBinding) -> (wgpu::Buffer, u64, Option<NonZeroU64>) {
+        (b.buffer.clone(), b.offset, b.size)
+    }
+
+    /// The cache key, or `None` for resources it doesn't track (acceleration structures, …).
+    pub(super) fn key(layout: &wgpu::BindGroupLayout, entries: &[(u32, wgpu::BindingResource)]) -> Option<Key> {
+        use wgpu::BindingResource as R;
+        let entries = entries
+            .iter()
+            .map(|(binding, resource)| {
+                let resource = match resource {
+                    R::Buffer(b) => Resource::Buffer(b.buffer.clone(), b.offset, b.size),
+                    R::BufferArray(bs) => Resource::Buffers(bs.iter().map(buffer).collect()),
+                    R::Sampler(s) => Resource::Sampler((*s).clone()),
+                    R::SamplerArray(ss) => Resource::Samplers(ss.iter().map(|s| (*s).clone()).collect()),
+                    R::TextureView(v) => Resource::View((*v).clone()),
+                    R::TextureViewArray(vs) => Resource::Views(vs.iter().map(|v| (*v).clone()).collect()),
+                    _ => return None,
+                };
+                Some((*binding, resource))
+            })
+            .collect::<Option<Vec<_>>>()?;
+        Some(Key { layout: layout.clone(), entries })
+    }
+
+    pub(super) fn get(key: &Key) -> Option<wgpu::BindGroup> {
+        CACHE.with_borrow_mut(|cache| {
+            let frame = cache.frame;
+            cache.groups.get_mut(key).map(|(group, used)| {
+                *used = frame;
+                group.clone()
+            })
+        })
+    }
+
+    pub(super) fn insert(key: Key, group: wgpu::BindGroup) {
+        CACHE.with_borrow_mut(|cache| {
+            let frame = cache.frame;
+            cache.groups.insert(key, (group, frame));
+        });
+    }
+
+    pub(super) fn end_frame() {
+        CACHE.with_borrow_mut(|cache| {
+            cache.frame += 1;
+            if cache.frame % 30 == 0 {
+                let oldest = cache.frame.saturating_sub(super::BIND_GROUP_KEEP_FRAMES);
+                cache.groups.retain(|_, (_, used)| *used >= oldest);
+            }
+        });
+    }
 }
 
 pub fn pipeline_layout(device: &wgpu::Device, label: &str, layouts: &[&wgpu::BindGroupLayout]) -> wgpu::PipelineLayout {

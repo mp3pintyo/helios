@@ -180,8 +180,16 @@ pass keeps a second colour target only while depth of field and motion blur both
 **A lost device** (e.g. a GPU process out of memory) stops the frames with a message ("The GPU device was lost …
 Reload the page") and logs the ledger, instead of leaving a frozen canvas.
 
-**Firefox on Windows** (155 in Playwright and the installed 160, RTX 3090, D3D12): Firefox's GPU process grows by
-about two canvas-sized surfaces per presented frame (≈ 11–13 MB at 1600×900, ≈ 2.7 MB at 800×450), also for a
-30-line page that only clears and presents; wgpu's memory-budget guard then loses the device with "Not enough memory
-left" once the process holds ≈ 99 % of its DXGI budget — in the valley ≈ 20–30 s after the frames run at full rate.
-Helios's own allocations (≈ 1.3 GB, steady) are not the cause; see `docs/round8/gpumem.md`.
+**Firefox on Windows** (155 in Playwright and the installed 160, RTX 3090, D3D12) lost the device after ≈ 800
+presented frames ("Not enough memory left") — 13 s at 60 Hz, 5 s at 160 Hz. Two causes, both fixed
+(`docs/round9/firefox-device-lost.md`):
+
+* *Bind groups.* Passes asked for ≈ 150 new bind groups a frame, and Firefox's D3D12 backend gives a dropped group's
+  descriptors back only when the garbage collector finalizes its JS object, so the 1 M-descriptor heap ran out.
+  `util::bind_group` now reuses a group whose layout and resources match one asked for within the last 120 frames
+  (keyed on wgpu's handle identity; unused groups are dropped every 30 frames). In the steady state no frame creates a
+  bind group; the page also keeps the frame target's view instead of making one a frame.
+* *Canvas format.* Firefox's GPU process keeps memory from every frame presented to a `bgra8unorm` canvas (≈ 5 MiB a
+  frame for Helios at 1600×900, 12.5 MiB for a page that only clears and presents); to `rgba8unorm` it stays flat.
+  Firefox gets an `rgba8unorm` canvas; Chromium and Edge keep their preferred `bgra8unorm` (no measurable difference
+  there: 158–161 fps and 13.0–13.6 ms HUD GPU time with either). `?canvas-format=rgba|bgra` overrides.

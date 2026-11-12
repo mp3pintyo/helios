@@ -61,6 +61,9 @@ pub(crate) struct State {
     /// The frame is rendered here and copied to the canvas only when it compiled nothing (see
     /// the module docs).
     frame_target: wgpu::Texture,
+    /// The view the renderer draws into, kept with the target: a new view a frame would also
+    /// make the bind groups that read it new every frame (see `helios_render`'s bind group cache).
+    frame_view: wgpu::TextureView,
     /// Waiting for the GPU process to finish compiling pipelines.
     compiling: Option<Compiling>,
     /// Frames in a row that created pipelines (a frame that keeps creating them is presented
@@ -128,9 +131,27 @@ fn parallel_compiles() -> bool {
     if let Some(choice) = option_string("shaders", "shaders") {
         return choice == "parallel";
     }
+    user_agent().contains("Chrome/")
+}
+
+/// The canvas format: the browser's preferred one (`bgra8unorm` on Windows), except in Firefox,
+/// whose GPU process (Windows, D3D12) keeps about two canvas-sized surfaces of every frame
+/// presented to a `bgra8unorm` canvas until the device is lost (≈ 750 frames at 1600×900,
+/// 12.5 MiB a frame); presented to `rgba8unorm`, its memory stays flat. `?canvas-format=bgra|rgba`
+/// overrides.
+fn canvas_format(formats: &[wgpu::TextureFormat]) -> Option<wgpu::TextureFormat> {
+    let rgba = match option_string("canvas-format", "canvas-format").as_deref() {
+        Some("rgba") => true,
+        Some("bgra") => false,
+        _ => user_agent().contains("Firefox/"),
+    };
+    let wanted = if rgba { wgpu::TextureFormat::Rgba8Unorm } else { wgpu::TextureFormat::Bgra8Unorm };
+    formats.iter().copied().find(|&f| f == wanted).or_else(|| formats.first().copied())
+}
+
+fn user_agent() -> String {
     let navigator = js_sys::Reflect::get(&window(), &JsValue::from_str("navigator")).unwrap_or(JsValue::UNDEFINED);
-    let agent = js_sys::Reflect::get(&navigator, &JsValue::from_str("userAgent")).ok().and_then(|a| a.as_string()).unwrap_or_default();
-    agent.contains("Chrome/")
+    js_sys::Reflect::get(&navigator, &JsValue::from_str("userAgent")).ok().and_then(|a| a.as_string()).unwrap_or_default()
 }
 
 /// Starts a wait for everything queued so far, pipeline compiles included.
@@ -428,7 +449,8 @@ async fn run() -> Result<(), String> {
     canvas.set_width(width);
     canvas.set_height(height);
     let caps = surface.get_capabilities(&ctx.adapter);
-    let format = caps.formats.first().copied().ok_or("surface has no formats")?;
+    let format = canvas_format(&caps.formats).ok_or("surface has no formats")?;
+    log::info!("canvas format {format:?} (offered {:?})", caps.formats);
     let config = wgpu::SurfaceConfiguration {
         // Frames are copied in from `frame_target` (see the module docs).
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_DST,
@@ -550,6 +572,7 @@ async fn run() -> Result<(), String> {
         hud_timer: 0.0,
         paused: false,
         looking: false,
+        frame_view: target.create_view(&Default::default()),
         frame_target: target,
         // The core pipelines are compiling now: wait for them before the first frame.
         compiling: Some(wait_for_gpu(&ctx.queue, false)),
@@ -777,13 +800,13 @@ fn frame(st: &mut State, now: f64) {
         st.surface.configure(&st.device, &st.config);
         helios_render::gpu_memory::retire_texture(&st.frame_target);
         st.frame_target = frame_target(&st.device, &st.config);
+        st.frame_view = st.frame_target.create_view(&Default::default());
         st.app.resize(width, height);
     }
 
     st.app.update(&mut st.input, dt);
     let rendered = st.app.renderer.frame_count();
-    let view = st.frame_target.create_view(&Default::default());
-    st.app.render(&view, dt);
+    st.app.render(&st.frame_view, dt);
     if st.app.renderer.frame_count() == rendered {
         // The frame's scene sync found pipelines of the scene's content to compile first (they
         // are queued now; the first frame, a new scene, an editor change); nothing was rendered,

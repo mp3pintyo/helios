@@ -429,6 +429,6 @@ Honest differences that remain:
     within a frame (UE's RDG transient resource allocator): targets are long-lived, and unused features give theirs
     back only after 240 frames (UE's render target pool frees after a number of unused frames, too). Growable buffers
     (culling work, Lumen's instance lists) grow to the largest scene and never shrink. In the browser a dropped
-    resource the renderer doesn't explicitly retire still waits for the garbage collector. Firefox's per-frame growth
-    of its GPU process on Windows (`docs/round8/gpumem.md`) is a browser issue Helios can only report (a lost device
-    shows a message).
+    resource the renderer doesn't explicitly retire still waits for the garbage collector (bind groups are reused
+    across frames for this reason, `docs/round9/firefox-device-lost.md`; Firefox gets an `rgba8unorm` canvas, whose
+    presented frames its GPU process doesn't keep).
