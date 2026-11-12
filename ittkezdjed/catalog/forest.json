@@ -1,0 +1,954 @@
+{
+ "scene": "forest",
+ "base": {
+  "detail": "medium",
+  "kind": "procedural",
+  "scene": "forest"
+ },
+ "camera": {
+  "eye": [
+   0,
+   -0.3,
+   0
+  ],
+  "forward": [
+   0.959,
+   0.119,
+   -0.256
+  ]
+ },
+ "materials": [
+  {
+   "name": "forest floor",
+   "kind": "terrain",
+   "graph": null
+  },
+  {
+   "name": "oak bark",
+   "kind": "standard",
+   "graph": null
+  },
+  {
+   "name": "pine bark",
+   "kind": "standard",
+   "graph": null
+  },
+  {
+   "name": "leaves 1",
+   "kind": "foliage",
+   "graph": null
+  },
+  {
+   "name": "leaves 2",
+   "kind": "foliage",
+   "graph": null
+  },
+  {
+   "name": "leaves 3",
+   "kind": "foliage",
+   "graph": null
+  },
+  {
+   "name": "needles",
+   "kind": "foliage",
+   "graph": null
+  },
+  {
+   "name": "grass",
+   "kind": "foliage",
+   "graph": null
+  },
+  {
+   "name": "fern",
+   "kind": "foliage",
+   "graph": null
+  },
+  {
+   "name": "mossy rock",
+   "kind": "rock",
+   "graph": null
+  },
+  {
+   "name": "mossy log",
+   "kind": "rock",
+   "graph": null
+  },
+  {
+   "name": "mushroom",
+   "kind": "standard",
+   "graph": null
+  },
+  {
+   "name": "rock 3",
+   "kind": "rock",
+   "graph": null
+  },
+  {
+   "name": "standard 4",
+   "kind": "standard",
+   "graph": null
+  },
+  {
+   "name": "standard 5",
+   "kind": "standard",
+   "graph": null
+  }
+ ],
+ "meshes": [
+  {
+   "name": "terrain",
+   "triangles": 294912
+  },
+  {
+   "name": "broadleaf wood",
+   "triangles": 9120
+  },
+  {
+   "name": "broadleaf foliage",
+   "triangles": 32640
+  },
+  {
+   "name": "broadleaf wood #2",
+   "triangles": 8234
+  },
+  {
+   "name": "broadleaf foliage #2",
+   "triangles": 32640
+  },
+  {
+   "name": "broadleaf wood #3",
+   "triangles": 6758
+  },
+  {
+   "name": "broadleaf foliage #3",
+   "triangles": 32640
+  },
+  {
+   "name": "conifer wood",
+   "triangles": 9584
+  },
+  {
+   "name": "conifer needles spray",
+   "triangles": 272
+  },
+  {
+   "name": "conifer needles spray #2",
+   "triangles": 272
+  },
+  {
+   "name": "conifer needles spray #3",
+   "triangles": 272
+  },
+  {
+   "name": "conifer needles spray #4",
+   "triangles": 272
+  },
+  {
+   "name": "conifer needles spray #5",
+   "triangles": 272
+  },
+  {
+   "name": "conifer needles spray #6",
+   "triangles": 272
+  },
+  {
+   "name": "conifer needles spray #7",
+   "triangles": 272
+  },
+  {
+   "name": "conifer needles",
+   "triangles": 13632
+  },
+  {
+   "name": "conifer wood #2",
+   "triangles": 6372
+  },
+  {
+   "name": "conifer needles spray #8",
+   "triangles": 272
+  },
+  {
+   "name": "conifer needles spray #9",
+   "triangles": 272
+  },
+  {
+   "name": "conifer needles spray #10",
+   "triangles": 272
+  },
+  {
+   "name": "conifer needles spray #11",
+   "triangles": 272
+  },
+  {
+   "name": "conifer needles spray #12",
+   "triangles": 272
+  },
+  {
+   "name": "conifer needles spray #13",
+   "triangles": 272
+  },
+  {
+   "name": "conifer needles spray #14",
+   "triangles": 272
+  },
+  {
+   "name": "conifer needles #2",
+   "triangles": 8960
+  },
+  {
+   "name": "bush wood",
+   "triangles": 1986
+  },
+  {
+   "name": "bush leaves",
+   "triangles": 3360
+  },
+  {
+   "name": "bush wood #2",
+   "triangles": 2098
+  },
+  {
+   "name": "bush leaves #2",
+   "triangles": 3360
+  },
+  {
+   "name": "fern",
+   "triangles": 1998
+  },
+  {
+   "name": "fern #2",
+   "triangles": 1998
+  },
+  {
+   "name": "fern #3",
+   "triangles": 1998
+  },
+  {
+   "name": "grass",
+   "triangles": 240
+  },
+  {
+   "name": "grass #2",
+   "triangles": 240
+  },
+  {
+   "name": "boulder",
+   "triangles": 20480
+  },
+  {
+   "name": "boulder #2",
+   "triangles": 20480
+  },
+  {
+   "name": "boulder #3",
+   "triangles": 20480
+  },
+  {
+   "name": "fallen log",
+   "triangles": 540
+  },
+  {
+   "name": "mushrooms",
+   "triangles": 896
+  },
+  {
+   "name": "campfire stone",
+   "triangles": 5120
+  },
+  {
+   "name": "campfire coals",
+   "triangles": 5120
+  },
+  {
+   "name": "campfire log",
+   "triangles": 136
+  }
+ ],
+ "actorCount": 6218,
+ "topLevelActors": [
+  {
+   "id": 1,
+   "name": "Landscape",
+   "children": 0
+  },
+  {
+   "id": 2,
+   "name": "Trees",
+   "children": 1500
+  },
+  {
+   "id": 1503,
+   "name": "Bushes",
+   "children": 500
+  },
+  {
+   "id": 2004,
+   "name": "Ferns",
+   "children": 2500
+  },
+  {
+   "id": 4505,
+   "name": "Grass",
+   "children": 1499
+  },
+  {
+   "id": 6005,
+   "name": "Rocks",
+   "children": 160
+  },
+  {
+   "id": 6166,
+   "name": "Fallen logs",
+   "children": 50
+  },
+  {
+   "id": 6217,
+   "name": "Camp lantern",
+   "children": 0
+  },
+  {
+   "id": 6218,
+   "name": "Campfire",
+   "children": 0
+  }
+ ],
+ "lights": 2,
+ "environment": {
+  "clouds": {
+   "base_altitude": 1500,
+   "coverage": 0.4000000059604645,
+   "density": 20,
+   "shadow_strength": 0.800000011920929,
+   "thickness": 1800,
+   "wind": [
+    14,
+    5
+   ]
+  },
+  "fog": {
+   "albedo": [
+    1,
+    1,
+    1
+   ],
+   "ambient": 1,
+   "anisotropy": 0.6499999761581421,
+   "base_height": -4,
+   "density": 0.009999999776482582,
+   "distance": 180,
+   "height_falloff": 0.05999999865889549,
+   "noise": 0.699999988079071
+  },
+  "sun_azimuth_deg": 143.2394561767578,
+  "sun_elevation_deg": 14.896902084350586,
+  "sun_intensity": 9,
+  "wind": {
+   "direction": [
+    1,
+    0.3499999940395355
+   ],
+   "gust_frequency": 0.11999999731779099,
+   "gust_wavelength": 35,
+   "strength": 1,
+   "turbulence": 0.5
+  }
+ },
+ "render": {
+  "schema": [
+   {
+    "group": "Lighting",
+    "key": "global_illumination",
+    "kind": {
+     "type": "bool"
+    },
+    "label": "Lumen global illumination"
+   },
+   {
+    "group": "Lighting",
+    "key": "gi_intensity",
+    "kind": {
+     "max": 4,
+     "min": 0,
+     "step": 0.05000000074505806,
+     "type": "number"
+    },
+    "label": "GI intensity"
+   },
+   {
+    "group": "Lighting",
+    "key": "shadows",
+    "kind": {
+     "type": "bool"
+    },
+    "label": "Virtual shadow maps"
+   },
+   {
+    "group": "Lighting",
+    "key": "local_light_shadow_maps",
+    "kind": {
+     "type": "bool"
+    },
+    "label": "Local light shadow maps"
+   },
+   {
+    "group": "Lighting",
+    "key": "shadow_refresh_budget",
+    "kind": {
+     "max": 512,
+     "min": 0,
+     "step": 8,
+     "type": "number"
+    },
+    "label": "Shadow page refreshes per frame (0 = all)"
+   },
+   {
+    "group": "Lighting",
+    "key": "shadow_distant_prefiltered",
+    "kind": {
+     "type": "bool"
+    },
+    "label": "Prefiltered distant shadows"
+   },
+   {
+    "group": "Lighting",
+    "key": "volume_shadows",
+    "kind": {
+     "type": "bool"
+    },
+    "label": "Volume shadows (smoke, fire, mist)"
+   },
+   {
+    "group": "Lighting",
+    "key": "shadow_distant_level",
+    "kind": {
+     "max": 15,
+     "min": 0,
+     "step": 1,
+     "type": "number"
+    },
+    "label": "Distant shadow levels from (0 = none)"
+   },
+   {
+    "group": "Lighting",
+    "key": "mega_lights",
+    "kind": {
+     "type": "bool"
+    },
+    "label": "MegaLights"
+   },
+   {
+    "group": "Lighting",
+    "key": "mega_lights_importance_cull",
+    "kind": {
+     "max": 0.10000000149011612,
+     "min": 0,
+     "step": 0.0024999999441206455,
+     "type": "number"
+    },
+    "label": "MegaLights importance cull"
+   },
+   {
+    "group": "Lighting",
+    "key": "mega_lights_shared_rays",
+    "kind": {
+     "type": "bool"
+    },
+    "label": "MegaLights shared rays"
+   },
+   {
+    "group": "Lighting",
+    "key": "mega_lights_hzb_traces",
+    "kind": {
+     "type": "bool"
+    },
+    "label": "MegaLights HZB screen traces"
+   },
+   {
+    "group": "Lighting",
+    "key": "mega_lights_volume",
+    "kind": {
+     "type": "bool"
+    },
+    "label": "MegaLights fog + translucency"
+   },
+   {
+    "group": "Lighting",
+    "key": "lumen_lite_ssr",
+    "kind": {
+     "type": "bool"
+    },
+    "label": "Lumen Lite: screen-space reflections"
+   },
+   {
+    "group": "Lighting",
+    "key": "lumen_skip_unlit_hits",
+    "kind": {
+     "type": "bool"
+    },
+    "label": "Lumen: screen traces skip unlit hits"
+   },
+   {
+    "group": "Lighting",
+    "key": "lumen_reflection_fog",
+    "kind": {
+     "type": "bool"
+    },
+    "label": "Lumen: height fog on reflections"
+   },
+   {
+    "group": "Lighting",
+    "key": "lumen_lite_adaptive_rate",
+    "kind": {
+     "type": "bool"
+    },
+    "label": "Lumen Lite: variability-driven probe updates"
+   },
+   {
+    "group": "Lighting",
+    "key": "lumen_light_sampling",
+    "kind": {
+     "type": "bool"
+    },
+    "label": "Lumen: sampled surface-cache lights"
+   },
+   {
+    "group": "Lighting",
+    "key": "auto_exposure",
+    "kind": {
+     "type": "bool"
+    },
+    "label": "Auto exposure"
+   },
+   {
+    "group": "Lighting",
+    "key": "local_exposure",
+    "kind": {
+     "type": "bool"
+    },
+    "label": "Local exposure"
+   },
+   {
+    "group": "Lighting",
+    "key": "short_range_ao",
+    "kind": {
+     "type": "bool"
+    },
+    "label": "Short-range AO"
+   },
+   {
+    "group": "Atmosphere",
+    "key": "river_simulation",
+    "kind": {
+     "type": "bool"
+    },
+    "label": "River simulation"
+   },
+   {
+    "group": "Lighting",
+    "key": "bloom_intensity",
+    "kind": {
+     "max": 0.30000001192092896,
+     "min": 0,
+     "step": 0.004999999888241291,
+     "type": "number"
+    },
+    "label": "Bloom"
+   },
+   {
+    "group": "Atmosphere",
+    "key": "aerial_perspective",
+    "kind": {
+     "type": "bool"
+    },
+    "label": "Aerial perspective"
+   },
+   {
+    "group": "Atmosphere",
+    "key": "aerial_perspective_scale",
+    "kind": {
+     "max": 16,
+     "min": 0,
+     "step": 0.25,
+     "type": "number"
+    },
+    "label": "Haze density"
+   },
+   {
+    "group": "Atmosphere",
+    "key": "clouds",
+    "kind": {
+     "type": "bool"
+    },
+    "label": "Volumetric clouds"
+   },
+   {
+    "group": "Atmosphere",
+    "key": "volumetric_fog",
+    "kind": {
+     "type": "bool"
+    },
+    "label": "Volumetric fog"
+   },
+   {
+    "group": "Atmosphere",
+    "key": "fog_scattering",
+    "kind": {
+     "max": 4,
+     "min": 0,
+     "step": 0.25,
+     "type": "number"
+    },
+    "label": "Fog screen space scattering"
+   },
+   {
+    "group": "Atmosphere",
+    "key": "wind",
+    "kind": {
+     "type": "bool"
+    },
+    "label": "Wind animation"
+   },
+   {
+    "group": "Atmosphere",
+    "key": "wind_bones",
+    "kind": {
+     "type": "bool"
+    },
+    "label": "Dynamic wind (plant bones)"
+   },
+   {
+    "group": "Atmosphere",
+    "key": "wind_simulation",
+    "kind": {
+     "type": "bool"
+    },
+    "label": "Dynamic wind simulation (push, gusts)"
+   },
+   {
+    "group": "Geometry",
+    "key": "lod_threshold",
+    "kind": {
+     "max": 16,
+     "min": 0.125,
+     "step": 0.125,
+     "type": "number"
+    },
+    "label": "Nanite error (px)"
+   },
+   {
+    "group": "Geometry",
+    "key": "tessellation",
+    "kind": {
+     "type": "bool"
+    },
+    "label": "Nanite tessellation (displacement)"
+   },
+   {
+    "group": "Geometry",
+    "key": "dice_rate",
+    "kind": {
+     "max": 8,
+     "min": 0.5,
+     "step": 0.25,
+     "type": "number"
+    },
+    "label": "Tessellation dice rate (px)"
+   },
+   {
+    "group": "Geometry",
+    "key": "occlusion_culling",
+    "kind": {
+     "type": "bool"
+    },
+    "label": "Occlusion culling"
+   },
+   {
+    "group": "Geometry",
+    "key": "sw_raster",
+    "kind": {
+     "type": "bool"
+    },
+    "label": "Software rasteriser"
+   },
+   {
+    "group": "Materials",
+    "key": "virtual_texturing",
+    "kind": {
+     "type": "bool"
+    },
+    "label": "Runtime virtual texture"
+   },
+   {
+    "group": "Materials",
+    "key": "texture_streaming",
+    "kind": {
+     "type": "bool"
+    },
+    "label": "Texture streaming"
+   },
+   {
+    "group": "Materials",
+    "key": "substrate",
+    "kind": {
+     "type": "bool"
+    },
+    "label": "Substrate slabs"
+   },
+   {
+    "group": "Materials",
+    "key": "translucency",
+    "kind": {
+     "type": "bool"
+    },
+    "label": "Translucency"
+   },
+   {
+    "group": "Materials",
+    "key": "translucency_layers",
+    "kind": {
+     "type": "bool"
+    },
+    "label": "Translucency layers"
+   },
+   {
+    "group": "Materials",
+    "key": "glass_shadows",
+    "kind": {
+     "type": "bool"
+    },
+    "label": "Coloured light through glass"
+   },
+   {
+    "group": "Materials",
+    "key": "avboit",
+    "kind": {
+     "type": "bool"
+    },
+    "label": "Voxel-based OIT (AVBOIT)"
+   },
+   {
+    "group": "Lighting",
+    "key": "world_cache",
+    "kind": {
+     "options": [
+      "off",
+      "behind cards",
+      "replaces cards"
+     ],
+     "type": "choice"
+    },
+    "label": "Lumen world cache"
+   },
+   {
+    "group": "Camera",
+    "key": "taa",
+    "kind": {
+     "type": "bool"
+    },
+    "label": "Temporal accumulation (TSR)"
+   },
+   {
+    "group": "Camera",
+    "key": "tsr_depth_history",
+    "kind": {
+     "type": "bool"
+    },
+    "label": "TSR depth history (disocclusion)"
+   },
+   {
+    "group": "Camera",
+    "key": "motion_blur",
+    "kind": {
+     "max": 1,
+     "min": 0,
+     "step": 0.05000000074505806,
+     "type": "number"
+    },
+    "label": "Motion blur shutter"
+   },
+   {
+    "group": "Camera",
+    "key": "depth_of_field",
+    "kind": {
+     "type": "bool"
+    },
+    "label": "Depth of field"
+   },
+   {
+    "group": "Camera",
+    "key": "exposure_compensation",
+    "kind": {
+     "max": 4,
+     "min": -4,
+     "step": 0.10000000149011612,
+     "type": "number"
+    },
+    "label": "Exposure compensation (EV)"
+   },
+   {
+    "group": "Resolution",
+    "key": "screen_percentage",
+    "kind": {
+     "max": 100,
+     "min": 25,
+     "step": 1,
+     "type": "number"
+    },
+    "label": "Screen percentage"
+   },
+   {
+    "group": "Resolution",
+    "key": "dynamic_resolution",
+    "kind": {
+     "type": "bool"
+    },
+    "label": "Dynamic resolution"
+   },
+   {
+    "group": "Resolution",
+    "key": "debug_view",
+    "kind": {
+     "options": [
+      "Lit",
+      "Clusters",
+      "Triangles",
+      "LOD level",
+      "Instances",
+      "Normals",
+      "Albedo",
+      "Indirect light",
+      "Shadow pages (VSM levels)",
+      "Raster path (red = software)",
+      "Shading models",
+      "Lumen surface cache",
+      "Global distance field",
+      "Reflections",
+      "Lumen surface cache (cards)",
+      "Local light shadow pages (mips)",
+      "Invalidation (movable, re-rendered shadow pages, recomposed SDF bricks)",
+      "Skin weights (joints)",
+      "MegaLights samples (light per sample, dark = blocked)",
+      "MegaLights lighting: samples | denoised",
+      "Lumen Lite probes",
+      "Particle overdraw / volume march steps",
+      "Voxel clusters (triangles grey)",
+      "Assembly parts",
+      "Material features (Substrate slabs)",
+      "Tessellation (depth, micro-triangles)",
+      "Shadow overview (levels | page work | invalidation | pool)",
+      "Lumen world cache (purple: no cell)"
+     ],
+     "type": "choice"
+    },
+    "label": "View mode"
+   }
+  ],
+  "values": {
+   "aerial_perspective": true,
+   "aerial_perspective_scale": 4,
+   "auto_exposure": true,
+   "avboit": true,
+   "bloom_intensity": 0.03999999910593033,
+   "clouds": true,
+   "debug_view": "Lit",
+   "depth_of_field": false,
+   "dice_rate": 2,
+   "dynamic_resolution": true,
+   "exposure_compensation": 0,
+   "fog_scattering": 0,
+   "gi_intensity": 1,
+   "glass_shadows": true,
+   "global_illumination": true,
+   "local_exposure": true,
+   "local_light_shadow_maps": true,
+   "lod_threshold": 1,
+   "lumen_light_sampling": true,
+   "lumen_lite_adaptive_rate": true,
+   "lumen_lite_ssr": true,
+   "lumen_reflection_fog": true,
+   "lumen_skip_unlit_hits": true,
+   "mega_lights": false,
+   "mega_lights_hzb_traces": true,
+   "mega_lights_importance_cull": 0.009999999776482582,
+   "mega_lights_shared_rays": true,
+   "mega_lights_volume": true,
+   "motion_blur": 0.5,
+   "occlusion_culling": true,
+   "river_simulation": true,
+   "screen_percentage": 100,
+   "shadow_distant_level": 7,
+   "shadow_distant_prefiltered": true,
+   "shadow_refresh_budget": 96,
+   "shadows": true,
+   "short_range_ao": true,
+   "substrate": true,
+   "sw_raster": true,
+   "taa": true,
+   "tessellation": true,
+   "texture_streaming": true,
+   "translucency": true,
+   "translucency_layers": true,
+   "tsr_depth_history": true,
+   "virtual_texturing": true,
+   "volume_shadows": true,
+   "volumetric_fog": true,
+   "wind": true,
+   "wind_bones": true,
+   "wind_simulation": true,
+   "world_cache": "replaces cards"
+  }
+ },
+ "content": {
+  "items": [
+   "engine/cube",
+   "engine/sphere",
+   "engine/cylinder",
+   "engine/plane",
+   "engine/rock",
+   "engine/boulder",
+   "engine/grass",
+   "engine/fern",
+   "engine/flower-red",
+   "engine/flower-yellow",
+   "engine/flower-blue",
+   "engine/flower-white",
+   "engine/bush",
+   "engine/tree",
+   "engine/conifer"
+  ],
+  "materials": [
+   "engine/default",
+   "engine/white",
+   "engine/rock",
+   "engine/gold",
+   "engine/glass",
+   "engine/emissive",
+   "engine/bark",
+   "engine/pine-bark",
+   "engine/leaves",
+   "engine/needles",
+   "engine/grass",
+   "engine/fern",
+   "engine/stem",
+   "engine/petals-red",
+   "engine/petals-yellow",
+   "engine/petals-blue",
+   "engine/petals-white"
+  ],
+  "pcgPresets": [
+   {
+    "id": "rocks-on-slopes",
+    "label": "Rocks on slopes"
+   },
+   {
+    "id": "flowers-in-meadows",
+    "label": "Flowers in meadows"
+   },
+   {
+    "id": "forest-edge",
+    "label": "Forest edge"
+   }
+  ]
+ },
+ "graphs": []
+}

@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="hu">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Helios starter</title>
+  <link rel="icon" href="data:,">
+  <!-- A minimal Helios page: a full-window 3D background, a loading veil, chapters that move the camera.
+       Setup: python D:/AI/Unreal/ittkezdjed/sync.py ./helios   (puts the engine into ./helios/)
+       Run:   python -m http.server 8080   →  http://localhost:8080/  (WebGPU needs http(s), not file://) -->
+  <style>
+    :root { color-scheme: dark; --ink: #e9edf4; --dim: #9aa4b5; --veil: rgba(8, 10, 14, 0.82); }
+    html, body { margin: 0; background: #0a0c10; color: var(--ink); font: 16px/1.55 system-ui, sans-serif; }
+    /* The canvas needs a real CSS size: the engine renders at that size × devicePixelRatio (capped at 1.5). */
+    #helios-canvas { position: fixed; inset: 0; width: 100vw; height: 100vh; display: block; outline: none; }
+    #veil { position: fixed; inset: 0; display: grid; place-items: center; background: var(--veil); transition: opacity .6s; z-index: 2; }
+    #veil.gone { opacity: 0; pointer-events: none; }
+    #veil p { max-width: 32rem; padding: 0 16px; text-align: center; color: var(--dim); }
+    main { position: relative; z-index: 1; pointer-events: none; }
+    section { min-height: 100vh; display: flex; align-items: center; padding: 0 6vw; }
+    section > div { pointer-events: auto; max-width: 28rem; background: rgba(10, 12, 16, 0.6); backdrop-filter: blur(6px); padding: 20px 24px; border-radius: 10px; }
+    h1, h2 { margin: 0 0 8px; }
+    #fps { position: fixed; right: 12px; bottom: 10px; color: var(--dim); font: 12px ui-monospace, monospace; z-index: 1; }
+  </style>
+</head>
+<body>
+  <canvas id="helios-canvas" tabindex="0" aria-label="3D scene"></canvas>
+  <div id="veil"><p id="veil-text">A 3D jelenet betöltése…</p></div>
+  <main>
+    <section data-camera="intro"><div><h1>Helios starter</h1><p>Görgess: minden fejezet máshová viszi a kamerát.</p></div></section>
+    <section data-camera="detail"><div><h2>Közelebbről</h2><p>A kamerát a <code>heliosLookAt</code> mozgatja.</p></div></section>
+    <section data-camera="wide"><div><h2>Messzebbről</h2><p>A nap állását a <code>heliosSetSun</code> állítja.</p></div></section>
+  </main>
+  <div id="fps"></div>
+  <script type="module" src="main.js"></script>
+</body>
+</html>

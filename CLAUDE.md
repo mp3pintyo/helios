@@ -15,3 +15,12 @@ Rules:
   no page fits); the README gets at most one line (index row, quick-start flag, diagram step).
 - New measurements: `docs/performance.md`; new UE5 gaps: `docs/status.md`.
 - Never run `cargo fmt` (the crate is not rustfmt-formatted).
+
+## Web sites built on Helios (`ittkezdjed/`)
+
+The starter kit for other sites is `ittkezdjed/` (guide, generated `API.md`, `CHANGELOG.md`, `helios-boot.js`, `sync.py`,
+`catalog/`, `template/`). When a change touches what pages use (exports in `web.rs` / `web_editor.rs`, `heliosConfig`
+keys, URL parameters, editor operations, the scene file format), in the same commit:
+- run `python ittkezdjed/sync.py --api`;
+- add a dated entry to `ittkezdjed/CHANGELOG.md` saying what a site must do;
+- if scene contents changed, regenerate `catalog/` (`uv run --with playwright==1.56.0 python -I ittkezdjed/tools/catalog.py`).

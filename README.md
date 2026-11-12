@@ -47,6 +47,7 @@ cargo install wasm-bindgen-cli --version 0.2.130
 ./build-web.ps1
 python -m http.server 8080 --directory web     # open http://localhost:8080/?scene=cathedral
 #   ?shaders=serial|parallel: how the browser's background shader compile is worked (default: by browser)
+#   Building your own web site on Helios: start at ittkezdjed/README.md (sync.py, helios-boot.js, API.md)
 
 # The level editor (browser): outliner, details, gizmos, content browser, PCG volumes, material graphs
 python serve.py 8080 web

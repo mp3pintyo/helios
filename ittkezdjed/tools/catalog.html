@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Helios catalog dump</title>
+  <link rel="icon" href="data:,">
+  <style>html, body { margin: 0; background: #000; } #helios-canvas { width: 640px; height: 360px; display: block; }</style>
+</head>
+<body>
+  <canvas id="helios-canvas"></canvas>
+  <script type="module">
+    // Opened by catalog.py as tools/catalog.html?scene=NAME (the repository root served over HTTP):
+    // starts the engine on the scene and leaves a summary of its editable content in window.catalog.
+    import { startHelios, sceneState } from "../helios-boot.js";
+    const scene = new URLSearchParams(location.search).get("scene") || "gallery";
+    try {
+      const H = await startHelios({ module: "../web/pkg/helios_demo.js", config: { scene }, waitFor: "ready", pauseWhenHidden: false });
+      const s = sceneState(H);
+      const top = s.actorList.filter((a) => a.parent === -1);
+      const camera = H.heliosEditorCamera();
+      window.catalog = {
+        scene: H.heliosScene(),
+        base: s.base,
+        // heliosEditorCamera: view-projection (16), eye (3), forward (3), fov, width, height.
+        camera: { eye: Array.from(camera.slice(16, 19)).map((v) => +v.toFixed(2)), forward: Array.from(camera.slice(19, 22)).map((v) => +v.toFixed(3)) },
+        materials: s.materials.map((m) => ({ name: m.name, kind: m.kind, graph: m.graph || undefined })),
+        meshes: s.meshes.map((m) => ({ name: m.name, triangles: m.triangles })),
+        actorCount: s.actorList.length,
+        topLevelActors: top.slice(0, 200).map((a) => ({ id: a.id, name: a.name, children: s.actorList.filter((c) => c.parent === a.id).length })),
+        lights: s.lights.length,
+        environment: s.environment,
+        render: s.render,
+        content: { items: s.content.items.map((i) => i.id || i), materials: s.content.materials, pcgPresets: s.content.presets },
+        graphs: Object.keys(s.graphs || {}),
+      };
+    } catch (e) {
+      window.catalog = { error: String(e.message || e) };
+    }
+  </script>
+</body>
+</html>

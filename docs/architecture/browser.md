@@ -36,6 +36,19 @@ Scene switches (`heliosLoadScene`, async since round 8; the embedded page's `N`)
 current scene keeps running, and resolve once the new scene is in. Imported glTF models bake on the page (their
 meshes would have to cross to the workers first). Lumen's displaced variants use the same workers (round 6).
 
+## Embedding in other pages (round 9, `ittkezdjed/`)
+
+Sites built on the engine start from [`ittkezdjed/README.md`](../../ittkezdjed/README.md).
+* `sync.py` copies `web/pkg` into a site, writes a `helios-engine.json` manifest (commit, wasm hash, exported API)
+  and reports the API diff, CHANGELOG entries and commits since the site's last sync.
+* `helios-boot.js` (`startHelios`) replaces the start-up loops each site used to write by hand.
+* `API.md` is generated from the `#[wasm_bindgen]` exports, `EditOp` and `SceneDoc`.
+* `catalog/` lists each built-in scene's names.
+
+For these pages, `heliosConfig` also takes `gltf`, `sceneFile` and `stream`. Before, these were URL-only, and sites
+rewrote `location` before loading the module. Two new exports: `heliosReady()` is true once `run()` has finished,
+including a scene file's edits; `heliosError()` returns the start-up error or the lost-device message.
+
 ## Frames that wait for pipelines (round 8, `webperf`)
 
 A frame's scene sync is where new content asks for pipelines: a new scene's shading models, graph materials,

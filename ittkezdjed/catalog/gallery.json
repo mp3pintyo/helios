@@ -1,0 +1,898 @@
+{
+ "scene": "gallery",
+ "base": {
+  "detail": "medium",
+  "kind": "procedural",
+  "scene": "gallery"
+ },
+ "camera": {
+  "eye": [
+   0,
+   2.8,
+   12.5
+  ],
+  "forward": [
+   0,
+   -0.127,
+   -0.992
+  ]
+ },
+ "materials": [
+  {
+   "name": "gallery/flagstone",
+   "kind": "standard",
+   "graph": null
+  },
+  {
+   "name": "gallery/plinth",
+   "kind": "standard",
+   "graph": null
+  },
+  {
+   "name": "gallery/car paint",
+   "kind": "standard",
+   "graph": null
+  },
+  {
+   "name": "gallery/velvet",
+   "kind": "standard",
+   "graph": null
+  },
+  {
+   "name": "gallery/skin",
+   "kind": "standard",
+   "graph": null
+  },
+  {
+   "name": "gallery/wax",
+   "kind": "standard",
+   "graph": null
+  },
+  {
+   "name": "gallery/marble",
+   "kind": "standard",
+   "graph": null
+  },
+  {
+   "name": "gallery/flame",
+   "kind": "standard",
+   "graph": null
+  },
+  {
+   "name": "gallery/leaves",
+   "kind": "foliage",
+   "graph": null
+  },
+  {
+   "name": "gallery/bush wood",
+   "kind": "standard",
+   "graph": null
+  },
+  {
+   "name": "gallery/brushed metal",
+   "kind": "standard",
+   "graph": null
+  },
+  {
+   "name": "gallery/ior 1.33",
+   "kind": "standard",
+   "graph": null
+  },
+  {
+   "name": "gallery/ior 2.4",
+   "kind": "standard",
+   "graph": null
+  },
+  {
+   "name": "gallery/specular colour",
+   "kind": "standard",
+   "graph": null
+  },
+  {
+   "name": "gallery/lava",
+   "kind": "standard",
+   "graph": "Lava"
+  },
+  {
+   "name": "gallery/stylised water",
+   "kind": "standard",
+   "graph": "Stylised water"
+  },
+  {
+   "name": "gallery/tropical water",
+   "kind": "standard",
+   "graph": "Stylised water"
+  },
+  {
+   "name": "gallery/wet stone",
+   "kind": "standard",
+   "graph": "Wet stone"
+  },
+  {
+   "name": "gallery/brick pavement",
+   "kind": "standard",
+   "graph": "Brick pavement"
+  },
+  {
+   "name": "gallery/kerb",
+   "kind": "standard",
+   "graph": null
+  },
+  {
+   "name": "gallery/mushrooms",
+   "kind": "standard",
+   "graph": "Mushrooms"
+  },
+  {
+   "name": "gallery/rippling cloth",
+   "kind": "standard",
+   "graph": "Rippling cloth"
+  },
+  {
+   "name": "gallery/combed tufts",
+   "kind": "standard",
+   "graph": "Combed tufts"
+  },
+  {
+   "name": "gallery/unlit sign",
+   "kind": "standard",
+   "graph": null
+  }
+ ],
+ "meshes": [
+  {
+   "name": "gallery/courtyard",
+   "triangles": 32768
+  },
+  {
+   "name": "gallery/terrace",
+   "triangles": 4608
+  },
+  {
+   "name": "gallery/plinth",
+   "triangles": 12
+  },
+  {
+   "name": "gallery/sphere",
+   "triangles": 20480
+  },
+  {
+   "name": "gallery/candle",
+   "triangles": 864
+  },
+  {
+   "name": "gallery/pot",
+   "triangles": 960
+  },
+  {
+   "name": "gallery/knot",
+   "triangles": 131072
+  },
+  {
+   "name": "gallery/bush wood",
+   "triangles": 1276
+  },
+  {
+   "name": "gallery/bush leaves",
+   "triangles": 3360
+  },
+  {
+   "name": "gallery/sign",
+   "triangles": 12
+  },
+  {
+   "name": "gallery/basin",
+   "triangles": 128
+  },
+  {
+   "name": "gallery/brick terrace",
+   "triangles": 2048
+  },
+  {
+   "name": "gallery/bed",
+   "triangles": 288
+  },
+  {
+   "name": "gallery/kerb",
+   "triangles": 12
+  },
+  {
+   "name": "gallery/pool",
+   "triangles": 1152
+  },
+  {
+   "name": "gallery/drum",
+   "triangles": 256
+  }
+ ],
+ "actorCount": 16,
+ "topLevelActors": [
+  {
+   "id": 1,
+   "name": "Courtyard",
+   "children": 0
+  },
+  {
+   "id": 2,
+   "name": "Specimens",
+   "children": 8
+  },
+  {
+   "id": 11,
+   "name": "Wet stone",
+   "children": 0
+  },
+  {
+   "id": 12,
+   "name": "Brick terrace",
+   "children": 0
+  },
+  {
+   "id": 13,
+   "name": "Mushroom and cloth beds",
+   "children": 0
+  },
+  {
+   "id": 14,
+   "name": "Turntable",
+   "children": 0
+  },
+  {
+   "id": 15,
+   "name": "Unlit sign",
+   "children": 0
+  },
+  {
+   "id": 16,
+   "name": "Spot light",
+   "children": 0
+  }
+ ],
+ "lights": 3,
+ "environment": {
+  "clouds": {
+   "base_altitude": 1500,
+   "coverage": 0.25,
+   "density": 20,
+   "shadow_strength": 0.800000011920929,
+   "thickness": 1800,
+   "wind": [
+    14,
+    5
+   ]
+  },
+  "fog": {
+   "albedo": [
+    1,
+    1,
+    1
+   ],
+   "ambient": 1,
+   "anisotropy": 0.6000000238418579,
+   "base_height": 0,
+   "density": 0,
+   "distance": 160,
+   "height_falloff": 0.05000000074505806,
+   "noise": 0.5
+  },
+  "sun_azimuth_deg": 128.91551208496094,
+  "sun_elevation_deg": 24.064226150512695,
+  "sun_intensity": 10,
+  "wind": {
+   "direction": [
+    1,
+    0.3499999940395355
+   ],
+   "gust_frequency": 0.11999999731779099,
+   "gust_wavelength": 35,
+   "strength": 0,
+   "turbulence": 0.5
+  }
+ },
+ "render": {
+  "schema": [
+   {
+    "group": "Lighting",
+    "key": "global_illumination",
+    "kind": {
+     "type": "bool"
+    },
+    "label": "Lumen global illumination"
+   },
+   {
+    "group": "Lighting",
+    "key": "gi_intensity",
+    "kind": {
+     "max": 4,
+     "min": 0,
+     "step": 0.05000000074505806,
+     "type": "number"
+    },
+    "label": "GI intensity"
+   },
+   {
+    "group": "Lighting",
+    "key": "shadows",
+    "kind": {
+     "type": "bool"
+    },
+    "label": "Virtual shadow maps"
+   },
+   {
+    "group": "Lighting",
+    "key": "local_light_shadow_maps",
+    "kind": {
+     "type": "bool"
+    },
+    "label": "Local light shadow maps"
+   },
+   {
+    "group": "Lighting",
+    "key": "shadow_refresh_budget",
+    "kind": {
+     "max": 512,
+     "min": 0,
+     "step": 8,
+     "type": "number"
+    },
+    "label": "Shadow page refreshes per frame (0 = all)"
+   },
+   {
+    "group": "Lighting",
+    "key": "shadow_distant_prefiltered",
+    "kind": {
+     "type": "bool"
+    },
+    "label": "Prefiltered distant shadows"
+   },
+   {
+    "group": "Lighting",
+    "key": "volume_shadows",
+    "kind": {
+     "type": "bool"
+    },
+    "label": "Volume shadows (smoke, fire, mist)"
+   },
+   {
+    "group": "Lighting",
+    "key": "shadow_distant_level",
+    "kind": {
+     "max": 15,
+     "min": 0,
+     "step": 1,
+     "type": "number"
+    },
+    "label": "Distant shadow levels from (0 = none)"
+   },
+   {
+    "group": "Lighting",
+    "key": "mega_lights",
+    "kind": {
+     "type": "bool"
+    },
+    "label": "MegaLights"
+   },
+   {
+    "group": "Lighting",
+    "key": "mega_lights_importance_cull",
+    "kind": {
+     "max": 0.10000000149011612,
+     "min": 0,
+     "step": 0.0024999999441206455,
+     "type": "number"
+    },
+    "label": "MegaLights importance cull"
+   },
+   {
+    "group": "Lighting",
+    "key": "mega_lights_shared_rays",
+    "kind": {
+     "type": "bool"
+    },
+    "label": "MegaLights shared rays"
+   },
+   {
+    "group": "Lighting",
+    "key": "mega_lights_hzb_traces",
+    "kind": {
+     "type": "bool"
+    },
+    "label": "MegaLights HZB screen traces"
+   },
+   {
+    "group": "Lighting",
+    "key": "mega_lights_volume",
+    "kind": {
+     "type": "bool"
+    },
+    "label": "MegaLights fog + translucency"
+   },
+   {
+    "group": "Lighting",
+    "key": "lumen_lite_ssr",
+    "kind": {
+     "type": "bool"
+    },
+    "label": "Lumen Lite: screen-space reflections"
+   },
+   {
+    "group": "Lighting",
+    "key": "lumen_skip_unlit_hits",
+    "kind": {
+     "type": "bool"
+    },
+    "label": "Lumen: screen traces skip unlit hits"
+   },
+   {
+    "group": "Lighting",
+    "key": "lumen_reflection_fog",
+    "kind": {
+     "type": "bool"
+    },
+    "label": "Lumen: height fog on reflections"
+   },
+   {
+    "group": "Lighting",
+    "key": "lumen_lite_adaptive_rate",
+    "kind": {
+     "type": "bool"
+    },
+    "label": "Lumen Lite: variability-driven probe updates"
+   },
+   {
+    "group": "Lighting",
+    "key": "lumen_light_sampling",
+    "kind": {
+     "type": "bool"
+    },
+    "label": "Lumen: sampled surface-cache lights"
+   },
+   {
+    "group": "Lighting",
+    "key": "auto_exposure",
+    "kind": {
+     "type": "bool"
+    },
+    "label": "Auto exposure"
+   },
+   {
+    "group": "Lighting",
+    "key": "local_exposure",
+    "kind": {
+     "type": "bool"
+    },
+    "label": "Local exposure"
+   },
+   {
+    "group": "Lighting",
+    "key": "short_range_ao",
+    "kind": {
+     "type": "bool"
+    },
+    "label": "Short-range AO"
+   },
+   {
+    "group": "Atmosphere",
+    "key": "river_simulation",
+    "kind": {
+     "type": "bool"
+    },
+    "label": "River simulation"
+   },
+   {
+    "group": "Lighting",
+    "key": "bloom_intensity",
+    "kind": {
+     "max": 0.30000001192092896,
+     "min": 0,
+     "step": 0.004999999888241291,
+     "type": "number"
+    },
+    "label": "Bloom"
+   },
+   {
+    "group": "Atmosphere",
+    "key": "aerial_perspective",
+    "kind": {
+     "type": "bool"
+    },
+    "label": "Aerial perspective"
+   },
+   {
+    "group": "Atmosphere",
+    "key": "aerial_perspective_scale",
+    "kind": {
+     "max": 16,
+     "min": 0,
+     "step": 0.25,
+     "type": "number"
+    },
+    "label": "Haze density"
+   },
+   {
+    "group": "Atmosphere",
+    "key": "clouds",
+    "kind": {
+     "type": "bool"
+    },
+    "label": "Volumetric clouds"
+   },
+   {
+    "group": "Atmosphere",
+    "key": "volumetric_fog",
+    "kind": {
+     "type": "bool"
+    },
+    "label": "Volumetric fog"
+   },
+   {
+    "group": "Atmosphere",
+    "key": "fog_scattering",
+    "kind": {
+     "max": 4,
+     "min": 0,
+     "step": 0.25,
+     "type": "number"
+    },
+    "label": "Fog screen space scattering"
+   },
+   {
+    "group": "Atmosphere",
+    "key": "wind",
+    "kind": {
+     "type": "bool"
+    },
+    "label": "Wind animation"
+   },
+   {
+    "group": "Atmosphere",
+    "key": "wind_bones",
+    "kind": {
+     "type": "bool"
+    },
+    "label": "Dynamic wind (plant bones)"
+   },
+   {
+    "group": "Atmosphere",
+    "key": "wind_simulation",
+    "kind": {
+     "type": "bool"
+    },
+    "label": "Dynamic wind simulation (push, gusts)"
+   },
+   {
+    "group": "Geometry",
+    "key": "lod_threshold",
+    "kind": {
+     "max": 16,
+     "min": 0.125,
+     "step": 0.125,
+     "type": "number"
+    },
+    "label": "Nanite error (px)"
+   },
+   {
+    "group": "Geometry",
+    "key": "tessellation",
+    "kind": {
+     "type": "bool"
+    },
+    "label": "Nanite tessellation (displacement)"
+   },
+   {
+    "group": "Geometry",
+    "key": "dice_rate",
+    "kind": {
+     "max": 8,
+     "min": 0.5,
+     "step": 0.25,
+     "type": "number"
+    },
+    "label": "Tessellation dice rate (px)"
+   },
+   {
+    "group": "Geometry",
+    "key": "occlusion_culling",
+    "kind": {
+     "type": "bool"
+    },
+    "label": "Occlusion culling"
+   },
+   {
+    "group": "Geometry",
+    "key": "sw_raster",
+    "kind": {
+     "type": "bool"
+    },
+    "label": "Software rasteriser"
+   },
+   {
+    "group": "Materials",
+    "key": "virtual_texturing",
+    "kind": {
+     "type": "bool"
+    },
+    "label": "Runtime virtual texture"
+   },
+   {
+    "group": "Materials",
+    "key": "texture_streaming",
+    "kind": {
+     "type": "bool"
+    },
+    "label": "Texture streaming"
+   },
+   {
+    "group": "Materials",
+    "key": "substrate",
+    "kind": {
+     "type": "bool"
+    },
+    "label": "Substrate slabs"
+   },
+   {
+    "group": "Materials",
+    "key": "translucency",
+    "kind": {
+     "type": "bool"
+    },
+    "label": "Translucency"
+   },
+   {
+    "group": "Materials",
+    "key": "translucency_layers",
+    "kind": {
+     "type": "bool"
+    },
+    "label": "Translucency layers"
+   },
+   {
+    "group": "Materials",
+    "key": "glass_shadows",
+    "kind": {
+     "type": "bool"
+    },
+    "label": "Coloured light through glass"
+   },
+   {
+    "group": "Materials",
+    "key": "avboit",
+    "kind": {
+     "type": "bool"
+    },
+    "label": "Voxel-based OIT (AVBOIT)"
+   },
+   {
+    "group": "Lighting",
+    "key": "world_cache",
+    "kind": {
+     "options": [
+      "off",
+      "behind cards",
+      "replaces cards"
+     ],
+     "type": "choice"
+    },
+    "label": "Lumen world cache"
+   },
+   {
+    "group": "Camera",
+    "key": "taa",
+    "kind": {
+     "type": "bool"
+    },
+    "label": "Temporal accumulation (TSR)"
+   },
+   {
+    "group": "Camera",
+    "key": "tsr_depth_history",
+    "kind": {
+     "type": "bool"
+    },
+    "label": "TSR depth history (disocclusion)"
+   },
+   {
+    "group": "Camera",
+    "key": "motion_blur",
+    "kind": {
+     "max": 1,
+     "min": 0,
+     "step": 0.05000000074505806,
+     "type": "number"
+    },
+    "label": "Motion blur shutter"
+   },
+   {
+    "group": "Camera",
+    "key": "depth_of_field",
+    "kind": {
+     "type": "bool"
+    },
+    "label": "Depth of field"
+   },
+   {
+    "group": "Camera",
+    "key": "exposure_compensation",
+    "kind": {
+     "max": 4,
+     "min": -4,
+     "step": 0.10000000149011612,
+     "type": "number"
+    },
+    "label": "Exposure compensation (EV)"
+   },
+   {
+    "group": "Resolution",
+    "key": "screen_percentage",
+    "kind": {
+     "max": 100,
+     "min": 25,
+     "step": 1,
+     "type": "number"
+    },
+    "label": "Screen percentage"
+   },
+   {
+    "group": "Resolution",
+    "key": "dynamic_resolution",
+    "kind": {
+     "type": "bool"
+    },
+    "label": "Dynamic resolution"
+   },
+   {
+    "group": "Resolution",
+    "key": "debug_view",
+    "kind": {
+     "options": [
+      "Lit",
+      "Clusters",
+      "Triangles",
+      "LOD level",
+      "Instances",
+      "Normals",
+      "Albedo",
+      "Indirect light",
+      "Shadow pages (VSM levels)",
+      "Raster path (red = software)",
+      "Shading models",
+      "Lumen surface cache",
+      "Global distance field",
+      "Reflections",
+      "Lumen surface cache (cards)",
+      "Local light shadow pages (mips)",
+      "Invalidation (movable, re-rendered shadow pages, recomposed SDF bricks)",
+      "Skin weights (joints)",
+      "MegaLights samples (light per sample, dark = blocked)",
+      "MegaLights lighting: samples | denoised",
+      "Lumen Lite probes",
+      "Particle overdraw / volume march steps",
+      "Voxel clusters (triangles grey)",
+      "Assembly parts",
+      "Material features (Substrate slabs)",
+      "Tessellation (depth, micro-triangles)",
+      "Shadow overview (levels | page work | invalidation | pool)",
+      "Lumen world cache (purple: no cell)"
+     ],
+     "type": "choice"
+    },
+    "label": "View mode"
+   }
+  ],
+  "values": {
+   "aerial_perspective": true,
+   "aerial_perspective_scale": 4,
+   "auto_exposure": true,
+   "avboit": true,
+   "bloom_intensity": 0.03999999910593033,
+   "clouds": true,
+   "debug_view": "Lit",
+   "depth_of_field": false,
+   "dice_rate": 2,
+   "dynamic_resolution": true,
+   "exposure_compensation": 0,
+   "fog_scattering": 0,
+   "gi_intensity": 1,
+   "glass_shadows": true,
+   "global_illumination": true,
+   "local_exposure": true,
+   "local_light_shadow_maps": true,
+   "lod_threshold": 1,
+   "lumen_light_sampling": true,
+   "lumen_lite_adaptive_rate": true,
+   "lumen_lite_ssr": true,
+   "lumen_reflection_fog": true,
+   "lumen_skip_unlit_hits": true,
+   "mega_lights": false,
+   "mega_lights_hzb_traces": true,
+   "mega_lights_importance_cull": 0.009999999776482582,
+   "mega_lights_shared_rays": true,
+   "mega_lights_volume": true,
+   "motion_blur": 0.5,
+   "occlusion_culling": true,
+   "river_simulation": true,
+   "screen_percentage": 100,
+   "shadow_distant_level": 7,
+   "shadow_distant_prefiltered": true,
+   "shadow_refresh_budget": 96,
+   "shadows": true,
+   "short_range_ao": true,
+   "substrate": true,
+   "sw_raster": true,
+   "taa": true,
+   "tessellation": true,
+   "texture_streaming": true,
+   "translucency": true,
+   "translucency_layers": true,
+   "tsr_depth_history": true,
+   "virtual_texturing": true,
+   "volume_shadows": true,
+   "volumetric_fog": true,
+   "wind": true,
+   "wind_bones": true,
+   "wind_simulation": true,
+   "world_cache": "replaces cards"
+  }
+ },
+ "content": {
+  "items": [
+   "engine/cube",
+   "engine/sphere",
+   "engine/cylinder",
+   "engine/plane",
+   "engine/rock",
+   "engine/boulder",
+   "engine/grass",
+   "engine/fern",
+   "engine/flower-red",
+   "engine/flower-yellow",
+   "engine/flower-blue",
+   "engine/flower-white",
+   "engine/bush",
+   "engine/tree",
+   "engine/conifer"
+  ],
+  "materials": [
+   "engine/default",
+   "engine/white",
+   "engine/rock",
+   "engine/gold",
+   "engine/glass",
+   "engine/emissive",
+   "engine/bark",
+   "engine/pine-bark",
+   "engine/leaves",
+   "engine/needles",
+   "engine/grass",
+   "engine/fern",
+   "engine/stem",
+   "engine/petals-red",
+   "engine/petals-yellow",
+   "engine/petals-blue",
+   "engine/petals-white"
+  ],
+  "pcgPresets": [
+   {
+    "id": "rocks-on-slopes",
+    "label": "Rocks on slopes"
+   },
+   {
+    "id": "flowers-in-meadows",
+    "label": "Flowers in meadows"
+   },
+   {
+    "id": "forest-edge",
+    "label": "Forest edge"
+   }
+  ]
+ },
+ "graphs": [
+  "0",
+  "1",
+  "2",
+  "3",
+  "4",
+  "5",
+  "6"
+ ]
+}

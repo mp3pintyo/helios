@@ -8,6 +8,7 @@ pipeline diagram and an index of the pages below.
 | [`architecture/`](architecture/) | One page per subsystem of the GPU pipeline (Nanite core, materials, virtual textures, shadows, motion, foliage, tessellation, Lumen, local lights and MegaLights, atmosphere, translucency and water, terrain and rivers, volumes and particles, post-processing, the browser platform) and the editor |
 | [`performance.md`](performance.md) | How costs are measured and the default views' frame times, round by round |
 | [`status.md`](status.md) | What is still simpler than Unreal Engine 5 |
+| [`../ittkezdjed/`](../ittkezdjed/) | Start here to build a web site on the engine: guide, generated page API reference, changelog for sites, start-up helper, sync script, scene catalog, starter template |
 | [`round4/`](round4/) … [`round9/`](round9/) | Design notes per feature: why it is built that way, the full measurement tables, before / after images |
 
 Until 2026-11-11 the README held every subsystem description and the status list. Design notes written before then

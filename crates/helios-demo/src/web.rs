@@ -1,8 +1,9 @@
 //! Browser platform layer: canvas surface, DOM input and a requestAnimationFrame loop.
 //!
 //! A page can embed the engine instead of using `index.html`'s full-window demo: it sets
-//! `globalThis.heliosConfig = { scene, screenPercentage, gpuBudgetMs, embedded, lights, megaLights, statusElement, bakeWorkers }` before
-//! loading the module (query parameters still work and take part as fallbacks), and drives the
+//! `globalThis.heliosConfig = { scene, gltf, sceneFile, stream, screenPercentage, gpuBudgetMs, embedded, lights, megaLights,
+//! gi, worldCache, statusElement, bakeWorkers }` before loading the module (query parameters still work and take part as
+//! fallbacks; a page's own guide is `ittkezdjed/README.md`), and drives the
 //! running engine through the exported `helios*` functions (scene, glTF model, candle lights,
 //! camera, sun, hotkeys, HUD).
 //! `embedded: true` keeps keyboard input on the focused canvas and leaves the mouse wheel to
@@ -114,6 +115,11 @@ thread_local! {
     static STATE: RefCell<Option<Rc<RefCell<State>>>> = const { RefCell::new(None) };
     /// What the engine is waiting for (`heliosBusy`); empty while it renders.
     static BUSY: RefCell<String> = const { RefCell::new(String::new()) };
+    /// Why the engine stopped: a start-up error or a lost device (`heliosError`); empty while it
+    /// runs or starts.
+    static ERROR: RefCell<String> = const { RefCell::new(String::new()) };
+    /// The start-up finished: the scene (and a scene file's edits) are in (`heliosReady`).
+    static READY: Cell<bool> = const { Cell::new(false) };
     /// When the shaders started compiling, the first image was presented and the last queued
     /// pipeline was made (ms, `performance.now()`; 0: not yet).
     static TIMES: Cell<[f64; 3]> = const { Cell::new([0.0; 3]) };
@@ -306,11 +312,12 @@ fn renderer_config() -> helios_render::RendererConfig {
     helios_render::RendererConfig { texture_compression: query_param("texture-compression").as_deref() != Some("0"), ..Default::default() }
 }
 
-/// Scene selected with `?scene=valley|cathedral|forest|gallery|model`; `?gltf=URL` alone selects the model.
+/// Scene selected with `?scene=valley|cathedral|forest|gallery|model`; `?gltf=URL` (page config
+/// `gltf`) alone selects the model.
 fn scene_from_url() -> SceneKind {
     match option_string("scene", "scene").and_then(|v| SceneKind::parse(&v)) {
         Some(kind) => kind,
-        None if query_param("gltf").is_some() => SceneKind::Model,
+        None if option_string("gltf", "gltf").is_some() => SceneKind::Model,
         None => SceneKind::Valley,
     }
 }
@@ -402,6 +409,7 @@ pub fn start() {
         if let Err(message) = run().await {
             log::error!("{message}");
             set_status(&message);
+            ERROR.with(|e| *e.borrow_mut() = message);
         }
     });
 }
@@ -483,8 +491,9 @@ async fn run() -> Result<(), String> {
     next_tick().await;
 
     let target = frame_target(&ctx.device, &config);
-    // `?scene-file=URL`: a saved editor scene; its base scene is built instead of `?scene`.
-    let scene_file = match query_param("scene-file") {
+    // `?scene-file=URL` (page config `sceneFile`): a saved editor scene; its base scene is built
+    // instead of `?scene`.
+    let scene_file = match option_string("sceneFile", "scene-file") {
         Some(url) => {
             let url = js_sys::decode_uri_component(&url).map(String::from).unwrap_or(url);
             set_status(&format!("Loading the scene file {url}…"));
@@ -500,7 +509,7 @@ async fn run() -> Result<(), String> {
     if option_string("lantern", "lantern").is_some_and(|v| v != "0") {
         crate::scenes::cathedral::set_lantern(true);
     }
-    let mut app = match query_param("stream") {
+    let mut app = match option_string("stream", "stream") {
         // `?stream=URL_BASE`: the scene of the mesh library at URL_BASE (written by
         // `helios --bake-hvm`), its geometry streamed with HTTP range requests.
         Some(base) => {
@@ -513,7 +522,7 @@ async fn run() -> Result<(), String> {
         }
         None => {
             let (mut kind, mut detail) = (scene_from_url(), Detail::Medium);
-            let mut gltf = query_param("gltf");
+            let mut gltf = option_string("gltf", "gltf");
             match scene_file.as_ref().map(|doc| &doc.base) {
                 Some(crate::editor::doc::BaseScene::Gltf { url, .. }) => (kind, gltf) = (SceneKind::Model, Some(url.clone())),
                 Some(base) => (kind, detail) = crate::app_editor::procedural_base(base).unwrap_or((kind, detail)),
@@ -594,6 +603,7 @@ async fn run() -> Result<(), String> {
         crate::web_editor::load_document(doc).await?;
         set_status("");
     }
+    READY.with(|r| r.set(true));
     Ok(())
 }
 
@@ -732,6 +742,7 @@ fn frame(st: &mut State, now: f64) {
             let message = "The GPU device was lost (the browser's GPU process may have run out of memory). Reload the page to continue.";
             set_busy(message);
             set_status(message);
+            ERROR.with(|e| *e.borrow_mut() = message.to_string());
             reason.clear();
         }
         return;
@@ -994,6 +1005,22 @@ pub fn helios_hud() -> String {
 #[wasm_bindgen(js_name = heliosBusy)]
 pub fn helios_busy() -> String {
     BUSY.with(|b| b.borrow().clone())
+}
+
+/// Why the engine stopped, or empty while it starts or runs: the start-up error (no WebGPU, a
+/// scene file or model that failed to load, …) or the lost GPU device. The status element shows
+/// the same text, but also progress; a page polling for readiness checks this to stop waiting.
+#[wasm_bindgen(js_name = heliosError)]
+pub fn helios_error() -> String {
+    ERROR.with(|e| e.borrow().clone())
+}
+
+/// Whether the start-up finished: the scene is built and a `sceneFile`'s edits are applied, so
+/// the camera, editor and scene calls act on the final scene (the first image may still be
+/// compiling: see [`helios_frames`]).
+#[wasm_bindgen(js_name = heliosReady)]
+pub fn helios_ready() -> bool {
+    READY.with(Cell::get)
 }
 
 /// Frames presented so far (0 until the first image is on the canvas).
