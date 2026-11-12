@@ -289,15 +289,42 @@ fn compute_pipeline_maker(
         let constants: Vec<(&str, f64)> = constants.iter().map(|(name, value)| (name.as_str(), *value)).collect();
         let layouts: Vec<&wgpu::BindGroupLayout> = layouts.iter().collect();
         let layout = pipeline_layout(&device, &label, &layouts);
-        device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some(&label),
-            layout: Some(&layout),
-            module: &module,
-            entry_point: Some(&entry_point),
-            compilation_options: wgpu::PipelineCompilationOptions { constants: &constants, zero_initialize_workgroup_memory: true },
-            cache: None,
+        timed(&label, || {
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some(&label),
+                layout: Some(&layout),
+                module: &module,
+                entry_point: Some(&entry_point),
+                compilation_options: wgpu::PipelineCompilationOptions { constants: &constants, zero_initialize_workgroup_memory: true },
+                cache: None,
+            })
         })
     }
+}
+
+/// Creates a render pipeline through [`timed`] (labelled by its descriptor).
+pub fn render_pipeline(device: &wgpu::Device, descriptor: &wgpu::RenderPipelineDescriptor) -> wgpu::RenderPipeline {
+    timed(descriptor.label.unwrap_or("render pipeline"), || device.create_render_pipeline(descriptor))
+}
+
+/// Runs `make` (a pipeline's creation). Natively with `HELIOS_PIPELINE_TIMES` set it logs how long
+/// it took: the shader compile. With `WGPU_BACKEND=dx12`, `WGPU_DX12_COMPILER=dxc` and Firefox's
+/// `dxcompiler.dll` first on the `PATH` that is the compile a Firefox visitor waits for (Firefox
+/// translates WGSL with naga to HLSL and compiles it with DXC, one pipeline at a time), measured
+/// one by one without a browser.
+pub fn timed<T>(label: &str, make: impl FnOnce() -> T) -> T {
+    crate::pipelines::note_created(label);
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if *ON.get_or_init(|| std::env::var_os("HELIOS_PIPELINE_TIMES").is_some()) {
+            let start = std::time::Instant::now();
+            let value = make();
+            log::info!("pipeline time {:.1} ms: {label}", start.elapsed().as_secs_f64() * 1000.0);
+            return value;
+        }
+    }
+    make()
 }
 
 pub struct TextureSpec<'a> {

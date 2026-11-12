@@ -176,7 +176,7 @@ impl TonemapPass {
             Lazy::background(move || {
                 let pipeline_layout = util::pipeline_layout(&device, "tonemap", &[&layout]);
                 let constants = [("OUTPUT_SRGB", if output_format.is_srgb() { 1.0 } else { 0.0 })];
-                device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                crate::util::render_pipeline(&device, &wgpu::RenderPipelineDescriptor {
                     label: Some("tonemap"),
                     layout: Some(&pipeline_layout),
                     vertex: wgpu::VertexState {

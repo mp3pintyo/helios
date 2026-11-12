@@ -334,7 +334,9 @@ impl LumenLite {
                 ]
                 .concat(),
             ),
-            debug: stage(
+            debug: Stage::debug(
+                device,
+                &module,
                 "debug_field",
                 &[&[(0, u()), (2, u()), (3, tex(false)), (10, ro()), (20, rw()), (30, tex(false)), (31, out())], &sampled_atlases[..]].concat(),
             ),

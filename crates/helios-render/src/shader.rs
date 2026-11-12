@@ -250,6 +250,57 @@ pub fn extended_resolve(graph: Option<&str>, displaces: bool) -> String {
 mod tests {
     use super::*;
 
+    /// Not a check: measures how long one compute pipeline takes to compile on this machine, for
+    /// making shaders cheaper to compile (Firefox compiles them one at a time on every visit).
+    /// `cargo test -p helios-render --lib compile_probe -- --ignored --nocapture` with
+    /// `WGPU_BACKEND=dx12 WGPU_DX12_COMPILER=dxc` and Firefox's `dxcompiler.dll` first on the
+    /// `PATH`. `PROBE_SHADER` names the shader (default `gbuffer.wgsl`; `extended` = the slab
+    /// resolve), `PROBE_FILE` reads composed WGSL from a file instead, `PROBE_DUMP` writes the
+    /// composed WGSL to a file; `PROBE_ENTRY` (default `resolve`), `PROBE_CONSTANTS`
+    /// (`NAME=value,…`), `PROBE_RUNS` (default 3).
+    #[test]
+    #[ignore]
+    fn compile_probe() {
+        let var = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
+        let context = pollster::block_on(crate::GpuContext::new(crate::GpuContext::create_instance(), None)).expect("a GPU");
+        let device = &context.device;
+        let wgsl = match (var("PROBE_FILE"), var("PROBE_SHADER")) {
+            (Some(path), _) => std::fs::read_to_string(path).expect("PROBE_FILE"),
+            (None, Some(name)) if name == "extended" => extended_resolve(None, false),
+            (None, name) => {
+                let name = name.unwrap_or_else(|| "gbuffer.wgsl".into());
+                let half = half_precision(device) && source(&name).contains("#include \"half.wgsl\"");
+                if half { compose_half(&name) } else { compose(&name) }
+            }
+        };
+        if let Some(path) = var("PROBE_DUMP") {
+            std::fs::write(path, &wgsl).expect("PROBE_DUMP");
+        }
+        let entry = var("PROBE_ENTRY").unwrap_or_else(|| "resolve".into());
+        let constants: Vec<(String, f64)> = var("PROBE_CONSTANTS")
+            .map(|c| c.split(',').filter_map(|kv| kv.split_once('=')).map(|(k, v)| (k.trim().to_string(), v.trim().parse().unwrap_or(0.0))).collect())
+            .unwrap_or_default();
+        let constants: Vec<(&str, f64)> = constants.iter().map(|(k, v)| (k.as_str(), *v)).collect();
+        let compile = |wgsl: String, entry: &str, constants: &[(&str, f64)]| {
+            let start = std::time::Instant::now();
+            let module = create_module_from(device, "probe", wgsl);
+            let _pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("probe"),
+                layout: None,
+                module: &module,
+                entry_point: Some(entry),
+                compilation_options: wgpu::PipelineCompilationOptions { constants, zero_initialize_workgroup_memory: true },
+                cache: None,
+            });
+            start.elapsed().as_secs_f64() * 1000.0
+        };
+        // Loads the compiler first. wgpu's D3D12 backend caches compiled shaders, so a pipeline is
+        // compiled only once per process: run the probe several times for the spread.
+        compile("@compute @workgroup_size(1) fn main() {}".into(), "main", &[]);
+        let ms = compile(wgsl.clone(), &entry, &constants);
+        println!("PROBE {} bytes of WGSL, {entry}: {ms:.0} ms", wgsl.len());
+    }
+
     /// Parses and validates every shader (with includes resolved), so WGSL errors show up in
     /// `cargo test` with precise locations instead of at pipeline creation.
     #[test]

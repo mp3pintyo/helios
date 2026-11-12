@@ -162,6 +162,13 @@ impl Stage {
         Self { pipeline: compute_pipeline(device, entry, module, entry, &layout, &[]), layout }
     }
 
+    /// A debug view's stage: compiled when the view is first shown, not with the feature (three
+    /// of them compiled on every visit: 0.25 s in Firefox's DXC).
+    pub fn debug(device: &wgpu::Device, module: &wgpu::ShaderModule, entry: &str, bindings: &[(u32, BindingType)]) -> Self {
+        let layout = bind_group_layout(device, entry, ShaderStages::COMPUTE, bindings);
+        Self { pipeline: crate::util::lazy_compute_pipeline(device, entry, module, entry, &layout, &[]), layout }
+    }
+
     pub fn group(&self, device: &wgpu::Device, entries: &[(u32, wgpu::BindingResource)]) -> wgpu::BindGroup {
         bind_group(device, "lumen", &self.layout, entries)
     }
@@ -476,7 +483,7 @@ impl Lumen {
                     (164, rw()),
                 ],
             ),
-            debug_cards: Stage::new(
+            debug_cards: Stage::debug(
                 device,
                 &card_module,
                 "debug_cards",
@@ -934,7 +941,7 @@ impl Lumen {
         // ---- Surface cache (voxel lighting, ping-pong) and radiance cache ------------------------
         // Relit every `surface_interval` frames; between relightings the radiance cache and the
         // gather read the latest one.
-        let relight = self.frame % self.surface_interval == 0;
+        let relight = self.frame.is_multiple_of(self.surface_interval);
         let read = self.voxels_latest;
         let write = if relight { 1 - read } else { read };
         {

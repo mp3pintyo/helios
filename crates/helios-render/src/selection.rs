@@ -107,7 +107,7 @@ impl SelectionOutline {
 fn outline_pipeline(device: &wgpu::Device, module: &wgpu::ShaderModule, layout: &wgpu::BindGroupLayout, output_format: TextureFormat) -> wgpu::RenderPipeline {
     let pipeline_layout = util::pipeline_layout(device, "selection outline", &[layout]);
     let constants = [("OUTPUT_SRGB", if output_format.is_srgb() { 1.0 } else { 0.0 })];
-    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+    crate::util::render_pipeline(device, &wgpu::RenderPipelineDescriptor {
         label: Some("selection outline"),
         layout: Some(&pipeline_layout),
         vertex: wgpu::VertexState { module, entry_point: Some("vs_main"), compilation_options: Default::default(), buffers: &[] },

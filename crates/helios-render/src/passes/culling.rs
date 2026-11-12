@@ -231,8 +231,10 @@ impl Culling {
 
         let cull_passes = |skinning: bool, deforming: bool| {
             let (device, module, layout) = (device.clone(), cull_module.clone(), cull_layout.clone());
-            let make = move || CullPasses::new(&device, &module, &layout, skinning, deforming);
-            if skinning || !deforming { Lazy::new(make) } else { Lazy::background(make) }
+            // Each specialisation is queued once a scene needs it (`prefetch`): the general one
+            // was compiled on every visit although a scene that nothing deforms culls with the
+            // lean one (0.3–0.6 s of core compiles in Firefox before the first image).
+            Lazy::new(move || CullPasses::new(&device, &module, &layout, skinning, deforming))
         };
         let args_pipeline = |entry: &str| compute_pipeline(device, entry, &args_module, entry, &args_layout, &[]);
         let sw_pipeline_with = |pass: u32, late: bool, masked: bool, background: bool, plants: bool| {
@@ -332,14 +334,15 @@ impl Culling {
     /// The culling specialisation for this frame: the lean one when nothing deforms (in the
     /// browser once compiled in the background; until then the general one, which is exact too).
     fn passes_for(&self, scene: &GpuScene) -> &CullPasses {
+        let general = &self.passes[scene.skins.skinned_instances as usize];
         if !scene.deforms() {
             let lean = &self.passes[2];
-            if lean.is_made() || !crate::pipelines::deferring() {
+            if lean.is_made() || !crate::pipelines::deferring() || !general.is_made() {
                 return lean;
             }
             lean.prefetch();
         }
-        &self.passes[scene.skins.skinned_instances as usize]
+        general
     }
 
     fn cull_impl(
@@ -497,10 +500,12 @@ impl Culling {
     /// Queues the pipelines of the content the scene has (skinned instances, alpha-masked and
     /// voxel clusters) for the browser's background compile.
     pub fn prefetch(&self, scene: &GpuScene) {
-        if scene.skins.skinned_instances {
-            self.passes[1].prefetch();
-        }
-        if !scene.deforms() {
+        // (Not for the stand-in of a scene still baking: it has no instances, so nothing
+        // deforms, and the forest compiled the lean culling it never used.)
+        if scene.instance_count == 0 {
+        } else if scene.deforms() {
+            self.passes[scene.skins.skinned_instances as usize].prefetch();
+        } else {
             self.passes[2].prefetch();
         }
         // One of the two rasteriser sets: with the plant code where plants have bones.
@@ -657,7 +662,7 @@ fn raster_pipeline(
     let layout = util::pipeline_layout(device, "raster", &[layout]);
     let constants = [("LATE", if late { 1.0 } else { 0.0 }), ("PLANTS", if plants { 1.0 } else { 0.0 })];
     let targets = [Some(wgpu::ColorTargetState { format: VISIBILITY_FORMAT, blend: None, write_mask: wgpu::ColorWrites::ALL })];
-    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+    crate::util::render_pipeline(device, &wgpu::RenderPipelineDescriptor {
         label: Some(if masked { "visibility raster (alpha-masked)" } else { "visibility raster" }),
         layout: Some(&layout),
         vertex: wgpu::VertexState {

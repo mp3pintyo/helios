@@ -36,7 +36,7 @@ impl SubsurfacePass {
             let (device, module, vertical_layout) = (device.clone(), module.clone(), vertical_layout.clone());
             Lazy::new(move || {
                 let additive = wgpu::BlendComponent { src_factor: wgpu::BlendFactor::One, dst_factor: wgpu::BlendFactor::One, operation: wgpu::BlendOperation::Add };
-                device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                crate::util::render_pipeline(&device, &wgpu::RenderPipelineDescriptor {
                     label: Some("subsurface vertical"),
                     layout: Some(&pipeline_layout(&device, "subsurface vertical", &[&vertical_layout])),
                     vertex: wgpu::VertexState { module: &module, entry_point: Some("fullscreen"), compilation_options: Default::default(), buffers: &[] },

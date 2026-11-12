@@ -1375,7 +1375,7 @@ fn pipeline(device: &wgpu::Device, module: &wgpu::ShaderModule, layout: &wgpu::B
             write_mask: wgpu::ColorWrites::RED | wgpu::ColorWrites::GREEN,
         }),
     ];
-    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+    crate::util::render_pipeline(device, &wgpu::RenderPipelineDescriptor {
         label: Some("translucency"),
         layout: Some(&pipeline_layout),
         vertex: wgpu::VertexState {
@@ -1412,7 +1412,7 @@ fn oit_pipeline(device: &wgpu::Device, module: &wgpu::ShaderModule, layout: &wgp
     };
     targets.push(Some(wgpu::ColorTargetState { format: wgpu::TextureFormat::Rgba16Float, blend: Some(motion_blend), write_mask: wgpu::ColorWrites::RED | wgpu::ColorWrites::GREEN }));
     let entry = "fs_oit";
-    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+    crate::util::render_pipeline(device, &wgpu::RenderPipelineDescriptor {
         label: Some("translucency (avboit)"),
         layout: Some(&pipeline_layout),
         vertex: wgpu::VertexState {
@@ -1440,7 +1440,7 @@ fn oit_pipeline(device: &wgpu::Device, module: &wgpu::ShaderModule, layout: &wgp
 fn grid_pipeline(device: &wgpu::Device, module: &wgpu::ShaderModule, layout: &wgpu::BindGroupLayout, shading: Shading, entry: &str, behind: bool) -> wgpu::RenderPipeline {
     let pipeline_layout = crate::util::pipeline_layout(device, "translucency avboit grid", &[layout]);
     let constants = [("SHADING", shading as u32 as f64), ("OIT_BEHIND_NEAREST", behind as u32 as f64)];
-    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+    crate::util::render_pipeline(device, &wgpu::RenderPipelineDescriptor {
         label: Some("translucency avboit grid"),
         layout: Some(&pipeline_layout),
         vertex: wgpu::VertexState {
@@ -1467,7 +1467,7 @@ fn grid_pipeline(device: &wgpu::Device, module: &wgpu::ShaderModule, layout: &wg
 /// front of the opaque scene and behind the previous layer, the depth test the nearest of them.
 fn peel_pipeline(device: &wgpu::Device, module: &wgpu::ShaderModule, layout: &wgpu::BindGroupLayout, shading: Shading) -> wgpu::RenderPipeline {
     let pipeline_layout = crate::util::pipeline_layout(device, "translucency peel", &[layout]);
-    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+    crate::util::render_pipeline(device, &wgpu::RenderPipelineDescriptor {
         label: Some("translucency peel"),
         layout: Some(&pipeline_layout),
         vertex: wgpu::VertexState { module, entry_point: Some("vs_main"), compilation_options: Default::default(), buffers: &[Some(mesh_buffer())] },

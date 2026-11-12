@@ -350,3 +350,70 @@ of 46.5 s, Opus55 gallery, Firefox 160) because each frame ran at ~30 fps under 
 | `high`: first image / every pipeline | 21.9 / 46.5 s | 20.9 / 49.1 s |
 | `high`: canvas updates after the first image | ~40 single frames | 6 short bursts |
 | `low`: every pipeline | — | 33.1 s |
+
+## Fewer compiles per visit (round 9, `compile-reduction`)
+
+Firefox compiles every pipeline on every visit, one at a time. The time a visitor waits is therefore the sum of
+the pipelines' compiles, and the ones a scene never uses were pure waste.
+
+**Measuring.** Two tools find the pipelines and their cost.
+* **Natively, one by one** (`util::timed`, `HELIOS_PIPELINE_TIMES=1`).
+  * Every pipeline creation (`compute_pipeline_maker`, `util::render_pipeline`) logs its time.
+  * With `WGPU_BACKEND=dx12`, `WGPU_DX12_COMPILER=dxc` and Firefox's `dxcompiler.dll` first on the `PATH`, this
+    is Firefox's compile chain (naga → HLSL → DXC) without a browser.
+  * The gallery: 176 pipelines, 31.5 s.
+  * One shader alone: `shader.rs`'s ignored `compile_probe` test (`PROBE_SHADER`, `PROBE_FILE`, `PROBE_CONSTANTS`).
+    wgpu caches a compiled shader per process, so each run measures one compile.
+* **In the browser, which pipelines a scene never uses** (`?pipeline-usage=1`).
+  * Every `Lazy` value keeps the labels its constructor created and whether a frame dereferenced it.
+  * 10 s after the last compile the engine logs the queued pipelines no frame used.
+  * The Opus55 site: 58 of 194.
+
+**What changed.** Each of these is compiled only when needed. A frame never renders differently, because a
+pipeline queued when it becomes needed holds the frame like any other.
+* **The plain `lighting`.**
+  * It is a `lazy_compute_pipeline`, queued by `LightingPass::sync_substrate` for scenes without slab materials.
+  * A scene with them used only the Substrate variant, yet both were core pipelines (0.9 s natively).
+* **The base dicing (`tessellation dice`, `vsm tessellation dice`).**
+  * It is lazy, queued by `Tessellation::sync_graphs`/`prefetch_graphs` for scenes with displaced surfaces but no
+    displacing graph.
+  * The gallery dices with its graph permutation, and its 6 base pipelines (2.8 s natively) were unused.
+* **Tessellation and hidden instances.**
+  * `gpu_scene::displaceable` counts only shown instances.
+  * The tessellation group is held while none is displaceable (`held_groups`).
+  * The Opus55 site hides the gallery but its floor, the brick terrace included, so the tessellator's 20 pipelines
+    (~7 s) wait until a displaced surface is shown.
+* **The `TESSELLATION` resolve permutation stays once in use.**
+  * In the browser it is kept when tessellation is no longer wanted. It renders undisplaced pixels exactly as the
+    plain one does, for 0.05–0.1 ms more.
+  * The Opus55 site hides the terrace before its first image, and the plain set (12 resolve pipelines, 9.3 s in
+    Firefox) compiled before that image.
+* **The culling specialisations.**
+  * All are lazy. `Culling::prefetch` queues the general one for scenes that deform and the lean one for the rest,
+    and nothing for the stand-in of a scene still being preprocessed.
+  * The general one was compiled on every visit. A scene that nothing deforms used it only until the lean one was
+    in.
+* **`vsm raster voxels`.** It is queued by `VirtualShadowMap::prefetch` only for scenes with voxel LODs (the
+  forest).
+* **The debug views' stages** (`Stage::debug`: Lumen's cards, Lumen Lite's field, the world cache). They compile
+  when the view is first shown.
+
+| Firefox, every pipeline compiled | Before | After |
+|---|---|---|
+| The Opus55 site (Firefox 160, RTX 3090) | 49.1 s (194 pipelines) | 32.6 s (163) |
+| The Opus55 site, first image | 20.9 s | 18.4 s |
+| Gallery (Firefox 155) | 39.2 s (189) | 34.4 s (179) |
+| Cathedral | 28.6 s (197) | 26.7 s (188) |
+| Valley | 34.8 s (203) | 34.2 s (200) |
+
+**Unchanged image.**
+* Screenshots of the four scenes and the Opus55 site with the old and the new engine, Chromium, paused after
+  every pipeline was in, differ only where things move: the animated props, the water, the moving camera and
+  film grain on the site, and the HUD's numbers.
+* Static geometry, shadows and GI match pixel for pixel. The mean difference is 0.6–1.7 levels of 255, about the
+  same as between two runs of the same build.
+
+**What is left.** The material resolve is about 1 s per shading model and graph slot (9 extended slots in the
+gallery: 7.5 s). Fully inlined, its 9 KB entry point is ~920 KB of code, mostly procedural noise
+(`pcg_hash` 1447 copies) and virtual texture sampling (`svt_sample_tile` 56). Restructuring these call sites could
+roughly halve each compile, but changes the shader's code generation, so it needs GPU-time checks as well.

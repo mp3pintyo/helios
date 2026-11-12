@@ -3,6 +3,24 @@
 Newest first. `sync.py` prints the entries newer than a site's last sync. Each entry says what
 changed and what a site has to do.
 
+## 2026-11-13: fewer shader compiles per visit
+
+* **Firefox: the full image arrives sooner.**
+  * Firefox compiles every shader on every visit. The engine now compiles only what the scene
+    uses.
+  * Pipelines left out: the lighting variant a scene does not use, the tessellator when no
+    displaced surface is shown, the culling variant for motion the scene does not have, and the
+    debug views.
+  * The Opus55 site: full quality after 32.6 s instead of 49.1 s, first image 18.4 s instead of
+    20.9 s. The demo scenes are 2–12 % faster.
+  * The image is unchanged.
+  * **Site:** sync.
+* **A page that hides content at start** (the Opus55 site hides the gallery but its floor) now
+  skips the tessellation of what it hides. The material shaders of hidden objects still compile
+  (they are queued before the page's edits arrive).
+* `?pipeline-usage=1` logs, 10 s after the last compile, the shaders no frame has used (for
+  finding waste).
+
 ## 2026-11-12 (late night): Firefox holds the image still while it compiles
 
 * **Firefox: no more jumping view after the first image.**

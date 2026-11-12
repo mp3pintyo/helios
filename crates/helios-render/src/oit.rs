@@ -156,7 +156,7 @@ impl Oit {
             let (device, module, layout) = (device.clone(), module.clone(), layout.clone());
             let make = move || {
                 let pipeline_layout = crate::util::pipeline_layout(&device, "oit composite", &[&layout]);
-                device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                crate::util::render_pipeline(&device, &wgpu::RenderPipelineDescriptor {
                     label: Some("oit composite"),
                     layout: Some(&pipeline_layout),
                     vertex: wgpu::VertexState { module: &module, entry_point: Some("vs_main"), compilation_options: Default::default(), buffers: &[] },
@@ -339,7 +339,7 @@ impl Oit {
 pub(crate) fn particle_avboit_pipeline(device: &wgpu::Device, module: &wgpu::ShaderModule, layout: &wgpu::BindGroupLayout) -> wgpu::RenderPipeline {
     let pipeline_layout = crate::util::pipeline_layout(device, "particle draw (avboit)", &[layout]);
     let targets = avboit_targets(true);
-    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+    crate::util::render_pipeline(device, &wgpu::RenderPipelineDescriptor {
         label: Some("particle draw (avboit)"),
         layout: Some(&pipeline_layout),
         vertex: wgpu::VertexState { module, entry_point: Some("vs_particle"), compilation_options: Default::default(), buffers: &[] },
@@ -375,7 +375,7 @@ pub(crate) fn particle_pipeline(device: &wgpu::Device, module: &wgpu::ShaderModu
     let reveal_target = Some(wgpu::ColorTargetState { format: REVEAL_FORMAT, blend: Some(wgpu::BlendState { color: reveal, alpha: reveal }), write_mask: wgpu::ColorWrites::RED });
     let targets = [accum_target.clone(), reveal_target.clone(), accum_target, reveal_target];
     let pipeline_layout = crate::util::pipeline_layout(device, "particle draw", &[layout]);
-    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+    crate::util::render_pipeline(device, &wgpu::RenderPipelineDescriptor {
         label: Some("particle draw"),
         layout: Some(&pipeline_layout),
         vertex: wgpu::VertexState { module, entry_point: Some("vs_particle"), compilation_options: Default::default(), buffers: &[] },

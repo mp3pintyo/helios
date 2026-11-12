@@ -322,8 +322,11 @@ pub struct VirtualShadowMap {
 impl VirtualShadowMap {
     /// Queues the page rasterisers the scene needs for the browser: with the plant code where
     /// plants have bones (`PLANTS` in plant_wind.wgsl), with skinning where instances are skinned.
-    pub fn prefetch(&self, plants: bool, skinning: bool, masked: bool) {
+    pub fn prefetch(&self, plants: bool, skinning: bool, masked: bool, voxels: bool) {
         self.raster[skinning as usize + 2 * plants as usize].prefetch();
+        if voxels {
+            self.raster_voxels.prefetch();
+        }
         if plants {
             self.raster_sw_plants[0].prefetch();
             if masked {
@@ -464,7 +467,7 @@ impl VirtualShadowMap {
                       background: bool| {
             let (device, layout, module, constants) = (device.clone(), layout.clone(), module.clone(), constants.to_vec());
             let make = move || {
-                device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                crate::util::render_pipeline(&device, &wgpu::RenderPipelineDescriptor {
                     label: Some(label),
                     layout: Some(&layout),
                     vertex: wgpu::VertexState {
@@ -539,7 +542,8 @@ impl VirtualShadowMap {
             raster_sw_plants: [0.0, 1.0].map(|masked| {
                 (if expected && masked == 0.0 { compute_pipeline } else { lazy_compute_pipeline })(device, "vsm raster sw", &raster_module, "rasterize", &sw_layout, &[("SLOPE_BIAS", SLOPE_BIAS as f64), ("MASKED", masked), ("PLANTS", 1.0)])
             }),
-            raster_voxels: compute_pipeline(
+            // Only scenes with voxel LODs (foliage far away) use it: queued by `prefetch`.
+            raster_voxels: lazy_compute_pipeline(
                 device,
                 "vsm raster voxels",
                 &create_module(device, "vsm_voxel_raster.wgsl"),

@@ -99,3 +99,23 @@ Firefox 160, RTX 3090, the Opus55 gallery at `high`):
 * `"still"` with 0.6 s bursts: 57.6 s.
 * Firefox 160 test page, 8 pipelines of ~530 ms: compiled serially, also asynchronously; 0 GPU frames completed
   meanwhile; a second visit with the same profile was no faster.
+
+**Round 9 fewer compiles** ([`browser.md`](architecture/browser.md#fewer-compiles-per-visit-round-9-compile-reduction)):
+
+| Firefox, every pipeline compiled | Before | After |
+|---|---|---|
+| Opus55 site (Firefox 160, RTX 3090) | 49.1 s (194 pipelines) | 32.6 s (163) |
+| Opus55 site, first image | 20.9 s | 18.4 s |
+| Gallery (Firefox 155) | 39.2 s | 34.4 s |
+| Cathedral | 28.6 s | 26.7 s |
+| Valley | 34.8 s | 34.2 s |
+
+Native DXC compile of the gallery's pipelines (`HELIOS_PIPELINE_TIMES=1`, Firefox's `dxcompiler.dll`): 176
+pipelines, 31.5 s. The largest are:
+* `extended material resolve`: 9 pipelines, 7.5 s;
+* `tessellation dice`: 8 pipelines, 4.7 s;
+* `vsm tessellation dice`: 4 pipelines, 2.4 s;
+* `trace_paths`: 1.8 s;
+* `material resolve`: 3 pipelines, 1.8 s;
+* `lighting (substrate)`: 1.2 s;
+* `lighting`: 0.9 s.

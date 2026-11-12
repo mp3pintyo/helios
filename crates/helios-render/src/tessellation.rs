@@ -49,7 +49,7 @@ use crate::material_graphs::ParameterValue;
 use crate::scene::{Material, MaterialHandle, Scene, TextureHandle};
 use helios_material::{DisplacementKind, ParameterKind};
 use crate::shader::{compose_variant, create_module, create_module_from};
-use crate::util::{bind, bind_group, bind_group_layout, compute_pipeline, storage_buffer};
+use crate::util::{bind, bind_group, bind_group_layout, compute_pipeline, lazy_compute_pipeline, storage_buffer};
 use crate::wind::{wind_entry, wind_resource};
 use crate::pipelines::Lazy;
 
@@ -357,22 +357,31 @@ struct GraphInputs {
     parameters: wgpu::Buffer,
 }
 
+/// How a dicing pipeline is made: [`compute_pipeline`] (in the background) or
+/// [`lazy_compute_pipeline`] (on first use or [`prefetch_dice`]).
+type MakePipeline = fn(&wgpu::Device, &str, &wgpu::ShaderModule, &str, &wgpu::BindGroupLayout, &[(&str, f64)]) -> Lazy<wgpu::ComputePipeline>;
+
 // One pipeline per raster pass and dicing path, two grid levels each (a `LEVEL` override made
 // 4 × 2 + 4 pipelines, each a 0.5–0.8 s compile in Firefox; docs/round8/webperf.md).
-fn main_dice(device: &wgpu::Device, module: &wgpu::ShaderModule, layout: &wgpu::BindGroupLayout) -> DicePipelines {
+fn main_dice(device: &wgpu::Device, module: &wgpu::ShaderModule, layout: &wgpu::BindGroupLayout, make: MakePipeline) -> DicePipelines {
     (0..2)
         .map(|stage| {
             [false, true].map(|grid| {
                 let constants = [CAPACITIES[0], CAPACITIES[1], ("PASS", stage as f64), ("GRID", grid as u32 as f64)];
-                compute_pipeline(device, "tessellation dice", module, "dice", layout, &constants)
+                make(device, "tessellation dice", module, "dice", layout, &constants)
             })
         })
         .collect()
 }
 
-fn shadow_dice(device: &wgpu::Device, module: &wgpu::ShaderModule, layout: &wgpu::BindGroupLayout) -> DicePipelines {
+fn shadow_dice(device: &wgpu::Device, module: &wgpu::ShaderModule, layout: &wgpu::BindGroupLayout, make: MakePipeline) -> DicePipelines {
     let bias = ("SLOPE_BIAS", crate::vsm::SLOPE_BIAS as f64);
-    vec![[false, true].map(|grid| compute_pipeline(device, "vsm tessellation dice", module, "dice", layout, &[CAPACITIES[0], CAPACITIES[1], bias, ("GRID", grid as u32 as f64)]))]
+    vec![[false, true].map(|grid| make(device, "vsm tessellation dice", module, "dice", layout, &[CAPACITIES[0], CAPACITIES[1], bias, ("GRID", grid as u32 as f64)]))]
+}
+
+/// Queues the base dicing pipelines (a scene with displaced surfaces but no displacing graph).
+fn prefetch_dice(dice: &DicePipelines) {
+    dice.iter().flatten().for_each(Lazy::prefetch);
 }
 
 const IDLE: u32 = 0;
@@ -414,7 +423,10 @@ impl Tessellation {
             split: pipelines(&module, &main_generate_layout, "tessellation split", "split", &[]),
             prepare_split: pipelines(&module, &prepare_layout, "tessellation split args", "prepare_split", &[]),
             prepare_dice: pipelines(&module, &prepare_layout, "tessellation dice args", "prepare_dice", &[]),
-            dice: main_dice(device, &module, &main_dice_layout),
+            // The base dicing (no displacing graph) only for scenes that use it: a scene with
+            // displacing graphs dices with their permutation (the gallery compiled both: 6 unused
+            // pipelines, 3–4 s in Firefox).
+            dice: main_dice(device, &module, &main_dice_layout, lazy_compute_pipeline),
         };
         let module = create_module(device, "vsm_tess.wgsl");
         let shadow = ViewPipelines {
@@ -422,7 +434,7 @@ impl Tessellation {
             split: pipelines(&module, &shadow_layout, "vsm tessellation split", "split", &[]),
             prepare_split: pipelines(&module, &prepare_layout, "vsm tessellation split args", "prepare_split", &[]),
             prepare_dice: pipelines(&module, &prepare_layout, "vsm tessellation dice args", "prepare_dice", &[]),
-            dice: shadow_dice(device, &module, &shadow_layout),
+            dice: shadow_dice(device, &module, &shadow_layout, lazy_compute_pipeline),
         };
         let state = |label| storage_buffer(device, label, STATE_WORDS * 4, wgpu::BufferUsages::COPY_SRC);
         let dispatch = |label| storage_buffer(device, label, DISPATCH_BYTES, wgpu::BufferUsages::INDIRECT);
@@ -472,6 +484,8 @@ impl Tessellation {
         let set = graphs::displacing_graphs(scene);
         if set.is_empty() {
             self.permutation = None;
+            prefetch_dice(&self.main.dice);
+            prefetch_dice(&self.shadow.dice);
             return;
         }
         let key = graphs::set_hash(&set);
@@ -489,7 +503,10 @@ impl Tessellation {
     pub fn prefetch_graphs(&mut self, device: &wgpu::Device, scene: &Scene) {
         let set = graphs::displacing_graphs(scene);
         let key = graphs::set_hash(&set);
-        if !set.is_empty() && !self.permutations.contains_key(&key) && self.permutations.len() < MAX_PERMUTATIONS {
+        if set.is_empty() {
+            prefetch_dice(&self.main.dice);
+            prefetch_dice(&self.shadow.dice);
+        } else if !self.permutations.contains_key(&key) && self.permutations.len() < MAX_PERMUTATIONS {
             self.create_permutation(device, scene, &set, key);
         }
     }
@@ -498,8 +515,8 @@ impl Tessellation {
         let code = graphs::scene_dispatch_module(scene, set);
         let module = |name: &str| create_module_from(device, "tessellation (displacing graphs)", compose_variant(name, &[("displacement_graphs_off.wgsl", &code)]));
         let permutation = GraphPermutation {
-            main: main_dice(device, &module("tess.wgsl"), &self.main_dice_layout),
-            shadow: shadow_dice(device, &module("vsm_tess.wgsl"), &self.shadow_layout),
+            main: main_dice(device, &module("tess.wgsl"), &self.main_dice_layout, compute_pipeline),
+            shadow: shadow_dice(device, &module("vsm_tess.wgsl"), &self.shadow_layout, compute_pipeline),
         };
         self.permutations.insert(key, permutation);
     }

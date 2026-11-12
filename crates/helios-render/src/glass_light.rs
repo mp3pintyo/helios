@@ -384,7 +384,7 @@ fn sphere_meets_box(center: Vec3, radius: f32, b: &Aabb) -> bool {
 
 fn pipeline(device: &wgpu::Device, module: &wgpu::ShaderModule, layout: &wgpu::BindGroupLayout) -> wgpu::RenderPipeline {
     let pipeline_layout = crate::util::pipeline_layout(device, "glass light", &[layout]);
-    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+    crate::util::render_pipeline(device, &wgpu::RenderPipelineDescriptor {
         label: Some("glass light"),
         layout: Some(&pipeline_layout),
         vertex: wgpu::VertexState {

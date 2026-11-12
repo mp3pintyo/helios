@@ -979,7 +979,7 @@ impl Renderer {
         let requested = self.settings;
         self.requested = requested;
         if pipelines::deferring() {
-            pipelines::set_held(held_groups(&requested));
+            pipelines::set_held(held_groups(&requested, self.scene.has_displaceable()));
             self.prefetch_content(scene);
         }
         self.settings = self.compiled_features(requested);
@@ -1052,6 +1052,8 @@ impl Renderer {
                 if r.mega_lights || matches!(r.debug_view, DebugView::MegaLightsSamples | DebugView::MegaLightsDenoising) {
                     self.megalights.sync_substrate(device, Some(&self.extended.megalights_layout));
                 }
+            } else {
+                self.lighting.sync_substrate(device, None);
             }
             if subsurface {
                 self.subsurface.prefetch();
@@ -1170,9 +1172,12 @@ impl Renderer {
         // the plain one is used whenever nothing is displaced. Tessellation switched on later (a
         // quality level stepping up) keeps the plain one until the displaced one has compiled in
         // the background with the tessellator: making it a core pipeline held the canvas 11 s in
-        // Firefox.
-        let early = self.frame_index == 0 || self.resolve_tessellated || pipelines::ready(Group::Tessellation);
-        self.resolve_tessellated = pipelines::deferring() && tessellation_wanted && early;
+        // Firefox. Once in use it stays when tessellation is no longer wanted (the displaced
+        // instances hidden, tessellation switched off): the Opus55 site hides the gallery's brick
+        // terrace before its first image, and switching to the plain permutation compiled 12
+        // resolve pipelines more first (9 s in Firefox).
+        let early = self.frame_index == 0 || pipelines::ready(Group::Tessellation);
+        self.resolve_tessellated = pipelines::deferring() && (self.resolve_tessellated || (tessellation_wanted && early));
         let tessellation = self.scene.has_displacement() || self.resolve_tessellated;
         let debug_views = self.settings.debug_view != DebugView::Lit;
         let (uv_extensions, skinning, kinds) = (self.scene.uv_extensions, self.scene.skins.skinned_instances, self.scene.resolve_kinds);
@@ -1180,7 +1185,7 @@ impl Renderer {
         let plant_kinds = if self.scene.plant_code() { self.scene.plant_kinds() } else { 0 };
         self.material.sync(&self.device, uv_extensions, skinning, tessellation, tessellation_wanted, debug_views, kinds, plant_kinds, &self.extended, substrate);
         if self.scene.instance_count > 0 {
-            self.vsm.prefetch(self.scene.plant_code(), skinning, self.scene.masks.any());
+            self.vsm.prefetch(self.scene.plant_code(), skinning, self.scene.masks.any(), self.scene.has_voxels());
         }
         let slab_lighting = self.extended.lighting.then_some(&self.extended.lighting_layout);
         self.lighting.sync_substrate(&self.device, slab_lighting);
@@ -1777,8 +1782,9 @@ fn viewport((width, height): (u32, u32)) -> Vec4 {
 /// until one is switched on ([`pipelines::set_held`]). Each group is held only when everything
 /// [`Renderer::compiled_features`] turns off while it compiles is off already, so a held group
 /// changes nothing a frame renders. (Lumen's group is never held: Lumen Lite uses its surface
-/// cache. Translucency is in nearly every scene.)
-fn held_groups(r: &RenderSettings) -> Vec<Group> {
+/// cache. Translucency is in nearly every scene.) Tessellation is also held while no shown
+/// instance is displaceable (`displaceable`).
+fn held_groups(r: &RenderSettings, displaceable: bool) -> Vec<Group> {
     [
         (Group::Shadows, !r.shadows),
         (Group::OcclusionCulling, !r.occlusion_culling),
@@ -1786,7 +1792,7 @@ fn held_groups(r: &RenderSettings) -> Vec<Group> {
         (Group::Fog, !r.volumetric_fog && r.fog_scattering.is_none()),
         (Group::Translucency, !r.translucency && !r.glass_shadows),
         (Group::CameraEffects, r.motion_blur <= 0.0 && r.depth_of_field.is_none() && r.local_exposure.is_none()),
-        (Group::Tessellation, !r.tessellation),
+        (Group::Tessellation, !r.tessellation || !displaceable),
         (Group::Effects, !r.volumes && !r.particles),
     ]
     .into_iter()

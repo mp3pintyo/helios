@@ -8,7 +8,7 @@ use super::Samplers;
 use crate::profiler::Recorder;
 use crate::shader::create_module;
 use crate::targets::FrameTargets;
-use crate::util::{bind, bind_group, bind_group_layout, compute_pipeline, workgroups};
+use crate::util::{bind, bind_group, bind_group_layout, compute_pipeline, lazy_compute_pipeline, workgroups};
 use crate::pipelines::{in_group, Group, Lazy};
 
 const C: ShaderStages = ShaderStages::COMPUTE;
@@ -75,6 +75,9 @@ impl GiPass {
 // ---- Deferred lighting -----------------------------------------------------------------------
 
 pub struct LightingPass {
+    /// The shading without Substrate slabs: compiled once a scene without slab materials needs
+    /// it ([`Self::sync_substrate`]), since a scene with them uses the slab variant only (the
+    /// gallery compiled both before its first image: 0.9 s more in Firefox's DXC).
     pipeline: Lazy<wgpu::ComputePipeline>,
     /// Soft shadows of the strongest shadow-mapped local lights per pixel, before the shading.
     local_shadows: Lazy<wgpu::ComputePipeline>,
@@ -192,7 +195,7 @@ impl LightingPass {
             ],
         );
         Self {
-            pipeline: compute_pipeline(device, "lighting", &module, "shade", &layout, &[]),
+            pipeline: lazy_compute_pipeline(device, "lighting", &module, "shade", &layout, &[]),
             // Runs only with local lights' shadow maps.
             local_shadows: in_group(Group::Shadows, || compute_pipeline(device, "local light shadows", &module, "local_shadows", &layout, &[])),
             layout,
@@ -202,8 +205,12 @@ impl LightingPass {
         }
     }
 
-    /// Compiles the slab variant once a scene needs it (`substrate`: its group 1 layout).
+    /// Compiles the slab variant once a scene needs it (`substrate`: its group 1 layout), or
+    /// queues the plain one for a scene without slabs.
     pub fn sync_substrate(&mut self, device: &wgpu::Device, substrate: Option<&wgpu::BindGroupLayout>) {
+        if substrate.is_none() {
+            self.pipeline.prefetch();
+        }
         if let (Some(group), None) = (substrate, &self.substrate) {
             let source = crate::shader::compose_variant("lighting.wgsl", &crate::shader::substrate_lighting());
             let module = crate::shader::create_module_from(device, "lighting (substrate)", source);

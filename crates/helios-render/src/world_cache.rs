@@ -244,7 +244,9 @@ impl WorldCache {
                 ],
             ),
             resolve: stage("resolve", &[(1, u()), (9, ro()), (151, rw()), (152, bind::storage_texture(F::Rgba32Uint)), (154, rw())]),
-            debug: stage(
+            debug: Stage::debug(
+                device,
+                &module,
                 "debug",
                 &[
                     (0, u()),

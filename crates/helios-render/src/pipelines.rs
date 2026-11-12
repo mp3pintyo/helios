@@ -159,6 +159,37 @@ thread_local! {
     static QUEUE: RefCell<Vec<Weak<dyn Job>>> = const { RefCell::new(Vec::new()) };
     /// Groups whose features the settings switch off ([`set_held`]), one bit per [`Group`].
     static HELD: Cell<u16> = const { Cell::new(0) };
+    /// Labels of the pipelines created so far by the constructor running now ([`note_created`]).
+    static NOTED: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Notes the label of a pipeline being created (every creation goes through
+/// [`crate::util::timed`]): a [`Lazy`] value keeps the labels its constructor created, for
+/// [`unused`].
+pub fn note_created(label: &str) {
+    NOTED.with(|n| n.borrow_mut().push(label.to_string()));
+}
+
+fn noted_mark() -> usize {
+    NOTED.with(|n| n.borrow().len())
+}
+
+/// The labels noted since `mark`, removed.
+fn noted_since(mark: usize) -> Vec<String> {
+    NOTED.with(|n| {
+        let mut n = n.borrow_mut();
+        let mark = mark.min(n.len());
+        n.split_off(mark)
+    })
+}
+
+/// Queued pipelines that were made but no frame has used yet (with their groups, by label), and
+/// how many queued pipelines were made in all: compiles a scene did not need (`?pipeline-usage=1`
+/// logs them once every pipeline is in).
+pub fn unused() -> (Vec<(Group, String)>, usize) {
+    let made: Vec<_> = entries().into_iter().filter(|j| j.state() == MADE).collect();
+    let unused = made.iter().filter(|j| !j.used()).map(|j| (j.group(), j.label())).collect();
+    (unused, made.len())
 }
 
 /// Holds back the queued pipelines of `groups`: the settings switch their features off (a
@@ -245,6 +276,10 @@ struct Entry<T> {
     state: AtomicU8,
     /// Queued [`ahead`] of a scene switch, not claimed yet.
     ahead: AtomicBool,
+    /// A frame dereferenced the value ([`unused`]).
+    used: AtomicBool,
+    /// The labels of the pipelines its constructor created.
+    label: OnceLock<String>,
 }
 
 /// A queue entry, whatever it makes.
@@ -256,6 +291,8 @@ trait Job {
     /// Queued [`ahead`] of a scene switch and not claimed yet.
     fn ahead(&self) -> bool;
     fn claim(&self);
+    fn used(&self) -> bool;
+    fn label(&self) -> String;
     fn make(&self);
     /// Starts an asynchronous compile of what `make` would create; false if there was none (the
     /// constructor made no pipeline, or the browser cannot compile asynchronously).
@@ -266,13 +303,16 @@ impl<T> Entry<T> {
     fn get(&self) -> &T {
         self.value.get_or_init(|| {
             self.state.store(MADE, Ordering::Relaxed);
+            let mark = noted_mark();
             // Pipelines created by the constructor (nested `Lazy` values) share its group (and
             // its being ahead of a scene switch).
-            if self.ahead.load(Ordering::Relaxed) {
+            let value = if self.ahead.load(Ordering::Relaxed) {
                 in_group(self.group, || ahead(|| (self.make)()))
             } else {
                 in_group(self.group, || (self.make)())
-            }
+            };
+            let _ = self.label.set(noted_since(mark).join(", "));
+            value
         })
     }
 }
@@ -298,13 +338,24 @@ impl<T: 'static> Job for Entry<T> {
         self.ahead.store(false, Ordering::Relaxed);
     }
 
+    fn used(&self) -> bool {
+        self.used.load(Ordering::Relaxed)
+    }
+
+    fn label(&self) -> String {
+        self.label.get().cloned().unwrap_or_default()
+    }
+
     fn make(&self) {
         self.get();
     }
 
     #[cfg(target_arch = "wasm32")]
     fn warm(&self, me: Weak<dyn Job>) -> bool {
-        let Some(compiled) = browser::warm(|| drop(in_group(self.group, || (self.make)()))) else { return false };
+        let mark = noted_mark();
+        let compiled = browser::warm(|| drop(in_group(self.group, || (self.make)())));
+        noted_since(mark);
+        let Some(compiled) = compiled else { return false };
         self.state.store(WARMING, Ordering::Relaxed);
         wasm_bindgen_futures::spawn_local(async move {
             // A failed compile is made anyway: the synchronous call then reports the error.
@@ -344,7 +395,17 @@ impl<T: 'static> Lazy<T> {
     }
 
     fn with_state(make: Make<T>, state: u8) -> Self {
-        Self { entry: Shared::new(Entry { value: OnceLock::new(), make, group: current_group(), state: AtomicU8::new(state), ahead: AtomicBool::new(false) }) }
+        Self {
+            entry: Shared::new(Entry {
+                value: OnceLock::new(),
+                make,
+                group: current_group(),
+                state: AtomicU8::new(state),
+                ahead: AtomicBool::new(false),
+                used: AtomicBool::new(false),
+                label: OnceLock::new(),
+            }),
+        }
     }
 
     /// Queues a pipeline made on first use for the background, because a frame will need it
@@ -381,6 +442,9 @@ impl<T> std::ops::Deref for Lazy<T> {
     type Target = T;
 
     fn deref(&self) -> &T {
+        if !self.entry.used.load(Ordering::Relaxed) {
+            self.entry.used.store(true, Ordering::Relaxed);
+        }
         self.entry.get()
     }
 }

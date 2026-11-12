@@ -554,7 +554,7 @@ fn avboit_draw_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
 /// A low-resolution draw of the sprites into the AVBOIT grid (`entry`: bounds or transmittance).
 fn low_resolution_pipeline(device: &wgpu::Device, module: &wgpu::ShaderModule, layout: &wgpu::BindGroupLayout, entry: &str) -> wgpu::RenderPipeline {
     let pipeline_layout = crate::util::pipeline_layout(device, "particle avboit grid", &[layout]);
-    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+    crate::util::render_pipeline(device, &wgpu::RenderPipelineDescriptor {
         label: Some("particle avboit grid"),
         layout: Some(&pipeline_layout),
         vertex: wgpu::VertexState { module, entry_point: Some("vs_particle"), compilation_options: Default::default(), buffers: &[] },

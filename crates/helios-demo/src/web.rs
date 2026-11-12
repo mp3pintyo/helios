@@ -183,6 +183,9 @@ static CORE_COMPILED: AtomicU32 = AtomicU32::new(0);
 /// pipeline's own; for finding the expensive ones).
 static FIXED_BATCH: AtomicU32 = AtomicU32::new(0);
 static COMPILE_LOG: AtomicU32 = AtomicU32::new(0);
+/// `?pipeline-usage=1`: 10 s after every pipeline is in, logs the queued pipelines no frame has
+/// used (compiles the scene did not need; 2 once logged).
+static PIPELINE_USAGE: AtomicU32 = AtomicU32::new(0);
 /// Why the GPU device was lost, until a frame reports it (then "" stays: the loop stops).
 static DEVICE_LOST: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 
@@ -538,6 +541,7 @@ async fn run() -> Result<(), String> {
     browser::install(&ctx.device, parallel_compiles());
     FIXED_BATCH.store(query_param("compile-batch").and_then(|v| v.parse().ok()).unwrap_or(0), Ordering::Relaxed);
     COMPILE_LOG.store((query_param("compile-log").as_deref() == Some("1")) as u32, Ordering::Relaxed);
+    PIPELINE_USAGE.store((query_param("pipeline-usage").as_deref() == Some("1")) as u32, Ordering::Relaxed);
 
     let (width, height) = canvas_size(&canvas);
     canvas.set_width(width);
@@ -1073,6 +1077,21 @@ fn frame(st: &mut State, now: f64) {
         set_time(2, now);
         let start = TIMES.with(Cell::get)[0];
         log::info!("every pipeline compiled at {:.1} s, {:.1} s after the shaders started ({} pipelines)", now / 1000.0, (now - start) / 1000.0, pipelines::progress().1);
+    }
+    let full = TIMES.with(Cell::get)[2];
+    if PIPELINE_USAGE.load(Ordering::Relaxed) == 1 && full > 0.0 && now - full > 10_000.0 {
+        PIPELINE_USAGE.store(2, Ordering::Relaxed);
+        let (unused, made) = pipelines::unused();
+        let mut by_label: Vec<(String, usize)> = Vec::new();
+        for (group, label) in unused.iter().map(|(g, l)| (g.name(), l)) {
+            let key = format!("{group}: {label}");
+            match by_label.iter_mut().find(|(k, _)| *k == key) {
+                Some((_, n)) => *n += 1,
+                None => by_label.push((key, 1)),
+            }
+        }
+        let list: Vec<String> = by_label.iter().map(|(k, n)| format!("{n}x {k}")).collect();
+        log::info!("pipelines made but unused 10 s after the last compile: {} of {made}: {}", unused.len(), list.join(" | "));
     }
 
     st.hud_timer += dt as f64;

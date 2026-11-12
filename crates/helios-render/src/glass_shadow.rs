@@ -306,7 +306,7 @@ impl GlassShadow {
 
 fn pipeline(device: &wgpu::Device, module: &wgpu::ShaderModule, layout: &wgpu::BindGroupLayout) -> wgpu::RenderPipeline {
     let pipeline_layout = crate::util::pipeline_layout(device, "glass shadow", &[layout]);
-    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+    crate::util::render_pipeline(device, &wgpu::RenderPipelineDescriptor {
         label: Some("glass shadow"),
         layout: Some(&pipeline_layout),
         vertex: wgpu::VertexState {

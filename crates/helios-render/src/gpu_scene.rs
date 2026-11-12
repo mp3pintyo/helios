@@ -613,9 +613,12 @@ fn gpu_instance_flags(scene: &Scene, instance: &Instance, alpha_masked: bool) ->
     flags
 }
 
-/// Whether some instance's material displaces it (tessellated once tessellation is on).
+/// Whether some shown instance's material displaces it (tessellated once tessellation is on).
+/// Hidden instances don't count: a page that hides the displaced ones (the Opus55 site empties
+/// the gallery but its floor) needs none of the tessellator's 20 pipelines, 7 s of compiles in
+/// Firefox, and their group is held (`Renderer::held_groups`).
 pub(crate) fn displaceable(scene: &Scene) -> bool {
-    scene.instances.iter().any(|i| displaced(scene, i))
+    scene.instances.iter().any(|i| i.visible && displaced(scene, i))
 }
 
 /// Whether the instance's material displaces it (skinned meshes are not tessellated).
