@@ -5,6 +5,7 @@ pub mod app_editor;
 pub mod editor;
 pub mod mesh_store;
 pub mod motion;
+pub mod quality;
 pub mod scene_bake;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod native_editor;

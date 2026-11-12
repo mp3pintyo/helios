@@ -218,6 +218,10 @@ pub struct Lumen {
     versions: (u64, u64, u64, u64),
     probe_origins: [Vec3; 2],
     frame: u32,
+    /// Which of `voxel_lighting` holds the latest relighting (see `set_surface_interval`).
+    voxels_latest: usize,
+    /// Frames between relightings of the voxel surface cache (`lumen_surface_interval`).
+    surface_interval: u32,
     gather: Option<GatherTargets>,
     cull_bricks: Stage,
     compose: Stage,
@@ -324,6 +328,8 @@ impl Lumen {
             versions: (u64::MAX, u64::MAX, u64::MAX, u64::MAX),
             probe_origins: [Vec3::splat(f32::MAX); 2],
             frame: 0,
+            voxels_latest: 0,
+            surface_interval: 1,
             gather: None,
             cull_bricks: in_group(Group::Core, || Stage::new(device, &sdf_module, "cull_bricks", &[(0, u()), (1, ro()), (4, ro()), (5, rw())])),
             compose: in_group(Group::Core, || Stage::new(
@@ -636,7 +642,7 @@ impl Lumen {
             sdf_enabled: self.has_sdf as u32,
             max_trace_distance: 120.0,
             sky_intensity: 1.0,
-            probe_update_fraction: PROBE_UPDATE_FRACTION,
+            probe_update_fraction: self.probe_update_fraction(),
             voxel_update_phase: frame % 4,
             world_cache: if self.has_sdf { self.world_cache.mode.gpu() } else { 0 },
             near_field: self.near_field.update(device, queue, camera_position),
@@ -653,6 +659,18 @@ impl Lumen {
             self.gather = Some(GatherTargets::new(device, size));
         }
         self.world_cache.prepare(device, camera_position, (targets.width, targets.height));
+    }
+
+    /// Relights the voxel surface cache every `frames` frames (1–8; `lumen_surface_interval`)
+    /// and refreshes the radiance probes as much slower: both cost the same at any resolution.
+    pub fn set_surface_interval(&mut self, frames: u32) {
+        self.surface_interval = frames.clamp(1, 8);
+    }
+
+    /// Radiance probes refreshed per frame: one in `PROBE_UPDATE_FRACTION × surface_interval`
+    /// (the probe count, 24³ × 2, divides by 8 × 1…8).
+    fn probe_update_fraction(&self) -> u32 {
+        PROBE_UPDATE_FRACTION * self.surface_interval
     }
 
     /// The clipmap levels as the incremental updates see them.
@@ -914,27 +932,33 @@ impl Lumen {
         }
 
         // ---- Surface cache (voxel lighting, ping-pong) and radiance cache ------------------------
-        let read = (self.frame & 1) as usize;
-        let write = 1 - read;
+        // Relit every `surface_interval` frames; between relightings the radiance cache and the
+        // gather read the latest one.
+        let relight = self.frame % self.surface_interval == 0;
+        let read = self.voxels_latest;
+        let write = if relight { 1 - read } else { read };
         {
-            let voxels = self.update_voxels.group(
-                device,
-                &[
-                    (0, frame.as_entire_binding()),
-                    (1, self.uniform.as_entire_binding()),
-                    (2, TextureView(&self.global_sdf)),
-                    (3, TextureView(&self.voxel_lighting[read])),
-                    (4, Sampler(&samplers.linear)),
-                    (5, TextureView(&self.voxel_lighting[write])),
-                    (6, self.radiance_probes.as_entire_binding()),
-                    (7, sky.sh.as_entire_binding()),
-                    (8, TextureView(&sky.transmittance)),
-                    (10, Sampler(&samplers.linear)),
-                    (11, lights.lights.as_entire_binding()),
-                    (163, self.light_grid.uniform.as_entire_binding()),
-                    (164, self.light_grid.words.as_entire_binding()),
-                ],
-            );
+            // Only when relighting: otherwise `read` and `write` are the same texture.
+            let voxels = relight.then(|| {
+                self.update_voxels.group(
+                    device,
+                    &[
+                        (0, frame.as_entire_binding()),
+                        (1, self.uniform.as_entire_binding()),
+                        (2, TextureView(&self.global_sdf)),
+                        (3, TextureView(&self.voxel_lighting[read])),
+                        (4, Sampler(&samplers.linear)),
+                        (5, TextureView(&self.voxel_lighting[write])),
+                        (6, self.radiance_probes.as_entire_binding()),
+                        (7, sky.sh.as_entire_binding()),
+                        (8, TextureView(&sky.transmittance)),
+                        (10, Sampler(&samplers.linear)),
+                        (11, lights.lights.as_entire_binding()),
+                        (163, self.light_grid.uniform.as_entire_binding()),
+                        (164, self.light_grid.words.as_entire_binding()),
+                    ],
+                )
+            });
             let probes = self.update_probes.group(
                 device,
                 &[
@@ -956,15 +980,18 @@ impl Lumen {
             );
             let mut pass = rec.compute_pass("lumen surface + radiance cache");
             if self.has_sdf {
-                pass.set_pipeline(&self.update_voxels.pipeline);
-                pass.set_bind_group(0, &voxels, &[]);
-                pass.dispatch_workgroups(LIGHT_RES / 4, LIGHT_RES / 4, LIGHT_RES * SDF_LEVELS as u32 / 4);
+                if let Some(voxels) = &voxels {
+                    pass.set_pipeline(&self.update_voxels.pipeline);
+                    pass.set_bind_group(0, voxels, &[]);
+                    pass.dispatch_workgroups(LIGHT_RES / 4, LIGHT_RES / 4, LIGHT_RES * SDF_LEVELS as u32 / 4);
+                }
                 pass.set_pipeline(&self.update_probes.pipeline);
                 pass.set_bind_group(0, &probes, &[]);
                 // One workgroup (a thread per ray) per refreshed probe.
-                pass.dispatch_workgroups(PROBE_RES * PROBE_RES * PROBE_RES * 2 / PROBE_UPDATE_FRACTION, 1, 1);
+                pass.dispatch_workgroups(PROBE_RES * PROBE_RES * PROBE_RES * 2 / self.probe_update_fraction(), 1, 1);
             }
         }
+        self.voxels_latest = write;
         let lighting = &self.voxel_lighting[write];
 
         // ---- World cache: paths from the screen into its cells ------------------------------------
@@ -1180,7 +1207,7 @@ impl Lumen {
 
     /// Views for debug visualisation: (global SDF, current voxel lighting).
     pub fn debug_views(&self) -> (&wgpu::TextureView, &wgpu::TextureView) {
-        (&self.global_sdf, &self.voxel_lighting[((self.frame & 1) ^ 1) as usize])
+        (&self.global_sdf, &self.voxel_lighting[self.voxels_latest])
     }
 
     pub fn radiance_probes(&self) -> &wgpu::Buffer {
@@ -1226,7 +1253,7 @@ impl Lumen {
         exposure: &wgpu::Buffer,
         surfaces: &CardInputs,
     ) {
-        let lighting = &self.voxel_lighting[((self.frame & 1) ^ 1) as usize];
+        let lighting = &self.voxel_lighting[self.voxels_latest];
         let inputs = WorldCacheInputs {
             frame,
             lumen: &self.uniform,

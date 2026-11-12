@@ -405,6 +405,12 @@ pub struct RenderSettings {
     /// importance-sampled from a world-space light grid, shadowed and accumulated over frames,
     /// instead of every light in range (`lumen_light_grid.rs`).
     pub lumen_light_sampling: bool,
+    /// Frames between two relightings of Lumen's voxel surface cache (1–8; 1: every frame); the
+    /// radiance probes refresh as much slower (one in 8 × this per frame). Both cost the same at
+    /// any resolution (64³ voxels × 4 levels and 24³ × 2 probes: 20–27 ms of a 2-CU iGPU's frame,
+    /// under 1 ms of a fast card's); in between the GI reads the last results, so light changes
+    /// reach the bounce light a few frames later. The quality levels raise it.
+    pub lumen_surface_interval: u32,
     /// Rivers run their shallow-water simulation (`river.rs`); off, they hold still.
     pub river_simulation: bool,
     /// Dynamic wind (`plant_wind.rs`, UE 5.9's Dynamic Wind): plants with bones bend them —
@@ -486,6 +492,7 @@ impl Default for RenderSettings {
             lumen_reflection_fog: true,
             lumen_lite_adaptive_rate: true,
             lumen_light_sampling: true,
+            lumen_surface_interval: 1,
             river_simulation: true,
             wind_bones: true,
             wind_simulation: true,
@@ -739,6 +746,12 @@ impl Renderer {
     /// Internal (render) resolution of the latest frame.
     pub fn internal_size(&self) -> (u32, u32) {
         (self.targets.width, self.targets.height)
+    }
+
+    /// Dynamic resolution continues from `percentage` (a slow GPU known in advance starts low
+    /// instead of spending its first seconds at 100 %).
+    pub fn start_resolution_at(&mut self, percentage: f32) {
+        self.resolution = ResolutionController::new(percentage);
     }
 
     /// Screen percentage of the latest frame (the dynamic resolution's choice while it is on).
@@ -1202,6 +1215,7 @@ impl Renderer {
             (mode, _) => mode,
         };
         self.lumen.set_world_cache(if self.settings.global_illumination { world_cache } else { WorldCacheMode::Off });
+        self.lumen.set_surface_interval(self.settings.lumen_surface_interval);
         self.lumen.update(&self.device, &self.queue, scene, &self.motion.changes, camera.position, frame, &self.targets, self.settings.tessellation);
         if self.uses_lumen_lite() {
             if let Some(lite) = self.lumen_lite.as_mut() {

@@ -59,6 +59,7 @@ cargo run -p helios-demo --release -- --scene-file my.helios.json     # natively
 cargo run -p helios-demo --release -- --scene cathedral --gi lite                      # lumen | lite | auto (default)
 cargo run -p helios-demo --release -- --scene cathedral --lights 1000 --megalights --sun 200,-30
 #   browser: ?gi=lite, ?megalights=1, ?lights=300 (or heliosConfig.gi / .megaLights / .lights)
+#   browser quality level: ?quality=low|medium|high (default auto: low on integrated GPUs; docs/architecture/browser.md)
 
 # Your own content: a glTF 2.0 model (.glb, or .gltf with its files); skinned models play their animations
 cargo run -p helios-demo --release -- --gltf path/to/Sponza.gltf      # [--no-ground]

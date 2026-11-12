@@ -49,6 +49,47 @@ For these pages, `heliosConfig` also takes `gltf`, `sceneFile` and `stream`. Bef
 rewrote `location` before loading the module. Two new exports: `heliosReady()` is true once `run()` has finished,
 including a scene file's edits; `heliosError()` returns the start-up error or the lost-device message.
 
+## Quality levels for weak GPUs (round 9, `quality-levels`)
+
+The browser picks a quality level for the GPU it runs on (`heliosConfig.quality` / `?quality=low|medium|high|auto`,
+default `auto`). See [`quality-levels.md`](../round9/quality-levels.md) for the measurements.
+
+* **Detection.** wgpu's WebGPU backend reports every adapter as `DeviceType::Other`, so the page asks the browser
+  itself (`gpu_info.js`): the WebGPU adapter's vendor and architecture and the WebGL renderer string.
+  `quality::classify` sorts that into discrete, integrated, Apple, mobile, software or unknown.
+  * Integrated, mobile and software adapters start at `low`.
+  * Apple silicon starts at `medium`.
+  * Discrete and unknown adapters start at `high`.
+* **Levels.** They are applied on top of what the scene, the page and the editor asked for. Edits made while a level
+  is on survive later changes of level.
+  * `medium`:
+    * Lumen Lite instead of the screen probes;
+    * weighted blended OIT instead of AVBOIT;
+    * no volume shadows, local exposure or fog scattering;
+    * Nanite error 1.5 px;
+    * Lumen's surface cache relit every 2nd frame (`lumen_surface_interval`);
+    * dynamic resolution down to 50 %.
+  * `low` takes all of that and also:
+    * switches off the volumetric clouds and fog, coloured glass light, short-range AO, local light shadow maps,
+      MegaLights, translucency layers, tessellation, motion blur, depth of field and the wind simulation;
+    * raises the Nanite error to 2 px and makes the shadow pages one level coarser;
+    * relights the surface cache every 4th frame;
+    * lets dynamic resolution go down to 35 %.
+* **Governor.** It decides by seconds, so a GPU that renders a few frames a second gets the same reaction time.
+  * One level down after 3 s over 1.25 × the budget at dynamic resolution's minimum, or over 2.5 × the budget at any
+    resolution.
+  * One level up after 8 s under 0.55 × the budget at full resolution, never back to a level it left.
+  * Without timestamp queries the frame interval decides.
+  * `heliosQuality()` reports the level, the GPU and the steps; `heliosSetQuality()` fixes a level or returns to
+    `auto`.
+  * The HUD's last line names both.
+  * `?gpu-class=discrete` (testing) makes an iGPU start high, to watch the steps down.
+* **Dynamic resolution on a slow GPU.**
+  * A step may halve each axis when the GPU time is over twice the budget.
+  * A level known at start begins at 50 % (`low`) or 70 % (`medium`).
+* **Effect.** On a 2-CU Radeon iGPU the four scenes went from 1.7–2.5 fps to 6.7–20 fps. On the RTX 3090 `auto`
+  stays `high`.
+
 ## Frames that wait for pipelines (round 8, `webperf`)
 
 A frame's scene sync is where new content asks for pipelines: a new scene's shading models, graph materials,

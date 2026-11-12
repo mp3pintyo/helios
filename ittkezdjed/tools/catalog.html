@@ -14,7 +14,8 @@
     import { startHelios, sceneState } from "../helios-boot.js";
     const scene = new URLSearchParams(location.search).get("scene") || "gallery";
     try {
-      const H = await startHelios({ module: "../web/pkg/helios_demo.js", config: { scene }, waitFor: "ready", pauseWhenHidden: false });
+      // `quality: "high"`: the render values are the scene's own, whatever GPU generates the catalog.
+      const H = await startHelios({ module: "../web/pkg/helios_demo.js", config: { scene, quality: "high" }, waitFor: "ready", pauseWhenHidden: false });
       const s = sceneState(H);
       const top = s.actorList.filter((a) => a.parent === -1);
       const camera = H.heliosEditorCamera();

@@ -432,3 +432,9 @@ Honest differences that remain:
     resource the renderer doesn't explicitly retire still waits for the garbage collector (bind groups are reused
     across frames for this reason, `docs/round9/firefox-device-lost.md`; Firefox gets an `rgba8unorm` canvas, whose
     presented frames its GPU process doesn't keep).
+20. **Scalability** (round 9, `quality-levels`): three fixed levels for the browser, picked from what it says about
+    the GPU and moved by measured frame times. UE has scalability groups per feature area (`sg.ShadowQuality`,
+    `sg.GlobalIlluminationQuality`, …, each 0–4) and an automatic benchmark (`r.ScalabilityBenchmark`) that measures
+    CPU and GPU once and stores the result; here nothing is stored between visits, the levels don't touch scene
+    content (UE's `foliage.DensityScale`, `r.ViewDistanceScale`), and natively the levels are not used (the native
+    demo knows the adapter type and keeps `--gi auto`).

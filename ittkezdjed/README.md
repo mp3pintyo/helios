@@ -158,6 +158,21 @@ Use the `render` op to set features: it sets a value. `heliosKey("KeyG")` presse
     the image has settled; `startHelios` already pauses it when the canvas is hidden.
   * A paused engine also stops compiling shaders. Pause a visible canvas only when
     `heliosFrames() > 0 && heliosBusy() === ""`, or it stays empty.
+* **Weak GPUs (quality levels).** Most visitors don't have a gaming GPU: on a laptop's or a
+  desktop CPU's integrated GPU the full renderer runs at a few frames a second.
+  * The engine picks a level by itself (`heliosConfig.quality`, default `"auto"`). It reads the
+    GPU from the browser: integrated (Intel UHD / Iris / Arc iGPU, AMD Radeon Graphics) and
+    mobile GPUs start at `low`, Apple silicon at `medium`, the rest at `high`.
+  * While the page runs it moves one level down when the GPU stays over its budget even at the
+    lowest resolution for 3 s, and one level up after 8 s far under it.
+  * `medium` uses Lumen Lite's cheaper GI, the cheaper transparency and coarser geometry. `low`
+    also drops the volumetric clouds and fog, coloured light through glass, local lights'
+    shadow maps, short-range AO and motion blur, and renders down to 35 % resolution.
+  * Design the scene so that it still reads at `low`: don't make a fog beam or a cloud the only
+    thing a section shows. Check with `?quality=low`.
+  * `heliosQuality()` says the level and the GPU (`{"level": "low", "auto": true, "gpu":
+    {"class": "integrated", …}}`); `heliosSetQuality("low" | "medium" | "high" | "auto")` sets it,
+    e.g. from a quality menu. A fixed `quality` in the config turns the automatic moves off.
 * **Readiness:**
   * `heliosReady()`: the scene, including a scene file's edits, is in, so camera and editor calls
     are safe.

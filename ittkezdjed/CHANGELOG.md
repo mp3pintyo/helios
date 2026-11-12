@@ -3,6 +3,19 @@
 Newest first. `sync.py` prints the entries newer than a site's last sync. Each entry says what
 changed and what a site has to do.
 
+## 2026-11-12 (later): quality levels for weak GPUs
+
+* **New: the engine lowers its quality on integrated GPUs** (`heliosConfig.quality`, URL
+  `?quality=`, default `"auto"`; `heliosQuality()`, `heliosSetQuality(level)`).
+  * Visitors reported stutter. On an integrated GPU the full renderer ran at 2–6 fps.
+  * `auto` starts integrated and mobile GPUs at `low`, Apple silicon at `medium`, the rest at
+    `high`, and moves one level a step when the frame times say so.
+  * **Site:** sync. Look at each section with `?quality=low`: the volumetric clouds and fog,
+    coloured glass light and local lights' shadow maps are off there. A page that must look the
+    same everywhere sets `quality: "high"` (and accepts the stutter).
+* **Dynamic resolution reacts faster on slow GPUs** (it reached 50 % only after half a minute at
+  2 fps). Nothing to do.
+
 ## 2026-11-12
 
 * **New: `heliosConfig.gltf`, `heliosConfig.sceneFile`, `heliosConfig.stream`.**

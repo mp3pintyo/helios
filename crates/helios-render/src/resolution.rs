@@ -104,6 +104,8 @@ impl ResolutionController {
     /// Below this fraction of the budget the resolution goes up (above 1.0 it goes down).
     const LOW: f32 = 0.8;
     const MAX_STEP_DOWN: f32 = 0.75;
+    const FAR_OVER: f32 = 2.0;
+    const MAX_STEP_DOWN_FAR: f32 = 0.5;
     const MAX_STEP_UP: f32 = 1.1;
 
     pub fn new(percentage: f32) -> Self {
@@ -141,7 +143,10 @@ impl ResolutionController {
         if average > budget * Self::LOW && average <= budget {
             return self.percentage;
         }
-        let step = (budget * Self::TARGET / average).sqrt().clamp(Self::MAX_STEP_DOWN, Self::MAX_STEP_UP);
+        // Far over the budget (an integrated GPU: a few frames a second) a step may halve each
+        // axis: at 0.75 per decision of six frames it took a 2 fps GPU half a minute to reach 50 %.
+        let max_down = if average > budget * Self::FAR_OVER { Self::MAX_STEP_DOWN_FAR } else { Self::MAX_STEP_DOWN };
+        let step = (budget * Self::TARGET / average).sqrt().clamp(max_down, Self::MAX_STEP_UP);
         // Whole percent steps: sub-percent changes are invisible and only churn.
         let next = (self.percentage * step).round().clamp(min, max);
         if next != self.percentage {
@@ -256,6 +261,16 @@ mod tests {
             controller.update(Some((7, 50.0)), &settings);
         }
         assert_eq!(controller.percentage(), 100.0);
+    }
+
+    #[test]
+    fn a_slow_gpu_reaches_the_minimum_in_one_decision() {
+        // A 2-CU iGPU: 400 ms at 100 % against a 14 ms budget.
+        let settings = DynamicResolution::with_budget(14.0);
+        let mut controller = ResolutionController::new(100.0);
+        let history = run(&mut controller, &settings, 20, |_, p| model(40.0, 360.0, p));
+        let first_min = history.iter().position(|&p| p == 50.0).unwrap();
+        assert!(first_min < ResolutionController::WINDOW + 1, "took {first_min} frames");
     }
 
     #[test]

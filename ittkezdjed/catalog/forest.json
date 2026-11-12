@@ -513,6 +513,17 @@
    },
    {
     "group": "Lighting",
+    "key": "lumen_surface_interval",
+    "kind": {
+     "max": 8,
+     "min": 1,
+     "step": 1,
+     "type": "number"
+    },
+    "label": "Lumen: frames between surface cache relightings"
+   },
+   {
+    "group": "Lighting",
     "key": "auto_exposure",
     "kind": {
      "type": "bool"
@@ -867,6 +878,7 @@
    "lumen_lite_ssr": true,
    "lumen_reflection_fog": true,
    "lumen_skip_unlit_hits": true,
+   "lumen_surface_interval": 1,
    "mega_lights": false,
    "mega_lights_hzb_traces": true,
    "mega_lights_importance_cull": 0.009999999776482582,

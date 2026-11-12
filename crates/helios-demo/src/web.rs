@@ -72,6 +72,8 @@ pub(crate) struct State {
     compiling_frames: u32,
     /// Frames presented so far (`heliosFrames`).
     presented: u32,
+    /// The quality level for this GPU and the governor that moves it (`quality.rs`).
+    levels: crate::quality::Levels,
     /// Serial compiles: the next rAF compiles the next background pipeline instead of rendering.
     compile_next: bool,
     /// Background pipelines created per serial compile: doubled while a batch compiles in under
@@ -443,6 +445,8 @@ async fn run() -> Result<(), String> {
     let ctx = GpuContext::new(instance, Some(&surface))
         .await
         .map_err(|e| format!("{e}. Use a browser with WebGPU enabled (Chrome/Edge 113+, Safari 26+, Firefox 141+)."))?;
+    // What the browser tells about the GPU: the quality level starts from it (quality.rs).
+    let gpu = gpu_info().await;
     // A lost device (e.g. the browser's GPU process ran out of memory) stops the frames with a
     // message instead of a frozen canvas.
     ctx.device.set_device_lost_callback(|reason, message| {
@@ -561,6 +565,38 @@ async fn run() -> Result<(), String> {
     if let Some(mode) = option_string("worldCache", "world-cache").as_deref().and_then(helios_render::WorldCacheMode::parse) {
         app.renderer.settings.world_cache = mode;
     }
+    // `?quality=low|medium|high|auto` (page config `quality`): the level, by default from the
+    // GPU and moved by the frame times (quality.rs, `heliosQuality`). A page's `gi` wins over
+    // the level's GI.
+    let requested = option_string("quality", "quality");
+    let level = requested.as_deref().and_then(crate::quality::Quality::parse);
+    if let Some(other) = requested.as_deref().filter(|v| level.is_none() && *v != "auto") {
+        log::warn!("unknown quality {other:?} (low, medium, high or auto)");
+    }
+    let keep_gi = option_string("gi", "gi").as_deref().and_then(helios_render::GiMethod::parse).is_some();
+    let mut levels = crate::quality::Levels::new(gpu, level, keep_gi, &app.renderer.settings, now());
+    // `?gpu-class=discrete|integrated|apple|mobile|software|unknown` (testing): as if the browser
+    // had reported that kind of GPU (e.g. a slow GPU taken for a fast one, to watch the steps down).
+    if let Some(class) = query_param("gpu-class").as_deref().and_then(crate::quality::GpuClass::parse) {
+        levels.force_class(class);
+    }
+    app.renderer.settings = levels.settings(&app.renderer.settings);
+    // A GPU known to be slow starts at a lower resolution (dynamic resolution goes up from there
+    // when it can): at 100 % its first frames took 0.5 s each.
+    match levels.quality() {
+        crate::quality::Quality::Low => app.renderer.start_resolution_at(50.0),
+        crate::quality::Quality::Medium => app.renderer.start_resolution_at(70.0),
+        crate::quality::Quality::High => {}
+    }
+    log::info!(
+        "GPU: {} ({} {}, {:?}): quality {}{}",
+        levels.class.name(),
+        levels.info.vendor,
+        levels.info.architecture,
+        levels.info.renderer,
+        levels.quality().name(),
+        if levels.governor.auto { " (auto)" } else { "" }
+    );
     set_status("");
 
     let hud = document.get_element_by_id("hud").and_then(|e| e.dyn_into::<HtmlElement>().ok());
@@ -587,6 +623,7 @@ async fn run() -> Result<(), String> {
         compiling: Some(wait_for_gpu(&ctx.queue, false)),
         compiling_frames: 0,
         presented: 0,
+        levels,
         compile_next: false,
         batch: FIXED_BATCH.load(Ordering::Relaxed).max(1),
         batch_labels: Vec::new(),
@@ -602,6 +639,8 @@ async fn run() -> Result<(), String> {
         set_status("Applying the scene file…");
         crate::web_editor::load_document(doc).await?;
         set_status("");
+        // The scene file's render overrides join what the level is applied to.
+        with_state(|st| st.app.renderer.settings = st.levels.settings(&st.app.renderer.settings));
     }
     READY.with(|r| r.set(true));
     Ok(())
@@ -867,6 +906,25 @@ fn frame(st: &mut State, now: f64) {
         }
     }
     st.presented += 1;
+    let renderer = &st.app.renderer;
+    let sample = crate::quality::Sample {
+        now_ms: now,
+        gpu_ms: renderer.gpu_time_ms(),
+        percentage: renderer.screen_percentage(),
+        dynamic: renderer.settings.dynamic_resolution,
+        budget_ms: renderer.settings.dynamic_resolution.map_or(st.app.gpu_budget_ms, |d| d.gpu_budget_ms),
+        complete: pipelines::waiting().is_empty(),
+    };
+    if let Some(level) = st.levels.governor.observe(sample) {
+        log::info!(
+            "quality {}: the GPU took {} at {:.0} % (budget {:.1} ms)",
+            level.name(),
+            sample.gpu_ms.map_or("too long per frame".to_string(), |ms| format!("{ms:.1} ms")),
+            sample.percentage,
+            sample.budget_ms
+        );
+        st.app.renderer.settings = st.levels.settings(&st.app.renderer.settings);
+    }
 
     if pipelines::compiler() == Compiler::Serial && pipelines::queued() {
         st.compile_next = true;
@@ -882,7 +940,9 @@ fn frame(st: &mut State, now: f64) {
         if let Some(hud) = &st.hud {
             let (made, total) = pipelines::progress();
             let shaders = if made < total { format!("shaders compiling in the background: {made} / {total} (waiting: {})\n", waiting_features()) } else { String::new() };
-            hud.set_inner_text(&format!("{shaders}{}", st.app.hud()));
+            let q = &st.levels;
+            let quality = format!("\nquality {}{} · {} GPU", q.quality().name(), if q.governor.auto { " (auto)" } else { "" }, q.class.name());
+            hud.set_inner_text(&format!("{shaders}{}{quality}", st.app.hud()));
         }
     }
 }
@@ -1062,6 +1122,55 @@ pub fn helios_gpu_passes(reset: bool) -> String {
         json
     })
     .unwrap_or_default()
+}
+
+#[wasm_bindgen(module = "/src/gpu_info.js")]
+extern "C" {
+    /// What the browser tells about the GPU, as JSON (see [`crate::quality::GpuInfo`]).
+    #[wasm_bindgen(js_name = gpuInfo)]
+    fn gpu_info_promise() -> js_sys::Promise;
+}
+
+async fn gpu_info() -> crate::quality::GpuInfo {
+    let json = wasm_bindgen_futures::JsFuture::from(gpu_info_promise()).await.ok().and_then(|v| v.as_string()).unwrap_or_default();
+    serde_json::from_str(&json).unwrap_or_default()
+}
+
+/// The quality level and the GPU it was chosen for, as JSON: `{"level": "low", "auto": true,
+/// "detected": "low", "gpu": {"class": "integrated", "vendor": "amd", "architecture": "rdna-2",
+/// "renderer": "ANGLE (AMD, AMD Radeon(TM) Graphics …)"}, "stepsDown": 0, "stepsUp": 0}`.
+/// `level` is `high` (the full renderer), `medium` (Lumen Lite's GI, the cheaper OIT, coarser
+/// geometry, Lumen's surface cache relit every other frame) or `low` (also no volumetric clouds
+/// or fog, coloured glass light, short-range AO, local light shadow maps or motion blur; the
+/// surface cache relit every 4th frame; dynamic resolution down to 35 %). `auto`: the engine chose
+/// it from the GPU (integrated and mobile GPUs start low, Apple silicon medium, the rest high)
+/// and moves it while the page runs: a step down when the GPU stays over its budget even at the
+/// lowest resolution for 3 s, a step up after 8 s far under it (never back to a level it left).
+/// Empty until the engine runs.
+#[wasm_bindgen(js_name = heliosQuality)]
+pub fn helios_quality() -> String {
+    with_state(|st| st.levels.describe().to_string()).unwrap_or_default()
+}
+
+/// Sets the quality level: `"low"`, `"medium"` or `"high"` fix it (a page's quality menu);
+/// `"auto"` returns to the level for the GPU and lets the engine move it again. Returns false
+/// for an unknown name.
+#[wasm_bindgen(js_name = heliosSetQuality)]
+pub fn helios_set_quality(level: &str) -> bool {
+    let (quality, auto) = match level {
+        "auto" => (None, true),
+        other => match crate::quality::Quality::parse(other) {
+            Some(q) => (Some(q), false),
+            None => return false,
+        },
+    };
+    with_state(|st| {
+        let q = quality.unwrap_or_else(|| crate::quality::Quality::for_class(st.levels.class));
+        st.levels.governor.set(q, auto, now());
+        st.app.renderer.settings = st.levels.settings(&st.app.renderer.settings);
+        log::info!("quality: {}{}", q.name(), if auto { " (auto)" } else { "" });
+    });
+    true
 }
 
 #[wasm_bindgen(module = "/src/gpu_memory.js")]

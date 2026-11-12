@@ -77,6 +77,9 @@ pub fn all() -> Vec<Setting> {
             s.lumen_lite_adaptive_rate = b(v)
         }),
         flag("lumen_light_sampling", "Lumen: sampled surface-cache lights", "Lighting", |s| json!(s.lumen_light_sampling), |s, v| s.lumen_light_sampling = b(v)),
+        number("lumen_surface_interval", "Lumen: frames between surface cache relightings", "Lighting", (1.0, 8.0, 1.0), |s| json!(s.lumen_surface_interval), |s, v| {
+            s.lumen_surface_interval = f(v).clamp(1.0, 8.0) as u32
+        }),
         flag("auto_exposure", "Auto exposure", "Lighting", |s| json!(s.auto_exposure), |s, v| s.auto_exposure = b(v)),
         flag("local_exposure", "Local exposure", "Lighting", |s| json!(s.local_exposure.is_some()), |s, v| {
             s.local_exposure = b(v).then(LocalExposure::default)

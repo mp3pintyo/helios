@@ -57,3 +57,15 @@ forest's plant bones in the rasterisers +0.4 ms and its shadow pages −0.87 ms 
 MegaLights froxel volume 0.69 ms (−0.23 ms of fog). Recovered: the short-range AO at half resolution in a pass of its
 own (0.06–0.10 ms; lighting −0.28…−0.71 ms), world-cache paths capped at 24 000 a frame (−0.07…−0.15 ms), AVBOIT
 composites skipping empty pixels (−0.04 ms), glass-light colours read only behind a pane (−0.05 ms in the cathedral).
+
+**Round 9 quality levels** ([`quality-levels.md`](round9/quality-levels.md); Chromium, 1600×900, default `auto`
+start).
+* iGPU: AMD Radeon Graphics of a Ryzen 5 7600X, 2 RDNA 2 CUs, through `--use-adapter-luid`. GPU per frame and frame
+  rate, before → `low`:
+  * valley 637 ms / 2.5 fps → 78 ms / 15 fps;
+  * cathedral 820 / 1.9 → 82 / 12;
+  * forest 814 / 1.7 → 169 / 6.7;
+  * gallery 599 / 2.2 → 54 / 20.
+* Lumen's surface cache and radiance probes were the cost left at `low` that does not shrink with the resolution.
+  Relit every 4th frame, it went from 25–27 to 4.6–5.9 ms.
+* RTX 3090: `auto` = `high`, 8.8–12.3 ms; a forced `low` takes 5.1–8.0 ms.
