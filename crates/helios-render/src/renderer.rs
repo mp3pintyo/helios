@@ -551,6 +551,9 @@ pub struct Renderer {
     /// The device samples the 17 textures AVBOIT's translucent surfaces need.
     avboit_supported: bool,
     displaceable: bool,
+    /// Browser: the material resolve renders with its tessellation permutation although nothing
+    /// is displaced yet (see `render_frame`).
+    resolve_tessellated: bool,
     frame_uniform: wgpu::Buffer,
     scene: GpuScene,
     targets: FrameTargets,
@@ -656,6 +659,7 @@ impl Renderer {
             held: false,
             avboit_supported: device.limits().max_sampled_textures_per_shader_stage >= crate::translucency::AVBOIT_SAMPLED_TEXTURES,
             displaceable: false,
+            resolve_tessellated: false,
             frame_uniform: uniform_buffer(device, "frame", std::mem::size_of::<FrameUniform>() as u64),
             scene: GpuScene::new(device, pool),
             targets: FrameTargets::new(device, (width, height), (width, height)),
@@ -975,6 +979,7 @@ impl Renderer {
         let requested = self.settings;
         self.requested = requested;
         if pipelines::deferring() {
+            pipelines::set_held(held_groups(&requested));
             self.prefetch_content(scene);
         }
         self.settings = self.compiled_features(requested);
@@ -1162,8 +1167,13 @@ impl Renderer {
         // browser a scene with tessellation asked for uses it from the first image on, while the
         // tessellator compiles, instead of compiling the plain permutation for those frames and
         // then the displaced one (5–10 resolve pipelines of 0.6–1.2 s each in Firefox). Natively
-        // the plain one is used whenever nothing is displaced.
-        let tessellation = self.scene.has_displacement() || (pipelines::deferring() && tessellation_wanted);
+        // the plain one is used whenever nothing is displaced. Tessellation switched on later (a
+        // quality level stepping up) keeps the plain one until the displaced one has compiled in
+        // the background with the tessellator: making it a core pipeline held the canvas 11 s in
+        // Firefox.
+        let early = self.frame_index == 0 || self.resolve_tessellated || pipelines::ready(Group::Tessellation);
+        self.resolve_tessellated = pipelines::deferring() && tessellation_wanted && early;
+        let tessellation = self.scene.has_displacement() || self.resolve_tessellated;
         let debug_views = self.settings.debug_view != DebugView::Lit;
         let (uv_extensions, skinning, kinds) = (self.scene.uv_extensions, self.scene.skins.skinned_instances, self.scene.resolve_kinds);
         // Only the shading models of plants carry the plant code (none with the bones off).
@@ -1761,4 +1771,25 @@ pub struct DynamicStats {
 fn viewport((width, height): (u32, u32)) -> Vec4 {
     let (w, h) = (width as f32, height as f32);
     Vec4::new(w, h, 1.0 / w, 1.0 / h)
+}
+
+/// The pipeline groups whose every feature `r` switches off: their background compile waits
+/// until one is switched on ([`pipelines::set_held`]). Each group is held only when everything
+/// [`Renderer::compiled_features`] turns off while it compiles is off already, so a held group
+/// changes nothing a frame renders. (Lumen's group is never held: Lumen Lite uses its surface
+/// cache. Translucency is in nearly every scene.)
+fn held_groups(r: &RenderSettings) -> Vec<Group> {
+    [
+        (Group::Shadows, !r.shadows),
+        (Group::OcclusionCulling, !r.occlusion_culling),
+        (Group::Clouds, !r.clouds),
+        (Group::Fog, !r.volumetric_fog && r.fog_scattering.is_none()),
+        (Group::Translucency, !r.translucency && !r.glass_shadows),
+        (Group::CameraEffects, r.motion_blur <= 0.0 && r.depth_of_field.is_none() && r.local_exposure.is_none()),
+        (Group::Tessellation, !r.tessellation),
+        (Group::Effects, !r.volumes && !r.particles),
+    ]
+    .into_iter()
+    .filter_map(|(group, off)| off.then_some(group))
+    .collect()
 }

@@ -108,9 +108,57 @@ presentation are done.
   ~14 ms of GPU work.
 * The governor gets the same budget, so a GPU that cannot reach 8 ms even at the lowest resolution steps down a
   level.
-* Not changed: after the first image, Firefox still compiles the background pipelines one batch per presented
-  frame, so the view runs at 0.5–3 fps for ~25 s (see below). Leaving a level's disabled features uncompiled
-  would shorten that.
+* After the first image, Firefox still compiles the background pipelines one batch per presented frame (see
+  below). At `high` the view runs at 0.5–3 fps for ~25 s. Lower levels shorten that: see the next section.
+
+## Only the features a level uses are compiled (round 9, `compile-only-enabled-features`)
+
+A quality level that switches features off also leaves their pipelines uncompiled, until a feature is switched
+on.
+* **Held groups.**
+  * Each frame the renderer gives `pipelines::set_held` the groups whose every feature the requested settings
+    switch off (`held_groups` in `renderer.rs`):
+    * clouds;
+    * fog (with fog scattering off);
+    * camera effects (no motion blur, depth of field or local exposure);
+    * tessellation;
+    * shadows, occlusion culling, translucency, volumes and particles, when switched off.
+  * A group is held only when everything `compiled_features` turns off while it compiles is off already, so a
+    held group changes nothing a frame renders.
+  * Lumen's group is never held: Lumen Lite uses its surface cache.
+* **How the queue treats them.**
+  * The serial compiler's `make_next` and the parallel compiler's warming skip held pipelines.
+  * `waiting`, `queued` and `progress` leave them out, so the governor's "complete" means "everything this level
+    uses".
+  * `heliosShaders()` lists them under `held`.
+  * They stay queued. A feature switched on (the governor stepping up, `heliosSetQuality`, the page's settings)
+    releases its group, which compiles in the background like any other while the feature stays off.
+* **The level is known before the scene bakes.**
+  * `run()` picks it right after reading the GPU and applies it to the renderer before the stand-in scene queues
+    its material permutations.
+  * Before this, the stand-in queued the defaults' tessellated culling and resolve set, and `low` then compiled the
+    plain one too: two core sets before the first image.
+  * The settings are restored before the scene's and page's options are read, and the level is applied again on
+    top of them.
+* **Tessellation switched on later.**
+  * In the browser the resolve's tessellation permutation is used from the first image on when tessellation is
+    asked for at the start.
+  * Switched on later, the resolve keeps the plain permutation until the Tessellation group, which holds the
+    displaced permutations, is ready.
+  * Making them core pipelines held the canvas 11 s in Firefox.
+* **Effect.** Firefox, the Opus55 site's gallery, RTX 3090:
+
+  | | Before | After |
+  |---|---|---|
+  | First image at `low` | 28.7 s | 17.9 s |
+  | Every pipeline at `low` | 53.4 s | 31.7 s |
+  | Pipelines at `low` | 212 | 152 |
+  | Stutter after the first image at `low` | ~25 s | ~14 s |
+  | `high` (first image / every pipeline) | 19.0 / 42.3 s | unchanged |
+
+* **The cost.** A switch from `low` to `high` now compiles the held groups and the displaced resolve then:
+  * in Firefox ~24 s of 0.5–3 fps, without a frozen canvas;
+  * in Chromium ~5 s at full frame rate.
 
 ## Frames that wait for pipelines (round 8, `webperf`)
 
@@ -269,3 +317,36 @@ presented frames ("Not enough memory left") — 13 s at 60 Hz, 5 s at 160 Hz. Tw
   frame for Helios at 1600×900, 12.5 MiB for a page that only clears and presents); to `rgba8unorm` it stays flat.
   Firefox gets an `rgba8unorm` canvas; Chromium and Edge keep their preferred `bgra8unorm` (no measurable difference
   there: 158–161 fps and 13.0–13.6 ms HUD GPU time with either). `?canvas-format=rgba|bgra` overrides.
+
+## Firefox: the canvas holds still while it compiles (round 9, `firefox-still-compile`)
+
+Firefox cannot render while it compiles a pipeline. Measured on Firefox 160 (RTX 3090, a page compiling 8 test
+pipelines of ~530 ms each):
+* the GPU completed 0 frames during an asynchronous batch and 2–3 during a synchronous one;
+* a second `GPUDevice` compiling blocked the first device's frames too;
+* the asynchronous pipelines compiled one after another, not in parallel;
+* only the main thread kept running (rAF 60 fps);
+* a pipeline compiled on an earlier visit with the same profile took as long again: there is no cache between
+  visits.
+
+Firefox has compiled with DXC since 135. The page side cannot change any of this.
+
+The view between the background batches is therefore a choice, `heliosConfig.compileView` (URL
+`?compile-view=`):
+* **`"still"` (default with the serial compiler, i.e. Firefox).**
+  * After the first image the canvas holds its image, and the batches compile back to back.
+  * Frames run only in short bursts: 30 after the first image, 8 whenever a feature's group becomes ready, so
+    the feature appears and TSR settles.
+  * The page sees `still: true` in `heliosShaders()`.
+  * A 2 px bar over the canvas's bottom edge shows the compile's progress and fades out at the end. It has no
+    text and no pointer events, and `compileIndicator: false` hides it.
+* **`"live"`.** One frame between batches, as before. A moving camera jumped about once a second for ~25 s.
+
+Bursts are counted in frames rather than time. At 0.6 s per burst the full set came 11 s later (57.6 s instead
+of 46.5 s, Opus55 gallery, Firefox 160) because each frame ran at ~30 fps under the compile load.
+
+| Opus55 gallery, Firefox 160, RTX 3090 | `live` | `still` |
+|---|---|---|
+| `high`: first image / every pipeline | 21.9 / 46.5 s | 20.9 / 49.1 s |
+| `high`: canvas updates after the first image | ~40 single frames | 6 short bursts |
+| `low`: every pipeline | — | 33.1 s |

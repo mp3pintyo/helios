@@ -156,9 +156,17 @@ Use the `render` op to set features: it sets a value. `heliosKey("KeyG")` presse
   * In Firefox the budget is at most 8 ms, whatever the page asks for. Firefox starts a frame
     only once the last one is on screen, so 14 ms of GPU work ran at ~27 fps there even on an
     RTX 3090/4090.
-  * Firefox compiles shaders one at a time and keeps no cache between visits: after the first
-    image the view stutters for ~25 s while the rest compile. Don't time an intro animation to
-    the first image in Firefox.
+  * Firefox compiles shaders one at a time and keeps no cache between visits. After the first
+    image the view stutters while the rest compile: ~25 s at `high`, ~14 s at `low`, which
+    leaves out the features it switches off. Don't time an intro animation to the first image in
+    Firefox.
+  * In Firefox the canvas holds its first image while the rest compiles, moving only for a moment as
+    each feature arrives. A thin bar at its bottom edge shows the progress (`compileIndicator:
+    false` hides it; `compileView: "live"` moves it between compiles instead, in jumps).
+    `heliosShaders().still` is true meanwhile: a page may show its own "loading details" hint.
+  * A quality menu that switches up a level compiles the features that level adds then. In
+    Firefox the view stutters for ~20 s after such a switch; in Chromium a few seconds pass
+    before they appear.
   * `screenPercentage` fixes the resolution instead.
   * Rendering a still view costs GPU time every frame. Pause it with `heliosSetPaused(true)` once
     the image has settled; `startHelios` already pauses it when the canvas is hidden.

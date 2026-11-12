@@ -1,7 +1,7 @@
 //! Browser platform layer: canvas surface, DOM input and a requestAnimationFrame loop.
 //!
 //! A page can embed the engine instead of using `index.html`'s full-window demo: it sets
-//! `globalThis.heliosConfig = { scene, gltf, sceneFile, stream, screenPercentage, gpuBudgetMs, embedded, lights, megaLights,
+//! `globalThis.heliosConfig = { scene, gltf, sceneFile, stream, screenPercentage, gpuBudgetMs, compileView, compileIndicator, embedded, lights, megaLights,
 //! gi, worldCache, statusElement, bakeWorkers }` before loading the module (query parameters still work and take part as
 //! fallbacks; a page's own guide is `ittkezdjed/README.md`), and drives the
 //! running engine through the exported `helios*` functions (scene, glTF model, candle lights,
@@ -86,6 +86,80 @@ pub(crate) struct State {
     /// After the first image: since when frames are held for pipelines a frame's scene sync
     /// queued (a scene switch, an editor change; ms, 0: not held).
     held_since: f64,
+    /// Serial compiles (Firefox) after the first image: the canvas holds still while the
+    /// background pipelines compile, and runs only for a moment once a feature arrives
+    /// (`heliosConfig.compileView`, see `STILL_BURST_FRAMES`).
+    still: bool,
+    /// Frames still to run normally before the next batch: after the first image, a feature
+    /// that arrived.
+    burst_frames: u32,
+    /// The pipeline groups ready at the last check, one bit per `Group`.
+    ready_groups: u16,
+    /// The thin progress bar along the canvas's bottom edge while it holds still
+    /// (`heliosConfig.compileIndicator`, default on).
+    indicator: Option<Indicator>,
+}
+
+/// While the canvas holds still for the background compile (`compileView: "still"`): the frames
+/// that run once a feature's pipelines have arrived (it appears; TSR settles) and after the first
+/// image. Counted in frames, not time: 0.6 s bursts at Firefox's ~30 fps under compile load
+/// made the full set 11 s later (57.6 s instead of 46.5 s, RTX 3090, the Opus55 gallery).
+const STILL_BURST_FRAMES: u32 = 8;
+const STILL_FIRST_BURST_FRAMES: u32 = 30;
+
+/// A 2 px bar over the canvas's bottom edge showing the background compile's progress while the
+/// canvas holds still: no text (pages are in many languages), no pointer events; it fades out
+/// when the last pipeline is in.
+struct Indicator {
+    bar: web_sys::HtmlElement,
+    /// The style last written (written again only when it changes).
+    last: String,
+}
+
+impl Indicator {
+    fn new() -> Option<Self> {
+        let document = window().document()?;
+        let bar: web_sys::HtmlElement = document.create_element("div").ok()?.dyn_into().ok()?;
+        bar.set_attribute("aria-hidden", "true").ok()?;
+        bar.set_attribute("data-helios", "compile-progress").ok()?;
+        document.body()?.append_child(&bar).ok()?;
+        Some(Self { bar, last: String::new() })
+    }
+
+    /// Shows `progress` (0–1) along the bottom of `canvas`, or fades out (`None`).
+    fn update(&mut self, canvas: &HtmlCanvasElement, progress: Option<f64>) {
+        let rect = canvas.get_bounding_client_rect();
+        let w = window();
+        let size = |v: Result<JsValue, JsValue>| v.ok().and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let (vw, vh) = (size(w.inner_width()), size(w.inner_height()));
+        let visible = rect.width() > 2.0 && rect.bottom() > 0.0 && rect.top() < vh && rect.right() > 0.0 && rect.left() < vw;
+        let (opacity, fraction) = match progress {
+            Some(p) => (if visible { 1.0 } else { 0.0 }, p.clamp(0.0, 1.0)),
+            None => (0.0, 1.0),
+        };
+        let percent = fraction * 100.0;
+        let style = format!(
+            concat!(
+                "position:fixed;left:{:.0}px;top:{:.0}px;width:{:.0}px;height:2px;pointer-events:none;z-index:2147483000;",
+                "background:linear-gradient(90deg,rgba(255,255,255,.7) {percent:.1}%,rgba(255,255,255,.12) {percent:.1}%);",
+                "opacity:{opacity};transition:opacity .6s ease;"
+            ),
+            rect.left(),
+            rect.bottom().min(vh) - 2.0,
+            rect.width(),
+            percent = percent,
+            opacity = opacity,
+        );
+        if style != self.last {
+            let _ = self.bar.set_attribute("style", &style);
+            self.last = style;
+        }
+    }
+}
+
+/// The groups whose pipelines are all in, one bit per `Group`.
+fn ready_groups() -> u16 {
+    Group::ALL.iter().enumerate().filter(|(_, &g)| pipelines::ready(g)).fold(0, |bits, (i, _)| bits | 1 << i)
 }
 
 /// A wait for the browser's GPU process to work through the pipelines created so far.
@@ -489,7 +563,26 @@ async fn run() -> Result<(), String> {
     // compiling in parallel) and compile in the GPU process while the scene loads and bakes.
     // The forest's and the gallery's plants have bones: their rasterisers carry the plant code.
     helios_render::expect_plant_bones(matches!(scene_from_url(), SceneKind::Forest | SceneKind::Gallery));
-    let renderer = Renderer::with_config(&ctx.device, &ctx.queue, format, width, height, renderer_config());
+    let mut renderer = Renderer::with_config(&ctx.device, &ctx.queue, format, width, height, renderer_config());
+    // `?quality=low|medium|high|auto` (page config `quality`): the level, by default from the
+    // GPU and moved by the frame times (quality.rs, `heliosQuality`). A page's `gi` wins over
+    // the level's GI. The level is known before the scene bakes, so the pipelines its stand-in
+    // queues are the level's permutations: queued with the defaults, Firefox compiled the
+    // tessellated culling and resolve set too, which `low` then switched off (the first image
+    // 10 s later). The features a level switches off are not compiled until switched on
+    // (`pipelines::set_held`).
+    let requested = option_string("quality", "quality");
+    let level = requested.as_deref().and_then(crate::quality::Quality::parse);
+    if let Some(other) = requested.as_deref().filter(|v| level.is_none() && *v != "auto") {
+        log::warn!("unknown quality {other:?} (low, medium, high or auto)");
+    }
+    let keep_gi = option_string("gi", "gi").as_deref().and_then(helios_render::GiMethod::parse).is_some();
+    // `?gpu-class=discrete|integrated|apple|mobile|software|unknown` (testing): as if the browser
+    // had reported that kind of GPU (e.g. a slow GPU taken for a fast one, to watch the steps down).
+    let forced_class = query_param("gpu-class").as_deref().and_then(crate::quality::GpuClass::parse);
+    let start_level = level.unwrap_or_else(|| crate::quality::Quality::for_class(forced_class.unwrap_or_else(|| crate::quality::classify(&gpu))));
+    let unlevelled = renderer.settings;
+    renderer.settings = start_level.apply(&unlevelled, keep_gi);
     // Firefox: yielding between the renderer's shader modules and the first pipelines kept the
     // main thread from blocking 5 s (until the GPU process had compiled the core set) at the
     // next turn of the event loop.
@@ -558,6 +651,8 @@ async fn run() -> Result<(), String> {
             DemoApp::from_setup(renderer, setup, kind, detail, model)
         }
     };
+    // The level is applied again below, on top of what the page asks for.
+    app.renderer.settings = unlevelled;
     configure_resolution(&mut app);
     // `?gi=lumen|lite` (page config `gi`); by default Lumen Lite once dynamic resolution can't
     // keep the budget even at its minimum.
@@ -573,19 +668,8 @@ async fn run() -> Result<(), String> {
     if let Some(mode) = option_string("worldCache", "world-cache").as_deref().and_then(helios_render::WorldCacheMode::parse) {
         app.renderer.settings.world_cache = mode;
     }
-    // `?quality=low|medium|high|auto` (page config `quality`): the level, by default from the
-    // GPU and moved by the frame times (quality.rs, `heliosQuality`). A page's `gi` wins over
-    // the level's GI.
-    let requested = option_string("quality", "quality");
-    let level = requested.as_deref().and_then(crate::quality::Quality::parse);
-    if let Some(other) = requested.as_deref().filter(|v| level.is_none() && *v != "auto") {
-        log::warn!("unknown quality {other:?} (low, medium, high or auto)");
-    }
-    let keep_gi = option_string("gi", "gi").as_deref().and_then(helios_render::GiMethod::parse).is_some();
     let mut levels = crate::quality::Levels::new(gpu, level, keep_gi, &app.renderer.settings, now());
-    // `?gpu-class=discrete|integrated|apple|mobile|software|unknown` (testing): as if the browser
-    // had reported that kind of GPU (e.g. a slow GPU taken for a fast one, to watch the steps down).
-    if let Some(class) = query_param("gpu-class").as_deref().and_then(crate::quality::GpuClass::parse) {
+    if let Some(class) = forced_class {
         levels.force_class(class);
     }
     app.renderer.settings = levels.settings(&app.renderer.settings);
@@ -607,6 +691,19 @@ async fn run() -> Result<(), String> {
     );
     set_status("");
 
+    // `compileView: "still" | "live"` (URL `?compile-view=`): how the canvas behaves while
+    // Firefox compiles the background pipelines after the first image. "still" (the default
+    // with the serial compiler): it holds its image and runs only for a moment as each feature
+    // arrives. "live": a frame between compile batches (a moving camera jumps once a second).
+    let still = pipelines::compiler() == Compiler::Serial
+        && match option_string("compileView", "compile-view").as_deref() {
+            None | Some("still") => true,
+            Some("live") => false,
+            Some(other) => {
+                log::warn!("unknown compileView {other:?} (still or live)");
+                true
+            }
+        };
     let hud = document.get_element_by_id("hud").and_then(|e| e.dyn_into::<HtmlElement>().ok());
     if let Some(help) = document.get_element_by_id("help") {
         help.set_text_content(Some(HELP));
@@ -636,6 +733,10 @@ async fn run() -> Result<(), String> {
         batch: FIXED_BATCH.load(Ordering::Relaxed).max(1),
         batch_labels: Vec::new(),
         held_since: 0.0,
+        still,
+        burst_frames: 0,
+        ready_groups: 0,
+        indicator: None,
     }));
     STATE.with(|s| *s.borrow_mut() = Some(state.clone()));
     // Keep the context (instance/adapter/queue) alive for the page lifetime.
@@ -781,7 +882,22 @@ fn frame(st: &mut State, now: f64) {
     let dt = ((now - st.last_time) / 1000.0) as f32;
     st.last_time = now;
     if st.paused {
+        if let Some(indicator) = &mut st.indicator {
+            indicator.update(&st.canvas, None);
+        }
         return;
+    }
+    if st.still && st.presented > 0 {
+        let refining = pipelines::queued().then(|| {
+            let (made, total) = pipelines::progress();
+            made as f64 / total.max(1) as f64
+        });
+        if refining.is_some() && st.indicator.is_none() && !matches!(option_string("compileIndicator", "compile-indicator").as_deref(), Some("false" | "0")) {
+            st.indicator = Indicator::new();
+        }
+        if let Some(indicator) = &mut st.indicator {
+            indicator.update(&st.canvas, refining);
+        }
     }
     if let Some(reason) = DEVICE_LOST.lock().unwrap().as_mut() {
         if !reason.is_empty() {
@@ -825,6 +941,20 @@ fn frame(st: &mut State, now: f64) {
         }
         st.compiling = None;
         set_busy("");
+    }
+
+    // Firefox with the canvas holding still: compile batch after batch, and run frames only for
+    // a moment once a feature's pipelines are in (it appears and settles) or after the first
+    // image. Presenting a frame between batches made a moving camera jump once a second for
+    // ~25 s; the compile itself cannot overlap rendering (Firefox 160's GPU process runs no other
+    // WebGPU work while it compiles, asynchronous pipelines and other devices included).
+    if st.still && st.presented > 0 && pipelines::compiler() == Compiler::Serial {
+        let ready = ready_groups();
+        if ready & !st.ready_groups != 0 {
+            st.burst_frames = st.burst_frames.max(STILL_BURST_FRAMES);
+        }
+        st.ready_groups = ready;
+        st.compile_next = st.burst_frames == 0 && pipelines::queued();
     }
 
     // Firefox: compile the next background pipelines in a frame of their own, one after a
@@ -912,8 +1042,11 @@ fn frame(st: &mut State, now: f64) {
         if !made_in_frames.is_empty() {
             log::info!("made by the first frames: {}", made_in_frames.join(", "));
         }
+        st.burst_frames = STILL_FIRST_BURST_FRAMES;
+        st.ready_groups = ready_groups();
     }
     st.presented += 1;
+    st.burst_frames = st.burst_frames.saturating_sub(1);
     let renderer = &st.app.renderer;
     let sample = crate::quality::Sample {
         now_ms: now,
@@ -935,7 +1068,7 @@ fn frame(st: &mut State, now: f64) {
     }
 
     if pipelines::compiler() == Compiler::Serial && pipelines::queued() {
-        st.compile_next = true;
+        st.compile_next = !(st.still && st.burst_frames > 0);
     } else if pipelines::waiting().is_empty() && TIMES.with(Cell::get)[2] == 0.0 {
         set_time(2, now);
         let start = TIMES.with(Cell::get)[0];
@@ -1098,17 +1231,24 @@ pub fn helios_frames() -> u32 {
 }
 
 /// The background shader compile as JSON: `{"compiled": 84, "total": 160, "waiting": ["shadows",
-/// …], "compiler": "Serial", "firstImageMs": …, "fullQualityMs": …}` (times from the start of the
-/// compile, 0 until reached). The features in `waiting` are off until their pipelines arrive.
+/// …], "held": ["clouds", …], "compiler": "Serial", "firstImageMs": …, "fullQualityMs": …}` (times
+/// from the start of the compile, 0 until reached). The features in `waiting` are off until their
+/// pipelines arrive. `held`: features the settings (the quality level) switch off, whose
+/// pipelines compile only once switched on (not counted in `total`). `still`: the canvas holds
+/// its image while the background pipelines compile (Firefox, `compileView: "still"`; it runs for
+/// a moment as each feature arrives) — a page may show its own "loading details" hint meanwhile.
 #[wasm_bindgen(js_name = heliosShaders)]
 pub fn helios_shaders() -> String {
     let (made, total) = pipelines::progress();
     let waiting: Vec<String> = pipelines::waiting().iter().map(|g| format!("\"{}\"", g.name())).collect();
+    let held: Vec<String> = Group::ALL.iter().filter(|&&g| pipelines::held(g)).map(|g| format!("\"{}\"", g.name())).collect();
+    let still = with_state(|st| st.still && st.presented > 0 && pipelines::queued()).unwrap_or(false);
     let [start, first, full] = TIMES.with(Cell::get);
     let since = |t: f64| if t > 0.0 { (t - start).round() } else { 0.0 };
     format!(
-        "{{\"compiled\":{made},\"total\":{total},\"waiting\":[{}],\"compiler\":\"{:?}\",\"firstImageMs\":{},\"fullQualityMs\":{}}}",
+        "{{\"compiled\":{made},\"total\":{total},\"waiting\":[{}],\"held\":[{}],\"still\":{still},\"compiler\":\"{:?}\",\"firstImageMs\":{},\"fullQualityMs\":{}}}",
         waiting.join(","),
+        held.join(","),
         pipelines::compiler(),
         since(first),
         since(full)

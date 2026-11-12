@@ -79,3 +79,23 @@ frames, so its frame rate depends on the GPU budget:
 | 14 ms (the old default) | 12.5 ms at 100 % | 27 fps, GPU 40 % busy |
 | 10 ms | ~9 ms | 46–60 fps |
 | 8 ms (Firefox's new cap) | ~7 ms at ~62 % | 60 fps |
+
+**Round 9 held pipeline groups** ([`browser.md`](architecture/browser.md#only-the-features-a-level-uses-are-compiled-round-9-compile-only-enabled-features);
+Firefox 1543, RTX 3090, the Opus55 site's gallery):
+
+| `low` | Before | After |
+|---|---|---|
+| First image | 28.7 s | 17.9 s |
+| Every pipeline compiled | 53.4 s | 31.7 s |
+| Pipelines | 212 | 152 |
+
+`high` is unchanged: 19.0 / 42.3 s before, 19.8 / 43.2 s after. After a switch from `low` to `high` the missing
+pipelines compile in ~24 s in Firefox (no frozen canvas) and ~5 s in Chromium.
+
+**Round 9 Firefox still compile** ([`browser.md`](architecture/browser.md#firefox-the-canvas-holds-still-while-it-compiles-round-9-firefox-still-compile);
+Firefox 160, RTX 3090, the Opus55 gallery at `high`):
+* `compileView: "live"`: first image 21.9 s, every pipeline 46.5 s.
+* `"still"` with frame-counted bursts: 20.9 s and 49.1 s.
+* `"still"` with 0.6 s bursts: 57.6 s.
+* Firefox 160 test page, 8 pipelines of ~530 ms: compiled serially, also asynchronously; 0 GPU frames completed
+  meanwhile; a second visit with the same profile was no faster.

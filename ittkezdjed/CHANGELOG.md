@@ -3,6 +3,32 @@
 Newest first. `sync.py` prints the entries newer than a site's last sync. Each entry says what
 changed and what a site has to do.
 
+## 2026-11-12 (late night): Firefox holds the image still while it compiles
+
+* **Firefox: no more jumping view after the first image.**
+  * Until now the view moved about once a second for ~25 s while the remaining shaders
+    compiled.
+  * Now the canvas holds its image and moves only for a moment as each feature (shadows, GI,
+    fog…) arrives.
+  * A 2 px bar at the canvas's bottom edge shows the progress and fades out at the end.
+  * Firefox cannot draw while it compiles, so this is the remaining choice; it adds ~2.6 s to the
+    full set.
+  * New config keys: `compileView` (`"still"`, the Firefox default, or `"live"`, the old
+    behaviour) and `compileIndicator` (`false` hides the bar).
+  * `heliosShaders()` gains `still`.
+  * **Site:** sync. A site that pauses the engine once settled still pauses only when
+    `heliosBusy() === ""` (unchanged); a paused engine stops compiling.
+
+## 2026-11-12 (night): lower levels start faster
+
+* **The features a quality level switches off are no longer compiled** until switched on.
+  * Firefox at `low`: the first image after 18 s instead of 29 s, and the stutter after it
+    ~14 s instead of ~25 s. `high` is unchanged.
+  * Switching up a level later (`heliosSetQuality`, or the engine stepping up) compiles them
+    then: in Firefox ~20 s of stutter, in Chromium a few seconds.
+  * **Site:** sync. A page with a quality menu: expect that delay after a switch up.
+  * `heliosShaders()` gains `held`, the features waiting to be switched on.
+
 ## 2026-11-12 (evening): Firefox at 60 fps on fast GPUs
 
 * **Fix: Firefox ran at ~27 fps even on an RTX 3090/4090.** Firefox starts a frame only once

@@ -157,6 +157,24 @@ thread_local! {
     static AHEAD: Cell<bool> = const { Cell::new(false) };
     /// Queued entries (and those made since, for the progress count), in creation order.
     static QUEUE: RefCell<Vec<Weak<dyn Job>>> = const { RefCell::new(Vec::new()) };
+    /// Groups whose features the settings switch off ([`set_held`]), one bit per [`Group`].
+    static HELD: Cell<u16> = const { Cell::new(0) };
+}
+
+/// Holds back the queued pipelines of `groups`: the settings switch their features off (a
+/// quality level without clouds or tessellation, say), so the background compile skips them and
+/// they count neither as [`waiting`] nor in [`progress`] or [`queued`]. They stay queued: once a
+/// feature is switched on, its group is no longer held and compiles in the background like any
+/// other (the renderer keeps the feature off until it is [`ready`]). In Firefox, which compiles
+/// one pipeline at a time and presents one frame per batch, the held tessellation, clouds, fog and
+/// camera effects shortened the stutter after the first image at `low` by ~11 s.
+pub fn set_held(groups: impl IntoIterator<Item = Group>) {
+    HELD.with(|h| h.set(groups.into_iter().filter(|&g| g != Group::Core).fold(0, |bits, g| bits | 1 << g as u16)));
+}
+
+/// Whether `group` is held back ([`set_held`]).
+pub fn held(group: Group) -> bool {
+    HELD.with(|h| h.get() & (1 << group as u16) != 0)
 }
 
 /// Whether background pipelines are queued instead of made at once (in the browser).
@@ -382,32 +400,44 @@ fn pending(state: u8) -> bool {
     matches!(state, WANTED | WARMING | WARM)
 }
 
+/// Still to make and not held back: what the queue works on and the progress counts.
+fn due(job: &Shared<dyn Job>) -> bool {
+    pending(job.state()) && !held(job.group())
+}
+
+/// Counted in [`progress`]: made, or due (a held pipeline is left out until its group is wanted).
+fn counted(job: &Shared<dyn Job>) -> bool {
+    job.state() == MADE || due(job)
+}
+
 /// Whether every queued pipeline of `group` is made (always, natively); pipelines queued
 /// [`ahead`] of a scene switch don't count until claimed.
 pub fn ready(group: Group) -> bool {
     QUEUE.with(|q| q.borrow().iter().filter_map(Weak::upgrade).all(|j| j.group() != group || j.ahead() || !pending(j.state())))
 }
 
-/// Whether any queued pipeline (ahead of a scene switch included) is still to make.
+/// Whether any queued pipeline (ahead of a scene switch included) is still to make (held groups
+/// left out).
 pub fn queued() -> bool {
-    entries().iter().any(|j| pending(j.state()))
+    entries().iter().any(due)
 }
 
-/// Queued pipelines made so far and in all (made ones stay counted while they live).
+/// Queued pipelines made so far and in all (made ones stay counted while they live; held ones
+/// not made are left out).
 pub fn progress() -> (usize, usize) {
-    let entries = entries();
+    let entries: Vec<_> = entries().into_iter().filter(counted).collect();
     (entries.iter().filter(|j| j.state() == MADE).count(), entries.len())
 }
 
 /// [`progress`] of one group.
 pub fn group_progress(group: Group) -> (usize, usize) {
-    let entries: Vec<_> = entries().into_iter().filter(|j| j.group() == group).collect();
+    let entries: Vec<_> = entries().into_iter().filter(|j| j.group() == group && counted(j)).collect();
     (entries.iter().filter(|j| j.state() == MADE).count(), entries.len())
 }
 
-/// Groups with pipelines still to make, in priority order.
+/// Groups with pipelines still to make, in priority order (held groups left out).
 pub fn waiting() -> Vec<Group> {
-    let mut groups: Vec<Group> = entries().iter().filter(|j| !j.ahead() && pending(j.state())).map(|j| j.group()).collect();
+    let mut groups: Vec<Group> = entries().iter().filter(|j| !j.ahead() && due(j)).map(|j| j.group()).collect();
     groups.dedup();
     groups
 }
@@ -427,7 +457,7 @@ pub fn pump_and(mut made_core: impl FnMut()) -> usize {
         Compiler::Parallel => {
             for job in entries() {
                 match job.state() {
-                    WANTED => {
+                    WANTED if !held(job.group()) => {
                         if !job.warm(Shared::downgrade(&job)) {
                             job.make();
                             made += 1;
@@ -461,10 +491,10 @@ pub fn pump_and(mut made_core: impl FnMut()) -> usize {
     made
 }
 
-/// Serial compiler: makes the next queued pipeline (by group, then creation). Returns whether
-/// there was one.
+/// Serial compiler: makes the next queued pipeline (by group, then creation; held groups
+/// skipped). Returns whether there was one.
 pub fn make_next() -> bool {
-    match entries().into_iter().find(|j| j.state() == WANTED) {
+    match entries().into_iter().find(|j| j.state() == WANTED && !held(j.group())) {
         Some(job) => {
             job.make();
             true
@@ -637,6 +667,30 @@ mod tests {
         assert!(!ready(Group::Core));
         assert_eq!(pump(), 1);
         assert!(rare.is_made());
+        set_deferring(false);
+    }
+
+    #[test]
+    fn held_groups_wait_until_their_feature_is_wanted() {
+        set_deferring(true);
+        set_compiler(Compiler::Serial);
+        let (_, make) = counter();
+        let clouds = in_group(Group::Clouds, || Lazy::background(make.clone()));
+        let fog = in_group(Group::Fog, || Lazy::background(make.clone()));
+        set_held([Group::Clouds, Group::Core]);
+        assert!(held(Group::Clouds) && !held(Group::Core) && !held(Group::Fog));
+        // Held: skipped, not waited for, not counted; still not ready (its feature stays off).
+        assert_eq!(waiting(), vec![Group::Fog]);
+        assert_eq!(progress(), (0, 1));
+        assert!(make_next() && fog.is_made());
+        assert!(!make_next() && !queued() && waiting().is_empty());
+        assert_eq!(progress(), (1, 1));
+        assert!(!clouds.is_made() && !ready(Group::Clouds));
+        // The feature is switched on: its group compiles like any other.
+        set_held([]);
+        assert!(queued() && waiting() == vec![Group::Clouds]);
+        assert_eq!(progress(), (1, 2));
+        assert!(make_next() && clouds.is_made() && ready(Group::Clouds));
         set_deferring(false);
     }
 
