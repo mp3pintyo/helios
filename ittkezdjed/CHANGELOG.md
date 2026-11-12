@@ -37,6 +37,10 @@ changed and what a site has to do.
   * The first image comes before every feature's shaders are compiled.
   * New: `heliosBusy()`, `heliosFrames()`, `heliosShaders()`.
   * **Site:** keep a loading veil until `heliosFrames() > 0` (or use `startHelios`).
+  * `heliosSetPaused(true)` also stops the compiling, because it advances in the frame loop.
+    **Site:** a page that pauses a still view on its own timer must wait until
+    `heliosFrames() > 0` and `heliosBusy() === ""`. Otherwise the canvas stays empty: a site that
+    paused 1.8 s after `heliosScene()` stuck at "Compiling GPU shaders… (46 / 50)".
 * **Streamed geometry (`?stream=`) needs `.hvm` version 7 files.** **Site:** re-preprocess them
   with the engine of the same version.
 * **New: `heliosPhoto(samples)` / `heliosPhotoProgress()`.** They accumulate a still with

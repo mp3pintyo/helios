@@ -156,6 +156,8 @@ Use the `render` op to set features: it sets a value. `heliosKey("KeyG")` presse
   * `screenPercentage` fixes the resolution instead.
   * Rendering a still view costs GPU time every frame. Pause it with `heliosSetPaused(true)` once
     the image has settled; `startHelios` already pauses it when the canvas is hidden.
+  * A paused engine also stops compiling shaders. Pause a visible canvas only when
+    `heliosFrames() > 0 && heliosBusy() === ""`, or it stays empty.
 * **Readiness:**
   * `heliosReady()`: the scene, including a scene file's edits, is in, so camera and editor calls
     are safe.
