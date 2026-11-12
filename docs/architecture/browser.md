@@ -90,6 +90,28 @@ default `auto`). See [`quality-levels.md`](../round9/quality-levels.md) for the 
 * **Effect.** On a 2-CU Radeon iGPU the four scenes went from 1.7–2.5 fps to 6.7–20 fps. On the RTX 3090 `auto`
   stays `high`.
 
+## Firefox's frame budget (round 9, `firefox-frame-budget`)
+
+Firefox does not overlap frames. The next animation frame comes only after the last frame's GPU work and its
+presentation are done.
+* On a fast GPU that cost half the refresh rate. On the RTX 3090 the gallery at `high` took 12.5 ms of GPU time
+  and still ran at 27 fps:
+  * the GPU process used 28 % of a core;
+  * the 3D engine was 40 % busy;
+  * the main thread spent ~1 ms per frame.
+* A visitor saw the same with an RTX 4090 laptop.
+* With ~8 ms of GPU work a frame fits a 60 Hz refresh: budget 10 gave 46–60 fps, budget 8 a steady 60.
+* `configure_resolution` therefore caps the budget at `FIREFOX_GPU_BUDGET_MS` = 8 in Firefox, also when a page
+  sets a higher `gpuBudgetMs`.
+* The gallery at `high` now holds 60 fps at ~60 % screen percentage, brought back to full resolution by TSR.
+* Chromium and Safari keep 14 ms. Chromium overlaps frames, and the interval there stays at the refresh rate up to
+  ~14 ms of GPU work.
+* The governor gets the same budget, so a GPU that cannot reach 8 ms even at the lowest resolution steps down a
+  level.
+* Not changed: after the first image, Firefox still compiles the background pipelines one batch per presented
+  frame, so the view runs at 0.5–3 fps for ~25 s (see below). Leaving a level's disabled features uncompiled
+  would shorten that.
+
 ## Frames that wait for pipelines (round 8, `webperf`)
 
 A frame's scene sync is where new content asks for pipelines: a new scene's shading models, graph materials,

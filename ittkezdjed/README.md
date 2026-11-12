@@ -153,6 +153,12 @@ Use the `render` op to set features: it sets a value. `heliosKey("KeyG")` presse
 * **Performance:**
   * Dynamic resolution keeps the GPU frame under `gpuBudgetMs`: 14 by default, 10–12 for a
     background behind text.
+  * In Firefox the budget is at most 8 ms, whatever the page asks for. Firefox starts a frame
+    only once the last one is on screen, so 14 ms of GPU work ran at ~27 fps there even on an
+    RTX 3090/4090.
+  * Firefox compiles shaders one at a time and keeps no cache between visits: after the first
+    image the view stutters for ~25 s while the rest compile. Don't time an intro animation to
+    the first image in Firefox.
   * `screenPercentage` fixes the resolution instead.
   * Rendering a still view costs GPU time every frame. Pause it with `heliosSetPaused(true)` once
     the image has settled; `startHelios` already pauses it when the canvas is hidden.

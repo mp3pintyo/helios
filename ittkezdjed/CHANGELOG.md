@@ -3,6 +3,14 @@
 Newest first. `sync.py` prints the entries newer than a site's last sync. Each entry says what
 changed and what a site has to do.
 
+## 2026-11-12 (evening): Firefox at 60 fps on fast GPUs
+
+* **Fix: Firefox ran at ~27 fps even on an RTX 3090/4090.** Firefox starts a frame only once
+  the last one is on screen, so the default 14 ms GPU budget left it at half the refresh rate
+  with the GPU 40 % busy. In Firefox the dynamic resolution's budget is now at most 8 ms (also
+  when the page sets a higher `gpuBudgetMs`): 60 fps at ~60 % resolution, which TSR brings back
+  to full. **Site:** sync.
+
 ## 2026-11-12 (later): quality levels for weak GPUs
 
 * **New: the engine lowers its quality on integrated GPUs** (`heliosConfig.quality`, URL

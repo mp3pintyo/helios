@@ -328,17 +328,25 @@ fn scene_from_url() -> SceneKind {
 /// for the compositor and the CPU side.
 const WEB_GPU_BUDGET_MS: f32 = 14.0;
 
+/// Firefox's ceiling on that budget. Firefox does not overlap frames: the next animation frame
+/// comes only after the last one's GPU work and its presentation (about 8 ms more), so a frame
+/// fits a 60 Hz refresh only with ~8 ms of GPU work; at 12.5 ms it ran at 27 fps with the GPU
+/// 40 % busy (RTX 3090, gallery at `high`), at 8 ms it holds 60 fps at ~60 % resolution.
+const FIREFOX_GPU_BUDGET_MS: f32 = 8.0;
+
 /// Screen percentage and dynamic resolution from the URL. Dynamic resolution is on by default
 /// in the browser: the page cannot pick the display's refresh or the GPU it runs on, and with
 /// vsync a frame that misses 16.7 ms costs a whole refresh, so rendering fewer pixels (TSR
 /// keeps the output resolution) is the better trade on laptops and integrated GPUs; a fast GPU
-/// simply stays at 100 %. Without timestamp queries it stays at the maximum.
+/// simply stays at 100 %. Without timestamp queries it stays at the maximum. In Firefox the
+/// budget is at most [`FIREFOX_GPU_BUDGET_MS`].
 ///   `?sp=N`       fixed screen percentage N (with `budget`: the dynamic maximum)
 ///   `?budget=MS`  dynamic resolution budget in GPU milliseconds (0 = off)
 fn configure_resolution(app: &mut DemoApp) {
     let number = |key, name| option_string(key, name).and_then(|v| v.parse::<f32>().ok());
     let percentage = number("screenPercentage", "sp");
     let budget = number("gpuBudgetMs", "budget").or(if percentage.is_some() { None } else { Some(WEB_GPU_BUDGET_MS) });
+    let budget = budget.map(|b| if b > 0.0 && user_agent().contains("Firefox/") { b.min(FIREFOX_GPU_BUDGET_MS) } else { b });
     let s = &mut app.renderer.settings;
     if let Some(percentage) = percentage {
         s.screen_percentage = percentage;

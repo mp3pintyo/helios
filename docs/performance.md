@@ -69,3 +69,13 @@ start).
 * Lumen's surface cache and radiance probes were the cost left at `low` that does not shrink with the resolution.
   Relit every 4th frame, it went from 25–27 to 4.6–5.9 ms.
 * RTX 3090: `auto` = `high`, 8.8–12.3 ms; a forced `low` takes 5.1–8.0 ms.
+
+**Round 9 Firefox frame budget** ([`browser.md`](architecture/browser.md#firefoxs-frame-budget-round-9-firefox-frame-budget);
+Firefox 1543 (Playwright), RTX 3090, 1600×900, the Opus55 site's gallery at `high`). Firefox does not overlap
+frames, so its frame rate depends on the GPU budget:
+
+| GPU budget | GPU time | Frame rate |
+|---|---|---|
+| 14 ms (the old default) | 12.5 ms at 100 % | 27 fps, GPU 40 % busy |
+| 10 ms | ~9 ms | 46–60 fps |
+| 8 ms (Firefox's new cap) | ~7 ms at ~62 % | 60 fps |
