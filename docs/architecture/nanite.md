@@ -40,6 +40,24 @@ Part of the `helios-render` GPU pipeline; the pipeline diagram and the index of 
   compute: a workgroup per cluster, exact sub-pixel edge functions with the top-left rule. Without 64-bit atomics the
   depth and payload are written in two passes (32-bit `atomicMax` of depth, then the ids of pixels that won); a merge
   pass combines hardware and software results. Images with it on/off differ by at most 5/255.
+  **One pass with 64-bit atomics** (round 9; `sw_target.wgsl`, `sw_target_u64.wgsl`, `shader.rs`
+  `single_pass_raster`): a native device with `SHADER_INT64` and `SHADER_INT64_ATOMIC_ALL_OPS` (Vulkan, D3D12 with
+  DXC) keeps depth and id as one 64-bit value per pixel, depth in the high word, and writes both with one
+  `atomicMax`, as Nanite does — triangle and voxel clusters are rasterised once, their payload pipelines are never
+  made, and of two fragments of equal depth the larger id wins whatever the thread order (the two-pass payload was
+  the last writer's). The three compute rasterisers (`sw_raster.wgsl`, `voxel_raster.wgsl`, `tess.wgsl`) write
+  through the helpers of an included file that the device swaps; the merge pass reads the same buffer with a
+  `SW_PACKED` constant. The tessellator keeps its second pass, which stores the barycentrics of the pixels its
+  patches won; it reads the value with `atomicMax(…, 0)`, because naga's HLSL loads a 64-bit atomic with the 32-bit
+  `InterlockedOr` (low word only). Reading the depth first to spare hidden fragments their alpha test was measured
+  slower than not reading it. `raster sw + merge` at 1600×900, minima of 3 interleaved runs: forest 2.25 → 1.09 ms
+  (frame 9.04 → 7.80 ms; at 2560×1440 3.23 → 1.58 ms, frame 15.11 → 13.20 ms), valley 0.114 → 0.072, cathedral
+  0.085 → 0.048, gallery 0.286 → 0.264 ms (mostly its tessellated terrace, still two passes); on D3D12 the forest
+  3.10 → 1.53 ms. Images differ by no more than two runs of the same build do. `--no-atomic64` forces two passes.
+  The browser stays on two passes: WebGPU's `atomic_vec2u_min_max` extension (`atomicStoreMax` on an
+  `atomic<vec2u>`; proposal merged, experimental in Dawn, not shipped) offers exactly this max, but no read — the
+  tessellator's second pass would have to bind the target read-only there — and Metal has the max without the read
+  too, so it also keeps two passes.
 * **Alpha-masked materials** (`alpha_mask.rs`, `alpha_mask.wgsl`; Nanite's "programmable raster"). A material with an
   `alpha_cutoff` is cut out where its base colour image's alpha is below it — in all four rasterisers (visibility
   buffer hardware and software, shadow pages hardware and software), so leaves and grilles also cast cut-out shadows.
@@ -76,3 +94,11 @@ Part of the `helios-render` GPU pipeline; the pipeline diagram and the index of 
   (`cull instances [main]`, `cull pages [shadow]` …) for profiling. Testing several DAG levels at once (a per-mesh
   level table skipping the finer levels of distant instances in the instance pass) was built, proved conservative and
   measured: it cost the instance pass what it saved the page pass, so it was removed.
+* **Not adopted: an edge-length cap on the DAG's errors** (round 9; meshoptimizer's `clusterlod.h`
+  `simplify_error_edge_limit`, which caps a group's error at a multiple of its triangles' edge length and saves
+  other builders up to half the distant triangles). Built into `dag.rs` and measured: at one edge length the cap
+  binds no group at all in the valley or the forest, because the simplifier's error here is purely geometric (the
+  attribute deviation only steers the collapse order) and stays below an edge; at half an edge it binds 3 and 210
+  groups — default views unchanged except the forest's 4.03 → 3.82 M triangles with no change in frame time
+  (7.73 / 7.71 ms). Removed. The same builds had no stuck group, so a vertex-clustering fallback for stalled
+  simplification has nothing to do either.

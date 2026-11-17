@@ -44,7 +44,8 @@ Part of the `helios-render` GPU pipeline; the pipeline diagram and the index of 
   shared memory, then one thread per micro-triangle; every grid vertex is displaced once and a morphing vertex
   mixes its own result with its coarser segment's end vertices' — grid vertices of the same patch — instead of
   evaluating three heights) — and rasterised with the software rasteriser's rules into
-  its target and two passes (depth `atomicMax`, then payload), alongside the other software clusters. All
+  its target and two passes (depth `atomicMax`, then payload; with 64-bit atomics the first pass writes depth and
+  id together and the second only the barycentrics, see [nanite.md](nanite.md)), alongside the other software clusters. All
   micro-triangles go through compute, as in UE (whose patches never take the hardware path either): the dice
   rate keeps them at a few pixels; ones stretched over 4096 pixels by a cliff in the height are dropped, and ones
   crossing the near plane are culled. **Visibility payload**: unchanged — `(cluster slot << 7 | base triangle)`,

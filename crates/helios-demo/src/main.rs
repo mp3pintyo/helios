@@ -336,6 +336,8 @@ mod native {
                     "--lantern" => helios_demo::scenes::cathedral::set_lantern(true),
                     // f32 everywhere, as on a device without f16 shaders.
                     "--no-shader-f16" => helios_render::allow_half_precision(false),
+                    // The compute rasterisers in two passes, as on a device without 64-bit atomics.
+                    "--no-atomic64" => helios_render::allow_atomic64(false),
                     // Test the fallbacks of a device with fewer sampled textures per stage.
                     "--max-sampled-textures" => GpuContext::limit_sampled_textures(value().parse().unwrap_or(24)),
                     "--campfire-smoke" => helios_demo::scenes::forest::set_campfire_smoke(value().parse().unwrap_or(1.0)),

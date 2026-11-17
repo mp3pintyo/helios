@@ -1,11 +1,10 @@
 // Software rasterisation of clusters with tiny triangles (Nanite's compute raster path).
 //
 // WebGPU has no 64-bit atomics, so depth and payload cannot be written in one atomicMax.
-// Instead every software cluster is rasterised twice:
-//   PASS 0 (depth)   : atomicMax of the reverse-Z depth bits per pixel
-//   PASS 1 (payload) : pixels whose depth equals the stored winner write the visibility id
-// Ties write identical-depth ids, which is harmless. The merge pass then combines software
-// and hardware results per pixel.
+// Instead every software cluster is rasterised twice there, PASS 0 for the depth and PASS 1 for
+// the payload; a native device with 64-bit atomics writes both at once and has no PASS 1
+// (sw_target.wgsl, sw_target_u64.wgsl). The merge pass then combines software and hardware
+// results per pixel.
 //
 // One workgroup per cluster: threads transform one vertex each into shared memory, then
 // rasterise one triangle each with exact sub-pixel edge functions and the top-left rule.
@@ -22,6 +21,7 @@
 #include "wind.wgsl"
 #include "skinning.wgsl"
 #include "plant_wind.wgsl"
+#include "sw_target.wgsl"
 
 override PASS: u32 = 0u;
 override LATE: bool = false;
@@ -34,8 +34,6 @@ override MASKED: bool = false;
 @group(0) @binding(4) var<storage, read> clusters: array<Cluster>;
 @group(0) @binding(5) var<storage, read> page_table: array<u32>;
 @group(0) @binding(6) var<storage, read> geometry: array<u32>;
-// [0, w*h): depth bits, [w*h, 2*w*h): payload.
-@group(0) @binding(7) var<storage, read_write> sw_target: array<atomic<u32>>;
 @group(0) @binding(40) var<uniform> materials: array<Material, MAX_MATERIALS>;
 @group(0) @binding(41) var alpha_masks: texture_2d_array<f32>;
 @group(0) @binding(42) var alpha_mask_sampler: sampler;
@@ -145,7 +143,7 @@ fn rasterize(
     let inv_area = 1.0 / (positive_area * SUBPIXEL * SUBPIXEL);
     let id = (slot << TRIANGLE_BITS) | lid;
     let pixels = u32(size.x);
-    let payload_offset = pixels * u32(size.y);
+    let pixel_count = pixels * u32(size.y);
 
     for (var y = 0u; y < extent.y; y++) {
         for (var x = 0u; x < extent.x; x++) {
@@ -165,12 +163,8 @@ fn rasterize(
             let bits = bitcast<u32>(z);
             // Alpha-tested only where the pixel would be written (`&&` short-circuits).
             let uv = (w0 * uv0 + w1 * uv1 + w2 * uv2) * inv_area;
-            if PASS == 0u {
-                if bits > atomicLoad(&sw_target[target_index]) && (!MASKED || alpha_test(mask, uv, uv_gradients[0], uv_gradients[1])) {
-                    atomicMax(&sw_target[target_index], bits);
-                }
-            } else if bits == atomicLoad(&sw_target[target_index]) && (!MASKED || alpha_test(mask, uv, uv_gradients[0], uv_gradients[1])) {
-                atomicStore(&sw_target[payload_offset + target_index], id);
+            if sw_wanted(target_index, bits) && (!MASKED || alpha_test(mask, uv, uv_gradients[0], uv_gradients[1])) {
+                sw_write(target_index, pixel_count, bits, id);
             }
         }
     }

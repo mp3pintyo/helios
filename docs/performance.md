@@ -119,3 +119,18 @@ pipelines, 31.5 s. The largest are:
 * `material resolve`: 3 pipelines, 1.8 s;
 * `lighting (substrate)`: 1.2 s;
 * `lighting`: 0.9 s.
+
+**Round 9 one-pass software raster** ([`nanite.md`](architecture/nanite.md): native devices with 64-bit atomics write
+depth and id with one `atomicMax`; RTX 3090, Vulkan, idle GPU, minima of 3 interleaved runs with and without
+`--no-atomic64`, default views):
+
+| GPU ms | Frame, two passes | Frame, one pass | `raster sw + merge`, two | one |
+|---|---|---|---|---|
+| Forest, 1600×900 | 9.04 | 7.80 | 2.25 | 1.09 |
+| Forest, 2560×1440 (2 runs) | 15.11 | 13.20 | 3.23 | 1.58 |
+| Valley, 1600×900 | 5.48 | 5.42 | 0.114 | 0.072 |
+| Cathedral | 6.11 | 6.05 | 0.085 | 0.048 |
+| Gallery | 4.58 | 4.57 | 0.286 | 0.264 |
+
+D3D12 (DXC), forest, 1600×900, one run each: frame 16.51 → 15.03 ms, `raster sw + merge` 3.10 → 1.53 ms. The
+browser is unchanged (two passes).

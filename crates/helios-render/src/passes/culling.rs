@@ -144,6 +144,9 @@ pub struct Culling {
     /// Alpha-masked hardware clusters ("programmable raster": the fragment shader discards).
     raster_masked_early: Lazy<wgpu::RenderPipeline>,
     raster_masked_late: Lazy<wgpu::RenderPipeline>,
+    /// Whether the compute rasterisers write depth and payload in one pass (64-bit atomics,
+    /// sw_target_u64.wgsl): the payload pipelines below are then never made.
+    single_pass: bool,
     /// [early depth, early payload, late depth, late payload]
     sw_raster: [Lazy<wgpu::ComputePipeline>; 4],
     /// The same for alpha-masked clusters (each specialisation skips the other's clusters).
@@ -237,8 +240,9 @@ impl Culling {
             Lazy::new(move || CullPasses::new(&device, &module, &layout, skinning, deforming))
         };
         let args_pipeline = |entry: &str| compute_pipeline(device, entry, &args_module, entry, &args_layout, &[]);
+        let single_pass = crate::shader::single_pass_raster(device);
         let sw_pipeline_with = |pass: u32, late: bool, masked: bool, background: bool, plants: bool| {
-            let make = if background { compute_pipeline } else { lazy_compute_pipeline };
+            let make = if background && !(single_pass && pass == 1) { compute_pipeline } else { lazy_compute_pipeline };
             make(
                 device,
                 if masked { "sw raster (alpha-masked)" } else { "sw raster" },
@@ -305,7 +309,8 @@ impl Culling {
             ],
             sw_raster_plants: [sw_plants(0, false, false), sw_plants(1, false, false), late(&|| sw_plants(0, true, false)), late(&|| sw_plants(1, true, false))],
             sw_raster_masked_plants: [sw_plants(0, false, true), sw_plants(1, false, true), late(&|| sw_plants(0, true, true)), late(&|| sw_plants(1, true, true))],
-            merge: compute_pipeline(device, "visibility merge", &merge_module, "merge", &merge_layout, &[]),
+            merge: compute_pipeline(device, "visibility merge", &merge_module, "merge", &merge_layout, &[("SW_PACKED", if single_pass { 1.0 } else { 0.0 })]),
+            single_pass,
             dummy_hzb,
             tessellation: None,
             cull_layout,
@@ -491,10 +496,17 @@ impl Culling {
             self.passes[1].prefetch();
         }
         if masked {
-            self.sw_raster_masked.iter().for_each(Lazy::prefetch);
+            self.prefetch_sw(&self.sw_raster_masked);
             self.raster_masked_early.prefetch();
             self.raster_masked_late.prefetch();
         }
+    }
+
+    /// Queues a compute rasteriser's pipelines ([early depth, early payload, late depth, late
+    /// payload]): without the payload passes where one pass writes both.
+    fn prefetch_sw(&self, pipelines: &[Lazy<wgpu::ComputePipeline>; 4]) {
+        let step = if self.single_pass { 2 } else { 1 };
+        pipelines.iter().step_by(step).for_each(Lazy::prefetch);
     }
 
     /// Queues the pipelines of the content the scene has (skinned instances, alpha-masked and
@@ -513,24 +525,24 @@ impl Culling {
         if scene.instance_count == 0 {
         } else if plants {
             self.raster_plants[..2].iter().for_each(Lazy::prefetch);
-            self.sw_raster_plants.iter().for_each(Lazy::prefetch);
+            self.prefetch_sw(&self.sw_raster_plants);
         } else {
             self.raster_early.prefetch();
             self.raster_late.prefetch();
-            self.sw_raster.iter().for_each(Lazy::prefetch);
+            self.prefetch_sw(&self.sw_raster);
         }
         if scene.masks.any() {
             if plants {
                 self.raster_plants[2..].iter().for_each(Lazy::prefetch);
-                self.sw_raster_masked_plants.iter().for_each(Lazy::prefetch);
+                self.prefetch_sw(&self.sw_raster_masked_plants);
             } else {
-                self.sw_raster_masked.iter().for_each(Lazy::prefetch);
+                self.prefetch_sw(&self.sw_raster_masked);
                 self.raster_masked_early.prefetch();
                 self.raster_masked_late.prefetch();
             }
         }
         if scene.has_voxels() {
-            self.voxel_raster.iter().for_each(Lazy::prefetch);
+            self.prefetch_sw(&self.voxel_raster);
         }
     }
 
@@ -552,8 +564,10 @@ impl Culling {
         let tess_groups = tessellation.map(|t| t.main_groups(device, view, scene, &targets.sw_target, targets.tess_lambda()));
 
         if !late {
-            // Only the depth half needs clearing; payloads are read where depth matched.
-            rec.encoder.clear_buffer(&targets.sw_target, 0, Some(targets.width as u64 * targets.height as u64 * 4));
+            // Only the depth half needs clearing; payloads are read where depth matched. (With
+            // 64-bit atomics depth and payload are one value per pixel: all of it.)
+            let pixels = targets.width as u64 * targets.height as u64;
+            rec.encoder.clear_buffer(&targets.sw_target, 0, Some(pixels * if self.single_pass { 8 } else { 4 }));
         }
         let (color_load, depth_load) = if late {
             (wgpu::LoadOp::Load, wgpu::LoadOp::Load)
@@ -620,20 +634,23 @@ impl Culling {
             t.generate_main(&mut pass, groups, view, args, late);
         }
         // The depth pass of all clusters (opaque, alpha-masked, voxels and tessellated), then the
-        // payload pass.
+        // payload pass. With 64-bit atomics the first pass writes the payload too, and only the
+        // tessellator has a second one (for the barycentrics of the pixels its patches won).
         let (sw_raster, sw_raster_masked) =
             if scene.plant_code() { (&self.sw_raster_plants, &self.sw_raster_masked_plants) } else { (&self.sw_raster, &self.sw_raster_masked) };
         for stage in [base, base + 1] {
-            pass.set_bind_group(0, &sw_group, &[]);
-            pass.set_pipeline(&sw_raster[stage]);
-            pass.dispatch_workgroups_indirect(&view.args, args);
-            if scene.masks.any() {
-                pass.set_pipeline(&sw_raster_masked[stage]);
+            if stage == base || !self.single_pass {
+                pass.set_bind_group(0, &sw_group, &[]);
+                pass.set_pipeline(&sw_raster[stage]);
                 pass.dispatch_workgroups_indirect(&view.args, args);
-            }
-            if scene.has_voxels() {
-                pass.set_pipeline(&self.voxel_raster[stage]);
-                pass.dispatch_workgroups_indirect(&view.args, args);
+                if scene.masks.any() {
+                    pass.set_pipeline(&sw_raster_masked[stage]);
+                    pass.dispatch_workgroups_indirect(&view.args, args);
+                }
+                if scene.has_voxels() {
+                    pass.set_pipeline(&self.voxel_raster[stage]);
+                    pass.dispatch_workgroups_indirect(&view.args, args);
+                }
             }
             if let (Some(t), Some(groups)) = (tessellation, &tess_groups) {
                 t.raster_main(&mut pass, groups, stage - base);

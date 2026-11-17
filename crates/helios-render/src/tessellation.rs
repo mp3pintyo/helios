@@ -48,7 +48,7 @@ use crate::profiler::Recorder;
 use crate::material_graphs::ParameterValue;
 use crate::scene::{Material, MaterialHandle, Scene, TextureHandle};
 use helios_material::{DisplacementKind, ParameterKind};
-use crate::shader::{compose_variant, create_module, create_module_from};
+use crate::shader::{compose_variant_for, create_module, create_module_from};
 use crate::util::{bind, bind_group, bind_group_layout, compute_pipeline, lazy_compute_pipeline, storage_buffer};
 use crate::wind::{wind_entry, wind_resource};
 use crate::pipelines::Lazy;
@@ -513,7 +513,7 @@ impl Tessellation {
 
     fn create_permutation(&mut self, device: &wgpu::Device, scene: &Scene, set: &[(u32, u64)], key: u64) {
         let code = graphs::scene_dispatch_module(scene, set);
-        let module = |name: &str| create_module_from(device, "tessellation (displacing graphs)", compose_variant(name, &[("displacement_graphs_off.wgsl", &code)]));
+        let module = |name: &str| create_module_from(device, "tessellation (displacing graphs)", compose_variant_for(device, name, &[("displacement_graphs_off.wgsl", &code)]));
         let permutation = GraphPermutation {
             main: main_dice(device, &module("tess.wgsl"), &self.main_dice_layout, compute_pipeline),
             shadow: shadow_dice(device, &module("vsm_tess.wgsl"), &self.shadow_layout, compute_pipeline),

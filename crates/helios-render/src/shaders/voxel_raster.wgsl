@@ -17,6 +17,7 @@
 #include "wind.wgsl"
 #include "voxel.wgsl"
 #include "plant_wind.wgsl"
+#include "sw_target.wgsl"
 
 override PASS: u32 = 0u;
 override LATE: bool = false;
@@ -28,8 +29,6 @@ override LATE: bool = false;
 @group(0) @binding(4) var<storage, read> clusters: array<Cluster>;
 @group(0) @binding(5) var<storage, read> page_table: array<u32>;
 @group(0) @binding(6) var<storage, read> geometry: array<u32>;
-// [0, w*h): depth bits, [w*h, 2*w*h): payload.
-@group(0) @binding(7) var<storage, read_write> sw_target: array<atomic<u32>>;
 @group(0) @binding(65) var<uniform> wind: Wind;
 @group(0) @binding(170) var plant_bones: texture_2d<f32>;
 @group(0) @binding(171) var plant_motion: texture_2d<f32>;
@@ -145,12 +144,8 @@ fn rasterize(
                 }
                 let target_index = u32(pixel.y) * pixels + u32(pixel.x);
                 let bits = bitcast<u32>(depth);
-                if PASS == 0u {
-                    if bits > atomicLoad(&sw_target[target_index]) {
-                        atomicMax(&sw_target[target_index], bits);
-                    }
-                } else if bits == atomicLoad(&sw_target[target_index]) {
-                    atomicStore(&sw_target[payload_offset + target_index], payload);
+                if sw_wanted(target_index, bits) {
+                    sw_write(target_index, payload_offset, bits, payload);
                 }
             }
         }

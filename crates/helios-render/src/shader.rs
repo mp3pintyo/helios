@@ -110,6 +110,8 @@ const SOURCES: &[(&str, &str)] = &[
     ("subsurface_store.wgsl", include_str!("shaders/subsurface_store.wgsl")),
     ("subsurface_store_off.wgsl", include_str!("shaders/subsurface_store_off.wgsl")),
     ("sw_raster.wgsl", include_str!("shaders/sw_raster.wgsl")),
+    ("sw_target.wgsl", include_str!("shaders/sw_target.wgsl")),
+    ("sw_target_u64.wgsl", include_str!("shaders/sw_target_u64.wgsl")),
     ("svt.wgsl", include_str!("shaders/svt.wgsl")),
     ("svt_off.wgsl", include_str!("shaders/svt_off.wgsl")),
     ("stars.wgsl", include_str!("shaders/stars.wgsl")),
@@ -207,8 +209,12 @@ pub fn half_precision(device: &wgpu::Device) -> bool {
 }
 
 /// [`compose`] with half.wgsl's f16 variant (`enable` directives moved to the top).
-pub fn compose_half(name: &str) -> String {
-    let source = compose_variant(name, &[("half.wgsl", source("half_f16.wgsl"))]);
+#[cfg(test)]
+fn compose_half(name: &str) -> String {
+    hoist_enables(&compose_variant(name, &[("half.wgsl", source("half_f16.wgsl"))]))
+}
+
+fn hoist_enables(source: &str) -> String {
     let (enables, rest): (Vec<&str>, Vec<&str>) = source.lines().partition(|l| l.trim_start().starts_with("enable "));
     let mut out = enables.join("\n");
     out.push('\n');
@@ -216,9 +222,47 @@ pub fn compose_half(name: &str) -> String {
     out
 }
 
+/// Whether devices may rasterise in one pass with 64-bit atomics (`--no-atomic64` turns it off).
+static ATOMIC64_ALLOWED: AtomicBool = AtomicBool::new(true);
+
+/// Lets devices created from now on use 64-bit atomics where the adapter offers them (the
+/// default), or not (the compute rasterisers then take two passes, as in a browser).
+pub fn allow_atomic64(allowed: bool) {
+    ATOMIC64_ALLOWED.store(allowed, Ordering::Relaxed);
+}
+
+/// The features [`single_pass_raster`] needs, if devices may use them. All 64-bit atomic
+/// operations, not only min and max: the rasterisers also load the value (to skip the alpha
+/// tests of hidden fragments, and in the tessellator's second pass), which leaves out Metal.
+pub(crate) fn atomic64_features() -> wgpu::Features {
+    if ATOMIC64_ALLOWED.load(Ordering::Relaxed) { ATOMIC64 } else { wgpu::Features::empty() }
+}
+
+const ATOMIC64: wgpu::Features = wgpu::Features::SHADER_INT64.union(wgpu::Features::SHADER_INT64_ATOMIC_ALL_OPS);
+
+/// Whether `device`'s compute rasterisers write depth and visibility id with one 64-bit
+/// `atomicMax`, in one pass (sw_target_u64.wgsl) instead of two (sw_target.wgsl).
+pub fn single_pass_raster(device: &wgpu::Device) -> bool {
+    device.features().contains(ATOMIC64)
+}
+
+/// [`compose_variant`] with the variants `device` selects besides `replacements`: the 64-bit
+/// rasteriser target ([`single_pass_raster`]) and f16 arithmetic ([`half_precision`]).
+pub fn compose_variant_for(device: &wgpu::Device, name: &str, replacements: &[(&str, &str)]) -> String {
+    let mut replacements = replacements.to_vec();
+    if single_pass_raster(device) {
+        replacements.push(("sw_target.wgsl", source("sw_target_u64.wgsl")));
+    }
+    let half = half_precision(device) && source(name).contains("#include \"half.wgsl\"");
+    if half {
+        replacements.push(("half.wgsl", source("half_f16.wgsl")));
+    }
+    let source = compose_variant(name, &replacements);
+    if half { hoist_enables(&source) } else { source }
+}
+
 pub fn create_module(device: &wgpu::Device, name: &str) -> wgpu::ShaderModule {
-    let source = if half_precision(device) && source(name).contains("#include \"half.wgsl\"") { compose_half(name) } else { compose(name) };
-    create_module_from(device, name, source)
+    create_module_from(device, name, compose_variant_for(device, name, &[]))
 }
 
 pub fn create_module_from(device: &wgpu::Device, label: &str, wgsl: String) -> wgpu::ShaderModule {
@@ -336,6 +380,18 @@ mod tests {
             Ok(())
         } else {
             Err(format!("{label}: {}", problems.join("; ")))
+        }
+    }
+
+    /// The compute rasterisers as a device with 64-bit atomics composes them (sw_target_u64.wgsl).
+    #[test]
+    fn single_pass_raster_variants_validate() {
+        let rasterisers: Vec<&str> = SOURCES.iter().filter(|(_, s)| s.contains("#include \"sw_target.wgsl\"")).map(|(n, _)| *n).collect();
+        assert_eq!(rasterisers, ["sw_raster.wgsl", "tess.wgsl", "voxel_raster.wgsl"]);
+        for name in rasterisers {
+            let source = compose_variant(name, &[("sw_target.wgsl", source("sw_target_u64.wgsl"))]);
+            assert!(source.contains("sw_target: array<atomic<u64>>"), "{name}");
+            validate(name, &source).unwrap();
         }
     }
 

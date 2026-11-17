@@ -371,7 +371,7 @@ The browser level editor (actors with components and a hierarchy, outliner, deta
 
 | Constraint | Consequence |
 |---|---|
-| No 64-bit atomics | Software raster writes depth and payload in two passes |
+| No 64-bit atomics | Software raster writes depth and payload in two passes (one pass natively on Vulkan / D3D12, `--no-atomic64` turns it off) |
 | No storage-texture atomics, no storage depth textures | Shadow software raster writes a u32 buffer that the page clear copies into the depth atlas; the same buffer keeps the pages' static layers |
 | No multi-draw-indirect / `first_instance` | One instanced indirect draw per pass; late passes offset slots via the early count |
 | 8 storage buffers per stage | Culling packs feedback + visibility bits into one buffer; materials live in a uniform array; skin palettes live in an `Rgba32Float` texture read with `textureLoad` (the G-buffer resolve was at 8); Substrate's slab table and graph parameters are uniform blocks |

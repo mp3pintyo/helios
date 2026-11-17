@@ -1,5 +1,5 @@
 // Nanite tessellation of the main view (tessellation.rs): displaced clusters into the visibility
-// buffer through the software rasteriser's target and two passes (sw_raster.wgsl).
+// buffer through the software rasteriser's target and two passes (sw_raster.wgsl, sw_target.wgsl).
 //
 //   emit   : one workgroup per software cluster, one thread per triangle of a tessellated
 //            cluster: its level-0 patch is culled and routed (diced or split, tess_queue.wgsl)
@@ -25,6 +25,7 @@
 #include "displacement_height.wgsl"
 #include "tess_core.wgsl"
 #include "tess_queue.wgsl"
+#include "sw_target.wgsl"
 
 override PASS: u32 = 0u;
 override LATE: bool = false;
@@ -38,8 +39,6 @@ override GRID: bool = false;
 @group(0) @binding(4) var<storage, read> clusters: array<Cluster>;
 @group(0) @binding(5) var<storage, read> page_table: array<u32>;
 @group(0) @binding(6) var<storage, read> geometry: array<u32>;
-// [0, w*h): depth bits, [w*h, 2*w*h): payload (sw_raster.wgsl).
-@group(0) @binding(7) var<storage, read_write> sw_target: array<atomic<u32>>;
 // Per pixel: the barycentrics of the displaced point on its base triangle (tess_pack_lambda).
 @group(0) @binding(11) var tess_lambda: texture_storage_2d<r32uint, write>;
 @group(0) @binding(40) var<uniform> materials: array<Material, MAX_MATERIALS>;
@@ -183,15 +182,15 @@ fn tess_rasterize(p0: vec4<f32>, p1: vec4<f32>, p2: vec4<f32>, l0: vec2<f32>, l1
             let target_index = pixel.y * pixels + pixel.x;
             let bits = bitcast<u32>(z);
             if PASS == 0u {
-                if bits > atomicLoad(&sw_target[target_index]) {
-                    atomicMax(&sw_target[target_index], bits);
+                if sw_wanted(target_index, bits) {
+                    sw_write(target_index, payload_offset, bits, id);
                 }
-            } else if atomicLoad(&sw_target[target_index]) - bits <= 1u {
-                // (The depth pass stored the largest bits, this triangle's among them. One step
-                // of slack: this pass has code the depth pass lacks, and a compiler may round z
-                // differently next to it — a pixel that matched no triangle would keep a stale
-                // payload and stale barycentrics.)
-                atomicStore(&sw_target[payload_offset + target_index], id);
+            } else if sw_won(target_index, bits, id) {
+                // (The depth pass stored the largest bits, this triangle's among them, with a
+                // step of slack — sw_target.wgsl — or a pixel that matched no triangle would
+                // keep a stale payload and stale barycentrics. With 64-bit atomics the id is
+                // already there, and only the barycentrics are left to write.)
+                sw_write(target_index, payload_offset, bits, id);
                 // Perspective-correct: the depth is near / w (reverse-Z, infinite far plane), so
                 // the weights times it are the weights over w. (From the normalised weights, not
                 // from the products `z` is summed from: sharing them would let the compiler round

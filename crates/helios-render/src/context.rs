@@ -88,9 +88,14 @@ impl GpuContext {
         // without them the tiles stay uncompressed); clip distances, which let shadow page draws
         // clip to their tile (vsm_draw_clipped.wgsl).
         // f16 shaders: passes written in half.wgsl's `hf` types compute in half precision.
+        // 64-bit atomics (native only): the compute rasterisers write depth and id in one pass.
         let half = if crate::shader::half_precision_allowed() { wgpu::Features::SHADER_F16 } else { wgpu::Features::empty() };
-        let required_features = adapter.features()
+        let mut required_features = adapter.features()
             & (wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TEXTURE_COMPRESSION_BC | wgpu::Features::CLIP_DISTANCES | half);
+        let atomic64 = crate::shader::atomic64_features();
+        if adapter.features().contains(atomic64) {
+            required_features |= atomic64;
+        }
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("helios device"),
@@ -104,7 +109,8 @@ impl GpuContext {
 
         let info = adapter.get_info();
         let half = if device.features().contains(wgpu::Features::SHADER_F16) { ", f16 shaders" } else { "" };
-        log::info!("GPU: {} ({:?}, {:?}{half})", info.name, info.device_type, info.backend);
+        let atomic64 = if crate::shader::single_pass_raster(&device) { ", 64-bit atomics" } else { "" };
+        log::info!("GPU: {} ({:?}, {:?}{half}{atomic64})", info.name, info.device_type, info.backend);
         Ok(Self { instance, adapter, device, queue })
     }
 }
